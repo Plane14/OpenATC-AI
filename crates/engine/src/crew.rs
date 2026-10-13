@@ -12,8 +12,14 @@ use openatc_core::{
     state::{Request, SpeechTag},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::BTreeMap;
+
+pub struct Batch {
+    outcomes: Vec<String>,
+    services: Vec<openatc_core::crew::request::Service>,
+    started: std::time::Instant,
+}
 
 pub struct CrewSession {
     pub aircraft: String,
@@ -23,6 +29,8 @@ pub struct CrewSession {
     pub sequence: u32,
     pub pushback: Option<openatc_core::crew::PushbackRequest>,
     pub observed_at: Option<std::time::Instant>,
+    pub batch: Option<Batch>,
+    pub service_requests: BTreeMap<String, u32>,
 }
 impl Default for CrewSession {
     fn default() -> Self {
@@ -36,6 +44,8 @@ impl Default for CrewSession {
                 .map_or(0, |t| t.as_millis() as u32),
             pushback: None,
             observed_at: None,
+            batch: None,
+            service_requests: BTreeMap::new(),
         }
     }
 }
@@ -54,7 +64,10 @@ pub async fn observe(
     let mut s = shared.write().await;
     let profile = input.profile.unwrap_or_else(|| s.crew.profile.clone());
     if s.crew.aircraft != input.aircraft || s.crew.profile != profile {
+        s.request_memory.cancel_pending();
         s.crew.checklist = None;
+        s.crew.batch = None;
+        s.crew.service_requests.clear();
         s.session.crew_actions.clear();
     }
     s.crew.aircraft = input.aircraft;
@@ -72,9 +85,29 @@ pub async fn observe(
     s.crew.profile = profile;
     s.crew.values = input.values;
     s.crew.observed_at = Some(std::time::Instant::now());
+    if s.crew
+        .batch
+        .as_ref()
+        .is_some_and(|b| b.started.elapsed().as_secs() >= 90)
+    {
+        let actions = std::mem::take(&mut s.session.crew_actions);
+        if let Some(mut batch) = s.crew.batch.take() {
+            for action in &actions {
+                s.request_memory.confirm(action.sequence, false);
+                let item = say(&format!("crew_control_{}", action.control), &[]);
+                batch
+                    .outcomes
+                    .push(say("crew_completed_unconfirmed", &[("item", item)]));
+            }
+            if let Some(action) = actions.first() {
+                let text = batch_reply(&mut s, batch);
+                speak(&mut s, &action.role, &text);
+            }
+        }
+    }
     Json(json!({"accepted":true})).into_response()
 }
-fn speak(s: &mut crate::EngineState, role: &str, text: &str) {
+pub(crate) fn speak(s: &mut crate::EngineState, role: &str, text: &str) {
     let voice = match role {
         "cabin" => &s.settings.attendant_voice,
         "ground" => &s.settings.ground_voice,
@@ -205,6 +238,7 @@ pub async fn acknowledge(AxumState(shared): AxumState<Shared>, Json(ack): Json<A
         return Json(json!({"accepted":false})).into_response();
     };
     s.session.crew_actions.remove(0);
+    s.request_memory.confirm(action.sequence, ack.success);
     let label = s
         .crew
         .profile
@@ -234,20 +268,126 @@ pub async fn acknowledge(AxumState(shared): AxumState<Shared>, Json(ack): Json<A
         } else {
             "crew_action_confirmed"
         };
-        let text = say(template, &[("item", label), ("state", action.response)]);
-        speak(&mut s, &action.role, &text);
+        let text = if s.crew.batch.is_some() {
+            let key = format!(
+                "crew_completed_{}_{}",
+                action.control,
+                if action.value == 0.0 { "off" } else { "on" }
+            );
+            if ["chocks", "external_power", "high_pressure_air"].contains(&action.control.as_str())
+            {
+                say(&key, &[])
+            } else if action.control == "slides" || action.control == "pushback_start" {
+                say(template, &[]).trim_end_matches('.').to_owned()
+            } else {
+                say(
+                    "crew_completed_control",
+                    &[("item", label), ("state", action.response)],
+                )
+            }
+        } else {
+            say(template, &[("item", label), ("state", action.response)])
+        };
+        if let Some(batch) = s.crew.batch.as_mut() {
+            batch.outcomes.push(text);
+        } else {
+            speak(&mut s, &action.role, &text);
+        }
         if let Some((_, index, true)) = s.crew.checklist.as_mut() {
             *index += 1;
             return next_item(&mut s);
         }
     } else {
-        s.session.crew_actions.clear();
-        s.crew.checklist = None;
         eprintln!("Crew action {} failed: {}", action.control, ack.detail);
-        let text = say("crew_action_failed", &[("item", label)]);
+        if let Some(batch) = s.crew.batch.as_mut() {
+            batch
+                .outcomes
+                .push(say("crew_completed_unconfirmed", &[("item", label)]));
+        } else {
+            s.session.crew_actions.clear();
+            s.crew.checklist = None;
+            let text = say("crew_action_failed", &[("item", label)]);
+            speak(&mut s, &action.role, &text);
+        }
+    }
+    if s.session.crew_actions.is_empty()
+        && let Some(batch) = s.crew.batch.take()
+    {
+        let text = batch_reply(&mut s, batch);
         speak(&mut s, &action.role, &text);
     }
     Json(json!({"accepted":true,"state":snapshot(&s.session,&s.settings)})).into_response()
+}
+
+fn batch_reply(s: &mut crate::EngineState, batch: Batch) -> String {
+    let mut text = String::new();
+    if let Some((last, rest)) = batch.outcomes.split_last() {
+        let items = if rest.is_empty() {
+            last.clone()
+        } else {
+            say(
+                "crew_completed_list",
+                &[("first", rest.join(", ")), ("last", last.clone())],
+            )
+        };
+        text = say("crew_batch_complete", &[("items", items)]);
+    }
+    let busy_cabin = s.cabin.preparing_for_turbulence
+        || matches!(s.session.mission.severity.as_str(), "urgent" | "emergency")
+        || matches!(
+            s.session.phase,
+            openatc_core::state::PhaseCode::Departure
+                | openatc_core::state::PhaseCode::Approach
+                | openatc_core::state::PhaseCode::Landed
+        );
+    let mut requests = Vec::new();
+    let mut coffee_count = 0;
+    for service in batch.services {
+        let count = s
+            .crew
+            .service_requests
+            .entry(service.response().into())
+            .or_default();
+        *count = count.saturating_add(1);
+        if service == openatc_core::crew::request::Service::Coffee {
+            coffee_count = *count;
+        }
+        requests.push(say(service.response(), &[]));
+    }
+    if let Some((last, rest)) = requests.split_last() {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        let service = if rest.is_empty() {
+            last.clone()
+        } else {
+            say(
+                "crew_completed_list",
+                &[("first", rest.join(", ")), ("last", last.clone())],
+            )
+        };
+        text.push_str(&say(
+            if busy_cabin {
+                "crew_service_when_free"
+            } else {
+                "crew_service_reply"
+            },
+            &[("service", service)],
+        ));
+        if !busy_cabin && coffee_count >= 3 && coffee_count % 3 == 0 {
+            text.push(' ');
+            text.push_str(&say("crew_coffee_repeat", &[]));
+        }
+    }
+    text
+}
+
+fn cross_check(s: &crate::EngineState) -> &'static str {
+    match s.crew.values.get("slides").copied() {
+        Some(1.0) => "crew_slides_armed_checked",
+        Some(0.0) => "crew_slides_disarmed_checked",
+        _ => "crew_slides_not_confirmed",
+    }
 }
 
 pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
@@ -255,49 +395,47 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
     if !["copilot", "cabin", "ground"].contains(&role) {
         return None;
     }
-    let mut text = request.text.to_lowercase();
-    let coffee = role == "cabin"
-        && text.contains("coffee")
-        && text
-            .split_once(',')
-            .is_some_and(|(control, _)| control.contains("arm") || control.contains("cross"));
-    if coffee {
-        text = text
-            .split_once(',')
-            .map_or(text.clone(), |(control, _)| control.to_owned());
-    }
+    let text = request.text.to_lowercase();
     let mut s = shared.write().await;
-    if coffee {
-        speak(&mut s, role, &say("crew_coffee_requested", &[]));
+    if role == "cabin"
+        && let Some(text) = crate::missions::respond(&mut s, &request.text)
+    {
+        let pilot = s.session.plan.callsign.clone();
+        add_transmission(&mut s.session, &pilot, &request.text, &SpeechTag::default());
+        speak(&mut s, role, &text);
+        return Some(Json(json!({"result":{"accepted":true,"message":text},"state":snapshot(&s.session,&s.settings)})).into_response());
     }
     let profile = s.crew.profile.clone();
-    let recognized = profile.controls.iter().any(|(id, c)| {
-        c.role == role
-            && openatc_core::dialogue::phrases(&format!("crew_request_{id}"))
-                .iter()
-                .any(|a| text.contains(a))
-    }) || [
-        "set ",
-        "remove ",
-        "disconnect ",
-        "connect ",
-        "add ",
-        "please ",
-        "can you ",
-        "could you ",
-        "remov",
-        "discon",
-        "conn",
-        "lower ",
-        "raise ",
-        "engage ",
-        "disengage ",
-        "turn ",
-        "arm ",
-        "disarm ",
-    ]
-    .iter()
-    .any(|word| text.starts_with(word))
+    let parsed = openatc_core::crew::request::parse(&profile, role, &text);
+    let recognized = parsed.is_some()
+        || profile.controls.iter().any(|(id, c)| {
+            c.role == role
+                && openatc_core::dialogue::phrases(&format!("crew_request_{id}"))
+                    .iter()
+                    .any(|a| text.contains(a))
+        })
+        || [
+            "set ",
+            "remove ",
+            "disconnect ",
+            "connect ",
+            "add ",
+            "please ",
+            "can you ",
+            "could you ",
+            "remov",
+            "discon",
+            "conn",
+            "lower ",
+            "raise ",
+            "engage ",
+            "disengage ",
+            "turn ",
+            "arm ",
+            "disarm ",
+        ]
+        .iter()
+        .any(|word| text.starts_with(word))
         || text.contains("checklist")
         || text.contains("cross check")
         || text.contains("crosscheck")
@@ -360,7 +498,8 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         }
         return Some(reply(&mut s, role, "crew_pushback_clarify", &[], false));
     }
-    if role == "cabin"
+    if parsed.is_none()
+        && role == "cabin"
         && !["arm", "disarm", "automatic", "manual"].iter().any(|word| {
             text.split_whitespace()
                 .any(|w| w.trim_matches(|c: char| !c.is_alphanumeric()) == *word)
@@ -514,7 +653,6 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
     }
     let generation = s.session_generation;
     let aircraft = s.crew.aircraft.clone();
-    let parsed = openatc_core::crew::parse_many(&profile, role, &text);
     drop(s);
     let parsed = if parsed.is_some() {
         parsed
@@ -553,10 +691,20 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                     .collect::<Vec<_>>()
                     .join("\n")
             };
+            let live_context = {
+                let state = shared.read().await;
+                crate::context::prompt(&state, &request.role, &request.text)
+            };
+            let instructions = shared
+                .read()
+                .await
+                .prompts
+                .crew_actions
+                .replace("{{role}}", role);
             let prompt = format!(
-                "Interpret explicit aircraft-control requests, tolerating obvious spelling and speech-recognition mistakes. Return only JSON {{\"actions\":[{{\"control\":\"id\",\"value\":number}}]}}, or {{}} if any requested action is unclear, a question, negated, or unsupported. Include every explicitly requested action in order, at most eight. An action verb may apply to multiple named controls. Never invent targets, repair numeric values or perform extra actions. Use only these controls: {}. Pilot wording examples follow; their numbers are fictional and must never replace the current request. Interpret the current request only. Return JSON, never a spoken reply.\n{}",
+                "{instructions}\nAllowed controls: {}\nPilot wording examples:\n{}",
                 json!(allowed),
-                pilot_examples
+                pilot_examples + &live_context
             );
             crate::support::chat_complete(
                 &client,
@@ -568,29 +716,8 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
             )
             .await
             .ok()
-            .and_then(|v| serde_json::from_str::<Value>(&v).ok())
-            .and_then(|v| {
-                let entries = v
-                    .get("actions")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_else(|| vec![v]);
-                if entries.is_empty() || entries.len() > 8 {
-                    return None;
-                }
-                let mut actions = Vec::new();
-                for item in entries {
-                    let id = item.get("control")?.as_str()?.to_owned();
-                    let value = item.get("value")?.as_f64()?;
-                    if !openatc_core::crew::validate(&profile, role, &id, value)
-                        || actions.iter().any(|(existing, _)| existing == &id)
-                    {
-                        return None;
-                    }
-                    actions.push((id, value));
-                }
-                Some(actions)
-            })
+            .and_then(|v| serde_json::from_str::<openatc_core::crew::request::Intent>(&v).ok())
+            .filter(|intent| intent.valid(&profile, role))
         } else {
             None
         }
@@ -608,11 +735,23 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
     if s.crew.aircraft != aircraft {
         return Some(reply(&mut s, role, "crew_action_clarify", &[], false));
     }
-    if let Some(actions) = parsed {
+    if let Some(intent) = parsed {
         if !s.session.crew_actions.is_empty() {
             return Some(reply(&mut s, role, "crew_actions_busy", &[], false));
         }
-        for (id, value) in actions {
+        let mut batch = Batch {
+            outcomes: Vec::new(),
+            services: intent.services,
+            started: std::time::Instant::now(),
+        };
+        if intent.cross_check && !intent.actions.iter().any(|a| a.control == "slides") {
+            batch
+                .outcomes
+                .push(say(cross_check(&s), &[]).trim_end_matches('.').to_owned());
+        }
+        let batched = intent.actions.len() > 1 || !batch.services.is_empty() || intent.cross_check;
+        for action in intent.actions {
+            let (id, value) = (action.control, action.value);
             let c = profile.controls.get(&id)?;
             let state = if c.momentary {
                 say("crew_state_button", &[])
@@ -642,6 +781,14 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                     false,
                 ));
             }
+        }
+        if s.session.crew_actions.is_empty() {
+            let message = batch_reply(&mut s, batch);
+            speak(&mut s, role, &message);
+            return Some(Json(json!({"result":{"accepted":true,"message":message},"state":snapshot(&s.session,&s.settings)})).into_response());
+        }
+        if batched {
+            s.crew.batch = Some(batch);
         }
         return Some(Json(json!({"result":{"accepted":true,"pending":true},"state":snapshot(&s.session,&s.settings)})).into_response());
     }

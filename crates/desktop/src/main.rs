@@ -2,6 +2,8 @@
 //! The default engine address is http://127.0.0.1:8087.
 
 use std::num::NonZeroU32;
+#[cfg(debug_assertions)]
+mod review;
 
 use glow::HasContext as _;
 use glutin::{
@@ -13,7 +15,7 @@ use glutin::{
 use imgui_winit_support::{
     WinitPlatform,
     winit::{
-        dpi::LogicalSize,
+        dpi::{LogicalSize, PhysicalSize},
         event_loop::EventLoop,
         window::{Window, WindowAttributes},
     },
@@ -32,6 +34,8 @@ fn main() {
     let mut renderer =
         imgui_glow_renderer::AutoRenderer::new(gl, &mut imgui_context).expect("renderer");
     let mut interface = Interface::new(&endpoint);
+    #[cfg(debug_assertions)]
+    let mut capture = review::Capture::from_env();
     if let Some(page) = std::env::args()
         .nth(2)
         .and_then(|value| value.parse::<usize>().ok())
@@ -77,47 +81,96 @@ fn main() {
                 ..
             } => {
                 interface.tick();
+                let physical = window.inner_size();
+                let scale = winit_platform.hidpi_factor();
+                imgui_context.io_mut().display_size = [
+                    (f64::from(physical.width) / scale) as f32,
+                    (f64::from(physical.height) / scale) as f32,
+                ];
+                #[cfg(debug_assertions)]
+                if let Some(review) = &capture {
+                    if let Some(section) = review.section {
+                        interface.show_settings_section(section);
+                    }
+                    interface.settings.pin_open = true;
+                    if let Some(scale) = std::env::var("OPENATC_PREVIEW_SCALE")
+                        .ok()
+                        .and_then(|v| v.parse::<f32>().ok())
+                    {
+                        interface.settings.ui_scale = scale.clamp(0.85, 1.5);
+                    }
+                    interface.settings.light_theme =
+                        std::env::var("OPENATC_PREVIEW_LIGHT").ok().as_deref() == Some("1");
+                    if let Some(opacity) = std::env::var("OPENATC_PREVIEW_OPACITY")
+                        .ok()
+                        .and_then(|v| v.parse::<f32>().ok())
+                    {
+                        interface.settings.window_opacity = opacity.clamp(0.2, 1.0);
+                    }
+                }
                 let ui_scale = interface.settings.ui_scale;
                 if (ui_scale - applied_ui_scale).abs() > 0.001 {
                     openatc_ui::widgets::configure_scale(&mut imgui_context, ui_scale);
                     applied_ui_scale = ui_scale;
                 }
-                interface.set_window_frame(WindowFrame {
+                let frame = WindowFrame {
                     position: [0.0, 0.0],
                     size: imgui_context.io().display_size,
-                    can_pop_out: false,
+                    can_pop_out: cfg!(debug_assertions)
+                        && std::env::var_os("OPENATC_PREVIEW_NATIVE_HEADER").is_some(),
                     popped_out: false,
-                });
+                };
                 unsafe { renderer.gl_context().clear(glow::COLOR_BUFFER_BIT) };
+                interface.set_window_frame(frame);
+                #[cfg(debug_assertions)]
+                if let Some(review) = &mut capture {
+                    review.drive(imgui_context.io_mut());
+                }
                 let ui = imgui_context.frame();
                 let actions = interface.draw(ui);
                 winit_platform.prepare_render(ui, &window);
                 let draw_data = imgui_context.render();
                 renderer.render(draw_data).expect("render");
+                #[cfg(debug_assertions)]
+                if let Some(review) = &mut capture {
+                    let physical = window.inner_size();
+                    if review.save(
+                        renderer.gl_context(),
+                        physical.width as i32,
+                        physical.height as i32,
+                    ) {
+                        window_target.exit();
+                    }
+                }
                 surface.swap_buffers(&context).expect("swap");
                 if actions.close {
                     window_target.exit();
                 }
-                if actions.resize_delta != [0.0, 0.0] {
-                    let current_size = window.inner_size().to_logical::<f64>(window.scale_factor());
-                    let _ = window.request_inner_size(LogicalSize::new(
-                        (current_size.width + f64::from(actions.resize_delta[0]))
-                            .max(f64::from(actions.minimum_size[0])),
-                        (current_size.height + f64::from(actions.resize_delta[1]))
-                            .max(f64::from(actions.minimum_size[1])),
-                    ));
-                }
-                if let Some(height) = actions.height {
-                    let current_size = window.inner_size().to_logical::<f64>(window.scale_factor());
-                    let _ = window.request_inner_size(LogicalSize::new(
-                        current_size.width,
-                        f64::from(height),
-                    ));
-                }
-                window.set_min_inner_size(Some(LogicalSize::new(
-                    actions.minimum_size[0],
-                    actions.minimum_size[1],
+                let scale = winit_platform.hidpi_factor();
+                window.set_min_inner_size(Some(PhysicalSize::new(
+                    f64::from(actions.minimum_size[0]) * scale,
+                    f64::from(actions.minimum_size[1]) * scale,
                 )));
+                if actions.resize_delta != [0.0, 0.0] || actions.height.is_some() {
+                    let current = window.inner_size().to_logical::<f64>(scale);
+                    let width = (current.width + f64::from(actions.resize_delta[0]))
+                        .max(f64::from(actions.minimum_size[0]));
+                    let height = actions.height.map_or_else(
+                        || {
+                            (current.height + f64::from(actions.resize_delta[1]))
+                                .max(f64::from(actions.minimum_size[1]))
+                        },
+                        f64::from,
+                    );
+                    // Some hosts resize immediately without a later resize event.
+                    if let Some(size) =
+                        window.request_inner_size(PhysicalSize::new(width * scale, height * scale))
+                        && let (Some(width), Some(height)) =
+                            (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+                    {
+                        surface.resize(&context, width, height);
+                    }
+                }
             }
             winit::event::Event::WindowEvent {
                 event: winit::event::WindowEvent::CloseRequested,
@@ -152,6 +205,18 @@ fn create_window() -> (
     PossiblyCurrentContext,
 ) {
     let event_loop = EventLoop::new().unwrap();
+    let preview_size = (960, 760);
+    #[cfg(debug_assertions)]
+    let mut preview_size = preview_size;
+    #[cfg(debug_assertions)]
+    if let Ok(size) = std::env::var("OPENATC_PREVIEW_SIZE") {
+        if let Some((w, h)) = size
+            .split_once('x')
+            .and_then(|(w, h)| w.parse::<u32>().ok().zip(h.parse::<u32>().ok()))
+        {
+            preview_size = (w.clamp(520, 1920), h.clamp(460, 1080));
+        }
+    }
     let window_attributes = WindowAttributes::default()
         .with_title(
             std::env::args()
@@ -160,7 +225,7 @@ fn create_window() -> (
                 .and_then(|p| openatc_ui::interface::PAGES.get(p))
                 .map_or_else(|| "OpenATC AI".to_owned(), |p| format!("OpenATC AI — {p}")),
         )
-        .with_inner_size(LogicalSize::new(960, 760));
+        .with_inner_size(LogicalSize::new(preview_size.0, preview_size.1));
     let (window, cfg) = glutin_winit::DisplayBuilder::new()
         .with_window_attributes(Some(window_attributes))
         .build(&event_loop, ConfigTemplateBuilder::new(), |mut configs| {

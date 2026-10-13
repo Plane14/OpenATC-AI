@@ -106,7 +106,11 @@ impl TerrainSampler {
         // Publish partial data immediately. Unknown/unprobed stations are gaps.
         *output = self.working.clone();
     }
-    fn height(&self, p: [f64; 2], own: [f64; 2]) -> Option<f64> {
+    fn height(&self, mut p: [f64; 2], own: [f64; 2]) -> Option<f64> {
+        if !p[0].is_finite() || !p[1].is_finite() || p[0].abs() > 90.0 {
+            return None;
+        }
+        p[1] = (p[1] + 180.0).rem_euclid(360.0) - 180.0;
         // Outside loaded scenery the SDK can report a false 0-MSL sphere.
         // A conservative local radius avoids presenting distant ocean-height hits
         // as terrain. The UI explicitly leaves the remainder unknown.

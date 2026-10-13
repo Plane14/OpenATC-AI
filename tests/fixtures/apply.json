@@ -444,7 +444,7 @@
       "airport": "demo",
       "expected": {
         "accepted": true,
-        "messagePrefix": "DEMO: Taxi toward ",
+        "messagePrefix": "DEMO: Taxi to ",
         "phaseAfter": 7
       }
     },
@@ -498,7 +498,7 @@
       },
       "expected": {
         "accepted": true,
-        "message": "DEMO: Maintain 8000 feet, route DCT.",
+        "message": "VH-BIL, climb and maintain 8000 feet.",
         "clearanceAlt": 8000
       }
     },
@@ -541,7 +541,7 @@
       },
       "expected": {
         "accepted": true,
-        "message": "DEMO: Maintain 3000 feet, route DCT.",
+        "message": "VH-BIL, descend and maintain 3000 feet.",
         "phaseAfter": 5
       }
     },
@@ -584,7 +584,7 @@
       },
       "expected": {
         "accepted": true,
-        "message": "DEMO: Maintain 5000 feet, route PELIN."
+        "message": "VH-BIL, cleared direct PELIN."
       }
     },
     {
@@ -672,7 +672,7 @@
       },
       "expected": {
         "accepted": true,
-        "message": "Roger mayday. Squawk 7700, state intentions and souls on board. Priority handling.",
+        "message": "Roger, emergency acknowledged. Say nature of emergency and intentions.",
         "urgent": true
       }
     },

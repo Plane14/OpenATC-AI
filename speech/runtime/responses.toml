@@ -382,7 +382,10 @@ say = [
 [roger_mayday_squawk_state_intentions_and_souls]
 slots = []
 say = [
-  "Roger mayday. Squawk 7700, state intentions and souls on board. Priority handling.",
+  "Roger, emergency acknowledged. Say nature of emergency and intentions.",
+  "Roger your emergency. Advise the nature of the problem and your intentions.",
+  "Emergency acknowledged. What assistance do you require?",
+  "Roger, say nature of emergency and the assistance required.",
 ]
 
 [didn_t_catch_that_try_request_taxi]
@@ -459,13 +462,13 @@ say = [
   "Taxi to runway {hold_short} holding point via {via}, hold short of runway {hold_short}.",
 ]
 
-[taxi_via_toward_stop_at_the_end]
+[taxi_to_parking_via]
 slots = ["via", "destination"]
 say = [
-  "Taxi toward {destination} via {via}, then hold position. Stand by for further instructions.",
-  "Via {via}, taxi toward {destination} and hold position. Stand by.",
-  "Taxi via {via} toward {destination}. Hold position and await further instructions.",
-  "Taxi toward {destination} via {via}. Hold position; further taxi instructions to follow.",
+  "Taxi to {destination} via {via}.",
+  "Continue taxi to {destination} via {via}.",
+  "Taxi via {via} to {destination}.",
+  "Proceed to {destination} via {via}.",
 ]
 
 [taxi_routing_needs_a_valid_ground_position]
@@ -1256,9 +1259,13 @@ say = ["Runway taxi readback correct. Backtrack as cleared, stop and hold positi
 slots = ["runway"]
 say = ["Taxi to the holding point for runway {runway}. Hold short of runway {runway}.", "Taxi to runway {runway} holding point, hold short of runway {runway}."]
 
-[taxi_toward_parking_hold]
+[taxi_to_parking]
 slots = ["destination"]
-say = ["Taxi toward {destination}, then hold position. Stand by for further instructions.", "Taxi toward {destination} and hold position. Await further instructions."]
+say = ["Taxi to {destination}.", "Continue taxi to {destination}.", "Proceed to {destination}."]
+
+[parking_taxi_readback_correct]
+slots = []
+say = ["Readback correct.", "Correct readback.", "Roger.", "Readback correct, continue taxi."]
 
 [pilot_taxi_holding_point_readback]
 slots = ["runway", "callsign"]
@@ -1302,7 +1309,7 @@ say = ["{callsign}, contact {station} on {frequency}.", "{callsign}, contact {st
 
 [flight_checkin]
 slots = ["callsign", "station"]
-say = ["{callsign}, {station}, roger.", "{callsign}, {station}, good day."]
+say = ["{callsign}, {station}, roger.", "{callsign}, {station}, roger your call."]
 
 [flight_remain_frequency]
 slots = ["callsign", "station"]
@@ -1313,6 +1320,10 @@ slots = ["direction", "speed", "pressure"]
 say = ["Wind {direction} degrees {speed} knots, {pressure}."]
 
 [flight_qnh]
+slots = ["pressure"]
+say = ["QNH {pressure}"]
+
+[flight_qnh_units]
 slots = ["pressure"]
 say = ["QNH {pressure} hectopascals"]
 
@@ -1366,7 +1377,7 @@ say = ["{callsign}, report final runway {runway}."]
 
 [arrival_landing_clearance]
 slots = ["callsign", "runway", "weather"]
-say = ["{callsign}, {weather} Runway {runway}, cleared to land."]
+say = ["{callsign}, {weather} Runway {runway}, cleared to land.", "{callsign}, runway {runway}, cleared to land. {weather}", "{callsign}, {weather} Cleared to land runway {runway}."]
 
 [crossing_route_unavailable]
 slots = []
@@ -1418,7 +1429,7 @@ say = ["{item}, {state}.", "{item} {state}, Captain.", "Confirmed: {item} {state
 
 [crew_action_failed]
 slots = ["item"]
-say = ["I could not confirm {item}. Please check the control.", "{item} did not respond as requested. Please check it.", "Unable to verify {item}. The checklist is stopped.", "{item} is not confirmed. Please check it yourself."]
+say = ["I could not confirm {item}. Please check the indication.", "{item} has not been confirmed. Please check the indication.", "Unable to verify {item}. Please check it."]
 
 [crew_action_unavailable]
 slots = ["item"]
@@ -1426,7 +1437,55 @@ say = ["I cannot set {item} in the current aircraft state.", "{item} is unavaila
 
 [crew_action_clarify]
 slots = []
-say = ["Please name the control and the required setting.", "Which control and setting would you like?", "Please give me one control and its target setting."]
+say = ["Please confirm the controls and settings you want.", "Which controls and settings would you like?", "Please say the requested controls and their settings again."]
+
+[crew_completed_control]
+slots = ["item", "state"]
+say = ["{item} {state}"]
+
+[crew_completed_list]
+slots = ["first", "last"]
+say = ["{first} and {last}"]
+
+[crew_batch_complete]
+slots = ["items"]
+say = ["{items}.", "Captain, {items}."]
+
+[crew_completed_unconfirmed]
+slots = ["item"]
+say = ["{item} could not be confirmed; please check the indication", "unable to confirm {item}; please check the indication"]
+
+[crew_completed_chocks_off]
+slots = []
+say = ["chocks removed", "chocks are clear"]
+
+[crew_completed_chocks_on]
+slots = []
+say = ["chocks in place", "chocks fitted"]
+
+[crew_completed_external_power_off]
+slots = []
+say = ["external power disconnected", "ground power disconnected"]
+
+[crew_completed_external_power_on]
+slots = []
+say = ["external power connected", "ground power connected"]
+
+[crew_completed_high_pressure_air_off]
+slots = []
+say = ["high-pressure air disconnected"]
+
+[crew_completed_high_pressure_air_on]
+slots = []
+say = ["high-pressure air connected"]
+
+[crew_tea_requested]
+slots = []
+say = ["Tea coming up, Captain.", "Of course, Captain. I'll bring your tea.", "Certainly. Tea on the way."]
+
+[crew_water_requested]
+slots = []
+say = ["Water coming up, Captain.", "Of course, Captain. I'll bring some water.", "Certainly. I'll bring your water."]
 
 [crew_checklist_none]
 slots = []
@@ -16132,7 +16191,7 @@ say = ["Stand by while I finish your previous request.", "One moment, your previ
 
 [pilot_typed_transmission]
 slots = ["station", "callsign", "message"]
-say = ["{station}, {callsign}, {message}"]
+say = ["{station}, {callsign}, {message}", "{station}, {callsign}. {message}"]
 
 [pilot_typed_station]
 slots = ["station", "message"]
@@ -16157,3 +16216,792 @@ say = [", climbing to {altitude}"]
 [crew_coffee_requested]
 slots = []
 say = ["Of course, Captain. I will bring your coffee.", "Coffee coming up, Captain.", "Certainly, Captain. Coffee on the way."]
+
+[crew_service_reply]
+slots = ["service"]
+say = [
+    "Yes, Captain. I'll {service}.",
+    "Of course, Captain. I'll {service}.",
+    "Certainly. I'll {service}, Captain.",
+    "Happy to, Captain. I'll {service}.",
+    "No problem, Captain. I'll {service}.",
+    "Coming right up, Captain. I'll {service}.",
+    "Absolutely, Captain. I'll {service}.",
+    "Leave it with me, Captain. I'll {service}.",
+]
+
+[crew_service_when_free]
+slots = ["service"]
+say = [
+    "Of course, Captain. I'll {service} once cabin duties allow.",
+    "Yes, Captain. I'll {service} as soon as we're free in the cabin.",
+    "Certainly, Captain. I'll {service} when the cabin workload permits.",
+]
+
+[crew_service_coffee]
+slots = []
+say = ["bring you your coffee", "bring you a coffee", "get your coffee ready", "bring a coffee up for you", "get that coffee for you", "bring your coffee to the flight deck"]
+
+[crew_service_tea]
+slots = []
+say = ["bring you your tea", "get your tea ready", "bring a tea up for you", "get that tea for you"]
+
+[crew_service_water]
+slots = []
+say = ["bring you some water", "get your water ready", "bring your water to the flight deck", "get that water for you"]
+
+[crew_service_meal]
+slots = []
+say = ["check what's available for your meal", "check the galley for a meal for you", "see what we have ready for your meal", "check the meal options for you"]
+
+[crew_service_snack]
+slots = []
+say = ["bring you a snack", "see what snacks we have for you", "get a snack ready for you", "check the galley for something to nibble on"]
+
+[crew_service_juice]
+slots = []
+say = ["bring you some juice", "get your juice ready", "bring your juice to the flight deck", "get that juice for you"]
+
+[cabin_request_passengers]
+slots = []
+say = ["how are the passengers", "how are our passengers", "how are the passenges", "how is everyone in the cabin", "how's everyone in the back", "passenger update", "how are things in the cabin", "how is the cabin", "how's the cabin"]
+
+[cabin_request_turbulence]
+slots = []
+say = ["turbulence coming", "turbulence ahead", "turbulence soon", "turbulence coming up", "turblance coming", "turbulance coming", "rough air ahead", "expecting turbulence", "expect some turbulence", "there will be some turbulence", "there will be some turblance", "prepare for turbulence"]
+
+[cabin_request_turbulence_clear]
+slots = []
+say = ["clear of the turbulence", "clear of turbulence", "clear of the rough air", "turbulence has passed", "turbulence is over"]
+
+[cabin_turbulence_preparing]
+slots = []
+say = ["Thanks for the warning, Captain. We'll pause service and prepare the cabin. How soon, and what intensity?", "Understood, Captain. We're preparing for rough air. Please advise the timing and intensity.", "Thank you, Captain. We'll secure the service equipment and check the passengers. How soon do you expect it, and how strong?"]
+
+[cabin_belts_on]
+slots = []
+say = ["The seat belt sign is on.", "I can see the seat belt sign is on."]
+
+[cabin_belts_pending]
+slots = []
+say = ["Please switch on the seat belt sign when ready.", "We'll ask everyone to return to their seats. Please put the seat belt sign on.", "We'll get everyone back to their seats; please switch the seat belt sign on."]
+
+[cabin_turbulence_clear]
+slots = []
+say = ["Thanks, Captain. We'll check on everyone before resuming service.", "Good to know, Captain. We'll check the cabin and pick up service when it's appropriate.", "Thank you for the update. We'll check the passengers and service equipment first."]
+
+[cabin_manifest_unknown]
+slots = []
+say = ["I haven't got a confirmed passenger count yet, Captain.", "The passenger count isn't available to me yet, Captain."]
+
+[cabin_passengers_boarding]
+slots = ["passengers"]
+say = ["We have {passengers} passengers listed, Captain. We're helping everyone settle in.", "There are {passengers} passengers on the list. We're sorting out bags and seats, Captain.", "{passengers} passengers on our list, Captain. We're getting everyone settled for departure.", "We're looking after the {passengers} passengers on our list, Captain. Still a few bags to find a home for."]
+
+[cabin_passengers_departure]
+slots = ["passengers"]
+say = ["We're looking after our {passengers} passengers, Captain, and concentrating on the departure checks.", "Our {passengers} passengers are settling in for departure, Captain. We're keeping the cabin briefings moving.", "All attention is on getting our {passengers} passengers ready for departure, Captain."]
+
+[cabin_passengers_cruise]
+slots = ["passengers"]
+say = ["Our {passengers} passengers are settling into the flight, Captain. Some are resting, some are keeping themselves entertained.", "Things are comfortable for our {passengers} passengers, Captain. A few are resting; the others are enjoying the flight.", "We're keeping an eye on our {passengers} passengers, Captain. A bit of reading, a bit of chatting, and a few naps.", "Our {passengers} passengers are having a quiet flight, Captain. The window seats are getting plenty of use.", "It's a relaxed cabin with our {passengers} passengers, Captain. We'll let you know if anything needs attention.", "We're looking after all {passengers} passengers, Captain. Some are resting, and some are still debating what to watch."]
+
+[cabin_passengers_resting]
+slots = ["passengers"]
+say = ["Our {passengers} passengers are settling down in the dimmed cabin, Captain. Some are resting; not everyone has signed up for a nap.", "It's quiet among our {passengers} passengers, Captain. Some are dozing and others are enjoying a bit of reading.", "We're keeping things quiet for our {passengers} passengers, Captain. Most seem ready for a rest; a few are still wide awake.", "A peaceful cabin for our {passengers} passengers, Captain. The lights are low, although a few have decided it's not bedtime yet."]
+
+[cabin_passengers_arrival]
+slots = ["passengers"]
+say = ["We're preparing our {passengers} passengers for arrival, Captain. We'll report when the cabin checks are complete.", "Our {passengers} passengers are getting ready for landing, Captain. We're finishing the cabin checks.", "We're checking on our {passengers} passengers and preparing for arrival, Captain."]
+
+[cabin_passengers_landed]
+slots = ["passengers"]
+say = ["Our {passengers} passengers are waiting for the stand, Captain. We'll remind everyone to remain seated.", "We're looking after our {passengers} passengers during taxi, Captain. Everyone's keen to get to the gate.", "Our {passengers} passengers are getting ready for the end of the flight, Captain. We'll keep them seated until it's time."]
+
+[cabin_passengers_finished]
+slots = ["passengers"]
+say = ["We're helping our {passengers} passengers prepare to leave, Captain. Time to make sure nothing's left in the seat pockets.", "That's the end of the flight for our {passengers} passengers, Captain. We're helping them gather their belongings.", "We're looking after our {passengers} passengers at the stand, Captain. We'll finish our cabin duties here."]
+
+[cabin_passengers_preparing]
+slots = ["passengers"]
+say = ["We're checking on our {passengers} passengers and asking them to remain seated, Captain.", "We're helping our {passengers} passengers get settled safely for the rough air, Captain.", "Our priority is getting our {passengers} passengers seated and checking the cabin, Captain."]
+
+[cabin_passenger_lavatory]
+slots = []
+say = ["One passenger is still in the lavatory. We'll check on them.", "We have one passenger in the lavatory, Captain. We'll follow up with them.", "One passenger is in the lavatory at the moment. We'll make sure they're aware."]
+
+[cabin_passengers_seated]
+slots = []
+say = ["Captain, the passengers are back in their seats and the lavatory is clear. The seat belt sign is on.", "Captain, passenger check complete. Everyone is seated, the lavatory is clear and the seat belt sign is on.", "The passengers are seated now, Captain. Lavatory clear, and the seat belt sign is on."]
+
+[crew_coffee_repeat]
+slots = []
+say = [
+    "You're keeping the galley busy with these coffee orders!",
+    "At this rate, I'll put the coffee pot on the crew list.",
+    "Another coffee order? The galley is starting to recognise your voice.",
+    "I think coffee is winning the popularity contest on the flight deck today.",
+    "Good thing we brought the coffee pot along, Captain.",
+    "I'll nominate you as our official coffee quality inspector.",
+    "The coffee pot is earning its wings today.",
+    "That's another vote for the galley's most popular drink.",
+]
+
+[pilot_request_ifr_clearance]
+slots = ["station", "callsign", "dest"]
+say = [
+    "{station}, {callsign}, request IFR clearance to {dest}.",
+    "{station}, {callsign}, requesting IFR clearance to {dest} as filed.",
+    "{station}, {callsign}, IFR to {dest}, request clearance.",
+    "{station}, {callsign}, ready to copy IFR clearance to {dest}.",
+    "{station}, {callsign}, request clearance to {dest} as filed.",
+    "{station}, {callsign}, requesting clearance, IFR to {dest}.",
+    "{station}, {callsign}, ready to copy clearance to {dest} as filed.",
+    "{station}, {callsign}, request IFR clearance, destination {dest}.",
+]
+
+[pilot_request_taxi]
+slots = ["station", "callsign"]
+say = ["{station}, {callsign}, request taxi.", "{station}, {callsign}, ready to taxi, request instructions.", "{station}, {callsign}, request taxi clearance.", "{station}, {callsign}, request taxi for departure."]
+
+[pilot_request_start]
+slots = ["station", "callsign"]
+say = ["{station}, {callsign}, request start-up.", "{station}, {callsign}, request permission to start engines.", "{station}, {callsign}, ready for engine start.", "{station}, {callsign}, request start-up approval."]
+
+[pilot_request_pushback]
+slots = ["station", "callsign"]
+say = ["{station}, {callsign}, request pushback.", "{station}, {callsign}, ready for pushback.", "{station}, {callsign}, request pushback approval.", "{station}, {callsign}, ready to push, request approval."]
+
+[pilot_request_start_pushback]
+slots = ["station", "callsign"]
+say = ["{station}, {callsign}, request start-up and pushback.", "{station}, {callsign}, ready for start-up and pushback.", "{station}, {callsign}, request approval for engine start and pushback.", "{station}, {callsign}, request pushback and engine start."]
+
+[pilot_request_ready]
+slots = ["station", "callsign"]
+say = ["{station}, {callsign}, ready for departure.", "{station}, {callsign}, holding short, ready for departure.", "{station}, {callsign}, ready for takeoff.", "{station}, {callsign}, at the holding point, ready for departure."]
+
+[voice_preview]
+slots = []
+say = ["Los Angeles Ground, Charlie Golf Tango Lima Tango, ready to taxi. Runway two five left, wind two four zero degrees at nine knots."]
+
+[pilot_runway_vacated]
+slots = ["callsign", "runway"]
+say = ["Runway {runway} vacated, {callsign}.", "{callsign}, clear of runway {runway}.", "{callsign}, runway {runway} vacated.", "Clear of runway {runway}, {callsign}."]
+
+[flight_checkin_climb]
+slots = ["callsign", "station", "altitude"]
+say = ["{callsign}, {station}, continue climb to {altitude}.", "{callsign}, {station}, continue climbing to {altitude} as cleared.", "{callsign}, {station}, roger. Continue climb to {altitude}.", "{callsign}, {station}, maintain your cleared climb to {altitude}."]
+
+[flight_checkin_level]
+slots = ["callsign", "station", "altitude"]
+say = ["{callsign}, {station}, maintain {altitude}.", "{callsign}, {station}, roger. Maintain {altitude} as cleared.", "{callsign}, {station}, continue at {altitude}."]
+
+[pilot_continue_climb]
+slots = ["callsign", "altitude"]
+say = ["Continue climb to {altitude}, {callsign}.", "Continuing climb to {altitude}, {callsign}.", "Climbing to {altitude} as cleared, {callsign}."]
+
+[pilot_maintain_altitude]
+slots = ["callsign", "altitude"]
+say = ["Maintain {altitude}, {callsign}.", "Maintaining {altitude}, {callsign}.", "{callsign}, maintaining {altitude} as cleared."]
+
+[amended_altitude_clearance]
+slots = ["altitude", "callsign"]
+say = ["{callsign}, maintain {altitude}.", "{callsign}, cleared to {altitude}, maintain that altitude.", "{callsign}, maintain {altitude} as amended."]
+
+[amended_direct_clearance]
+slots = ["callsign", "route"]
+say = ["{callsign}, cleared direct {route}.", "{callsign}, proceed direct {route}.", "{callsign}, direct {route} approved.", "{callsign}, cleared direct to {route}."]
+
+[pilot_altitude_amendment]
+slots = ["altitude", "callsign"]
+say = ["Maintain {altitude}, {callsign}.", "{altitude}, {callsign}.", "{callsign}, maintaining {altitude}."]
+
+[pilot_direct_amendment]
+slots = ["callsign", "route"]
+say = ["Direct {route}, {callsign}.", "Cleared direct {route}, {callsign}.", "Proceeding direct {route}, {callsign}."]
+
+[pilot_runway_amendment]
+slots = ["callsign", "runway"]
+say = ["Runway {runway}, {callsign}.", "{callsign}, runway {runway}.", "Runway changed to {runway}, {callsign}."]
+
+[amendment_unavailable]
+slots = []
+say = ["Unable that amendment at this time.", "Unable that request at this stage of the flight.", "Stand by on that request."]
+
+[amendment_wrong_airport]
+slots = []
+say = ["Request the departure runway change from your departure airport controller."]
+
+[amendment_approach_unavailable]
+slots = []
+say = ["Unable that approach. Request a published approach at your destination.", "That approach is not available in the current navigation data."]
+
+[amendment_runway_unavailable]
+slots = []
+say = ["Unable that runway. Request an available runway.", "That runway is not available at this airport."]
+
+[amendment_departure_incompatible]
+slots = []
+say = ["Unable that runway with the assigned departure. Request a revised departure procedure."]
+
+[amendment_expect_approach]
+slots = ["approach", "callsign"]
+say = ["{callsign}, expect {approach}.", "{callsign}, approach changed, expect {approach}.", "{callsign}, {approach} requested, expect that approach."]
+
+[pilot_approach_amendment]
+slots = ["approach", "callsign"]
+say = ["Expect {approach}, {callsign}.", "{callsign}, expecting {approach}.", "{approach}, {callsign}."]
+
+[amendment_runway]
+slots = ["callsign", "runway"]
+say = ["{callsign}, runway changed to {runway}.", "{callsign}, expect runway {runway}.", "{callsign}, runway {runway} approved."]
+
+[speed_request_invalid]
+slots = []
+say = ["Say again the requested indicated airspeed in knots.", "Confirm requested airspeed in knots."]
+
+[speed_indication_unavailable]
+slots = []
+say = ["Unable to confirm indicated airspeed. Advise your indicated airspeed."]
+
+[speed_restriction_unable]
+slots = []
+say = ["Unable that speed due to the applicable restriction.", "Unable requested speed. Comply with the published speed restriction."]
+
+[deviation_request_invalid]
+slots = []
+say = ["Say again the direction and maximum deviation in degrees.", "Confirm left or right of course and the requested number of degrees."]
+
+[route_geometry_unavailable]
+slots = []
+say = ["Unable to confirm your next fix. Advise your next waypoint."]
+
+[altitude_restriction_unable]
+slots = []
+say = ["Unable that altitude due to the next published crossing restriction.", "Unable requested altitude. The published crossing restriction remains in effect.", "Unable that level with the current procedure. Request a revised clearance.", "Unable requested altitude due to the published crossing restriction.", "Unable that level, the next published crossing restriction must be met.", "Unable requested level with the current crossing restriction.", "Unable altitude change, maintain the cleared restriction."]
+
+[assigned_speed]
+slots = ["callsign", "speed"]
+say = ["{callsign}, maintain {speed} knots.", "{callsign}, speed {speed} knots.", "{callsign}, maintain indicated airspeed {speed} knots.", "{callsign}, requested speed approved, maintain {speed} knots."]
+
+[pilot_speed_readback]
+slots = ["callsign", "speed"]
+say = ["Maintain {speed} knots, {callsign}.", "{speed} knots, {callsign}.", "{callsign}, maintaining {speed} knots."]
+
+[speed_correction]
+slots = ["callsign", "speed"]
+say = ["{callsign}, check your speed. Maintain {speed} knots.", "{callsign}, assigned speed {speed} knots. Correct your speed.", "{callsign}, speed {speed} knots. Maintain the assigned speed.", "{callsign}, verify indicated airspeed, maintain {speed} knots."]
+
+[deviation_approved]
+slots = ["callsign", "degrees", "direction"]
+say = ["{callsign}, deviation up to {degrees} degrees {direction} of course approved. Advise when clear.", "{callsign}, deviate up to {degrees} degrees {direction}. Report when able to resume your route.", "{callsign}, up to {degrees} degrees {direction} of course approved. Advise when able to return on course.", "{callsign}, deviation {degrees} degrees {direction} approved. Advise clear of the conditions."]
+
+[pilot_deviation_readback]
+slots = ["callsign", "degrees", "direction"]
+say = ["Up to {degrees} degrees {direction}, will advise clear, {callsign}.", "Deviation {degrees} degrees {direction}, will report clear, {callsign}.", "{callsign}, up to {degrees} degrees {direction}, will advise when able to resume."]
+
+[deviation_resume]
+slots = ["callsign", "fix"]
+say = ["{callsign}, proceed direct {fix}.", "{callsign}, when able proceed direct {fix}.", "{callsign}, resume your route direct {fix}.", "{callsign}, cleared direct {fix}, resume your route."]
+
+[pilot_resume_readback]
+slots = ["callsign", "fix"]
+say = ["Direct {fix}, {callsign}.", "Resuming direct {fix}, {callsign}.", "When able direct {fix}, {callsign}."]
+
+[course_correction_heading]
+slots = ["callsign", "direction", "fix", "heading"]
+say = ["{callsign}, you are off course. Turn {direction} heading {heading}, vectors to {fix}.", "{callsign}, turn {direction} heading {heading} to rejoin the route to {fix}.", "{callsign}, check your course. Turn {direction} heading {heading}, vectors to {fix}.", "{callsign}, turn {direction} heading {heading}, vector to {fix}. You are off your cleared route.", "{callsign}, verify navigation. Turn {direction} heading {heading}, vectors to {fix}.", "{callsign}, turn {direction} heading {heading} to intercept the course to {fix}."]
+
+[course_correction_relative]
+slots = ["callsign", "degrees", "direction"]
+say = ["{callsign}, you are off course. Turn {degrees} degrees {direction}.", "{callsign}, turn {degrees} degrees {direction} to rejoin your route.", "{callsign}, check your course. Turn {degrees} degrees {direction}.", "{callsign}, turn {degrees} degrees {direction}, vector to rejoin the cleared route.", "{callsign}, verify navigation. Turn {degrees} degrees {direction}."]
+
+[pilot_heading_readback]
+slots = ["callsign", "direction", "heading"]
+say = ["{direction} heading {heading}, {callsign}.", "Turn {direction} heading {heading}, {callsign}.", "Heading {heading}, turning {direction}, {callsign}."]
+
+[pilot_turn_relative]
+slots = ["callsign", "degrees", "direction"]
+say = ["{degrees} degrees {direction}, {callsign}.", "Turning {degrees} degrees {direction}, {callsign}.", "Turn {degrees} degrees {direction}, {callsign}."]
+
+[crossing_restriction_missed]
+slots = ["callsign", "fix"]
+say = ["{callsign}, verify altitude and speed. You did not meet the crossing restriction at {fix}.", "{callsign}, the published restriction at {fix} was not met. Say intentions.", "{callsign}, check your crossing at {fix}. Advise if unable to comply with the published restriction."]
+
+[automatic_climb]
+slots = ["altitude", "callsign"]
+say = ["{callsign}, climb and maintain {altitude}.", "{callsign}, climb to {altitude}.", "{callsign}, climb now, maintain {altitude}.", "{callsign}, cleared to climb to {altitude}.", "{callsign}, climb to and maintain {altitude}.", "{callsign}, climb and maintain {altitude}."]
+
+[automatic_continue_climb]
+slots = ["altitude", "callsign"]
+say = ["{callsign}, continue climb to {altitude}.", "{callsign}, continue climbing, maintain {altitude}.", "{callsign}, continue your climb to {altitude}.", "{callsign}, cleared to continue climb to {altitude}.", "{callsign}, continue climb, maintain {altitude}.", "{callsign}, continue climbing to {altitude}."]
+
+[automatic_descent]
+slots = ["altitude", "callsign"]
+say = ["{callsign}, descend and maintain {altitude}.", "{callsign}, descend to {altitude}.", "{callsign}, descend now, maintain {altitude}.", "{callsign}, cleared to descend to {altitude}.", "{callsign}, descend to and maintain {altitude}.", "{callsign}, descend and maintain {altitude}."]
+
+[automatic_continue_descent]
+slots = ["altitude", "callsign"]
+say = ["{callsign}, continue descent to {altitude}.", "{callsign}, continue descending, maintain {altitude}.", "{callsign}, continue your descent to {altitude}.", "{callsign}, cleared to continue descent to {altitude}.", "{callsign}, continue descent, maintain {altitude}.", "{callsign}, continue descending to {altitude}."]
+
+[flight_following_terminated]
+slots = ["callsign"]
+say = ["{callsign}, radar service terminated. Say intentions.", "{callsign}, unable to continue flight following. Radar service terminated."]
+
+[crossing_at]
+slots = ["altitude", "callsign", "fix"]
+say = ["{callsign}, cross {fix} at {altitude}.", "{callsign}, maintain the restriction, cross {fix} at {altitude}.", "{callsign}, cross {fix} at {altitude} as published."]
+
+[crossing_above]
+slots = ["altitude", "callsign", "fix"]
+say = ["{callsign}, cross {fix} at or above {altitude}.", "{callsign}, cross {fix} at or above {altitude} as published.", "{callsign}, the crossing restriction at {fix} is at or above {altitude}."]
+
+[crossing_below]
+slots = ["altitude", "callsign", "fix"]
+say = ["{callsign}, cross {fix} at or below {altitude}.", "{callsign}, cross {fix} at or below {altitude} as published.", "{callsign}, the crossing restriction at {fix} is at or below {altitude}."]
+
+[crossing_window]
+slots = ["callsign", "fix", "maximum", "minimum"]
+say = ["{callsign}, cross {fix} at or above {minimum} and at or below {maximum}.", "{callsign}, cross {fix} between {minimum} and {maximum}.", "{callsign}, the crossing window at {fix} is {minimum} to {maximum}."]
+
+[pilot_request_direct_change]
+slots = ["callsign", "value"]
+say = ["{callsign}, request direct to {value}.", "Request direct to {value}, {callsign}."]
+
+[pilot_request_change_approach_change]
+slots = ["callsign", "value"]
+say = ["{callsign}, request approach {value}.", "Request approach {value}, {callsign}."]
+
+[pilot_request_departure_runway_change]
+slots = ["callsign", "value"]
+say = ["{callsign}, request departure runway {value}.", "Request departure runway {value}, {callsign}."]
+
+[pilot_request_arrival_runway_change]
+slots = ["callsign", "value"]
+say = ["{callsign}, request arrival runway {value}.", "Request arrival runway {value}, {callsign}."]
+
+[pilot_request_speed_change]
+slots = ["callsign", "value"]
+say = ["{callsign}, request airspeed {value}.", "Request airspeed {value}, {callsign}."]
+
+[pilot_request_deviation_change]
+slots = ["callsign", "value"]
+say = ["{callsign}, request deviation {value}.", "Request deviation {value}, {callsign}."]
+
+[automatic_climb_via_sid]
+slots = ["callsign", "sid", "altitude"]
+say = ["{callsign}, climb via the {sid} departure, except maintain {altitude}.", "{callsign}, climb via SID, the {sid}, except maintain {altitude}."]
+
+[arrival_approach_clearance]
+slots = ["callsign", "approach", "runway"]
+say = ["{callsign}, cleared {approach} approach, runway {runway}.", "{callsign}, cleared for the {approach} approach to runway {runway}.", "{callsign}, cleared {approach} approach to runway {runway}.", "{callsign}, cleared for {approach}, runway {runway}."]
+
+[pilot_approach_clearance]
+slots = ["callsign", "approach", "runway"]
+say = ["Cleared {approach} approach, runway {runway}, {callsign}."]
+
+[arrival_go_around_blocked]
+slots = ["callsign"]
+say = ["{callsign}, go around. Runway occupied.", "{callsign}, go around, traffic on the runway.", "{callsign}, go around, runway not clear.", "{callsign}, go around. Traffic has not vacated the runway."]
+
+[pilot_go_around_blocked]
+slots = ["callsign"]
+say = ["Going around, {callsign}."]
+
+[arrival_go_around_traffic]
+slots = ["callsign"]
+say = ["{callsign}, go around, traffic conflict.", "{callsign}, go around. Conflicting traffic on final.", "{callsign}, go around, conflicting arrival traffic."]
+
+[arrival_continue_traffic]
+slots = ["callsign"]
+say = ["{callsign}, continue approach, traffic on final. Stand by for landing clearance.", "{callsign}, continue approach. Landing clearance withheld due to traffic.", "{callsign}, continue approach, stand by. Conflicting traffic on final."]
+
+[arrival_continue_no_landing]
+slots = ["callsign"]
+say = ["{callsign}, continue approach. Runway occupied.", "{callsign}, continue approach, expect late landing clearance, traffic on the runway.", "{callsign}, continue approach, runway still occupied. Landing clearance to follow.", "{callsign}, continue approach. Traffic has not yet vacated the runway."]
+
+[pilot_landing_readback]
+slots = ["callsign", "runway"]
+say = ["Runway {runway}, cleared to land, {callsign}.", "Cleared to land runway {runway}, {callsign}."]
+
+[altitude_descent_distance_unable]
+slots = []
+say = ["Unable requested altitude, insufficient distance remaining for descent.", "Unable that climb, remain at your cleared altitude for the arrival.", "Unable higher, descent required for the destination.", "Unable requested level, insufficient distance to meet the arrival profile.", "Unable higher at this point, maintain your present cleared altitude.", "Unable that altitude, insufficient track miles remaining for descent."]
+
+[off_course_vector_unavailable]
+slots = ["callsign"]
+say = ["{callsign}, you appear to be off course. Say intentions.", "{callsign}, verify your position and routing. Say intentions."]
+
+[instruction_readback_reminder]
+slots = ["callsign"]
+say = ["{callsign}, acknowledge your last clearance.", "{callsign}, read back your last clearance.", "{callsign}, confirm receipt of the last instruction.", "{callsign}, say again your readback."]
+
+[flight_checkin_descent]
+slots = ["callsign", "station", "altitude"]
+say = ["{callsign}, {station}, continue descent to {altitude}.", "{callsign}, {station}, roger, descend and maintain {altitude}."]
+[pilot_continue_descent]
+slots = ["callsign", "altitude"]
+say = ["Continue descent to {altitude}, {callsign}.", "Descending to {altitude}, {callsign}."]
+
+[direct_fix_unavailable]
+slots = []
+say = ["Unable direct, that fix is not in the remaining loaded route.", "Unable to identify that waypoint in your loaded flight plan. Confirm the fix.", "Say again the waypoint. Unable to identify it in the remaining route."]
+[direct_restriction_unable]
+slots = []
+say = ["Unable direct due to published crossing restrictions. Continue on your cleared route.", "Unable that shortcut, the intermediate restrictions must be met.", "Unable direct at this time, maintain the cleared route through the restricted fixes."]
+
+[arrival_go_around_unconfirmed]
+slots = ["callsign"]
+say = ["{callsign}, go around. Unable landing clearance.", "{callsign}, go around, landing clearance is not available."]
+[arrival_continue_unconfirmed]
+slots = ["callsign"]
+say = ["{callsign}, continue approach. Landing clearance not yet available.", "{callsign}, continue approach, stand by for landing clearance."]
+
+[altitude_profile_unavailable]
+slots = []
+say = ["Unable higher at this time. Confirm your remaining route and destination.", "Unable to assess that climb with the current route information. Maintain your cleared altitude.", "Maintain your cleared altitude. Confirm the destination and remaining routing before requesting higher."]
+
+[monitor_squawk]
+slots = ["callsign", "squawk"]
+say = [
+  "{callsign}, verify squawking {squawk}.",
+  "{callsign}, check your transponder code. Squawk {squawk}.",
+  "{callsign}, assigned code is {squawk}. Check your transponder.",
+  "{callsign}, squawk {squawk}. Your selected code differs from the assigned code.",
+  "{callsign}, confirm your transponder is set to {squawk}.",
+  "{callsign}, reset transponder, squawk {squawk}.",
+]
+
+[monitor_squawk_altitude]
+slots = ["callsign"]
+say = [
+  "{callsign}, squawk altitude.",
+  "{callsign}, check your transponder, squawk altitude.",
+  "{callsign}, verify altitude reporting is on.",
+  "{callsign}, check altitude reporting. Squawk altitude.",
+]
+
+[monitor_runway_entry]
+slots = ["callsign", "runway"]
+say = [
+  "{callsign}, stop immediately. Runway {runway} entry was not authorized.",
+  "{callsign}, stop immediately, stop immediately. You have entered runway {runway} without clearance.",
+  "{callsign}, stop immediately. You are on runway {runway}, no crossing clearance was issued.",
+]
+
+[monitor_takeoff_without_clearance]
+slots = ["callsign"]
+say = [
+  "{callsign}, takeoff clearance was not issued. Say intentions.",
+  "{callsign}, you departed without a takeoff clearance. Say intentions.",
+  "{callsign}, no takeoff clearance was issued. State your intentions.",
+]
+
+[monitor_landing_without_clearance]
+slots = ["callsign"]
+say = [
+  "{callsign}, landing clearance was not issued. Vacate the runway when able.",
+  "{callsign}, you landed without clearance. Vacate at the next available taxiway.",
+  "{callsign}, no landing clearance was issued. Clear the runway when able.",
+]
+
+[monitor_taxi_position]
+slots = ["callsign"]
+say = [
+  "{callsign}, you appear to be off your assigned taxi route. Hold position. Do you require taxi assistance?",
+  "{callsign}, verify position. Hold position. Do you need revised taxi instructions?",
+  "{callsign}, check your taxi route and hold position. Do you require taxi assistance?",
+  "{callsign}, hold position. Would you like revised taxi instructions from your present position?",
+  "{callsign}, you appear to have left the assigned route. Hold position. Do you need taxi assistance?",
+  "{callsign}, hold position and check your location. Do you require revised taxi instructions?",
+]
+
+[taxi_assistance_revised]
+slots = ["callsign", "instructions"]
+say = [
+  "{callsign}, revised taxi instructions. {instructions}",
+  "{callsign}, from your present position. {instructions}",
+]
+
+[taxi_assistance_stop]
+slots = ["callsign"]
+say = ["{callsign}, hold position. Report stopped for revised taxi instructions."]
+
+[taxi_assistance_declined]
+slots = ["callsign"]
+say = ["{callsign}, roger. Hold position and advise your intentions."]
+
+[taxi_assistance_unavailable]
+slots = ["callsign"]
+say = ["{callsign}, hold position. Unable to provide revised taxi instructions from this position. Confirm the nearest taxiway sign."]
+
+[parking_aircraft_size_unknown]
+slots = []
+say = [
+  "Confirm aircraft type and wingspan before taxi clearance.",
+  "Unable to assign parking until your aircraft size is confirmed.",
+]
+
+[parking_size_unavailable]
+slots = []
+say = [
+  "That stand is not suitable for your aircraft. Stand by for alternative parking.",
+  "Unable that stand for your aircraft size. Stand by.",
+]
+
+[parking_occupied]
+slots = []
+say = [
+  "That stand is occupied. Hold position, stand by for alternative parking.",
+  "Hold position. Your requested stand is occupied; standby for another stand.",
+]
+
+[parking_traffic_unknown]
+slots = []
+say = [
+  "Hold position. Unable to confirm stand availability, stand by.",
+  "Stand availability is not confirmed. Hold position.",
+]
+
+[parking_no_available_stand]
+slots = []
+say = [
+  "Hold position. No suitable stand is available at present. Stand by for parking.",
+  "All suitable parking is unavailable. Hold position and stand by.",
+  "Hold position, awaiting a suitable stand. Stand by.",
+]
+
+[traffic_unidentified]
+slots = []
+say = ["an aircraft", "unidentified traffic"]
+
+[traffic_taxi_hold]
+slots = ["callsign", "traffic"]
+say = ["{callsign}, hold position. Traffic, {traffic}, ahead.", "{callsign}, hold position for {traffic}.", "{callsign}, stop and hold position, traffic {traffic} ahead.", "{callsign}, hold position, give way to {traffic}."]
+
+[pilot_traffic_hold]
+slots = ["callsign"]
+say = ["Holding position, {callsign}.", "Will hold position, {callsign}."]
+
+[traffic_taxi_resume]
+slots = ["callsign", "instructions"]
+say = ["{callsign}, traffic clear. {instructions}", "{callsign}, continue taxi. {instructions}", "{callsign}, resume taxi. {instructions}"]
+
+[pilot_traffic_resume]
+slots = ["callsign", "instructions"]
+say = ["{instructions} {callsign}."]
+
+[traffic_increase_speed]
+slots = ["callsign", "speed"]
+say = ["{callsign}, increase speed to {speed} knots if able, traffic following. Advise if unable.", "{callsign}, for spacing with following traffic, increase speed to {speed} knots if able.", "{callsign}, increase speed to {speed} knots if able for approach spacing. Advise unable."]
+
+[traffic_reduce_speed]
+slots = ["callsign", "speed"]
+say = ["{callsign}, reduce speed to {speed} knots for spacing. Advise if unable.", "{callsign}, for spacing with traffic ahead, reduce speed to {speed} knots.", "{callsign}, reduce speed to {speed} knots, traffic ahead on the approach. Advise unable."]
+
+[traffic_resume_published_speed]
+slots = ["callsign"]
+say = ["{callsign}, resume published speed.", "{callsign}, speed adjustment no longer required, resume published speed.", "{callsign}, comply with published speed restrictions."]
+
+[pilot_resume_published_speed]
+slots = ["callsign"]
+say = ["Resume published speed, {callsign}.", "Comply with published speed restrictions, {callsign}."]
+
+[traffic_unable_speed]
+slots = ["callsign"]
+say = ["{callsign}, roger unable. Resume published speed.", "{callsign}, roger, speed adjustment cancelled. Comply with published speed restrictions."]
+
+[traffic_vacated_report]
+slots = ["traffic", "runway"]
+say = ["{traffic}, runway {runway} vacated.", "{traffic}, clear of runway {runway}.", "Runway {runway} vacated, {traffic}."]
+
+[traffic_landing_observed]
+slots = ["runway"]
+say = ["We've just landed on runway {runway}.", "We're on the ground after landing on runway {runway}.", "Just down on runway {runway}."]
+
+[traffic_landing_unknown]
+slots = []
+say = ["No recent landing to report from us.", "We don't have a landing report for you.", "Unable to give you a recent landing report."]
+
+[traffic_crosswind_observed]
+slots = ["runway", "speed", "side"]
+say = ["The reported surface wind gave about {speed} knots crosswind {side} on runway {runway}.", "For runway {runway}, the reported wind worked out to roughly {speed} knots crosswind {side}.", "About {speed} knots crosswind {side} on runway {runway}, using the surface wind reported at landing."]
+
+[traffic_from_right]
+slots = []
+say = ["from the right"]
+
+[traffic_from_left]
+slots = []
+say = ["from the left"]
+
+[traffic_negligible_crosswind]
+slots = []
+say = ["with no significant side component"]
+
+[traffic_crosswind_unknown]
+slots = []
+say = ["We don't have a confirmed wind observation for our landing.", "Unable to give you a reliable crosswind report from our landing.", "No confirmed landing crosswind available from us."]
+
+[traffic_weather_observed]
+slots = ["airport", "direction", "speed", "visibility"]
+say = ["The surface report at {airport} is wind {direction} degrees, {speed} knots, visibility {visibility} kilometres.", "For {airport}, reported surface wind {direction} degrees at {speed} knots, visibility {visibility} kilometres.", "Latest surface observation for {airport}: wind {direction} degrees, {speed} knots, visibility {visibility} kilometres."]
+
+[traffic_weather_unknown]
+slots = []
+say = ["We don't have a current local weather report to pass on.", "No recent weather observation available from us.", "Unable to give you a confirmed weather report here."]
+
+[pilot_traffic_weather]
+slots = ["callsign", "traffic"]
+say = ["{traffic}, {callsign}, do you have a local weather report?", "{traffic}, {callsign}, how is the weather at the field?"]
+
+[pilot_traffic_landing]
+slots = ["callsign", "traffic"]
+say = ["{traffic}, {callsign}, how was the landing?", "{traffic}, {callsign}, do you have a landing report?"]
+
+[pilot_traffic_crosswind]
+slots = ["callsign", "traffic"]
+say = ["{traffic}, {callsign}, was there much crosswind on landing?", "{traffic}, {callsign}, can you pass on the landing crosswind?"]
+
+[parking_became_occupied]
+slots = ["callsign", "stand"]
+say = ["{callsign}, hold position. Stand {stand} is occupied. Stand by for revised taxi instructions.", "{callsign}, hold position, your assigned stand {stand} is occupied. I will advise.", "{callsign}, stop and hold position. Traffic at stand {stand}; expect a stand change."]
+
+[parking_availability_unconfirmed]
+slots = ["callsign", "stand"]
+say = ["{callsign}, hold position. Stand by while I confirm stand {stand} is available.", "{callsign}, hold position, checking availability of stand {stand}."]
+
+[parking_reassigned]
+slots = ["callsign", "stand", "instructions"]
+say = ["{callsign}, assigned stand {stand}. {instructions}", "{callsign}, stand {stand} is available. {instructions}", "{callsign}, revised taxi clearance to stand {stand}. {instructions}"]
+
+[emergency_pan_acknowledged]
+slots = []
+say = ["Roger Pan Pan. Say nature of the problem and your intentions.", "Pan Pan acknowledged. Advise the assistance required.", "Roger your urgency call. Say intentions.", "Roger Pan Pan. What assistance do you require?"]
+
+[atc_offer_direct]
+slots = ["callsign", "waypoint"]
+say = ["{callsign}, are you able direct {waypoint}?", "{callsign}, advise if you would like direct {waypoint}.", "{callsign}, direct {waypoint} is available, advise if required.", "{callsign}, would you prefer direct {waypoint}?", "{callsign}, advise if able to accept direct {waypoint}.", "{callsign}, I can offer direct {waypoint}, advise."]
+
+[pilot_accept_shortcut]
+slots = ["station", "callsign", "waypoint"]
+say = ["{station}, {callsign}, request direct {waypoint}.", "{station}, {callsign}, able direct {waypoint}, request clearance.", "{station}, {callsign}, we can accept direct {waypoint}."]
+
+[pilot_decline_shortcut]
+slots = ["callsign"]
+say = ["Prefer to remain on the cleared route, {callsign}.", "We will stay with the cleared route, {callsign}.", "Unable the shortcut, request present route, {callsign}."]
+
+[atc_shortcut_declined]
+slots = ["callsign"]
+say = ["{callsign}, roger, continue on your cleared route.", "{callsign}, roger, maintain present clearance.", "{callsign}, understood, route unchanged."]
+
+[traffic_advisory]
+slots = ["callsign", "clock", "range", "movement", "aircraft", "altitude"]
+say = [
+  "{callsign}, traffic, {clock} o'clock, {range}, {movement}, {aircraft}, altitude indicates {altitude} feet.",
+  "{callsign}, traffic {clock} o'clock, {range}, {movement}, {aircraft}, indicating {altitude} feet.",
+  "{callsign}, traffic, {clock} o'clock at {range}, {movement}, {aircraft}, altitude indicates {altitude} feet. Report traffic in sight.",
+  "{callsign}, traffic {clock} o'clock, {range}, {aircraft}, {movement}, indicating {altitude} feet. Advise when in sight."
+]
+
+[traffic_alert]
+slots = ["callsign", "clock", "range", "movement", "aircraft", "altitude"]
+say = ["{callsign}, traffic alert, {clock} o'clock, {range}, {movement}, {aircraft}, altitude indicates {altitude} feet."]
+
+[holding_wake]
+slots = ["runway"]
+say = [
+  "Hold short of runway {runway}, hold for wake turbulence.",
+  "Runway {runway}, hold for wake turbulence. Remain short.",
+  "Hold for wake turbulence, hold short of runway {runway}.",
+  "Remain short of runway {runway}. Hold for wake turbulence."
+]
+
+[arrival_go_around_wake]
+slots = ["callsign"]
+say = [
+  "{callsign}, go around, wake turbulence separation. Fly the published missed approach.",
+  "{callsign}, go around. Insufficient wake turbulence separation. Fly the published missed approach.",
+  "{callsign}, go around, fly the published missed approach. Wake turbulence separation."
+]
+
+[arrival_continue_wake]
+slots = ["callsign"]
+say = [
+  "{callsign}, continue approach. Caution wake turbulence from preceding traffic. Expect landing clearance.",
+  "{callsign}, continue approach, expect landing clearance. Caution wake turbulence.",
+  "{callsign}, caution wake turbulence from preceding traffic. Continue approach, expect landing clearance."
+]
+
+[traffic_no_factor]
+slots = ["callsign", "clock"]
+say = ["{callsign}, {clock} o'clock traffic no factor.", "{callsign}, traffic previously at {clock} o'clock, no factor."]
+
+[traffic_no_longer_observed]
+slots = ["callsign", "clock"]
+say = ["{callsign}, {clock} o'clock traffic no longer observed.", "{callsign}, traffic previously at {clock} o'clock, no longer observed."]
+
+[traffic_sighting_acknowledged]
+slots = ["callsign"]
+say = ["{callsign}, roger.", "{callsign}, roger, traffic in sight."]
+
+[traffic_keep_looking]
+slots = ["callsign"]
+say = ["{callsign}, roger. Continue looking.", "{callsign}, roger, I'll keep you advised.", "{callsign}, roger, further traffic information to follow."]
+
+[traffic_no_active_advisory]
+slots = ["callsign"]
+say = ["{callsign}, confirm which traffic you are reporting.", "{callsign}, say again which traffic you have in sight."]
+
+[traffic_range_less_than_mile]
+slots = []
+say = ["less than a mile"]
+
+[traffic_range_miles]
+slots = ["distance"]
+say = ["{distance} miles"]
+
+[traffic_type_unknown]
+slots = []
+say = ["type unknown"]
+
+[traffic_northbound]
+slots = []
+say = ["northbound"]
+
+[traffic_northeast_bound]
+slots = []
+say = ["northeast bound"]
+
+[traffic_eastbound]
+slots = []
+say = ["eastbound"]
+
+[traffic_southeast_bound]
+slots = []
+say = ["southeast bound"]
+
+[traffic_southbound]
+slots = []
+say = ["southbound"]
+
+[traffic_southwest_bound]
+slots = []
+say = ["southwest bound"]
+
+[traffic_westbound]
+slots = []
+say = ["westbound"]
+
+[traffic_northwest_bound]
+slots = []
+say = ["northwest bound"]
+
+[compliance_assistance]
+slots = ["callsign"]
+say = [
+  "{callsign}, advise if unable to comply. Do you require assistance?",
+  "{callsign}, confirm you can comply with the assigned instructions. Advise if you need assistance.",
+  "{callsign}, say intentions and advise if unable to comply.",
+  "{callsign}, are you able to comply? Advise the nature of any difficulty."
+]

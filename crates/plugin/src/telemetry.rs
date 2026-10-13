@@ -1,12 +1,14 @@
-//! Simulator telemetry bundle: the datarefs the flight loop reads, with the
-//! unit conversions the engine expects. Numeric refs resolve flexibly (f64,
-//! f32, i32) because sim versions disagree on widths; a missing ref reads
-//! zero and gets logged, never failing enable.
+//! Simulator readings and unit conversions. Numeric datarefs can use any SDK
+//! width. Unavailable optional instruments remain unknown instead of rejecting
+//! the aircraft's position and radio state.
 
-use xplane::data::{ArrayRead, DataRead, ReadOnly, borrowed::DataRef};
+use xplane::data::{ArrayRead, DataRead};
 
-/// Live datarefs; missing ones read as zero.
+/// Readers resolved when the plugin is enabled.
+#[derive(Default)]
 pub struct Refs {
+    /// Type code supplied by the currently loaded aircraft.
+    pub aircraft_icao: Option<Box<dyn Fn() -> String>>,
     pub traffic: Option<Box<dyn Fn() -> Vec<openatc_core::state::TrafficTarget>>>,
     /// Latitude degrees.
     pub latitude: Option<Box<dyn Fn() -> f64>>,
@@ -14,22 +16,42 @@ pub struct Refs {
     pub longitude: Option<Box<dyn Fn() -> f64>>,
     /// Elevation meters MSL.
     pub altitude: Option<Box<dyn Fn() -> f64>>,
+    /// Pilot's barometric altitude, feet.
+    pub indicated_altitude: Option<Box<dyn Fn() -> f64>>,
+    /// Standard-pressure altitude, feet.
+    pub pressure_altitude: Option<Box<dyn Fn() -> f64>>,
     /// Ground speed meters per second.
     pub speed: Option<Box<dyn Fn() -> f64>>,
     /// Heading degrees true.
     pub heading: Option<Box<dyn Fn() -> f64>>,
     /// Actual ground track degrees true.
     pub track: Option<Box<dyn Fn() -> f64>>,
+    /// Indicated airspeed knots.
+    pub indicated_speed: Option<Box<dyn Fn() -> f64>>,
+    /// Magnetic heading degrees.
+    pub magnetic_heading: Option<Box<dyn Fn() -> f64>>,
+    /// Simulator engine-running flags.
+    pub engines: Option<Box<dyn Fn() -> bool>>,
     /// Weight on wheels flag.
     pub ground: Option<Box<dyn Fn() -> i32>>,
     /// Pause flag.
     pub pause: Option<Box<dyn Fn() -> i32>>,
+    /// Simulator clock for traffic progress and wake intervals.
+    pub simulation_seconds: Option<Box<dyn Fn() -> f64>>,
     /// Vertical speed feet per minute, if present.
     pub vertical_speed: Option<Box<dyn Fn() -> f64>>,
     /// Height above ground meters, if present.
     pub agl: Option<Box<dyn Fn() -> f64>>,
-    /// COM1 frequency Hz, if present.
-    pub com1: Option<DataRef<i32, ReadOnly>>,
+    /// COM1 frequency in kHz, if present.
+    pub com1: Option<Box<dyn Fn() -> i32>>,
+    pub transponder_code: Option<Box<dyn Fn() -> i32>>,
+    pub transponder_mode: Option<Box<dyn Fn() -> i32>>,
+}
+
+fn find_integer(data: &mut xplane::data::DataApi, name: &str) -> Option<Box<dyn Fn() -> i32>> {
+    data.find::<i32, _>(name)
+        .ok()
+        .map(|found| Box::new(move || found.get()) as Box<dyn Fn() -> i32>)
 }
 
 /// Find a numeric ref in whatever width the sim provides it.
@@ -78,10 +100,42 @@ fn named_flag(
 /// zero downstream so enable always succeeds.
 pub fn find_refs(data: &mut xplane::data::DataApi, log: &mut Vec<String>) -> Refs {
     Refs {
+        aircraft_icao: data
+            .find::<[u8], _>("sim/aircraft/view/acf_ICAO")
+            .ok()
+            .map(|found| {
+                Box::new(move || {
+                    let mut code = [0; 40];
+                    found.get(&mut code);
+                    String::from_utf8_lossy(&code)
+                        .trim_end_matches('\0')
+                        .trim()
+                        .to_owned()
+                }) as Box<dyn Fn() -> String>
+            }),
+        transponder_code: find_integer(data, "sim/cockpit2/radios/actuators/transponder_code"),
+        transponder_mode: find_integer(data, "sim/cockpit2/radios/actuators/transponder_mode"),
+        indicated_speed: find_number(data, "sim/cockpit2/gauges/indicators/airspeed_kts_pilot"),
+        magnetic_heading: find_number(
+            data,
+            "sim/cockpit2/gauges/indicators/heading_AHARS_deg_mag_pilot",
+        ),
+        engines: data
+            .find::<[i32], _>("sim/flightmodel/engine/ENGN_running")
+            .ok()
+            .map(|r| {
+                Box::new(move || {
+                    let mut running = [0; 16];
+                    r.get(&mut running);
+                    running.iter().any(|v| *v != 0)
+                }) as Box<dyn Fn() -> bool>
+            }),
         traffic: traffic_reader(data),
         latitude: named_number(data, log, "sim/flightmodel/position/latitude"),
         longitude: named_number(data, log, "sim/flightmodel/position/longitude"),
         altitude: named_number(data, log, "sim/flightmodel/position/elevation"),
+        indicated_altitude: find_number(data, "sim/cockpit2/gauges/indicators/altitude_ft_pilot"),
+        pressure_altitude: find_number(data, "sim/flightmodel2/position/pressure_altitude"),
         speed: named_number(data, log, "sim/flightmodel/position/groundspeed"),
         heading: named_number(data, log, "sim/flightmodel/position/psi"),
         track: find_number(
@@ -90,11 +144,10 @@ pub fn find_refs(data: &mut xplane::data::DataApi, log: &mut Vec<String>) -> Ref
         ),
         ground: named_flag(data, log, "sim/flightmodel/failures/onground_any"),
         pause: named_flag(data, log, "sim/time/paused"),
+        simulation_seconds: find_number(data, "sim/time/total_flight_time_sec"),
         vertical_speed: find_number(data, "sim/flightmodel/position/vh_ind_fpm"),
         agl: find_number(data, "sim/flightmodel/position/y_agl"),
-        com1: data
-            .find("sim/cockpit2/radios/actuators/com1_frequency_hz_833")
-            .ok(),
+        com1: find_integer(data, "sim/cockpit2/radios/actuators/com1_frequency_hz_833"),
     }
 }
 
@@ -103,26 +156,111 @@ pub fn find_refs(data: &mut xplane::data::DataApi, log: &mut Vec<String>) -> Ref
 pub fn gather(refs: &Refs) -> openatc_core::state::Telemetry {
     let number = |value: &Option<Box<dyn Fn() -> f64>>| value.as_ref().map_or(0.0, |read| read());
     let flag = |value: &Option<Box<dyn Fn() -> i32>>| value.as_ref().map_or(0, |read| read());
+    let latitude = number(&refs.latitude);
+    let longitude = number(&refs.longitude);
     openatc_core::state::Telemetry {
+        aircraft_icao: refs
+            .aircraft_icao
+            .as_ref()
+            .map_or_else(String::new, |read| read()),
+        wingspan_meters: None,
         traffic: refs.traffic.as_ref().map(|read| read()),
         radio_busy: false,
         radio_sequence_seen: None,
-        latitude: number(&refs.latitude),
-        longitude: number(&refs.longitude),
+        latitude,
+        longitude,
         altitude_feet: number(&refs.altitude) * 3.280_839_895,
+        indicated_altitude_feet: optional_number(&refs.indicated_altitude, false),
+        pressure_altitude_feet: optional_number(&refs.pressure_altitude, false),
         ground_speed_knots: number(&refs.speed) * 1.943_844_492,
         heading_degrees: number(&refs.heading),
-        ground_track_degrees: refs.track.as_ref().map(|read| read()),
+        ground_track_degrees: optional_number(&refs.track, false),
+        indicated_speed_knots: optional_number(&refs.indicated_speed, true),
+        magnetic_heading_degrees: optional_number(&refs.magnetic_heading, false),
         on_ground: flag(&refs.ground) != 0,
+        engines_running: refs.engines.as_ref().is_some_and(|read| read()),
         paused: flag(&refs.pause) != 0,
+        simulation_seconds: optional_number(&refs.simulation_seconds, true),
         vertical_speed_fpm: refs.vertical_speed.as_ref().map_or(0.0, |read| read()),
         height_agl_feet: refs.agl.as_ref().map_or(0.0, |read| read()) * 3.280_839_895,
         radio_power: true,
-        com1_khz: refs.com1.as_ref().map_or(0, DataRead::get),
+        com1_khz: flag(&refs.com1),
+        transponder_code: refs.transponder_code.as_ref().map(|read| read()),
+        transponder_mode: refs.transponder_mode.as_ref().map(|read| read()),
         position_valid: refs.latitude.is_some()
             && refs.longitude.is_some()
-            && number(&refs.latitude).is_finite()
-            && number(&refs.longitude).is_finite(),
+            && latitude.is_finite()
+            && longitude.is_finite()
+            && latitude.abs() <= 90.0
+            && longitude.abs() <= 180.0,
+    }
+}
+
+// Unavailable instrument readings must not discard a valid position and radio.
+fn optional_number(reader: &Option<Box<dyn Fn() -> f64>>, nonnegative: bool) -> Option<f64> {
+    reader
+        .as_ref()
+        .map(|read| read())
+        .filter(|value| value.is_finite() && (!nonnegative || *value >= 0.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn barometric_altitudes_stay_separate_from_geometric_position() {
+        let refs = Refs {
+            altitude: Some(Box::new(|| 18311.7 / 3.280_839_895)),
+            indicated_altitude: Some(Box::new(|| 18000.0)),
+            pressure_altitude: Some(Box::new(|| 18000.0)),
+            ..Default::default()
+        };
+        let telemetry = gather(&refs);
+        assert!((telemetry.altitude_feet - 18311.7).abs() < 0.01);
+        assert_eq!(telemetry.reported_altitude_feet(), 18000.0);
+        assert_eq!(telemetry.clearance_altitude_feet(18000, 10000), 18000.0);
+        let invalid = Refs {
+            indicated_altitude: Some(Box::new(|| f64::NAN)),
+            pressure_altitude: Some(Box::new(|| f64::INFINITY)),
+            ..Default::default()
+        };
+        let telemetry = gather(&invalid);
+        assert_eq!(telemetry.indicated_altitude_feet, None);
+        assert_eq!(telemetry.pressure_altitude_feet, None);
+    }
+
+    #[test]
+    fn unavailable_instruments_do_not_hide_the_airport_position() {
+        let mut refs = Refs {
+            latitude: Some(Box::new(|| 33.938318)),
+            longitude: Some(Box::new(|| -118.383084)),
+            ground: Some(Box::new(|| 1)),
+            indicated_speed: Some(Box::new(|| -0.1)),
+            simulation_seconds: Some(Box::new(|| -1.0)),
+            track: Some(Box::new(|| f64::NAN)),
+            magnetic_heading: Some(Box::new(|| f64::INFINITY)),
+            agl: Some(Box::new(|| -0.12)),
+            ..Default::default()
+        };
+        let sample = gather(&refs);
+        assert!(sample.position_valid);
+        assert_eq!(sample.indicated_speed_knots, None);
+        assert_eq!(sample.simulation_seconds, None);
+        assert_eq!(sample.ground_track_degrees, None);
+        assert_eq!(sample.magnetic_heading_degrees, None);
+        let mut state = openatc_core::state::State::default();
+        openatc_core::ops::update_flight_phase(&mut state, &sample).unwrap();
+        assert_eq!(state.telemetry.latitude, 33.938318);
+        assert!(state.telemetry.height_agl_feet < 0.0);
+        refs.indicated_speed = Some(Box::new(|| 140.0));
+        assert_eq!(gather(&refs).indicated_speed_knots, Some(140.0));
+        refs.latitude = Some(Box::new(|| 95.0));
+        let invalid = gather(&refs);
+        assert!(!invalid.position_valid);
+        let error = openatc_core::ops::update_flight_phase(&mut state, &invalid).unwrap_err();
+        assert!(error.contains("latitude = 95"));
+        assert_eq!(state.telemetry.latitude, sample.latitude);
     }
 }
 
@@ -147,34 +285,68 @@ fn traffic_reader(
     let wheels = data
         .find::<[i32], _>("sim/cockpit2/tcas/targets/position/weight_on_wheels")
         .ok()?;
+    let flight_ids = data
+        .find::<[u8], _>("sim/cockpit2/tcas/targets/flight_id")
+        .ok();
+    let aircraft_types = data
+        .find::<[u8], _>("sim/cockpit2/tcas/targets/icao_type")
+        .ok();
+    let vx = data
+        .find::<[f32], _>("sim/cockpit2/tcas/targets/position/vx")
+        .ok();
+    let vz = data
+        .find::<[f32], _>("sim/cockpit2/tcas/targets/position/vz")
+        .ok();
     Some(Box::new(move || {
-        let (ids, lat, lon, ele, track, wheels) = (
-            ids.as_vec(),
-            lat.as_vec(),
-            lon.as_vec(),
-            ele.as_vec(),
-            track.as_vec(),
-            wheels.as_vec(),
-        );
+        // TCAS exposes 64 slots, including ownship; read them without six temporary vectors.
+        let (mut id_values, mut lat_values, mut lon_values) = ([0; 64], [0.0; 64], [0.0; 64]);
+        let (mut ele_values, mut track_values, mut wheel_values) = ([0.0; 64], [0.0; 64], [0; 64]);
+        let (mut flights, mut types) = ([0; 512], [0; 512]);
+        if let Some(ids) = &flight_ids {
+            ids.get(&mut flights);
+        }
+        if let Some(ids) = &aircraft_types {
+            ids.get(&mut types);
+        }
+        let (mut east, mut north) = ([0.0; 64], [0.0; 64]);
+        let speed_available = vx
+            .as_ref()
+            .zip(vz.as_ref())
+            .map(|(x, z)| x.get(&mut east).min(z.get(&mut north)))
+            .unwrap_or(0);
+        let code = |bytes: &[u8]| {
+            String::from_utf8_lossy(bytes.split(|b| *b == 0).next().unwrap_or_default())
+                .trim()
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .take(8)
+                .collect()
+        };
         let len = [
-            ids.len(),
-            lat.len(),
-            lon.len(),
-            ele.len(),
-            track.len(),
-            wheels.len(),
+            ids.get(&mut id_values),
+            lat.get(&mut lat_values),
+            lon.get(&mut lon_values),
+            ele.get(&mut ele_values),
+            track.get(&mut track_values),
+            wheels.get(&mut wheel_values),
         ]
         .into_iter()
         .min()
         .unwrap_or(0);
         (1..len)
-            .filter(|i| ids[*i] != 0)
+            .filter(|i| id_values[*i] != 0)
             .map(|i| openatc_core::state::TrafficTarget {
-                latitude: f64::from(lat[i]),
-                longitude: f64::from(lon[i]),
-                altitude_feet: f64::from(ele[i]) * 3.280_839_895,
-                track_degrees: f64::from(track[i]),
-                on_ground: wheels[i] != 0,
+                id: id_values[i] as u32,
+                callsign: code(&flights[i * 8..i * 8 + 8]),
+                aircraft: code(&types[i * 8..i * 8 + 8]),
+                ground_speed_knots: (i < speed_available)
+                    .then(|| f64::from(east[i].hypot(north[i])) * 1.943_844_492),
+                wingspan_meters: None,
+                latitude: f64::from(lat_values[i]),
+                longitude: f64::from(lon_values[i]),
+                altitude_feet: f64::from(ele_values[i]) * 3.280_839_895,
+                track_degrees: f64::from(track_values[i]),
+                on_ground: wheel_values[i] != 0,
             })
             .collect()
     }))

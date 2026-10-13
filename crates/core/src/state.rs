@@ -37,6 +37,16 @@ pub enum PhaseCode {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TrafficTarget {
+    /// Stable simulator Mode S identity; zero means the provider did not identify it.
+    pub id: u32,
+    /// Flight ID supplied by the simulator traffic provider.
+    pub callsign: String,
+    /// ICAO aircraft type supplied by the traffic provider.
+    pub aircraft: String,
+    /// Ground speed derived from simulator horizontal velocity, knots.
+    pub ground_speed_knots: Option<f64>,
+    /// Wingspan reported by the traffic provider, if available.
+    pub wingspan_meters: Option<f64>,
     /// Degrees north.
     pub latitude: f64,
     /// Degrees east.
@@ -49,17 +59,37 @@ pub struct TrafficTarget {
     pub on_ground: bool,
 }
 
+/// The traffic currently pointed out by the tuned controller.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TrafficCall {
+    /// Surveillance identity, not the aircraft's display order.
+    pub target_id: u32,
+    /// Frequency where the advisory was issued.
+    pub frequency_khz: i32,
+    /// The pilot has reported this traffic in sight.
+    pub sighted: bool,
+}
+
 /// Live simulator telemetry snapshot.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 #[allow(clippy::struct_excessive_bools)] // Independent simulator flags, not workflow states.
 pub struct Telemetry {
+    /// ICAO type of the loaded aircraft, independent of the dispatch plan.
+    pub aircraft_icao: String,
+    /// Simulator-reported wingspan in metres, absent when unavailable.
+    pub wingspan_meters: Option<f64>,
     /// Degrees north.
     pub latitude: f64,
     /// Degrees east.
     pub longitude: f64,
     /// Feet MSL.
     pub altitude_feet: f64,
+    /// Pilot's barometric altimeter reading, feet; absent when unavailable.
+    pub indicated_altitude_feet: Option<f64>,
+    /// Altitude on standard pressure, feet, used for flight-level clearances.
+    pub pressure_altitude_feet: Option<f64>,
     /// Knots.
     pub ground_speed_knots: f64,
     /// Degrees true.
@@ -67,11 +97,19 @@ pub struct Telemetry {
     /// Ground track degrees true, when supplied by the simulator.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ground_track_degrees: Option<f64>,
+    /// Indicated airspeed knots, absent when unavailable.
+    pub indicated_speed_knots: Option<f64>,
+    /// Magnetic heading degrees, absent when unavailable.
+    pub magnetic_heading_degrees: Option<f64>,
     /// Weight on wheels.
     #[serde(default = "default_true")]
     pub on_ground: bool,
+    /// At least one engine is running.
+    pub engines_running: bool,
     /// Simulator paused.
     pub paused: bool,
+    /// Elapsed simulator flight time; absent from older clients.
+    pub simulation_seconds: Option<f64>,
     /// Local radio playback, microphone or a pending crew radio exchange.
     pub radio_busy: bool,
     /// Latest transmission observed by the simulator audio queue.
@@ -82,6 +120,10 @@ pub struct Telemetry {
     pub height_agl_feet: f64,
     /// COM1 frequency in kHz.
     pub com1_khz: i32,
+    /// Four octal digits as shown on the transponder; absent if unavailable.
+    pub transponder_code: Option<i32>,
+    /// X-Plane mode: 0 off, 1 standby, 2 A, 3 C, 4 test, 5 ground, 6 TA, 7 TA/RA.
+    pub transponder_mode: Option<i32>,
     /// Aircraft radio powered; absent legacy telemetry defaults to true.
     #[serde(default = "default_true")]
     pub radio_power: bool,
@@ -95,22 +137,51 @@ impl Default for Telemetry {
     /// Default telemetry before simulator data arrives.
     fn default() -> Self {
         Self {
+            aircraft_icao: String::new(),
+            wingspan_meters: None,
             latitude: 0.0,
             longitude: 0.0,
             altitude_feet: 0.0,
+            indicated_altitude_feet: None,
+            pressure_altitude_feet: None,
             ground_speed_knots: 0.0,
             heading_degrees: 0.0,
             ground_track_degrees: None,
+            indicated_speed_knots: None,
+            magnetic_heading_degrees: None,
             on_ground: true,
+            engines_running: false,
             paused: false,
+            simulation_seconds: None,
             radio_busy: false,
             radio_sequence_seen: None,
             vertical_speed_fpm: 0.0,
             height_agl_feet: 0.0,
             com1_khz: 0,
+            transponder_code: None,
+            transponder_mode: None,
             radio_power: true,
             traffic: None,
             position_valid: false,
+        }
+    }
+}
+
+impl Telemetry {
+    /// Altitude used for pilot reports; older clients fall back to geometric MSL.
+    #[must_use]
+    pub fn reported_altitude_feet(&self) -> f64 {
+        self.indicated_altitude_feet.unwrap_or(self.altitude_feet)
+    }
+
+    /// Compare flight levels on standard pressure and lower altitudes on the altimeter.
+    #[must_use]
+    pub fn clearance_altitude_feet(&self, target: i32, transition: i32) -> f64 {
+        if target >= transition {
+            self.pressure_altitude_feet
+                .unwrap_or_else(|| self.reported_altitude_feet())
+        } else {
+            self.reported_altitude_feet()
         }
     }
 }
@@ -125,8 +196,20 @@ pub struct RouteFix {
     pub latitude: f64,
     /// Degrees east.
     pub longitude: f64,
-    /// Feet MSL.
+    /// Planned altitude, not a crossing restriction.
     pub altitude_feet: f64,
+    /// Published lower crossing limit, feet MSL.
+    pub minimum_altitude_feet: Option<i32>,
+    /// Published upper crossing limit, feet MSL.
+    pub maximum_altitude_feet: Option<i32>,
+    /// Published maximum indicated airspeed at the fix.
+    pub maximum_speed_knots: Option<f64>,
+    /// Published leg type; curved and vector legs need their own geometry.
+    pub path_terminator: String,
+    /// Navdata origin of the restriction.
+    pub constraint_source: String,
+    /// Requested step-climb altitude at this fix; it still needs ATC clearance.
+    pub step_altitude_feet: Option<i32>,
 }
 
 fn default_callsign() -> String {
@@ -213,6 +296,9 @@ pub struct FlightPlan {
     /// SID transition.
     #[serde(default)]
     pub sid_transition: String,
+    /// Departure contains published vector or manual-termination legs.
+    #[serde(default)]
+    pub sid_has_vectors: bool,
     /// Assigned STAR.
     #[serde(default)]
     pub star: String,
@@ -295,6 +381,7 @@ impl Default for FlightPlan {
             aircraft: default_aircraft(),
             registration: default_callsign(),
             sid: String::new(),
+            sid_has_vectors: false,
             sid_transition: String::new(),
             star: String::new(),
             star_transition: String::new(),
@@ -347,6 +434,8 @@ pub struct Clearance {
     /// Squawk code.
     #[serde(default = "default_squawk")]
     pub squawk: String,
+    /// Fields changed by the latest amendment: altitude, direct or runway.
+    pub readback_scope: String,
     /// Pilot read it back.
     #[serde(default)]
     pub acknowledged: bool,
@@ -362,6 +451,9 @@ pub struct Clearance {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transmission {
+    /// An advisory may interrupt speech without replacing a pending instruction.
+    #[serde(default)]
+    pub information_only: bool,
     /// Deterministic pilot acknowledgment, empty when none is expected.
     #[serde(default)]
     pub pilot_reply: String,
@@ -392,6 +484,14 @@ pub struct Transmission {
     /// Urgent delivery.
     #[serde(default)]
     pub urgent: bool,
+}
+
+impl Transmission {
+    /// The latest instruction remains actionable across informational interruptions.
+    #[must_use]
+    pub fn is_controller_instruction(&self) -> bool {
+        self.speaker == "ATC" && !self.background && !self.information_only
+    }
 }
 
 /// Pilot request submitted to the controller.
@@ -496,6 +596,10 @@ pub struct Point {
 #[serde(rename_all = "camelCase", default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct TaxiClearance {
+    /// Arrival stand is occupied or its availability cannot be confirmed.
+    pub parking_hold: bool,
+    /// Temporary ATC hold for conflicting taxi traffic; runway permissions are unchanged.
+    pub traffic_hold: bool,
     /// Explicit permission for this runway crossing only.
     pub crossing_runway: String,
     /// Airport ICAO.
@@ -584,6 +688,24 @@ impl TaxiClearance {
 #[serde(rename_all = "camelCase")]
 #[allow(clippy::struct_excessive_bools)] // Independent saved permissions and flight flags.
 pub struct State {
+    /// Remaining observed departure wake delay; zero does not override runway occupancy.
+    #[serde(default)]
+    pub departure_wake_seconds: f64,
+    /// Required approach spacing was not present when the preceding aircraft crossed the threshold.
+    #[serde(default)]
+    pub arrival_wake_conflict: bool,
+    /// Traffic advisory awaiting an optional pilot sighting report.
+    #[serde(default)]
+    pub traffic_call: Option<TrafficCall>,
+    /// Optional offer; accepting it requests a separately validated clearance.
+    #[serde(default)]
+    pub atc_offer: Option<AtcOffer>,
+    /// The pilot has declared an emergency on this flight.
+    #[serde(default)]
+    pub emergency_declared: bool,
+    /// Active mission and story outcomes, separate from aircraft permissions.
+    #[serde(default)]
+    pub mission: crate::missions::Status,
     /// Pending simulator-thread crew actions.
     #[serde(default)]
     pub crew_actions: Vec<crate::crew::Action>,
@@ -654,6 +776,12 @@ fn default_sequence() -> u32 {
 impl Default for State {
     fn default() -> Self {
         Self {
+            traffic_call: None,
+            departure_wake_seconds: 0.0,
+            arrival_wake_conflict: false,
+            mission: Default::default(),
+            atc_offer: None,
+            emergency_declared: false,
             crew_actions: Vec::new(),
             crew_controls: Vec::new(),
             clearance_cancelled: false,
@@ -685,4 +813,16 @@ pub struct ApplyResult {
     pub accepted: bool,
     /// Controller message.
     pub message: String,
+}
+
+/// A time-limited offer belongs to one controller and flight.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AtcOffer {
+    /// Transmission carrying the offer.
+    pub sequence: u32,
+    /// Controller frequency in kHz.
+    pub frequency_khz: i32,
+    /// Known downstream route fix.
+    pub waypoint: String,
 }

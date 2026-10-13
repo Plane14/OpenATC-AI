@@ -19,6 +19,36 @@ pub fn conversation(state: &State) -> String {
         state.telemetry.ground_speed_knots,
         state.telemetry.height_agl_feet
     );
+    let _ = writeln!(
+        text,
+        "Altitude: geometric {:.1} ft | indicated {:?} ft | standard-pressure {:?} ft",
+        state.telemetry.altitude_feet,
+        state.telemetry.indicated_altitude_feet,
+        state.telemetry.pressure_altitude_feet
+    );
+    let route = &state.taxi_clearance;
+    let _ = writeln!(
+        text,
+        "Surface: {:?} | hold {} | crossing {} | route #{} | notified COM {} | waiting for traffic {}\nRadio: busy {} | sequence seen {:?} | handoff {} / sequence {}\nTraffic: {}\n",
+        route.stage(),
+        route.hold_short_runway,
+        route.crossing_runway,
+        route.sequence,
+        route.holding_channel,
+        route.waiting_for_traffic,
+        state.telemetry.radio_busy,
+        state.telemetry.radio_sequence_seen,
+        state.recommended_frequency_khz,
+        state.frequency_sequence,
+        state
+            .telemetry
+            .traffic
+            .as_ref()
+            .map_or("unavailable".into(), |targets| format!(
+                "{} reported",
+                targets.len()
+            ))
+    );
     for entry in &state.transcript {
         let _ = writeln!(
             text,

@@ -1,5 +1,7 @@
 # Remaining work
 
+Current priorities include IFR reliability and generated traffic, with bounded multicore execution on Linux, Windows and macOS. The items below distinguish completed foundations from planned work.
+
 The 0.2 interface, online OFP import, local navdata reader, stage controller, taxi graph, simulator airport-weather/ATIS reporting, audio settings and HTTP/TLS separation are implemented in source. Check `VALIDATION.md` before assuming runtime coverage.
 
 Current Rust work includes native audio selection, plugin-owned engine lifecycle, improved maps/Arrival profiles, local-frequency tuning, ToLiss A20N datarefs and the recursive editable speech library. See the READMEs and current validation section.
@@ -7,12 +9,17 @@ Current Rust work includes native audio selection, plugin-owned engine lifecycle
 Still needed for a complete ATC system:
 
 - Simulator runtime validation across X-Plane UI scales, multi-monitor and pop-out configurations; native SDK 4.4 graphics integration, non-ASCII keyboard entry.
-- Traffic ownership, full separation and sequencing beyond simulator-reported runway occupancy/final-approach protection; full published-procedure execution and navigation/terrain validation.
-- Enroute airspace/sector data and automatic handoffs. Existing copilot tuning uses explicit structured assignments from the loaded airport.
+- Complete traffic separation, wake sequencing and plausible random traffic generation without real-world timetables. Native AI amount control, predictive taxi holds, whole-aircraft runway clearance, concurrent traffic advisories, limited jet approach spacing and simulated pilot weather/landing exchanges are implemented. FAA pair-specific departure/approach wake checks cover observed same/close-parallel runway traffic; intersecting paths and preceding low/missed approaches remain incomplete. These paths need live traffic-provider and performance acceptance.
+- Extend the bounded CPU pool to generated-route planning and traffic movement. Scenery/navigation loading and CSL indexing already use it; immutable traffic snapshots, stale-job cancellation, distance-based work budgets and measured simulator frame time remain acceptance requirements on Linux, Windows and macOS.
+- Custom lightweight CSL rendering and generated-flight control. Settings → Traffic installs Bluebell with download/extraction progress, cancellation and retry; rendering and moving these models still need implementation. The follow-me car is one scenery instance, not an aircraft traffic controller. X-Plane can operate native AI aircraft, but its documented initialization API does not expose our own per-aircraft route/clearance schedule. CSL packs are visual assets rather than native flight models.
+- KittenTTS 2's 47-voice production integration. The GPU/VRAM benchmark is recorded, but the selectable server provider currently remains the older eight-voice Mini runtime. A Rust native prototype produces correct CPU audio; its Vulkan path returns invalid logits and is not enabled in the server. Kokoro stays the default. Full-roster validation, GPU compatibility and cross-platform packaging checks are still needed before advertising Kitten 2 as supported.
+- Broader enroute/arrival acceptance against installed controller coverage. Current and predicted sector handoffs, copilot tuning and check-ins are implemented; coverage gaps, complex overlapping sectors and worldwide routing still need simulator testing.
 - Aircraft-size/obstacle validation beyond the current painted-centerline fallback, taxi-route amendments and richer holding-point metadata. Separate runway crossing clearances, crossing readbacks and onward taxi are implemented and checked against installed KLAX scenery; broader simulator acceptance remains. Conservative centerline fallback and separate Tower-authorized runway backtracking are implemented.
 - Navigraph developer registration, entitled-user authorization and licensed chart rendering. No working login or chart support is claimed yet.
 - Precipitation radar tiles, map terrain/coastline base layers, forecast fields and simulator-weather grids. Current radio weather comes from airport-location simulator surface samples, not radar.
 - Aircraft-specific performance, mass/fuel loading, route generation and restrictions. Current dispatch data is imported from SimBrief or entered by the user.
+- Complete diversion routing and scenario-driven runway closures/vector offers. Optional direct-to offers are implemented with terrain, restriction and descent checks. The Missions selector/editor supports eight A320-family stories, phase/probability triggers, branches, dialogue and a journal. Mission media fields are editable metadata; playback and automatic assistance dispatch remain unfinished.
+- Gate occupancy beyond TCAS, including static scenery aircraft and coordinated relocation of OpenATC-owned traffic once that exists. Current taxi-in rechecks known occupancy and can hold/reassign a suitable stand; it does not remove another provider's aircraft.
 - Aircraft-specific radio overrides where a third-party aircraft does not honor X-Plane's standard COM1 dataref; hardware push-to-talk binding and broader speech-cancellation controls.
 
 Editable speech follow-through:
@@ -28,7 +35,7 @@ The current sprint implements nearby station discovery, unconditional reception 
 ## Crew follow-up
 
 - Validate the new ToLiss panel routing and each custom control in the running neo. Button-only mappings expose a press, not a verified engaged state.
-- Identify a supported ToLiss pushback distance/angle interface before connecting automatic start.
+- Identify a supported ToLiss pushback distance/angle interface. Starting its already-configured sequence is supported; spoken distance/angle changes are not applied.
 - Add reviewed, complete aircraft/operator checklists; current examples are abbreviated.
 - Add held-control semantics where the SDK requires more than a tap.
 

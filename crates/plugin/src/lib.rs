@@ -6,6 +6,7 @@
 mod arrival;
 mod crew;
 mod debug_jump;
+mod follow_me;
 mod geometry;
 mod gl;
 mod panel;
@@ -13,6 +14,7 @@ mod render;
 mod supervise;
 mod taxi;
 mod telemetry;
+mod traffic;
 mod weather;
 mod window;
 
@@ -28,6 +30,7 @@ use xplane::{
 
 /// Shared plugin state behind the command handlers.
 struct Shared {
+    native_traffic: traffic::NativeTraffic,
     crew: crew::Runtime,
     interface: Option<Interface>,
     window: Option<window::Floater>,
@@ -46,6 +49,7 @@ struct Shared {
     enabled: bool,
     ground_arrows: taxi::GroundGuidance,
     holding_marker: taxi::GroundGuidance,
+    follow_me: follow_me::FollowMe,
     debug_cancel_pending: bool,
     arrival_sampler: arrival::TerrainSampler,
     weather_sampler: weather::Sampler,
@@ -324,6 +328,7 @@ fn update_autopilot(shared: &Arc<Mutex<Shared>>) {
         return;
     }
     let entry = openatc_core::state::Transmission {
+        information_only: false,
         pilot_reply: String::new(),
         background: false,
         speaker: "COPILOT".to_owned(),
@@ -391,6 +396,45 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let debug_cancel_pending = locked.debug_cancel_pending;
+    let requested_frequency = locked.interface.as_mut().and_then(|i| {
+        i.requested_frequency_khz
+            .take()
+            .filter(|f| i.radio_power && (118_000..=136_990).contains(f))
+    });
+    if let Some(frequency) = requested_frequency {
+        let observed = locked.com1.as_mut().map(|radio| {
+            radio.set(frequency);
+            radio.get()
+        });
+        if observed == Some(frequency) {
+            // A manual selection supersedes an earlier copilot handoff.
+            locked.last_frequency_sequence = locked
+                .interface
+                .as_ref()
+                .map_or(0, |i| i.engine.state().frequency_sequence);
+        }
+        if let Some(interface) = locked.interface.as_mut() {
+            if observed == Some(frequency) {
+                interface.radio_tuned(frequency);
+            } else {
+                interface.notice =
+                    "The aircraft did not accept the selected COM1 frequency.".into();
+            }
+        }
+    }
+    // Use the same aircraft binding for tuning and reception.
+    if let Some(t) = telemetry.as_mut()
+        && let Some(radio) = locked.com1.as_ref()
+    {
+        t.com1_khz = radio.get();
+    }
+    if let Some(t) = telemetry.as_mut() {
+        t.wingspan_meters = locked
+            .panel
+            .profile
+            .as_ref()
+            .and_then(|p| p.wingspan_meters);
+    }
     let Some(interface) = locked.interface.as_mut() else {
         return;
     };
@@ -403,6 +447,15 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     {
         interface.current_airport = taxi::current_airport(telemetry.latitude, telemetry.longitude);
     }
+    if let Some(t) = &telemetry {
+        let mut observed = t.clone();
+        observed.radio_sequence_seen = Some(interface.last_speech_sequence);
+        observed.radio_busy = interface.speech.busy()
+            || interface.speech.recording()
+            || !interface.speech_queue.is_empty()
+            || interface.auto_reply_pending;
+        interface.engine.telemetry(observed);
+    }
     interface.tick();
     if interface.engine.connected() && interface.settings.simulator_root.is_empty() {
         let root = xpapi.paths.xplane_folder().to_string_lossy().into_owned();
@@ -410,10 +463,6 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
             .engine
             .post("/simulator/root", serde_json::json!({"root": root}));
     }
-    let requested_frequency = interface
-        .requested_frequency_khz
-        .take()
-        .filter(|frequency| interface.radio_power && (118_000..=136_990).contains(frequency));
     // Playback and recording occupy the radio until their queues drain.
     if let Some(telemetry) = telemetry.as_mut() {
         telemetry.radio_sequence_seen = Some(interface.last_speech_sequence);
@@ -424,10 +473,7 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     }
     // Send telemetry after processing the current UI requests.
     if let Some(telemetry) = &telemetry {
-        interface.engine.post(
-            "/telemetry",
-            serde_json::to_value(telemetry).unwrap_or(serde_json::Value::Null),
-        );
+        interface.engine.telemetry(telemetry.clone());
     }
     let state = interface.engine.state();
     if let Some(kind) = interface
@@ -447,6 +493,7 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
             |()| "Debug jump complete; parking brake set. ATC permissions remain unchanged.".into(),
         );
         locked.crew = crew::Runtime::default();
+        locked.follow_me = follow_me::FollowMe::new();
         locked.debug_cancel_pending = pending;
         return;
     }
@@ -461,6 +508,9 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     }
     let ground_enabled = interface.settings.show_ground_taxi_arrows;
     let holding_enabled = interface.settings.show_holding_point;
+    let follow_me_enabled = interface.settings.show_follow_me;
+    let native_enabled = interface.settings.manage_native_traffic;
+    let native_count = interface.settings.native_traffic_count;
     let arrival_target = openatc_core::arrival::target(
         &interface.arrival,
         &state.plan.arrival_runway,
@@ -496,17 +546,13 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     }
     locked.ground_arrows.update(ground_enabled, &state);
     locked.holding_marker.update(holding_enabled, &state);
-    if let Some(frequency) = requested_frequency {
-        if let Some(radio) = locked.com1.as_mut() {
-            radio.set(frequency);
-            if let Some(interface) = locked.interface.as_mut() {
-                interface.last_action =
-                    format!("Tuning COM1 to {:.3} MHz", f64::from(frequency) / 1000.0);
-            }
-        } else if let Some(interface) = locked.interface.as_mut() {
-            "COM1 cannot be tuned from this aircraft's radio dataref."
-                .clone_into(&mut interface.notice);
-        }
+    locked.follow_me.update(follow_me_enabled, &state);
+    let status = locked
+        .native_traffic
+        .update(native_enabled, native_count)
+        .to_owned();
+    if let Some(interface) = locked.interface.as_mut() {
+        interface.native_traffic_status = status;
     }
     let generation = locked
         .interface
@@ -521,6 +567,7 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
         locked.last_ap_seq = 0;
         locked.ground_arrows = taxi::GroundGuidance::new();
         locked.holding_marker = taxi::GroundGuidance::new_holding_marker();
+        locked.follow_me = follow_me::FollowMe::new();
         locked.arrival_sampler = arrival::TerrainSampler::new();
         locked.weather_sampler = weather::Sampler::default();
     }
@@ -565,6 +612,7 @@ impl Plugin for OpenAtc {
         // below shares ownership between callbacks, never threads.
         #[allow(clippy::arc_with_non_send_sync)]
         let shared = Arc::new(Mutex::new(Shared {
+            native_traffic: traffic::NativeTraffic::default(),
             crew: crew::Runtime::default(),
             interface: None,
             window: None,
@@ -582,6 +630,7 @@ impl Plugin for OpenAtc {
             enabled: false,
             ground_arrows: taxi::GroundGuidance::new(),
             holding_marker: taxi::GroundGuidance::new_holding_marker(),
+            follow_me: follow_me::FollowMe::new(),
             debug_cancel_pending: false,
             arrival_sampler: arrival::TerrainSampler::new(),
             weather_sampler: weather::Sampler::default(),
@@ -674,14 +723,22 @@ impl Plugin for OpenAtc {
             setup_commands(self, xpapi);
         }
         debug_log("OpenATC AI: enable flight loop");
-        // Half-second flight loop with the shared state.
+        // Radio and telemetry stay at 2 Hz; an active escort gets lightweight movement updates.
         let tick_shared = self.shared.clone();
+        let mut last_logic = std::time::Instant::now();
         let mut flight_loop = xpapi.new_flight_loop(
             FlightLoopPhase::BeforeFlightModel,
             move |xpapi: &mut xplane::XPAPI,
                   _state: &mut xplane::flight_loop::LoopState<LoopMarker>| {
-                flight_tick(&tick_shared, xpapi);
-                LoopResult::Seconds(0.5)
+                if last_logic.elapsed() >= Duration::from_millis(500) {
+                    flight_tick(&tick_shared, xpapi);
+                    last_logic = std::time::Instant::now();
+                }
+                let mut shared = tick_shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                shared.follow_me.step();
+                LoopResult::Seconds(if shared.follow_me.active() { 0.05 } else { 0.5 })
             },
             LoopMarker,
         );
@@ -712,8 +769,10 @@ impl Plugin for OpenAtc {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         shared.enabled = false;
+        shared.native_traffic = traffic::NativeTraffic::default();
         shared.ground_arrows = taxi::GroundGuidance::new();
         shared.holding_marker = taxi::GroundGuidance::new_holding_marker();
+        shared.follow_me = follow_me::FollowMe::new();
         shared.arrival_sampler = arrival::TerrainSampler::new();
         shared.weather_sampler = weather::Sampler::default();
         if let Some(window) = shared.window.as_ref() {
@@ -729,9 +788,16 @@ impl Plugin for OpenAtc {
         &mut self,
         _xpapi: &mut xplane::XPAPI,
         _from: i32,
-        _message: xplane::message::MessageId,
+        message: xplane::message::MessageId,
         _param: *mut std::ffi::c_void,
     ) {
+        if message == xplane::message::MessageId::ReleasePlanes {
+            self.shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .native_traffic
+                .yield_to_provider();
+        }
     }
 
     fn info(&self) -> PluginInfo {

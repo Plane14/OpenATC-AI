@@ -17,6 +17,7 @@ fn pending() -> State {
         ..serde_json::from_value(serde_json::json!({})).unwrap()
     });
     state.transcript.push(Transmission {
+        information_only: false,
         speaker: "ATC".into(),
         position: "Airport Tower".into(),
         sequence: 2,
@@ -59,6 +60,7 @@ fn taxi_reply_keeps_hold_short_and_background_traffic_cannot_replace_it() {
     state.taxi_clearance.destination = "31".into();
     state.taxi_clearance.hold_short_runway = "31".into();
     state.transcript.push(Transmission {
+        information_only: false,
         speaker: "ATC".into(),
         text: "Jetstar 789, hold short.".into(),
         background: true,

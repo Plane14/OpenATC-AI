@@ -1,12 +1,26 @@
 //! Companion engine for controller state, local HTTP requests and AI/STT/TTS services.
 
+mod cabin;
+mod context;
 mod crew;
+mod discipline;
 mod flight;
+mod initiative;
+mod instructions;
+mod intent;
 mod lifecycle;
+mod memory;
+mod missions;
+mod parking;
 mod radio;
 mod routes;
+mod squawk;
 mod support;
 mod surface;
+mod traffic;
+mod traffic_models;
+mod traffic_profiles;
+mod workers;
 
 use openatc_core::airport::Airport;
 use openatc_core::regions::{Region, load_regions};
@@ -23,10 +37,32 @@ pub const VERSION: &str = "0.2.1";
 
 /// Everything the engine owns: session state plus configuration.
 pub struct EngineState {
+    /// Shared CPU budget for work that must not occupy the HTTP executor.
+    pub workers: Arc<workers::Workers>,
+    /// Model downloads run separately from flight and radio work.
+    pub model_installer: traffic_models::Installer,
+    /// Validated airline, hub and aircraft preferences, loaded on CPU workers.
+    pub traffic_profiles: traffic_profiles::Store,
+    /// Share one scenery scan between map, station and radio requests.
+    pub station_index_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Optional controller offers and their expiry.
+    pub initiative: initiative::Monitor,
+    /// Arrival stand changes are retried at a bounded rate.
+    pub parking: parking::Monitor,
+    /// Bounded traffic history and active spacing instructions.
+    pub traffic: traffic::Traffic,
+    /// Selected mission clock and branching outcomes.
+    pub mission: missions::Runtime,
+    /// Codes recently assigned by this engine, including previous flights.
+    pub squawks: squawk::Allocator,
+    /// Passenger activity for the simulated cabin conversation.
+    pub cabin: cabin::Cabin,
+    /// Recent requests and verified outcomes for this flight.
+    pub request_memory: memory::RequestMemory,
     /// Invalidates work started before a new-flight reset.
     pub session_generation: u64,
     /// Prepared crew radio exchange and its owning flight generation.
-    pub pending_copilot_reply: Option<(u64, openatc_core::state::Request)>,
+    pub pending_copilot_reply: Option<routes::PreparedReply>,
     /// Previous phrase choices and transmitted wording.
     pub phrase_history: radio::PhraseHistory,
     /// Aircraft crew controls, live readbacks and checklist progress.
@@ -39,6 +75,16 @@ pub struct EngineState {
     pub settings: Settings,
     /// Cached published stations.
     pub stations: Vec<openatc_core::stations::Station>,
+    /// Voice roster fetched from the configured TTS service.
+    pub voices: Vec<openatc_core::voices::Voice>,
+    /// TTS endpoint associated with the cached roster.
+    pub voices_source: String,
+    /// Last voice refresh attempt, including failed requests.
+    pub voices_refreshed: Option<std::time::Instant>,
+    /// Airport positions including fields without radio frequencies.
+    pub map_airports: Vec<openatc_core::stations::AirportMarker>,
+    /// Simulator folder used to build the airport marker index.
+    pub map_root: String,
     /// Root used by the station index.
     pub station_root: String,
     /// Latest simulator airport weather, timestamped at receipt.
@@ -48,6 +94,10 @@ pub struct EngineState {
     pub sim_weather: BTreeMap<String, (serde_json::Value, std::time::Instant)>,
     /// Loaded airport, if any.
     pub airport: Option<Airport>,
+    /// Destination geometry retained while departure surface data is in use.
+    pub arrival_airport: Option<Airport>,
+    /// Installed minimum off-route grid for vectoring checks.
+    pub mora: openatc_core::navigation::Mora,
     /// Remembered controller voices.
     pub controllers: Controllers,
     /// Role prompts.
@@ -133,7 +183,7 @@ async fn weather_loop(shared: Shared) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         reload_settings_if_changed(&shared, &mut settings_stamp).await;
-        // Weather transmissions now use simulator observations only. Internet
+        // Weather transmissions use simulator observations only. Internet
         // METAR fetches remain available as explicitly labelled planning data.
     }
 }
@@ -262,6 +312,17 @@ async fn main() {
         }
     };
     let shared: Shared = Arc::new(RwLock::new(EngineState {
+        workers: Arc::new(workers::Workers::new(settings.cpu_workers)),
+        model_installer: Default::default(),
+        station_index_lock: Default::default(),
+        cabin: Default::default(),
+        request_memory: Default::default(),
+        squawks: Default::default(),
+        mission: Default::default(),
+        parking: Default::default(),
+        initiative: Default::default(),
+        traffic: Default::default(),
+        traffic_profiles: Default::default(),
         session_generation: 0,
         pending_copilot_reply: None,
         phrase_history: radio::PhraseHistory::load(&config_dir),
@@ -270,10 +331,17 @@ async fn main() {
         session: State::default(),
         settings,
         stations: Vec::new(),
+        voices: Vec::new(),
+        voices_source: String::new(),
+        voices_refreshed: None,
+        map_airports: Vec::new(),
+        map_root: String::new(),
         station_root: String::new(),
         sim_weather: BTreeMap::new(),
         atis_information: BTreeMap::new(),
         airport: None,
+        arrival_airport: None,
+        mora: Default::default(),
         controllers,
         prompts,
         regions,
@@ -290,8 +358,22 @@ async fn main() {
     let app = axum::Router::new()
         .route("/health", get(routes::health))
         .route("/voice-health", get(routes::voice_health))
+        .route("/speech/voices", post(routes::post_voices))
+        .route("/debug/map", post(radio::debug_map))
         .route("/state", get(routes::full_state))
         .route("/settings", post(routes::post_settings))
+        .route("/missions/list", post(missions::list))
+        .route("/missions/save", post(missions::save))
+        .route("/missions/start", post(missions::start))
+        .route("/missions/stop", post(missions::stop))
+        .route("/missions/choose", post(missions::choose))
+        .route("/traffic/talk", post(traffic::talk))
+        .route("/traffic/profiles", post(traffic_profiles::inspect))
+        .route("/traffic/models/status", post(traffic_models::status))
+        .route("/traffic/models/index", post(traffic_models::index))
+        .route("/traffic/models/install", post(traffic_models::install))
+        .route("/traffic/models/cancel", post(traffic_models::cancel))
+        .route("/atc/offer", post(initiative::answer))
         .route("/simulator/root", post(routes::post_simulator_root))
         .route("/debug/cancel-actions", post(routes::debug_cancel_actions))
         .route("/crew/observe", post(crew::observe))
@@ -334,4 +416,55 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(address).await.unwrap();
     println!("OpenATC engine: http://127.0.0.1:{port}");
     lifecycle::serve(listener, app, lifetime).await;
+}
+
+#[cfg(test)]
+fn test_state() -> EngineState {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let config_dir = std::env::temp_dir().join(format!(
+        "openatc-unit-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    EngineState {
+        workers: Arc::new(workers::Workers::new(1)),
+        model_installer: Default::default(),
+        station_index_lock: Default::default(),
+        cabin: Default::default(),
+        request_memory: Default::default(),
+        squawks: Default::default(),
+        mission: Default::default(),
+        parking: Default::default(),
+        initiative: Default::default(),
+        traffic: Default::default(),
+        traffic_profiles: Default::default(),
+        session_generation: 0,
+        pending_copilot_reply: None,
+        phrase_history: radio::PhraseHistory::load(&config_dir),
+        crew: crew::CrewSession::default(),
+        flow: flight::FlightFlow::default(),
+        session: State::default(),
+        settings: Settings::default(),
+        stations: Vec::new(),
+        voices: Vec::new(),
+        voices_source: String::new(),
+        voices_refreshed: None,
+        map_airports: Vec::new(),
+        map_root: String::new(),
+        station_root: String::new(),
+        sim_weather: BTreeMap::new(),
+        atis_information: BTreeMap::new(),
+        airport: None,
+        arrival_airport: None,
+        mora: Default::default(),
+        controllers: Controllers::default(),
+        prompts: support::load_prompts(&config_dir, &config_dir),
+        regions: BTreeMap::new(),
+        regions_path: String::new(),
+        speech: Default::default(),
+        speech_source: String::new(),
+        config_dir,
+        expectations: Vec::new(),
+        client: reqwest::Client::new(),
+    }
 }

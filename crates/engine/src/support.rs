@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 
 /// Role prompts with file-loaded overrides and shipped fallbacks.
 pub struct Prompts {
+    /// Wording rules for an already validated ATC decision.
+    pub atc: String,
+    /// Structured interpretation of multi-part crew requests.
+    pub crew_actions: String,
     /// Cabin crew system prompt.
     pub cabin: String,
     /// Ground crew system prompt.
@@ -38,6 +42,8 @@ pub fn fill_prompt(text: &str, callsign: &str) -> String {
 #[must_use]
 pub fn load_prompts(config_dir: &Path, exe_dir: &Path) -> Prompts {
     let mut prompts = Prompts {
+        atc: include_str!("../../../prompts/atc_reply.txt").to_owned(),
+        crew_actions: include_str!("../../../prompts/crew_actions.txt").to_owned(),
         cabin: include_str!("../../../prompts/cabin.txt").to_owned(),
         ground: include_str!("../../../prompts/ground.txt").to_owned(),
         copilot: include_str!("../../../prompts/copilot_readback.txt").to_owned(),
@@ -57,6 +63,8 @@ pub fn load_prompts(config_dir: &Path, exe_dir: &Path) -> Prompts {
         }
         prompts.source = candidate.to_string_lossy().into_owned();
         for (name, target) in [
+            ("atc_reply.txt", &mut prompts.atc),
+            ("crew_actions.txt", &mut prompts.crew_actions),
             ("cabin.txt", &mut prompts.cabin),
             ("ground.txt", &mut prompts.ground),
             ("copilot_readback.txt", &mut prompts.copilot),

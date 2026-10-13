@@ -24,8 +24,7 @@ pub fn can_transmit(role: &str, radio_power: bool, bus_power: bool) -> bool {
     radio_power
 }
 
-/// Realism controls, including the
-/// flat-bool layout) so preset matching agrees exactly.
+/// Independent realism switches used by preset matching.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug)]
 pub struct Realism {
@@ -58,8 +57,7 @@ impl Default for Realism {
     }
 }
 
-/// Preset name for a toggle state; anything else is custom.
-/// Apply a named realism preset.
+/// Match the current switches to a preset name, or return custom.
 #[must_use]
 pub fn discipline_preset(realism: Realism, congestion: &str) -> String {
     let quiet = !realism.strict_readbacks

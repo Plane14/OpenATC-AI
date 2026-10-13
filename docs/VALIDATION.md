@@ -1,3 +1,121 @@
+# Barometric altitude and QNH wording — 13 October 2026
+
+Core97/engine65/plugin18/UI28 tests pass, with environment-specific tests ignored as listed in the log. The 18,311.7 geometric / 18,000 indicated and pressure-altitude regression produces no altitude warnings, including variation within the existing 300-foot band. A real 500-foot pressure-altitude error requires the existing 30-second delay and then warns; descent toward the assigned level suppresses repeat correction. Optional invalid altimeter readings are omitted at the plugin boundary. Older telemetry falls back to its existing geometric reading. QNH1022 omits units, QNH993 retains hectopascals.
+
+Final release-engine radio and three-controller full-flight replays, release build and Linux dependency audit pass. Logs: `/tmp/openatc-altitude-tests-final.log`, `/tmp/openatc-altitude-{release,radio,flight,audit}.log`. Native ToLiss altimeter readings and speech remain user acceptance checks; X-Plane was not launched. Region-level transition settings remain the source for pressure-altitude selection; airport-specific transition levels are not added in this repair.
+
+# Crew selection and LFMN stand guidance — 13 October 2026
+
+Plugin checks pass: 17 tests, one installed-scenery test separately run. Repeated ground/cabin calls retain their recipient and explicit radio selection restores ATC. The real-engine crew suite grants start-up/pushback approval, remains stationary in Pushback, requests external power and chock removal, acknowledges both simulator actions and verifies one Ground confirmation; the same request is refused at 2 knots.
+
+The installed LFMN regression reproduces the reported 43.655764, 7.202480 stand, 154.5 metres from its approved taxiway route. It now samples 11 arrows toward the 04L crossing hold on the way to 04R. Every arrow remains on the published route; the unverified apron connector remains unmarked. Logs: `/tmp/openatc-mech-arrows-tests.log`, `/tmp/openatc-mech-crew.log`, `/tmp/openatc-nice-arrows.log`. Native button interaction and rendered simulator arrow visibility still require acceptance in X-Plane; these checks do not launch it.
+
+# Center frequency and check-in regression — 13 October 2026
+
+Legacy `FREQ` and airport frequency records restore the truncated last digit; tests cover 118.025, 125.275, 125.725 and 136.975 MHz while preserving modern 118.020 and 118.030 channel records. An engine regression loads synthetic controller scenery, crosses an Approach boundary, receives a 118.025 Center handoff, completes the copilot readback, tunes, checks in and receives Center's climb instruction. A UI regression verifies check-in, radio check, frequency, altitude and direct requests remain available in Departure on Center, while surface requests stay hidden.
+
+The installed-scenery regression passes at 33.914847, -118.384915, 3,600 feet MSL on 118.025 MHz and resolves LOS ANGELES Center. Logs: `/tmp/openatc-center-tests.log` and `/tmp/openatc-center-installed-scenery.log`. This reads scenery and simulates telemetry; it does not launch X-Plane or prove native speech playback.
+
+# Taxi movement, assistance replies and window transitions — 13 October 2026
+
+Engine tests pass (62 passed, one environment-dependent test ignored), including stationary taxi starts beyond the warning delay, speed fluctuations without displacement, movement before readback, fresh clearance sequences, a real deviation followed by a stop, and busy-radio/controller gating. Typed `yes` passes through the real request handler with the AI endpoint deliberately unavailable for both departure and arrival taxi. Replacement routes retain the intervening runway hold, appear as pending readback and support copilot readback. Stale questions, another frequency and incomplete readbacks cannot be accepted with a short answer.
+
+UI tests pass (27 passed, one installed-engine test ignored). Actual click events exercise compact/expanded controls with the pointer left over the button and moved out/back in. Wheel and resize events verify latest-message following and preservation of an earlier reading position. Desktop captures exercise collapse and expansion with a populated transcript. A stale desktop viewport after an immediate host resize was found during capture and fixed; this does not establish native X-Plane rendering or FPS.
+
+The release-engine clearance-to-gate replay passes all three controller configurations. The HTTP radio replay rejects a deliberately crew-shaped classifier response, returns an ATC clarification and preserves both clearances. Linux release build and dependency/export audit pass. Evidence: `/tmp/openatc-taxi-fix-tests.log`, `/tmp/openatc-window-fix-tests.log`, `/tmp/openatc-taxi-window-{flight,radio,build,audit}.log`, and `/tmp/openatc-taxi-window-preview/`. X-Plane was not started; native simulator and Windows/macOS runtime acceptance remain outstanding.
+
+# Header and UI audit — 13 October 2026
+
+The UI suite passes 25 tests, with the installed-engine integration test intentionally ignored in this UI-only pass; all 15 plugin tests pass. New interaction checks click every navigation icon and pop-out at 520/960 base widths and 0.85/1.0/1.5 text scales. They verify that icons stay inside the window and that pop-out works outside ATC. A separate input test edits the actual callsign field while the engine is unavailable.
+
+Desktop renders cover all ten pages and all eleven settings sections, including narrow windows and enlarged Light-theme controls. Populated KLAX radio/taxi and KLGB arrival views use the standalone engine with installed scenery and synthetic parked telemetry. UI captures use an isolated settings directory with local inactive AI/speech endpoints, preserving the user's settings. Map labels and long settings/form labels were corrected after inspecting renders. Header navigation is now vector icons; the earlier text page strip is superseded. Settings retain wrapping text tabs.
+
+Evidence is under `/tmp/openatc-ui-audit/`: page and settings contact sheets, individual captures, `tests-final.log` and `release-build.log`. The debug desktop capture can inject clicks using `OPENATC_PREVIEW_CLICKS` (`seconds:x:y`, separated by semicolons) and delay capture with `OPENATC_PREVIEW_DELAY`; these controls are excluded from release builds. These checks do not establish native simulator rendering, real flight operation or FPS. X-Plane was not started.
+
+# Release repair checks — 13 October 2026, 10:35 UTC
+
+The Linux core, engine, UI, plugin, settings and xtask suites pass. New regressions exercise invalid optional simulator instruments, preservation of required position validation, retained telemetry errors across empty polls, recovery on a valid sample, settings migration and clickable wrapped tabs. The original rejected native sample was not captured; field-specific diagnostics now identify any remaining rejection instead of reporting only "Invalid telemetry".
+
+The release engine passes clearance-to-gate replays for separate Delivery/Ground/Tower, Ground/Tower and combined Tower service. Radio, compound crew and speech integrations pass. Installed KLAX scenery checks identify KLAX as the occupied airport, expose published Delivery services, update request availability immediately after COM1 changes and hide start-up requests once engines run. The installed parallel-runway holding/crossing regression also passes. Linux release builds and dependency/export audits pass; existing vendored SDK warnings remain.
+
+Desktop captures were inspected for narrow STT/TTS settings, Light-mode Traffic settings/model installation and the KLAX radio list. Page navigation and settings sections are visible wrapping tabs. Background scene capture and post-processing were removed. These checks establish desktop layout, not native simulator rendering or performance.
+
+X-Plane was not available for native acceptance: an attempted direct launch required Steam, and the user instructed the agent not to start it again. No subsequent simulator launch was attempted. Native flight/audio/ToLiss/FPS and Windows/macOS runtime acceptance remain outstanding. Generated CSL traffic and the other unfinished items in [the roadmap](ROADMAP.md) remain separate work; this is a release candidate, not a claim that the whole roadmap is complete. Bluebell stays uninstalled for the user's installer test.
+
+Local evidence: `/tmp/openatc-release-tests.log`, `/tmp/openatc-ui-final-tests.log`, `/tmp/openatc-installed-radio.log`, `/tmp/openatc-klax-surface.log`, `/tmp/openatc-{flight,radio,crew,speech}-replay.log`, `/tmp/openatc-release-build.log`, `/tmp/openatc-audit.log`. The full-flight report is `packages/flight-validation/report.json`.
+
+# Resumed flight and traffic work — 13 October 2026
+
+Linux checks pass for the changed core, engine, UI, plugin, settings and developer tooling. The combined run has 94 core unit tests, 57 engine tests, 22 UI tests, 14 plugin tests, seven settings tests and three xtask tests, plus core integration suites. A further focused regression checks rejection of non-finite motion/flight-clock input without replacing the last valid state. Environment-dependent tests remain ignored unless explicitly run. Clippy completes with existing/advisory warnings; the checkout is not warning-free.
+
+The release-engine flight replay passes separate Delivery/Ground/Tower, Ground/Tower and combined Tower configurations from clearance to the destination gate. It covers both runway crossings, sector handoffs, mission/emergency exchanges and copilot readbacks. The replay now supplies A320 type/dimensions and verifies that Tower retains the flight while the aircraft centre has exited but the tail still overlaps the runway. The installed KLAX scenery regression also passes. Release radio, compound crew and speech integrations and the Linux dependency audit pass.
+
+Focused checks exercise two simultaneous encounters, an urgent second aircraft during a pending readback, reused surveillance IDs, missing observations and paused telemetry. Information-only advisories preserve the operational readback. Prepared copilot playback is idempotent; stale completion sequences and frequency changes cannot accept another reply. Retuning also removes the old prepared reply so it cannot leave monitoring permanently busy.
+
+Wake checks cover FAA CWT aircraft pairs, full-length versus intersection/opposite departures, qualifying parallel runways, simulator-time pause behaviour, Piper/A320 approach order, displaced thresholds and a spacing violation that survives the leader's touchdown/loss from the feed. They are not proof of complete wake coverage: intersecting flight paths, preceding low/missed approaches and national variations remain open. Whole-aircraft runway checks are conservative reference-point envelopes, not calibrated per-aircraft collision meshes.
+
+The new movement core is tested for protected resource ownership, explicit crossing/continuation permission, impossible climb/discontinuous route rejection, reset generations, pause and clock changes. It is not yet connected to generated flights or a renderer. No native X-Plane flight, audible radio exchange, ToLiss control acceptance, native FPS measurement, or Windows/macOS runtime acceptance was performed in this pass. Bluebell remains uninstalled for the user's installer test. See [the unfinished implementation work](ROADMAP.md).
+
+# Appearance, settings and editable traffic profiles — 13 October 2026
+
+Linux unit/integration suites pass for core, engine, settings, UI and plugin. The core unit suite has 85 passing tests, engine 51, plugin 14, settings 7 and UI 22; environment-dependent tests remain ignored where their fixtures are unavailable. New checks cover profile references/overrides, seeded route/model eligibility, worker saturation and cancelled queued work, own-aircraft climb prediction when target vertical speed is unknown, and saved appearance defaults/ranges. Clippy completes with advisory warnings; this is not a warning-free checkout.
+
+Light/Dark desktop appearance captures were inspected at wide and minimum-width layouts. Those captures establish layout only, not native simulator appearance, pop-out/VR transitions or FPS. The background post-processing implementation from that pass has since been removed after native flickering reports.
+
+The three editable traffic profile files, validation service and model-compatible selector are implemented. They do not establish generated-aircraft movement or complete traffic separation. Bluebell remains uninstalled for the user's installer test.
+
+The Linux release plugin/engine build passes. `test-flight` and `test-speech` pass against that release engine, including the three controller configurations from clearance through departure crossings, sector handoffs, approach/landing, arrival crossings and parking. These are telemetry replays, not a native simulator flight.
+
+# Traffic foundation and multicore task reconciliation — 13 October 2026
+
+The public [roadmap](ROADMAP.md) records the remaining scope, including explicit Linux/Windows/macOS multicore work and acceptance checks. The current CPU pool is used by scenery/navigation loading and CSL indexing. Tests verify conservative automatic limits, explicit caps, concurrent execution of independent jobs and survival after a job panics. This does not establish generated-traffic simulation or a native FPS benefit.
+
+The latest Linux tests pass: core 81, engine 49, settings 7 and UI 21; two environment-specific tests remain ignored. New tests cover predictive encounters, heading-based clock positions, unknown/invalid data, sighting negation, lost-feed versus no-factor replies, preserving a pending readback and retaining IFR clearance through repeated corrections. Synthetic CSL packages verify model matching and path boundaries; Bluebell has not been reinstalled for these checks.
+
+The debug engine builds, the plugin passes `cargo check`, and the real-engine `test-flight` and `test-speech` replays pass. Clippy completes for core, engine, UI and settings with advisory warnings; this is not a warning-free checkout. The flight replay covers three controller configurations from clearance through arrival runway crossings and parking. These checks use simulated telemetry, not a live simulator flight. No new binaries have been installed in X-Plane during this pass.
+
+Custom CSL rendering and generated movement, simultaneous encounter management, urgent advisory preemption, complete wake/separation rules and airborne holding are still unfinished. Windows/macOS execution, UI appearance, audible exchanges and simulator frame time require native acceptance.
+
+# Crew, missions, traffic and final hold — 13 October 2026
+
+The Linux release plugin and engine build and dependency audit pass. Core, engine, settings, UI, plugin and xtask tests pass; the final focused checks also cover parked/finished plan import and headless Traffic/Missions pages. Clippy completes with advisory warnings, including existing vendored SDK warnings; this is not a warning-free build.
+
+The release-engine `test-flight` replay passes with separate Delivery/Ground/Tower, Ground/Tower and combined Tower duties. It covers departure and arrival runway crossings, holding-point handoff, takeoff, sector handoffs, approach and landing permission, observed runway exit and taxi to the assigned gate. It also saves, loads and runs a medical mission, selects an event response, declares an emergency explicitly and finishes the story at parking. The current report and transcripts are in `packages/flight-validation/report.json`.
+
+The installed-scenery KLAX regression passes at the reported 25L holding position (33.938318, -118.383084), at 0.19 knots. It verifies a handoff to that airport's published Tower. That coordinate already matched the existing holding geometry; the fix also addresses the monitoring/handoff path rather than assuming marker size was the sole cause.
+
+Release radio/speech integration and real-engine crew integration pass. Radio checks now use the dynamically assigned squawk, verify that it survives taxi and that successive flights do not reuse recent codes. Phrase-variety checks remove the squawk before comparing wording, so different numbers alone cannot make the test pass. Crew checks exercise compound actions/services and acknowledgement-driven results, including partial failures. The plan-import regression preserves a preflight crew exchange, resets completed-flight state and keeps message IDs monotonic.
+
+New deterministic tests cover taxi conflict hold/resume, runway-hold priority, approach speed limits and an unable response, short-final go-around while the radio is busy, truthful observed-traffic replies, occupied-gate reassignment, aircraft size, mission probability/phase/pause/choices, cabin incidents and optional terrain-checked shortcut offers. Full-flight replay exposed an ordinary taxi-conflict hold taking priority over runway-crossing monitoring; the corrected path passes the replay.
+
+These checks drive synthetic telemetry and acknowledgements through the real engine. They do **not** establish live ToLiss controls, audible turn-taking, native AI ownership/count behaviour, renderer appearance, FPS or Windows/macOS runtime compatibility. Native AI uses X-Plane flight models. Custom Bluebell CSL rendering/installation, complete traffic separation, full diversion routing and mission media playback remain unfinished. See [remaining work](ROADMAP.md).
+
+# Earlier full-flight replay and observed compliance — 13 October 2026
+
+`cargo xtask test-flight target/debug/open-atc-engine speech` passed three real-engine HTTP flights with separate Delivery/Ground/Tower, Ground/Tower and Tower-only surface duties. Synthetic scenery provides two intervening runways, three regional sector boundaries and an arrival gate. The replay checks clearance/readback, start/pushback, departure crossing, vacated report, onward taxi, Tower transfer, takeoff permission, airborne handoffs, approach/Tower/landing permissions, touchdown, rollout, observed runway exit, arrival crossing and taxi to Gate C1. Traffic blocks both a departure and arrival crossing; movement permission remains pending until readback. Busy-radio telemetry cannot interrupt the prepared copilot exchange. Reports include each checkpoint and final transcript under `packages/flight-validation/`.
+
+The replay found and fixed station indexing that depended on opening Channels, regional check-in trying to load a Center identifier as an airport, and service redirection that announced a Tower frequency without updating the copilot's tuning target. Taxi-to-parking instructions no longer tell the aircraft to await further routing at its assigned gate.
+
+New engine tests cover traffic appearing after landing clearance, a pending landing readback, short-final conflict checks inside the retry interval, and preventing immediate approach re-clearance after a go-around. Routine runway-exit calls wait for rollout below 40 knots. These checks use the [FAA landing and exiting procedures](https://www.faa.gov/air_traffic/publications/atpubs/ATC_html/chap3_section_10.html) as a reference; complete separation, local exceptions and missed-approach leg guidance are not implemented.
+
+Observed compliance tests cover squawk adjustment time, busy radio, pause, correction, unknown/invalid/emergency codes, altitude-reporting mode, permission for the actual runway, unauthorized takeoff and landing, and delayed taxi assistance from the issuing controller. The plugin reads the documented X-Plane code/mode datarefs; missing observations remain absent. Phrase references include [FAA transponder procedures](https://www.faa.gov/air_traffic/publications/atpubs/ATC_html/chap5_section_2.html). These reminders are optional Realism settings and do not replace operational clearance checks.
+
+The core, engine, settings, UI, plugin and xtask test run passed. Environment-dependent tests remain ignored. Ground arrow instances are now reused on updates; live simulator rendering and FPS, aircraft-specific telemetry and audio timing still need acceptance. No Windows/macOS CI run or live simulator flight is claimed for this revision.
+
+Follow-me route tests cover corners, speed bounds, distance, pause, readback, arrival crossing limits and removal at parking. The renderer resolves X-Plane's installed vehicle through the scenery library, uses one instance and does not acquire AI aircraft. The client regression holds a command response open while flooding telemetry updates: the newest position must still reach the server, without queueing every old sample. Snapshot readers share immutable data and retain a consistent old snapshot across reset. Live follow-me rendering and actual frame-time measurements remain unverified.
+
+The Linux release plugin and engine build, dependency audit and release-engine full-flight replay passed after this work. Static map cache replacement is tested, including reloading the same airport and clearing the airport. Clippy completes with advisory warnings. New vehicle SDK imports are present in the bundled Windows XPLM import library. A full Windows cross-check from Fedora stopped in a native dependency because MSVC's `lib.exe` is unavailable; this does not establish Windows compilation or linking.
+
+SimBrief low-level import: regression tests and Linux release build pass. A live download for the supplied Pilot ID through the release engine returned KLAX/25L → KLGB/30, LAXX1 SLI KAYOH8, cruise and provisional initial altitude 4,000 feet. The complete planning draft is returned; visual simulator acceptance remains a user check.
+
+# Airborne instructions and phrase alternatives — 12 October 2026
+
+Core, engine, UI and settings tests pass, including descent-distance limits, published crossing windows, phonetic short replies, current/predicted sector ownership, pending-readback reminders, and separate approach/Tower check-in/landing permissions. The Linux release engine/plugin build and real-engine radio, crew and speech checks pass. Repeated start-up now rejects after approval; its integration expectation was updated accordingly. Existing vendored SDK documentation warnings remain.
+
+Rendered the developer Map with installed coverage and the slow terrain overlay removed. The separate Arrival terrain profile remains. The new airborne catalogue contains 87 phrase alternatives across 21 events, with corresponding runtime templates and additional amendment/refusal/readback responses. TOML contracts and placeholder validation pass.
+
+No complete simulator flight has been flown for this revision. Sector coverage quality, actual controller audio timing, descent performance, arrival surface monitoring and third-party controls still need live acceptance. Curved/unnamed/vector procedure legs, local MVA and complete missed-approach routing remain implementation limits. The nominal descent check must not be described as an aircraft-performance guarantee.
+
 Debug surface jumps and addressed controller calls: target tests verify taxi permission and ground-state gating, heading and safe hold position. Radio integration checks no handoff while stopped with takeoff clearance, addressed controller messages and no backwards Delivery redirect for repeated clearance requests. SDK repositioning in ToLiss has not been exercised live.
 
 Airport-filter and circle-rendering revision: default workspace tests, the UI pavement-containment regression, release build and radio integration pass. The regression checks KLAX surface geometry overrides 57CA reference-point selection and does not override it away from that pavement. Circle geometry is now two triangles with one shared alpha texture. Simulator appearance still requires a live check.
@@ -208,3 +326,54 @@ Windows build review: the plugin launcher, OpenGL loader and SDK bindings pass t
 Core, engine, UI and plugin tests passed after the check-in and handoff changes. The real-engine radio exercise checks that a prepared copilot check-in appears before the controller responds, then receives an ATC acknowledgement when committed. The crew exercise passed. Linux plugin and engine release builds passed. Natural check-in variants and cabin arming/cross-check forms have regression coverage.
 
 Actual third-party radio tuning and ToLiss slide confirmation still require simulator testing. The observed slide failure was a readback failure after execution; a longer settling window and raw failure readings improve diagnosis but do not prove the aircraft's slides will arm. Departure-sector selection also needs comparison with the simulator's installed station and sector data; these changes do not assert that a particular SOCAL frequency is the correct sector.
+
+Radio pronunciation checks cover C-GTLT, runway suffixes, squawk and frequency digits, while leaving altitude values available to the speech provider as ordinary quantities. The real-engine check-in test requires exactly one additional ATC entry after the prepared copilot transmission, preventing duplicate pilot entries. Final pronunciation quality still needs listening with the configured TTS voice in the simulator.
+
+
+### Voice API and Map validation — 10 October 2026
+
+Core, settings, engine and UI checks cover provider voice metadata, English filtering, radio abbreviation expansion, airport-name speech, Planning callsigns and repeated sector polygons. Real-engine radio checks confirm that international voices remain unchanged with the filter off, that the filter rejects a non-English voice when on, and that a provider-described custom English voice is accepted.
+
+A live query to the configured TTS service returned 54 voices, 28 labelled English. A French Kokoro voice accepted English radio text and returned a 24 kHz mono PCM WAV. This proves request/synthesis support, not accent quality; listening remains a user check. Real scenery around KLAX returned airport markers and controller coverage; both voice and Map pages were rendered and visually inspected outside the simulator. Map labels use installed data, and no new boundaries were fabricated. Live aircraft movement, hover interaction and end-to-end handoff acceptance remain simulator checks.
+
+## Radio exchanges and map controls — 10 October 2026
+
+Core, engine and UI tests pass. The real-engine radio exercise checks named destination clearances and readbacks, operational airborne check-in replies, and a copilot runway-vacated report that leaves the crossing route active until the prepared reply is committed. Radio-busy telemetry cannot issue the next taxi clearance during that report. The onward route then requires its own readback. Speech-library checks and the Linux release build pass.
+
+The debug map was rendered with installed airport and controller data. Airport visibility controls both drawing and hover details. Terrain sampling uses X-Plane probes on the simulator thread, with 24 probes per flight tick and a local cached grid; it is not a worldwide terrain dataset. Native terrain appearance and the full audio exchange still need simulator acceptance.
+
+Phraseology references: [FAA AIM radio communications](https://www.faa.gov/air_traffic/publications/aim_html/chap4_section_2.html), [FAA departure procedures](https://www.faa.gov/air_traffic/publications/aim_html/chap5_section_2.html), and the [FAA runway-clear definition](https://www.faa.gov/air_traffic/publications/atpubs/pcg_html/glossary-c.html). Terrain API: [XPLMProbeTerrainXYZ](https://developer.x-plane.com/sdk/XPLMProbeTerrainXYZ/).
+
+The updated Linux engine, plugin and speech files were installed after X-Plane closed. Installed engine and plugin hashes match the release build. Git was not changed.
+
+## New flight confirmation — 12 October 2026
+
+The confirmation was rendered inside a 760 × 760 plugin window within a larger viewport. An ImGui input regression uses an offset 560 × 650 host window in a 2560 × 1440 viewport, verifies both button bounds stay inside the host, and clicks Cancel, Start new flight and Retry. The start click queues a reset and advances the flight-local reset generation; a failed connection restores the confirmation with a visible error. UI and engine tests, the Linux release build and the real-engine radio/reset exercise pass. Native simulator input remains a user acceptance check.
+
+## Controller, provider and GPU changes — 13 October 2026
+
+The shared Rust suite passes for core, engine, UI, plugin, TTS, STT, AI server and xtask. Installed-scenery tests remain opt-in; the KLAX containment regression was also run explicitly against the local X-Plane installation and passed at the three reported aircraft positions. It confirms KLAX ownership and usable published Delivery/Ground/Tower entries without airport-specific production logic.
+
+New regressions cover strict model-request JSON, independent/global CPU flags, the full eight-voice Kitten roster with no reuse until exhausted and saved controller identities, touchdown followed by runway exit and separate/combined Ground duties, and parking completion only at an approved final stand. The radio, crew and speech integration suites pass against the release companion engine. Linux plugin/engine dependency audits pass.
+
+The AI/STT/TTS targets pass strict Clippy and formatting checks. The broader engine Clippy pass still reports existing core pedantic warnings (including public API documentation and geometry conversions); the complete workspace is not claimed Clippy-clean. Actionlint accepts the native build workflows. Linux GPU binaries were compiled and exercised on Fedora with actual models; the changed Windows/macOS GPU jobs have not been run on hosted runners.
+
+On the remote RTX 2080 Ti server, Qwen JSON completion was exercised repeatedly, speech was generated on CUDA and CPU, and Whisper transcribed a generated radio sample through the HTTP API. With cuDNN unavailable, the speech warm-up selected CPU and the same synthesis request returned valid audio. Measurements and their scope are in the README and [AI server guide](AI_SERVER.md).
+
+Whisper Tiny misrecognised the heading in one synthetic phrase ("two seven zero" became "to 770"). This is not evidence that operational speech recognition is reliable for every phrase; requests must retain numeric validation, and live microphone/radio testing remains necessary. All eight Kitten presets generated valid finite audio in the Rust CPU audition run. Automated validity checks do not establish a listening-quality preference.
+
+Remaining live acceptance includes the full departure-to-parking flight, embedded UI/audio turn-taking, third-party aircraft controls, and provider voices on native Windows/macOS. No complete live flight or worldwide procedure certification is claimed.
+
+## KittenTTS 2 GPU evaluation — 13 October 2026
+
+An isolated Rust/PyO3 benchmark exercised the upstream CUDA runtime on the RTX 2080 Ti using the compact `emb4` checkpoint. All 47 voice names were discovered; five voices were sampled across eight requests per decoder. Both the default and student decoders returned valid audio. Repeated heading/climb instructions took 5.62–5.69 seconds; the test added 5,088–5,268 MiB above the resident OpenATC service's GPU allocation. A trial FP16 conversion failed on invalid probabilities and was not adopted. Full measurements and limitations are recorded in [AI server evaluation](AI_SERVER.md#kittentts-2-evaluation).
+
+The production service stayed on Kokoro throughout. Its health endpoint and synthesis were checked after the benchmark, and the test GPU processes exited. Version 2 was not added to the Rust application, and no project dependency or simulator file changed during this evaluation.
+
+## Bluebell installation and controller buttons — 13 October 2026
+
+The engine downloaded all 12 publisher-hosted DDS archives, extracted 4,216,196,964 bytes, installed the pack and recovered its installed status after restart. Archive-path rejection and download cancellation/retry checks pass. The pack and download cache were subsequently removed from the plugin installation at the user's request so they can test a fresh download from Traffic.
+
+A UI-client test against the release engine and installed KLAX scenery switches Ground → Delivery, checks that IFR clearance becomes available, submits the request immediately, reads it back, and switches back to Ground. It checks taxi/start-up availability and hides start-up when engines are running. The cold-start run exposed a station-discovery timeout from repeated whole-catalogue capability scans; grouping by airport and deduplicating scenery paths fixes that path. Concurrent index requests now share one scan.
+
+Station-list tests cover airport ownership over a nearer heliport, automatic ground/airborne/arrival lists and the absence of a persistent ICAO filter. Core, engine, plugin and UI regression suites pass, as does the real-engine radio replay. Linux release builds pass. Clippy completes with advisory warnings. These checks do not establish live X-Plane UI, aircraft-specific radio readback, or Windows/macOS runtime acceptance.

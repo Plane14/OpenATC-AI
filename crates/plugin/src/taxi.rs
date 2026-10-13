@@ -46,6 +46,8 @@ impl GroundGuidance {
     pub fn update(&mut self, enabled: bool, state: &State) {
         let route = &state.taxi_clearance;
         if !enabled
+            || route.traffic_hold
+            || route.parking_hold
             || !route.approved
             || (!self.holding_marker && route.guidance_complete)
             || (self.holding_marker
@@ -70,7 +72,6 @@ impl GroundGuidance {
         }
         self.last_sequence = route.sequence;
         self.last_update = Instant::now();
-        self.clear(); // Never keep objects at an old local origin or on a replaced route.
         if self.object.is_null() && !self.load_attempted {
             self.load_attempted = true;
             if let Some(file) = crate::supervise::plugin_file_path() {
@@ -123,17 +124,28 @@ impl GroundGuidance {
         } else {
             samples(&route.points, &ownship)
         };
+        let mut used = 0;
         for (point, heading) in positions {
             let Some(position) = self.position(state, &point, heading) else {
                 continue;
             };
-            let mut datarefs = [ptr::null()];
             unsafe {
-                let instance = xp::XPLMCreateInstance(self.object, datarefs.as_mut_ptr());
-                if !instance.is_null() {
-                    xp::XPLMInstanceSetPosition(instance, &raw const position, ptr::null());
+                if used == self.instances.len() {
+                    let mut datarefs = [ptr::null()];
+                    let instance = xp::XPLMCreateInstance(self.object, datarefs.as_mut_ptr());
+                    if instance.is_null() {
+                        continue;
+                    }
                     self.instances.push(instance);
                 }
+                // Refresh local coordinates without recreating the same objects each second.
+                xp::XPLMInstanceSetPosition(self.instances[used], &raw const position, ptr::null());
+            }
+            used += 1;
+        }
+        for instance in self.instances.drain(used..) {
+            unsafe {
+                xp::XPLMDestroyInstance(instance);
             }
         }
     }
@@ -305,9 +317,11 @@ fn samples(points: &[Point], ownship: &Point) -> Vec<(Point, f64)> {
         }
         total += length;
     }
-    if nearest.0 > 100.0 {
+    if nearest.0 > 1200.0 {
         return Vec::new();
-    } // No invented ramp connector.
+    }
+    // Show the approved taxiway ahead even when the stand is off the network.
+    // The gap across an unmapped apron still receives no invented arrows.
     let mut output = Vec::new();
     let mut along = nearest.1 + 10.0;
     let mut offset = 0.0;
@@ -423,8 +437,80 @@ mod tests {
         assert_eq!(a[1].1, 90.0);
         assert!(a.last().unwrap().0.east < 94.0);
     }
+
     #[test]
-    fn remote_airport_and_off_route_have_no_arrows() {
-        assert!(samples(&[p(0.0, 0.0), p(0.0, 100.0)], &p(200.0, 0.0)).is_empty());
+    fn arrows_remain_visible_from_a_stand_outside_the_taxi_network() {
+        let route = [p(0.0, 0.0), p(0.0, 400.0)];
+        let arrows = samples(&route, &p(180.0, -20.0));
+        assert!(!arrows.is_empty());
+        assert!(
+            arrows
+                .iter()
+                .all(|(point, _)| point.east == 0.0 && point.north >= 10.0 && point.north < 394.0)
+        );
+        assert!(samples(&route, &p(1500.0, 0.0)).is_empty());
+    }
+    #[test]
+    fn remote_airport_has_no_arrows() {
+        assert!(samples(&[p(0.0, 0.0), p(0.0, 100.0)], &p(2000.0, 0.0)).is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires installed LFMN scenery via OPENATC_TEST_SIMULATOR_ROOT"]
+    fn nice_stand_shows_the_approved_taxiway_without_an_apron_connector() {
+        let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
+        let airport = openatc_core::airport::load_airport_from_simulator(
+            &root,
+            "LFMN",
+            &|p| std::path::Path::new(p).is_file(),
+            &|p| std::fs::read_to_string(p).map_err(|e| e.to_string()),
+        )
+        .unwrap();
+        let telemetry = openatc_core::state::Telemetry {
+            latitude: 43.655764,
+            longitude: 7.202480,
+            on_ground: true,
+            position_valid: true,
+            ..Default::default()
+        };
+        let route =
+            openatc_core::airport::calculate_taxi_route(&airport, &telemetry, "04R", false, 'C')
+                .unwrap();
+        let ownship = Point {
+            east: (telemetry.longitude - route.reference_longitude)
+                * 111_320.0
+                * route.reference_latitude.to_radians().cos(),
+            north: (telemetry.latitude - route.reference_latitude) * 111_320.0,
+            height: 0.0,
+        };
+        let arrows = samples(&route.points, &ownship);
+        assert!(!arrows.is_empty(), "{}", route.instructions);
+        assert_eq!(route.hold_short_runway, "04L");
+        let distance = route
+            .points
+            .windows(2)
+            .map(|pair| {
+                let dx = pair[1].east - pair[0].east;
+                let dn = pair[1].north - pair[0].north;
+                let length_squared = dx * dx + dn * dn;
+                let fraction = if length_squared > 0.0 {
+                    (((ownship.east - pair[0].east) * dx + (ownship.north - pair[0].north) * dn)
+                        / length_squared)
+                        .clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                (pair[0].east + dx * fraction - ownship.east)
+                    .hypot(pair[0].north + dn * fraction - ownship.north)
+            })
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            distance > 100.0,
+            "The reported stand is {distance:.1} m from the route"
+        );
+        eprintln!(
+            "LFMN stand is {distance:.1} m from its approved route; {} arrows sampled",
+            arrows.len()
+        );
     }
 }

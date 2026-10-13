@@ -25,7 +25,7 @@ pub fn draw(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
         return;
     }
     ui.text_colored(
-        widgets::ACCENT,
+        widgets::accent(ui),
         format!(
             "{}  /  RWY {}  /  {}  {}",
             dest, state.plan.arrival_runway, state.plan.star, state.plan.approach
@@ -139,7 +139,7 @@ pub fn draw(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
         {
             ui.new_line();
         }
-        ui.text_colored(color, label);
+        ui.text_colored(widgets::text_color(ui, color), label);
         ui.same_line();
     }
     ui.new_line();

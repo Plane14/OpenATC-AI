@@ -7,6 +7,79 @@ pub const MUTED: [f32; 4] = [0.61, 0.67, 0.74, 1.0];
 /// Warning amber.
 pub const AMBER: [f32; 4] = [1.0, 0.73, 0.36, 1.0];
 
+/// Keep every tab visible by wrapping when the window gets narrow.
+pub fn section_tabs(ui: &imgui::Ui, labels: &[&str], selected: &mut usize) {
+    let width = ui.content_region_avail()[0];
+    let spacing = ui.clone_style().item_spacing[0];
+    let padding = ui.clone_style().frame_padding[0] * 2.0;
+    let mut used = 0.0;
+    for (index, label) in labels.iter().enumerate() {
+        let tab_width = ui.calc_text_size(label)[0] + padding;
+        if used > 0.0 && used + spacing + tab_width <= width {
+            ui.same_line();
+            used += spacing;
+        } else {
+            used = 0.0;
+        }
+        let _selected = (*selected == index).then(|| {
+            ui.push_style_color(
+                imgui::StyleColor::Button,
+                ui.style_color(imgui::StyleColor::ButtonActive),
+            )
+        });
+        if ui.button(label) {
+            *selected = index;
+        }
+        used += tab_width;
+    }
+    ui.separator();
+}
+
+/// Whether the current palette uses dark text on a light background.
+pub fn is_light(ui: &imgui::Ui) -> bool {
+    ui.style_color(imgui::StyleColor::Text)[0] < 0.5
+}
+
+/// Accent used for links and section titles.
+pub fn accent(ui: &imgui::Ui) -> [f32; 4] {
+    ui.style_color(imgui::StyleColor::CheckMark)
+}
+
+/// Secondary text, with contrast matched to the selected theme.
+pub fn muted(ui: &imgui::Ui) -> [f32; 4] {
+    ui.style_color(imgui::StyleColor::TextDisabled)
+}
+
+/// Warning text, distinct from the blue accent in either palette.
+pub fn warning(ui: &imgui::Ui) -> [f32; 4] {
+    if is_light(ui) {
+        [0.53, 0.28, 0.0, 1.0]
+    } else {
+        AMBER
+    }
+}
+
+/// Adapt coloured labels without changing the colours of dark map canvases.
+pub fn text_color(ui: &imgui::Ui, mut color: [f32; 4]) -> [f32; 4] {
+    if is_light(ui) {
+        for channel in &mut color[..3] {
+            *channel *= 0.43;
+        }
+    }
+    color
+}
+
+/// Inset panel fill with independent background opacity.
+pub fn panel_color(ui: &imgui::Ui, alpha: f32) -> [f32; 4] {
+    let mut color = if is_light(ui) {
+        [0.86, 0.90, 0.93, 1.0]
+    } else {
+        [0.13, 0.17, 0.21, 1.0]
+    };
+    color[3] = alpha;
+    color
+}
+
 /// Font raster oversampling for crisp text.
 pub const FONT_RASTER_SCALE: f32 = 3.0;
 
@@ -48,14 +121,26 @@ pub enum ToolbarIcon {
     Messages,
     /// Headset: radio frequencies.
     Headset,
+    /// Folded map: controller coverage.
+    Map,
     /// Clipboard: flight plan.
     FlightPlan,
+    /// Connected waypoints: taxi guidance.
+    Taxi,
+    /// Aircraft: arrival planning.
+    Arrival,
+    /// Control tower: airport information.
+    Airports,
+    /// Three sliders: preferences.
+    Settings,
+    /// Radar sweep: nearby traffic.
+    Traffic,
+    /// Flag: flight missions.
+    Missions,
     /// Blank page with a plus: new flight.
     NewFile,
     /// Two forward triangles: surface test jump.
     FastForward,
-    /// Hamburger: page menu.
-    Menu,
     /// Pin: keep expanded.
     Pin,
     /// Collapse chevron.
@@ -77,18 +162,24 @@ pub fn icon_button(ui: &imgui::Ui, label: &str, icon: ToolbarIcon, selected: boo
     let hovered = ui.is_item_hovered();
     let draw = ui.get_window_draw_list();
     let center = [position[0] + size * 0.5, position[1] + size * 0.5];
-    let color = if selected {
+    let mut color = if selected {
         [1.0; 4]
     } else {
-        [0.84, 0.88, 0.90, 1.0]
+        ui.style_color(imgui::StyleColor::Text)
     };
-    let background = if selected {
+    let mut background = if ui.is_item_active() {
+        ui.style_color(imgui::StyleColor::ButtonActive)
+    } else if selected {
         [0.0, 0.59, 0.75, 1.0]
     } else if hovered {
-        [0.43, 0.49, 0.53, 0.96]
+        ui.style_color(imgui::StyleColor::ButtonHovered)
     } else {
-        [0.37, 0.41, 0.44, 0.70]
+        ui.style_color(imgui::StyleColor::Button)
     };
+    // Draw-list colours do not inherit ImGui's disabled alpha.
+    let alpha = ui.clone_style().alpha;
+    color[3] *= alpha;
+    background[3] *= alpha;
     if !matches!(icon, ToolbarIcon::Close) {
         draw.add_rect(
             position,
@@ -100,7 +191,7 @@ pub fn icon_button(ui: &imgui::Ui, label: &str, icon: ToolbarIcon, selected: boo
         .build();
     }
     draw_toolbar_glyph(&draw, icon, center, color, background, hovered, scale);
-    if hovered {
+    if ui.is_item_hovered_with_flags(imgui::ItemHoveredFlags::ALLOW_WHEN_DISABLED) {
         ui.tooltip_text(label);
     }
     clicked
@@ -125,8 +216,87 @@ fn draw_toolbar_glyph(
             .build();
     };
     match icon {
-        ToolbarIcon::Messages => draw_symbol(draw, 0, center, color, 11.0 * scale),
-        ToolbarIcon::FlightPlan => draw_symbol(draw, 1, center, color, 10.0 * scale),
+        ToolbarIcon::Messages => {
+            draw.add_rect(point(-9.0, -9.0), point(9.0, 5.0), color)
+                .rounding(4.0 * scale)
+                .thickness(1.6 * scale)
+                .build();
+            line([-5.0, 5.0], [-7.0, 10.0]);
+            line([-7.0, 10.0], [1.0, 5.0]);
+            line([-5.0, -4.0], [5.0, -4.0]);
+            line([-5.0, 0.0], [2.0, 0.0]);
+        }
+        ToolbarIcon::FlightPlan => {
+            draw.add_rect(point(-7.0, -10.0), point(7.0, 10.0), color)
+                .rounding(2.0 * scale)
+                .thickness(1.6 * scale)
+                .build();
+            for y in [-5.0, 0.0, 5.0] {
+                line([-3.0, y], [if y == 5.0 { 1.0 } else { 3.0 }, y]);
+            }
+        }
+        ToolbarIcon::Taxi => {
+            line([-7.0, 8.0], [-2.0, 8.0]);
+            line([-2.0, 8.0], [-2.0, -8.0]);
+            line([-2.0, -8.0], [7.0, -8.0]);
+            draw.add_circle(point(-8.0, 8.0), 3.0 * scale, color)
+                .thickness(1.6 * scale)
+                .build();
+            draw.add_circle(point(8.0, -8.0), 3.0 * scale, color)
+                .filled(true)
+                .build();
+        }
+        ToolbarIcon::Arrival => {
+            line([0.0, -11.0], [0.0, 10.0]);
+            line([-10.0, 2.0], [0.0, -4.0]);
+            line([0.0, -4.0], [10.0, 2.0]);
+            line([-5.0, 9.0], [0.0, 6.0]);
+            line([0.0, 6.0], [5.0, 9.0]);
+        }
+        ToolbarIcon::Airports => {
+            draw.add_rect(point(-8.0, -8.0), point(8.0, -2.0), color)
+                .rounding(scale)
+                .thickness(1.6 * scale)
+                .build();
+            line([0.0, -11.0], [0.0, -8.0]);
+            line([-4.0, -2.0], [-4.0, 10.0]);
+            line([4.0, -2.0], [4.0, 10.0]);
+            line([-8.0, 10.0], [8.0, 10.0]);
+        }
+        ToolbarIcon::Settings => {
+            for (x, y) in [(-4.0, -8.0), (4.0, 0.0), (-4.0, 8.0)] {
+                line([-10.0, y], [10.0, y]);
+                draw.add_circle(point(x, y), 3.0 * scale, color)
+                    .filled(true)
+                    .build();
+            }
+        }
+        ToolbarIcon::Traffic => {
+            draw.add_circle(center, 10.0 * scale, color)
+                .thickness(1.6 * scale)
+                .build();
+            line([0.0, 0.0], [7.0, -7.0]);
+            draw.add_circle(point(-4.0, -5.0), 1.8 * scale, color)
+                .filled(true)
+                .build();
+            draw.add_circle(point(5.0, 4.0), 1.8 * scale, color)
+                .filled(true)
+                .build();
+        }
+        ToolbarIcon::Missions => {
+            line([-7.0, 11.0], [-7.0, -10.0]);
+            for (a, b) in [
+                ([-7.0, -9.0], [1.0, -9.0]),
+                ([1.0, -9.0], [1.0, -6.0]),
+                ([1.0, -6.0], [9.0, -6.0]),
+                ([9.0, -6.0], [9.0, 3.0]),
+                ([9.0, 3.0], [1.0, 3.0]),
+                ([1.0, 3.0], [1.0, 0.0]),
+                ([1.0, 0.0], [-7.0, 0.0]),
+            ] {
+                line(a, b);
+            }
+        }
         ToolbarIcon::FastForward => {
             for x in [-9.0, 1.0] {
                 draw.add_triangle(point(x, -8.0), point(x + 9.0, 0.0), point(x, 8.0), color)
@@ -149,16 +319,31 @@ fn draw_toolbar_glyph(
                 line(a, b);
             }
         }
+        ToolbarIcon::Map => {
+            for (a, b) in [
+                ([-11., -7.], [-4., -10.]),
+                ([-4., -10.], [4., -6.]),
+                ([4., -6.], [11., -9.]),
+                ([11., -9.], [11., 7.]),
+                ([11., 7.], [4., 10.]),
+                ([4., 10.], [-4., 6.]),
+                ([-4., 6.], [-11., 9.]),
+                ([-11., 9.], [-11., -7.]),
+                ([-4., -10.], [-4., 6.]),
+                ([4., -6.], [4., 10.]),
+            ] {
+                line(a, b);
+            }
+        }
         ToolbarIcon::Headset => {
-            draw.add_circle(point(0.0, -1.0), 8.0 * scale, color)
-                .thickness(1.6 * scale)
-                .build();
-            draw.add_rect(point(-10.0, -1.0), point(-6.0, 8.0), background)
-                .filled(true)
-                .build();
-            draw.add_rect(point(6.0, -1.0), point(10.0, 8.0), background)
-                .filled(true)
-                .build();
+            for i in 0..16 {
+                let angle = std::f32::consts::PI + i as f32 * std::f32::consts::PI / 16.0;
+                let next = angle + std::f32::consts::PI / 16.0;
+                line(
+                    [8.0 * angle.cos(), 8.0 * angle.sin() - 1.0],
+                    [8.0 * next.cos(), 8.0 * next.sin() - 1.0],
+                );
+            }
             draw.add_rect(point(-10.0, -1.0), point(-6.0, 8.0), color)
                 .thickness(1.6 * scale)
                 .rounding(scale)
@@ -169,11 +354,6 @@ fn draw_toolbar_glyph(
                 .build();
             line([8.0, 8.0], [8.0, 11.0]);
             line([8.0, 11.0], [2.0, 11.0]);
-        }
-        ToolbarIcon::Menu => {
-            for vertical in [-6.0, 0.0, 6.0] {
-                line([-8.0, vertical], [8.0, vertical]);
-            }
         }
         ToolbarIcon::Pin => {
             line([-5.0, -9.0], [5.0, -9.0]);
@@ -205,7 +385,7 @@ fn draw_toolbar_glyph(
                 .build();
         }
         ToolbarIcon::Close => {
-            draw.add_circle(center, 7.0 * scale, [1.0, 0.34, 0.32, 1.0])
+            draw.add_circle(center, 7.0 * scale, [1.0, 0.34, 0.32, color[3]])
                 .filled(true)
                 .build();
             if hovered {
@@ -247,9 +427,30 @@ pub fn edit_paragraph(
         .build()
 }
 
+/// Secondary text that stays inside the content area.
+pub fn muted_wrapped(ui: &imgui::Ui, text: impl AsRef<str>) {
+    let _color = ui.push_style_color(imgui::StyleColor::Text, muted(ui));
+    ui.text_wrapped(text);
+}
+
+/// Keep related controls together when there is room for the next item.
+pub fn same_line_if_fits(ui: &imgui::Ui, width: f32) {
+    let right = ui.cursor_screen_pos()[0] + ui.content_region_avail()[0];
+    if ui.item_rect_max()[0] + ui.clone_style().item_spacing[0] + width <= right {
+        ui.same_line();
+    }
+}
+
+/// Number of readable columns for dispatch fields at the current font size.
+pub fn form_columns(ui: &imgui::Ui) -> usize {
+    (ui.content_region_avail()[0] / (250.0 * ui.current_font_size() / 18.0))
+        .floor()
+        .clamp(1.0, 3.0) as usize
+}
+
 /// Consistent page title and short purpose line.
 pub fn page_heading(ui: &imgui::Ui, title: &str, description: &str) {
-    ui.text_colored(ACCENT, title.to_uppercase());
+    ui.text_colored(accent(ui), title.to_uppercase());
     ui.text_wrapped(description);
     ui.spacing();
     ui.separator();
@@ -259,7 +460,7 @@ pub fn page_heading(ui: &imgui::Ui, title: &str, description: &str) {
 /// Section heading with rules above and below.
 pub fn section_title(ui: &imgui::Ui, title: &str) {
     ui.spacing();
-    ui.text_colored(ACCENT, title);
+    ui.text_colored(accent(ui), title);
     ui.separator();
     ui.spacing();
 }
@@ -279,87 +480,12 @@ pub fn metric(ui: &imgui::Ui, title: &str, value: &str, width: f32, ui_scale: f3
         .border(true)
         .scroll_bar(false)
         .build(|| {
-            let color = ui.push_style_color(imgui::StyleColor::Text, MUTED);
+            let color = ui.push_style_color(imgui::StyleColor::Text, muted(ui));
             ui.text_wrapped(title);
             color.pop();
             ui.text(value);
         });
     token.pop();
-}
-
-/// Vector glyphs for map legends (0..=5), drawn in immediate mode.
-pub fn draw_symbol(
-    draw: &imgui::DrawListMut<'_>,
-    symbol: i32,
-    center: [f32; 2],
-    color: [f32; 4],
-    radius: f32,
-) {
-    let point = |x: f32, y: f32| [center[0] + x * radius, center[1] + y * radius];
-    let line = |draw: &imgui::DrawListMut<'_>, x1: f32, y1: f32, x2: f32, y2: f32| {
-        draw.add_line(point(x1, y1), point(x2, y2), color)
-            .thickness(1.7)
-            .build();
-    };
-    match symbol {
-        0 => {
-            draw.add_rect(point(-0.7, -0.65), point(0.7, 0.5), color)
-                .rounding(3.0)
-                .thickness(1.7)
-                .build();
-            line(draw, -0.4, 0.5, -0.65, 0.85);
-            line(draw, -0.65, 0.85, 0.05, 0.5);
-            line(draw, -0.4, -0.2, 0.4, -0.2);
-            line(draw, -0.4, 0.1, 0.1, 0.1);
-        }
-        1 => {
-            draw.add_rect(point(-0.65, -0.85), point(0.65, 0.85), color)
-                .rounding(2.0)
-                .thickness(1.7)
-                .build();
-            line(draw, -0.3, -0.4, 0.3, -0.4);
-            line(draw, -0.3, 0.0, 0.3, 0.0);
-            line(draw, -0.3, 0.4, 0.1, 0.4);
-        }
-        2 => {
-            line(draw, -0.8, 0.65, -0.2, 0.65);
-            line(draw, -0.2, 0.65, -0.2, -0.6);
-            line(draw, -0.2, -0.6, 0.7, -0.6);
-            draw.add_circle(point(-0.8, 0.65), 3.0, color)
-                .thickness(1.5)
-                .build();
-            draw.add_circle(point(0.7, -0.6), 3.0, color)
-                .filled(true)
-                .build();
-        }
-        3 => {
-            line(draw, 0.0, -0.9, 0.0, 0.85);
-            line(draw, -0.85, 0.2, 0.0, -0.3);
-            line(draw, 0.0, -0.3, 0.85, 0.2);
-            line(draw, -0.4, 0.8, 0.0, 0.5);
-            line(draw, 0.0, 0.5, 0.4, 0.8);
-        }
-        4 => {
-            line(draw, -0.7, 0.8, 0.7, 0.8);
-            line(draw, -0.35, 0.8, -0.35, -0.2);
-            line(draw, 0.35, 0.8, 0.35, -0.2);
-            draw.add_rect(point(-0.65, -0.7), point(0.65, -0.15), color)
-                .rounding(1.0)
-                .thickness(1.7)
-                .build();
-            line(draw, 0.0, -0.7, 0.0, -1.0);
-        }
-        _ => {
-            for (index, vertical) in [-0.65, 0.0, 0.65].iter().enumerate() {
-                let vertical = *vertical;
-                line(draw, -0.85, vertical, 0.85, vertical);
-                let dot = if index == 1 { 0.35 } else { -0.25 };
-                draw.add_circle(point(dot, vertical), 3.5, color)
-                    .filled(true)
-                    .build();
-            }
-        }
-    }
 }
 
 /// Apply the dark `OpenATC` style: spacing, rounding and the color table.

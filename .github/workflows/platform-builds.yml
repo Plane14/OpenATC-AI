@@ -92,6 +92,41 @@ jobs:
           $linker = (Get-Command link.exe -ErrorAction Stop).Source
           if ($linker -notmatch 'Microsoft Visual Studio') { throw "Expected the MSVC linker, found $linker" }
           "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" >> $env:GITHUB_ENV
+      - uses: actions/cache@v4
+        if: runner.os != 'macOS' && matrix.product == 'ai-server'
+        id: vulkan-cache
+        with:
+          path: ${{ runner.temp }}/openatc-vulkan
+          key: vulkan-1.4.341.1-${{ runner.os }}
+      - name: Install Linux Vulkan SDK
+        if: runner.os == 'Linux' && matrix.product == 'ai-server'
+        run: |
+          set -euo pipefail
+          sdk="$RUNNER_TEMP/openatc-vulkan"
+          if [ ! -x "$sdk/1.4.341.1/x86_64/bin/glslc" ]; then
+            curl --fail --location --retry 3 https://sdk.lunarg.com/sdk/download/1.4.341.1/linux/vulkansdk-linux-x86_64-1.4.341.1.tar.xz -o "$RUNNER_TEMP/vulkan.tar.xz"
+            mkdir -p "$sdk"
+            tar -xf "$RUNNER_TEMP/vulkan.tar.xz" -C "$sdk"
+          fi
+          sdk="$sdk/1.4.341.1/x86_64"
+          test -x "$sdk/bin/glslc"
+          echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+          echo "$sdk/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$sdk/lib" >> "$GITHUB_ENV"
+      - name: Install Windows Vulkan SDK
+        if: runner.os == 'Windows' && matrix.product == 'ai-server'
+        shell: pwsh
+        run: |
+          $sdk = "$env:RUNNER_TEMP\openatc-vulkan"
+          if (!(Test-Path "$sdk\Bin\glslc.exe")) {
+            $installer = "$env:RUNNER_TEMP\vulkan.exe"
+            Invoke-WebRequest https://sdk.lunarg.com/sdk/download/1.4.341.1/windows/vulkansdk-windows-X64-1.4.341.1.exe -OutFile $installer
+            $process = Start-Process $installer -ArgumentList @('--root', $sdk, '--accept-licenses', '--default-answer', '--confirm-command', 'install') -Wait -PassThru
+            if ($process.ExitCode -ne 0) { throw "Vulkan SDK install failed: $($process.ExitCode)" }
+          }
+          if (!(Test-Path "$sdk\Bin\glslc.exe")) { throw 'Vulkan shader compiler is missing' }
+          "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
+          "$sdk\Bin" >> $env:GITHUB_PATH
       - name: Find Apple SDK and libclang
         if: runner.os == 'macOS'
         run: |
@@ -102,7 +137,7 @@ jobs:
         id: onnx-cache
         with:
           path: ${{ runner.temp }}/openatc-onnx
-          key: onnxruntime-1.28.0-macos15-intel-no-tests-v1
+          key: onnxruntime-1.28.0-macos15-intel-coreml-no-tests-v2
       - uses: actions/checkout@v4
         if: matrix.platform == 'macos-intel' && matrix.product == 'ai-server' && steps.onnx-cache.outputs.cache-hit != 'true' 
         with:
@@ -114,7 +149,7 @@ jobs:
         if: matrix.platform == 'macos-intel' && matrix.product == 'ai-server' && steps.onnx-cache.outputs.cache-hit != 'true'
         run: |
           cd build-deps/onnxruntime
-          ./build.sh --config Release --build_shared_lib --parallel 3 --skip_tests --compile_no_warning_as_error --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF CMAKE_OSX_ARCHITECTURES=x86_64 CMAKE_INSTALL_RPATH=@loader_path
+          ./build.sh --config Release --build_shared_lib --use_coreml --parallel 3 --skip_tests --compile_no_warning_as_error --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF CMAKE_OSX_ARCHITECTURES=x86_64 CMAKE_INSTALL_RPATH=@loader_path
           runtime="$PWD/build/MacOS/Release"
           test -f "$runtime/libonnxruntime.dylib"
           mkdir -p "$RUNNER_TEMP/openatc-onnx"
@@ -143,10 +178,18 @@ jobs:
       - name: Build Windows AI server and speech sidecar
         if: runner.os == 'Windows' && matrix.product == 'ai-server'
         shell: pwsh
-        run: cargo build --locked --release -p openatc-ai -p openatc-stt
-      - name: Build Linux and macOS AI server and speech sidecar
-        if: runner.os != 'Windows' && matrix.product == 'ai-server'
-        run: cargo build --locked --release -p openatc-ai -p openatc-stt
+        run: |
+          cargo build --locked --release -p openatc-ai -p openatc-stt --features openatc-ai/vulkan,openatc-stt/vulkan,openatc-ai/tts-cuda
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $loader = @("$env:VULKAN_SDK\Bin\vulkan-1.dll", "$env:WINDIR\System32\vulkan-1.dll") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (!$loader) { throw 'Vulkan loader is missing from the SDK/runtime installation' }
+          Copy-Item $loader target/release/vulkan-1.dll
+      - name: Build Linux AI server and speech sidecar
+        if: runner.os == 'Linux' && matrix.product == 'ai-server'
+        run: cargo build --locked --release -p openatc-ai -p openatc-stt --features openatc-ai/vulkan,openatc-stt/vulkan,openatc-ai/tts-cuda
+      - name: Build macOS AI server and speech sidecar
+        if: runner.os == 'macOS' && matrix.product == 'ai-server'
+        run: cargo build --locked --release -p openatc-ai -p openatc-stt --features openatc-ai/tts-coreml,openatc-stt/metal
       - name: Exercise Windows companion engine
         if: runner.os == 'Windows' && matrix.product == 'plugin'
         shell: pwsh
@@ -157,12 +200,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo xtask test-speech target/release/open-atc-engine.exe speech
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo xtask test-flight target/release/open-atc-engine.exe speech
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Exercise Linux and macOS companion engine
         if: runner.os != 'Windows' && matrix.product == 'plugin'
         run: |
           cargo xtask test-radio target/release/open-atc-engine speech
           cargo xtask test-crew target/release/open-atc-engine speech
           cargo xtask test-speech target/release/open-atc-engine speech
+          cargo xtask test-flight target/release/open-atc-engine speech
       - name: Build packaging tools
         run: cargo build --locked --release -p xtask
       - name: Install Windows installer compiler

@@ -1,9 +1,17 @@
-Classify the pilot message. Return only JSON with intent (radio_check,repeat,standby,unable,clearance,taxi,start,pushback,start_pushback,ready,go_around,cancel_ifr,altitude,descent,direct,approach,gate,frequency,emergency,conversation), altitudeFeet integer and waypoint string. Never issue clearances. Use conversation if uncertain.
+Classify the pilot message. Return only JSON with intent (radio_check,repeat,standby,unable,clearance,taxi,progressive,start,pushback,start_pushback,ready,go_around,cancel_ifr,altitude,descent,direct,approach,departure_runway,arrival_runway,change_approach,speed,deviation,resume_course,gate,frequency,emergency,checkin,cross_runway,vacated,readback,landing,position,traffic_sighted,traffic_not_sighted,conversation), altitudeFeet integer and waypoint string. Never issue clearances or return crew actions. Use conversation if uncertain.
 Disambiguation: MAYDAY or PAN-PAN anywhere means emergency, even buried in a longer message. Numbers with FL mean flight levels times 100. Direct plus a fix name means direct with that waypoint uppercased. Anything without a request that merely chats, thanks or comments on the frequency is conversation.
 Examples. Pilot: mayday mayday engine failure. Answer: {"intent":"emergency","altitudeFeet":0,"waypoint":""}.
 Pilot: request altitude FL320. Answer: {"intent":"altitude","altitudeFeet":32000,"waypoint":""}.
 Pilot: thanks for the smooth flight. Answer: {"intent":"conversation","altitudeFeet":0,"waypoint":""}.
+Pilot: Approach, Charlie Golf Tango Lima Tango, checking in, with you. Answer: {"intent":"checkin","altitudeFeet":0,"waypoint":""}.
+Pilot: chek in with you. Answer: {"intent":"checkin","altitudeFeet":0,"waypoint":""}.
+Pilot: runway vacted. Answer: {"intent":"vacated","altitudeFeet":0,"waypoint":""}.
+Pilot: request crossing runway two five right. Answer: {"intent":"cross_runway","altitudeFeet":0,"waypoint":"25R"}.
+Pilot: ready to taxi. Answer: {"intent":"taxi","altitudeFeet":0,"waypoint":""}.
+Pilot: ready for departure. Answer: {"intent":"ready","altitudeFeet":0,"waypoint":""}.
 
 Start-up alone is start. Pushback alone is pushback. Start-up and pushback, push and start, or both is start_pushback. These are distinct permissions, not completed aircraft actions.
 
 Recover obvious typos, missing words, homophones and speech-recognition errors when the intended request is clear. Examples: reqest clernce -> clearance; requst taxy -> taxi; vacted -> runway vacated; chek in -> checkin. Recognize checkin, cross_runway, vacated, readback and landing as well. Do not change callsigns, airport IDs, fix names, runway numbers, altitudes, headings or squawk values. Do not invent missing clearance readback values. Return conversation if operational values or the intended action remain ambiguous. Ignore an addressing prefix containing the controller name and pilot callsign when identifying the request.
+
+For departure_runway or arrival_runway, waypoint contains the requested runway. For change_approach it contains the published procedure ID. For speed it contains indicated airspeed in knots as a numeric string. For deviation it contains direction and the explicit number of degrees, e.g. "left 20". If distance is requested instead of degrees, do not convert it. Resume_course means the pilot reports clear of the conditions and requests return to the cleared route. A requested step climb uses altitude with the requested flight level converted to feet. Operational values must come from the current request, never from examples or simulator context.

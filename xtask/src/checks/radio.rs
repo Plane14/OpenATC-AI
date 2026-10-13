@@ -27,14 +27,26 @@ pub(super) fn radio(e: &mut Engine, m: &Model) -> Result {
     e.post("plan", plan())?;
     let v = e.req("clearance")?;
     accepted(&v);
-    for item in ["VH-BIL", "DEST", "5000", "2105", "09", "DCT DEST"] {
+    let squawk = v["state"]["clearance"]["squawk"].as_str().unwrap();
+    assert_eq!(squawk.len(), 4);
+    assert!(squawk.bytes().all(|digit| (b'0'..=b'7').contains(&digit)));
+    for item in ["VH-BIL", "DEST", "5000", squawk, "09", "DCT DEST"] {
         contains(&v, item);
     }
+    let destination_name = stations.iter().find(|s| s["airport"] == "DEST").unwrap()["airportName"]
+        .as_str()
+        .unwrap();
+    assert!(
+        v["result"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(destination_name)
+    );
     assert_eq!(v["state"]["clearance"]["acknowledged"], false);
     e.tune(121900, json!({}))?;
     rejected(&e.req("start")?);
     e.tune(121800, json!({}))?;
-    let bad=e.post("request",json!({"intent":"conversation","role":"atc","text":"Victor Hotel Bravo India Lima cleared DEST five hundred feet squawk two one zero five runway zero nine"}))?;
+    let bad=e.post("request",json!({"intent":"conversation","role":"atc","text":format!("Victor Hotel Bravo India Lima cleared DEST five hundred feet squawk {squawk} runway zero nine")}))?;
     rejected(&bad);
     assert!(
         bad["result"]["message"]
@@ -43,7 +55,7 @@ pub(super) fn radio(e: &mut Engine, m: &Model) -> Result {
             .to_lowercase()
             .contains("say again")
     );
-    let good=e.post("request",json!({"intent":"conversation","role":"atc","text":"Cleared to DEST, route DCT DEST, initial altitude 5000 feet, squawk 2105, runway 09, VH-BIL"}))?;
+    let good=e.post("request",json!({"intent":"conversation","role":"atc","text":format!("Cleared to {destination_name}, route DCT DEST, initial altitude 5000 feet, squawk {squawk}, runway 09, VH-BIL")}))?;
     accepted(&good);
     contains(&good, "Custom TOML");
     assert_eq!(good["state"]["clearance"]["acknowledged"], true);
@@ -56,12 +68,13 @@ pub(super) fn radio(e: &mut Engine, m: &Model) -> Result {
         accepted(&v);
         assert_eq!(v["state"][field], true);
     }
-    accepted(&e.req("start")?);
+    rejected(&e.req("start")?);
     let taxi = e.post(
         "request",
         json!({"intent":"conversation","role":"atc","text":"Test Ground, VH-BIL, reqest taxy"}),
     )?;
     accepted(&taxi);
+    assert_eq!(taxi["state"]["clearance"]["squawk"], squawk);
     let path = taxi["state"]["taxiClearance"].clone();
     assert!(path["points"].as_array().unwrap().len() > 1);
     assert_eq!(path["pendingReadback"], true);
@@ -174,6 +187,7 @@ pub(super) fn radio(e: &mut Engine, m: &Model) -> Result {
     );
     assert_eq!(m.count(), before);
     let mut wordings = std::collections::HashSet::new();
+    let mut squawks = std::collections::HashSet::new();
     let mut last = String::new();
     for _ in 0..10 {
         e.reset()?;
@@ -182,7 +196,12 @@ pub(super) fn radio(e: &mut Engine, m: &Model) -> Result {
         let v = e.req("clearance")?;
         accepted(&v);
         last = v["result"]["message"].as_str().unwrap().into();
-        wordings.insert(last.clone());
+        let code = v["state"]["clearance"]["squawk"].as_str().unwrap();
+        assert!(
+            squawks.insert(code.to_owned()),
+            "New flight reused a recent squawk"
+        );
+        wordings.insert(last.replace(code, "{squawk}"));
     }
     assert_eq!(wordings.len(), 10);
     assert_eq!(m.count(), before);
@@ -213,6 +232,41 @@ pub(super) fn radio(e: &mut Engine, m: &Model) -> Result {
         assert!(prompt.contains(expected), "{prompt}");
     }
     e.settings(json!({"ttsUrl":m.url()}))?;
+    let voices = e.post("speech/voices", json!({}))?;
+    assert_eq!(voices["voices"].as_array().unwrap().len(), 3);
+    e.settings(json!({"englishVoicesOnly":false}))?;
+    let _ = e.call(
+        "speech/speak",
+        Some(
+            json!({"text":"Test GND, VH-BIL, cleared to DEST.","speaker":"atc","voice":"ff_siwis"}),
+        ),
+    )?;
+    let spoken = m.requests.lock().unwrap().last().unwrap().clone();
+    assert_eq!(spoken["voice"], "ff_siwis");
+    let input = spoken["input"].as_str().unwrap();
+    assert!(input.contains("Ground"));
+    assert!(input.contains("Victor Hotel Bravo India Lima"));
+    assert!(!input.contains("cleared to DEST"));
+    e.settings(json!({"englishVoicesOnly":true}))?;
+    let _ = e.call(
+        "speech/speak",
+        Some(json!({"text":"Radio check.","speaker":"atc","voice":"ff_siwis"})),
+    )?;
+    assert!(
+        ["af_bella", "custom_en"].contains(
+            &m.requests.lock().unwrap().last().unwrap()["voice"]
+                .as_str()
+                .unwrap()
+        )
+    );
+    let _ = e.call(
+        "speech/speak",
+        Some(json!({"text":"Radio check.","speaker":"atc","voice":"custom_en"})),
+    )?;
+    assert_eq!(
+        m.requests.lock().unwrap().last().unwrap()["voice"],
+        "custom_en"
+    );
     let phrase = "Position approximately three miles northwest of Vientiane.";
     assert_eq!(
         e.call("speech/speak", Some(json!({"text":phrase,"speaker":"atc"})))?
@@ -331,12 +385,32 @@ pub(super) fn radio(e: &mut Engine, m: &Model) -> Result {
     accepted(&checkin);
     contains(&checkin, "VH-BIL");
     assert!(
+        checkin["result"]["message"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("climb")
+    );
+    assert!(
         !checkin["result"]["message"]
             .as_str()
             .unwrap()
             .contains("reported altitude")
     );
     e.settings(json!({"copilotReplies":true}))?;
+    e.post("request/copilot-prepare", json!({}))?;
+    let climb_reply = e.state()?;
+    assert!(
+        climb_reply["transcript"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("5000")
+    );
+    accepted(&e.post("request/copilot-reply", json!({}))?);
     e.post("request/copilot-checkin", json!({}))?;
     let prepared = e.state()?;
     assert_eq!(
@@ -349,11 +423,38 @@ pub(super) fn radio(e: &mut Engine, m: &Model) -> Result {
             .unwrap()
             .contains("1500")
     );
+    let before_reply = prepared["transcript"].as_array().unwrap().len();
     e.post("request/copilot-reply", json!({}))?;
+    assert_eq!(
+        e.state()?["transcript"].as_array().unwrap().len(),
+        before_reply + 1,
+        "copilot check-in must not be recorded again as a pilot transmission"
+    );
     assert_eq!(
         e.state()?["transcript"].as_array().unwrap().last().unwrap()["speaker"],
         "ATC"
     );
+    let saved_answer = m.answer.lock().unwrap().clone();
+    e.settings(json!({"aiEnabled":true,"llmPhraseVariety":false}))?;
+    m.set(json!({"actions":[{"target":"altitude","value":12000}]}));
+    let before_invalid = e.state()?;
+    let clarified = e.post("request", json!({"role":"atc","text":"VH-BIL, yes"}))?;
+    rejected(&clarified);
+    assert_eq!(clarified["state"]["clearance"], before_invalid["clearance"]);
+    assert_eq!(
+        clarified["state"]["taxiClearance"],
+        before_invalid["taxiClearance"]
+    );
+    assert!(
+        clarified["result"]["message"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("say again")
+    );
+    assert!(!m.prompt().contains("Use supported control actions"));
+    *m.answer.lock().unwrap() = saved_answer;
+    e.settings(json!({"aiEnabled":false,"llmPhraseVariety":true}))?;
     e.tune(123450, json!({}))?;
     let before = m.count();
     assert_eq!(e.req("conversation")?["result"]["silent"], true);
@@ -536,7 +637,20 @@ fn crossing(e: &mut Engine) -> Result {
     );
     e.tune(124500, json!({"latitude":0}))?;
     assert_eq!(e.state()?["taxiClearance"]["crossingRunway"], "25R");
+    e.settings(json!({"copilotReplies":true}))?;
     e.tune(124500, json!({"latitude":-0.0012,"groundSpeedKnots":8}))?;
+    assert_eq!(e.state()?["taxiClearance"]["crossingRunway"], "25R");
+    e.post("request/copilot-prepare", json!({}))?;
+    let reported = e.state()?;
+    let report = reported["transcript"].as_array().unwrap().last().unwrap();
+    assert_eq!(report["speaker"], "COPILOT");
+    assert!(report["text"].as_str().unwrap().contains("25R"));
+    assert_eq!(reported["taxiClearance"]["crossingRunway"], "25R");
+    e.tune(124500, json!({"radioBusy":true}))?;
+    assert_eq!(e.state()?["taxiClearance"]["crossingRunway"], "25R");
+    accepted(&e.post("request/copilot-reply", json!({}))?);
+    e.settings(json!({"copilotReplies":false}))?;
+    e.tune(124500, json!({"radioBusy":false}))?;
     let onward = e.state()?["taxiClearance"].clone();
     assert_eq!(onward["crossingRunway"], "");
     assert_eq!(onward["holdShortRunway"], "25L");
@@ -570,10 +684,7 @@ fn crossing(e: &mut Engine) -> Result {
         .iter()
         .filter(|t| t["speaker"] == "ATC")
     {
-        assert!(
-            ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
-                .contains(&t["voice"].as_str().unwrap())
-        );
+        assert!(["af_bella", "custom_en"].contains(&t["voice"].as_str().unwrap()));
     }
     Ok(())
 }

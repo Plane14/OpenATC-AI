@@ -9,7 +9,9 @@
 //! (54 voices, `[510, 1, 256]` float32 each). The engine owns the session on
 //! a single worker thread.
 
+mod device;
 pub mod fx;
+pub mod kitten;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -55,6 +57,8 @@ pub struct TtsEngine {
     speed_is_float: bool,
     voices: BTreeMap<String, Vec<f32>>,
     vocab: BTreeMap<String, i64>,
+    device: String,
+    device_reason: String,
     g2p: misaki_rs::G2P,
 }
 
@@ -65,10 +69,16 @@ impl TtsEngine {
     ///
     /// Missing files, unreadable voices, or a session that cannot start.
     pub fn load(model_path: &Path, voices_path: &Path) -> Result<Self, String> {
-        let session = ort::session::Session::builder()
-            .map_err(|error| format!("cannot build session: {error}"))?
-            .commit_from_file(model_path)
-            .map_err(|error| format!("cannot load {}: {error}", model_path.display()))?;
+        Self::load_with_device(model_path, voices_path, false)
+    }
+
+    /// Prefer an accelerator unless CPU was explicitly selected.
+    pub fn load_with_device(
+        model_path: &Path,
+        voices_path: &Path,
+        force_cpu: bool,
+    ) -> Result<Self, String> {
+        let (session, device, device_reason) = device::load(model_path, force_cpu)?;
         let names: Vec<String> = session
             .inputs()
             .iter()
@@ -114,14 +124,37 @@ impl TtsEngine {
         }
         let vocab: BTreeMap<String, i64> = serde_json::from_str(include_str!("vocab.json"))
             .map_err(|error| format!("bad embedded vocab: {error}"))?;
-        Ok(Self {
+        let mut engine = Self {
             session,
+            device,
+            device_reason,
             use_input_ids,
             speed_is_float,
             voices,
             vocab,
             g2p: misaki_rs::G2P::new(misaki_rs::Language::EnglishUS),
-        })
+        };
+        // CUDA loads some libraries on the first inference, after session creation.
+        if engine.device != "cpu"
+            && let Err(error) = engine.synthesize("Radio check.", "", 1.0, 0.0, 0.0)
+        {
+            eprintln!("Kokoro GPU warm-up failed: {error}; using CPU");
+            engine.session = device::cpu(model_path)?;
+            engine.device = "cpu".into();
+            engine.device_reason = error;
+        }
+        Ok(engine)
+    }
+
+    /// Selected execution provider.
+    #[must_use]
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+    /// Why this provider was selected.
+    #[must_use]
+    pub fn device_reason(&self) -> &str {
+        &self.device_reason
     }
 
     /// Voice ids available in the loaded table.

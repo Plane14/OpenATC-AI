@@ -90,7 +90,18 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
                 .len(),
             1 - i
         );
+        if i == 0 {
+            assert_eq!(
+                count(&c.engine.state()?),
+                count(&v["state"]),
+                "Ground spoke before the whole request completed"
+            );
+        }
     }
+    let done = c.engine.state()?;
+    assert_eq!(count(&done), count(&v["state"]) + 1);
+    let text = latest(&done).to_lowercase();
+    assert!(text.contains("chocks") && text.contains("power") && text.contains(" and "));
     c.denied("ground", "remove chocks and connect imaginary thing")?;
     c.action(
         "cabin",
@@ -107,6 +118,19 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     let query = c.request("cabin", "crosscheck")?;
     accepted(&query);
     assert!(query["state"]["crewActions"].as_array().unwrap().is_empty());
+    for text in [
+        "can i please have a coffe and can you cross check and arm doors",
+        "arm and cross check, can you bring me a quick coffee before we push back?",
+    ] {
+        let request = c.request("cabin", text)?;
+        let tasks = request["state"]["crewActions"].as_array().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["control"], "slides");
+        let done = c.ack(&tasks[0], true)?;
+        assert_eq!(count(&done["state"]), count(&request["state"]) + 1);
+        let text = latest(&done["state"]).to_lowercase();
+        assert!(text.contains("armed") && text.contains("cross-check") && text.contains("coffee"));
+    }
     c.action("cabin", "doors to manual", "slides", 0.)?;
     for text in ["is beacon on?", "don't turn beacon on"] {
         assert!(
@@ -192,7 +216,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         1.,
     )?;
     c.denied("ground", "connect high pressure air")?;
-    m.set(json!({"control":"heading","value":275}));
+    m.set(json!({"actions":[{"control":"heading","value":275}]}));
     e.settings(json!({"aiEnabled":true,"aiModel":"test","aiUrl":m.url()}))?;
     c.action(
         "copilot",
@@ -207,16 +231,22 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     let typo = c.request("ground", "remuve choks and exernal pwer")?;
     assert_eq!(typo["state"]["crewActions"].as_array().unwrap().len(), 2);
     let failed = c.ack(&typo["state"]["crewActions"][0], false)?;
+    assert_eq!(count(&failed["state"]), count(&typo["state"]));
+    assert_eq!(failed["state"]["crewActions"].as_array().unwrap().len(), 1);
+    let done = c.ack(&failed["state"]["crewActions"][0], true)?;
+    assert_eq!(count(&done["state"]), count(&typo["state"]) + 1);
+    let summary = latest(&done["state"]).to_lowercase();
     assert!(
-        failed["state"]["crewActions"]
-            .as_array()
-            .unwrap()
-            .is_empty()
+        summary.contains("chocks")
+            && summary.contains("confirm")
+            && summary.contains("power disconnected")
     );
     for proposal in [
-        json!({"control":"heading","value":999}),
-        json!({"control":"slides","value":1}),
-        json!({"control":"sim/custom/anything","value":1}),
+        json!({"actions":[{"control":"heading","value":999}]}),
+        json!({"actions":[{"control":"slides","value":1}]}),
+        json!({"actions":[{"control":"sim/custom/anything","value":1}]}),
+        json!({"actions":[{"control":"heading","value":275}],"services":["coffee"]}),
+        json!({"actions":[{"control":"heading","value":275}],"extra_command":"start_engine"}),
     ] {
         m.set(proposal);
         c.denied("copilot", "please choose heading two seven five")?;
@@ -230,5 +260,32 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     assert_eq!(c.ack(task, true)?["accepted"], false);
     c.observe("different aircraft")?;
     assert!(e.state()?["crewActions"].as_array().unwrap().is_empty());
+    e.post("plan", plan())?;
+    e.post("telemetry", json!({"latitude":0.003,"longitude":-0.003,"altitudeFeet":0,"onGround":true,"positionValid":true,"radioPower":true,"com1Khz":121800,"groundSpeedKnots":0,"traffic":[]}))?;
+    clearance(e)?;
+    e.post("telemetry", json!({"latitude":0.003,"longitude":-0.003,"altitudeFeet":0,"onGround":true,"positionValid":true,"radioPower":true,"com1Khz":121900,"groundSpeedKnots":0,"traffic":[]}))?;
+    accepted(&e.req("start_pushback")?);
+    assert_eq!(e.state()?["phase"], 8);
+    c.values["chocks"] = json!(1);
+    c.values["external_power"] = json!(1);
+    let services = c.request("ground", "disconnect external power and chocks please")?;
+    let tasks = services["state"]["crewActions"].as_array().unwrap();
+    assert_eq!(tasks.len(), 2, "{services}");
+    assert!(
+        tasks
+            .iter()
+            .all(|task| task["role"] == "ground" && task["value"].as_f64() == Some(0.0))
+    );
+    for task in tasks {
+        c.ack(task, true)?;
+    }
+    let done = e.state()?;
+    assert_eq!(done["phase"], 8);
+    assert_eq!(
+        done["transcript"].as_array().unwrap().last().unwrap()["speaker"],
+        "GROUND"
+    );
+    e.post("telemetry", json!({"latitude":0.003,"longitude":-0.003,"altitudeFeet":0,"onGround":true,"positionValid":true,"radioPower":true,"com1Khz":121900,"groundSpeedKnots":2,"traffic":[]}))?;
+    c.denied("ground", "disconnect external power and chocks please")?;
     Ok(())
 }

@@ -42,7 +42,7 @@ pub fn check_compliance(
     }
     if let Some(cleared) = expectation.altitude_feet
         && !telemetry.on_ground
-        && (telemetry.altitude_feet - f64::from(cleared)).abs() > ALTITUDE_TOLERANCE_FEET
+        && (telemetry.reported_altitude_feet() - f64::from(cleared)).abs() > ALTITUDE_TOLERANCE_FEET
     {
         return Some("complaint.altitude_bust");
     }
@@ -101,6 +101,24 @@ mod tests {
             Some("complaint.altitude_bust")
         );
         assert_eq!(check_compliance(&level(5100.0), "", &expectation), None);
+    }
+
+    #[test]
+    fn indicated_altitude_and_normal_variation_do_not_trigger_a_bust() {
+        let expectation = Expectation {
+            altitude_feet: Some(18000),
+            ticks_since_accept: 9,
+            ..Default::default()
+        };
+        let telemetry = Telemetry {
+            indicated_altitude_feet: Some(18020.0),
+            pressure_altitude_feet: Some(18000.0),
+            ..level(18311.7)
+        };
+        assert_eq!(check_compliance(&telemetry, "", &expectation), None);
+        assert_eq!(telemetry.clearance_altitude_feet(5000, 10000), 18020.0);
+        assert_eq!(telemetry.clearance_altitude_feet(18000, 10000), 18000.0);
+        assert_eq!(level(18010.0).reported_altitude_feet(), 18010.0);
     }
 
     #[test]
@@ -177,7 +195,7 @@ mod tests {
     }
 }
 
-/// Repeated deviations cancel only after three corrective calls.
+/// Count consecutive unresolved deviations before escalating the correction.
 #[derive(Clone, Debug, Default)]
 pub struct WarningCount {
     /// Number of corrective calls for the current unresolved deviation.
@@ -197,7 +215,7 @@ impl WarningCount {
 #[cfg(test)]
 mod warning_tests {
     #[test]
-    fn three_corrections_then_cancel_and_reset() {
+    fn three_corrections_then_escalate_and_reset() {
         let mut count = super::WarningCount::default();
         for _ in 0..3 {
             assert!(!count.continuing());

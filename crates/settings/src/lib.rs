@@ -79,7 +79,7 @@ pub struct Realism {
     #[serde(default = "yes")]
     /// Readbacks must match altitude, route and sequence exactly.
     pub strict_readbacks: bool,
-    /// Monitor accepted instructions; cancel permission after three unresolved corrections.
+    /// Monitor accepted instructions and issue corrections for unresolved deviations.
     #[serde(default)]
     pub enforce_clearance_constraints: bool,
     #[serde(default)]
@@ -123,6 +123,20 @@ impl Default for Realism {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
+    /// CPU worker limit for scenery and traffic jobs; zero chooses a conservative automatic limit.
+    pub cpu_workers: u8,
+    /// Offer optional en-route shortcuts; restriction checks still apply.
+    pub atc_shortcut_offers: bool,
+    /// Minimum quiet-flight interval between optional offers.
+    pub atc_offer_interval_minutes: u8,
+    /// Let OpenATC set the native simulator AI count; other providers keep ownership.
+    pub manage_native_traffic: bool,
+    /// Native AI aircraft excluding ownship, limited to nineteen SDK slots.
+    pub native_traffic_count: u8,
+    /// Speak simulated pilot reports based on observed local traffic movements.
+    pub hear_traffic_radio: bool,
+    /// Allow conversations with simulated pilots for identified traffic.
+    pub talk_to_traffic: bool,
     /// Numeric `SimBrief` pilot ID for OFP import.
     pub simbrief_id: String,
     /// X-Plane installation folder override; empty means auto-detect.
@@ -152,6 +166,8 @@ pub struct Settings {
     pub copilot_voice: String,
     /// Comma-separated controller voices; new airspaces draw from it.
     pub voice_pool: String,
+    /// Restrict voice selection and playback to English-language voices.
+    pub english_voices_only: bool,
     #[serde(default = "brisk")]
     /// Default delivery preset for assigned controllers.
     pub controller_delivery: Delivery,
@@ -184,7 +200,6 @@ pub struct Settings {
     #[serde(default = "yes")]
     /// Show the copilot talk button beside Transmit.
     pub copilot_button: bool,
-    #[serde(default = "yes")]
     /// Developer mode: verbose errors and error copying.
     pub dev_mode: bool,
     #[serde(default = "quiet")]
@@ -247,8 +262,17 @@ pub struct Settings {
     #[serde(default = "yes")]
     /// Readbacks must match altitude, route and sequence exactly.
     pub strict_readbacks: bool,
-    /// Warn about deviations and withdraw permission after three corrective calls.
+    /// Warn about deviations from accepted clearances and restrictions.
     pub enforce_clearance_constraints: bool,
+    /// Ask about inability or assistance after repeated corrections. The saved key is retained.
+    #[serde(default = "yes")]
+    pub terminate_after_warnings: bool,
+    /// Compare the observed transponder code and mode with the clearance.
+    pub monitor_transponder: bool,
+    /// Warn about runway entry, takeoff or landing without permission.
+    pub monitor_runway_permissions: bool,
+    /// Offer help after a sustained deviation from the approved taxi route.
+    pub monitor_taxi_route: bool,
     #[serde(default)]
     /// Answer service requests only on the assigned COM1 frequency.
     pub require_frequency: bool,
@@ -278,6 +302,8 @@ pub struct Settings {
     pub show_ground_taxi_arrows: bool,
     /// Highlight the authorised holding point on the map and simulator ground.
     pub show_holding_point: bool,
+    /// Display the simulator's follow-me vehicle on the approved taxi route.
+    pub show_follow_me: bool,
     /// ILS approach and glideslope volumes on the airport map.
     pub show_ils_beams: bool,
     /// Draw your aircraft on maps.
@@ -302,6 +328,10 @@ pub struct Settings {
     pub fade_delay: f32,
     /// Faded window background opacity.
     pub faded_opacity: f32,
+    /// Use dark text and light controls instead of the default dark palette.
+    pub light_theme: bool,
+    /// Expanded window background opacity. Text and controls remain opaque.
+    pub window_opacity: f32,
     /// Interface text and layout scale.
     pub ui_scale: f32,
 }
@@ -322,6 +352,13 @@ fn tts() -> String {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            cpu_workers: 0,
+            atc_shortcut_offers: false,
+            atc_offer_interval_minutes: 10,
+            manage_native_traffic: false,
+            native_traffic_count: 4,
+            hear_traffic_radio: false,
+            talk_to_traffic: false,
             // Services.
             simbrief_id: String::new(),
             simulator_root: String::new(),
@@ -335,6 +372,7 @@ impl Default for Settings {
             voice: alloy(),
             copilot_voice: am_echo(),
             voice_pool: String::new(),
+            english_voices_only: true,
             controller_delivery: Delivery::Brisk,
             copilot_delivery: Delivery::Brisk,
             pilot_voice: am_adam(),
@@ -348,7 +386,7 @@ impl Default for Settings {
             attendant_volume: 0.8,
             ground_volume: 0.8,
             copilot_button: true,
-            dev_mode: true,
+            dev_mode: false,
             // Speeds (multiplied by the master tts_speed, clamped 0.5..2).
             controller_speed_min: 0.9,
             controller_speed_max: 1.15,
@@ -380,6 +418,10 @@ impl Default for Settings {
             // Discipline (Standard preset).
             strict_readbacks: true,
             enforce_clearance_constraints: false,
+            terminate_after_warnings: true,
+            monitor_transponder: false,
+            monitor_runway_permissions: false,
+            monitor_taxi_route: false,
             require_frequency: false,
             require_callsign: false,
             strict_phraseology: true,
@@ -395,6 +437,7 @@ impl Default for Settings {
             show_taxi_arrows: true,
             show_ground_taxi_arrows: false,
             show_holding_point: false,
+            show_follow_me: false,
             show_ils_beams: false,
             show_ownship: true,
             show_labels: true,
@@ -409,6 +452,8 @@ impl Default for Settings {
             tts_speed: 1.0,
             fade_delay: 8.0,
             faded_opacity: 0.4,
+            light_theme: false,
+            window_opacity: 0.9,
             ui_scale: 1.0,
         }
     }
@@ -441,6 +486,24 @@ impl Settings {
 
     /// Validate settings before saving or applying them.
     pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.cpu_workers > 16 {
+            return Err(ValidationError::OutOfRange(
+                "CPU workers",
+                f32::from(self.cpu_workers),
+            ));
+        }
+        if self.native_traffic_count > 19 {
+            return Err(ValidationError::OutOfRange(
+                "native traffic count",
+                f32::from(self.native_traffic_count),
+            ));
+        }
+        if !(2..=60).contains(&self.atc_offer_interval_minutes) {
+            return Err(ValidationError::OutOfRange(
+                "ATC offer interval",
+                f32::from(self.atc_offer_interval_minutes),
+            ));
+        }
         for url in [&self.ai_url, &self.stt_url, &self.tts_url] {
             let rest = url
                 .strip_prefix("http://")
@@ -483,6 +546,12 @@ impl Settings {
             || !(0.85..=1.5).contains(&self.ui_scale)
         {
             return Err(ValidationError::OutOfRange("audio/UI scale", 0.0));
+        }
+        if !(0.2..=1.0).contains(&self.window_opacity) {
+            return Err(ValidationError::OutOfRange(
+                "window opacity",
+                self.window_opacity,
+            ));
         }
         for (name, value) in [
             ("hiss", self.radio_hiss),
@@ -553,6 +622,26 @@ mod tests {
     }
 
     #[test]
+    fn retired_appearance_keys_do_not_reset_service_or_voice_settings() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "frostedBackground": true, "glassBlur": 0.8, "glassFrost": 0.7,
+            "ttsUrl": "http://192.168.1.10:8099", "sttUrl": "http://192.168.1.10:8099",
+            "aiUrl": "http://192.168.1.10:11434", "pilotVoice": "am_adam",
+            "lightTheme": true, "windowOpacity": 0.65
+        }))
+        .unwrap();
+        settings.validate().unwrap();
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(settings.tts_url, "http://192.168.1.10:8099");
+        assert_eq!(settings.ai_url, "http://192.168.1.10:11434");
+        assert_eq!(settings.pilot_voice, "am_adam");
+        assert!(settings.light_theme);
+        for key in ["frostedBackground", "glassBlur", "glassFrost"] {
+            assert!(saved.get(key).is_none());
+        }
+    }
+
+    #[test]
     fn old_files_load_with_defaults() {
         let settings: Settings =
             serde_json::from_str(r#"{"voice":"alloy","ttsSpeed":1.0}"#).unwrap();
@@ -566,7 +655,24 @@ mod tests {
         assert!(settings.show_taxi_arrows);
         assert!(!settings.show_ground_taxi_arrows);
         assert!(!settings.show_holding_point);
-        assert!(settings.dev_mode);
+        assert!(!settings.dev_mode);
+        assert!(!settings.light_theme);
+        let edited: Settings =
+            serde_json::from_str(r#"{"devMode":true,"lightTheme":true,"windowOpacity":0.55}"#)
+                .unwrap();
+        assert!(edited.dev_mode && edited.light_theme);
+        assert_eq!(
+            serde_json::to_value(&edited).unwrap()["windowOpacity"],
+            serde_json::json!(0.55_f32)
+        );
+        assert!(
+            Settings {
+                window_opacity: f32::NAN,
+                ..Settings::default()
+            }
+            .validate()
+            .is_err()
+        );
         assert!(settings.realism().strict_readbacks);
         settings.validate().unwrap();
     }

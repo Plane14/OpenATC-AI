@@ -1,5 +1,17 @@
 # Third-party components
 
+## Local speech and model inference
+
+Kitten Mini 0.8 integration adapts the token vocabulary, voice styles and speed priors from [KittenML's KittenTTS implementation](https://github.com/KittenML/KittenTTS/tree/0.8.1). The original is Apache-2.0 licensed; its license is retained in `assets/licenses/KittenTTS-APACHE-2.0.txt`. OpenATC implements inference and chunking in Rust and downloads the pinned ONNX model, voice styles and configuration listed in `models-kitten.toml`. Kitten Mini 0.8 is separate from KittenTTS2 and its licensing.
+
+Kokoro uses the [Kokoro-82M model](https://huggingface.co/hexgrad/Kokoro-82M) and the ONNX/voice exports identified in `models.toml`. Kitten Mini and Kokoro models use Apache-2.0 terms. ONNX Runtime is MIT-licensed. The eSpeak-ng phonemizer is a native GPL-3.0-or-later dependency; its redistribution/source obligations still apply through Rust bindings. The application license does not replace dependency licenses.
+
+Accelerated speech uses separately installed NVIDIA CUDA and cuDNN runtime libraries. These are NVIDIA-licensed components, not MIT application code or downloaded model weights. OpenATC's release package contains its ONNX provider libraries; users supply compatible GPU drivers and NVIDIA runtime libraries. Keep any runtime redistribution within the vendor's terms. Apple and Vulkan backends similarly depend on their platform runtimes.
+
+The Windows AI package includes the Vulkan loader so a missing system loader does not prevent CPU fallback from starting. Its upstream Apache-2.0 and permissive notices are retained in `assets/licenses/Vulkan-Loader-LICENSE.txt`. A loader does not supply a hardware driver's Vulkan implementation.
+
+The AI-server package includes this documentation and the project license notices. No model weights or personal provider keys are bundled. See [AI server setup](AI_SERVER.md) for the build features and required runtime files.
+
 The active runtime is the Rust workspace; exact dependency versions are pinned in `Cargo.lock`. It uses imgui/glow for UI, miniaudio behind a native FFI adapter for audio, Axum/reqwest for the companion engine, and xplane/xplane-sys with the SDK 4.0 feature for X-Plane 12 weather APIs. Legacy CMake build files have been removed. Rust dependencies can still contain native C/C++ implementations (including ImGui and miniaudio); first-party Rust does not mean a purely Rust dependency tree. Preserve dependency and SDK redistribution terms when packaging.
 
 Bundled DejaVu Sans and DejaVu Sans Bold fonts retain their license in `assets/fonts/LICENSE.txt`. The OpenATC AI vector logo is project artwork. Font bytes are embedded at build time; no font download or user-system font path is required at runtime.

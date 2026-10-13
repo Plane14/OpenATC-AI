@@ -1,0 +1,40 @@
+I
+1200 Version
+1 0 0 0 TEST Departure International
+100 45 1 1 0.25 0 3 0 09L 0.003 0 0 0 2 0 0 0 27R 0.003 0.02 0 0 2 0 0 0
+100 45 1 1 0.25 0 3 0 09R 0 0 0 0 2 0 0 0 27L 0 0.02 0 0 2 0 0 0
+1052 121800 Departure Delivery
+1053 121900 Departure Ground
+1054 118700 Departure Tower
+1055 119100 Departure Approach
+1201 0.006 0.002 both 1
+1201 0.004 0.002 both 2
+1201 0.002 0.002 both 3
+1201 0.001 0 both 4
+1201 0 0 both 5
+1202 1 2 twoway taxiway_C Alpha
+1202 2 3 twoway taxiway_C Alpha
+1204 departure 09L,27R
+1202 3 4 twoway taxiway_C Bravo
+1202 4 5 twoway taxiway_C Bravo
+1300 0.006 0.002 180 gate jets Gate D1
+1301 d airline
+1 0 0 0 DEST Arrival International
+100 45 1 1 0.25 0 3 0 09L 0.003 4 0 0 2 0 0 0 27R 0.003 4.02 0 0 2 0 0 0
+100 45 1 1 0.25 0 3 0 09R 0 4 0 0 2 0 0 0 27L 0 4.02 0 0 2 0 0 0
+1053 121600 Arrival Ground
+1054 118900 Arrival Tower
+1055 119300 Arrival Approach
+1201 0 4.012 both 1
+1201 0.001 4.012 both 2
+1201 0.002 4.012 both 3
+1201 0.004 4.012 both 4
+1201 0.006 4.012 both 5
+1202 1 2 twoway taxiway_C Charlie
+1202 2 3 twoway taxiway_C Charlie
+1202 3 4 twoway taxiway_C Delta
+1204 departure 09L,27R
+1202 4 5 twoway taxiway_C Delta
+1300 0.006 4.012 180 gate jets Gate C1
+1301 c airline
+99

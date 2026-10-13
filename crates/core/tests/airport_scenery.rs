@@ -145,7 +145,7 @@ fn installed_centerlines_supply_missing_taxi_graph() {
         .unwrap();
     }
     let backtrack =
-        openatc_core::airport::calculate_runway_taxi_route(&airport, &stopped, "13").unwrap();
+        openatc_core::airport::calculate_runway_taxi_route(&airport, &stopped, "13", 'C').unwrap();
     assert!(backtrack.runway_taxi);
     if let Ok(path) = std::env::var("OPENATC_ROUTE_REVIEW_PATH") {
         std::fs::write(path,serde_json::to_vec(&serde_json::json!({"airport":airport,"taxi":route,"holding":opposite,"backtrack":backtrack})).unwrap()).unwrap();
@@ -189,7 +189,7 @@ fn no_taxiway_runway_backtrack_uses_pavement_then_assigned_runway_and_holds() {
         position_valid: true,
         ..Default::default()
     };
-    let route = calculate_runway_taxi_route(&airport, &telemetry, "09").unwrap();
+    let route = calculate_runway_taxi_route(&airport, &telemetry, "09", 'C').unwrap();
     assert!(route.runway_taxi);
     assert!(!route.approved);
     assert!(route.hold_short_runway.is_empty());
@@ -207,7 +207,8 @@ fn no_taxiway_runway_backtrack_uses_pavement_then_assigned_runway_and_holds() {
                 latitude: 0.002,
                 ..telemetry.clone()
             },
-            "09"
+            "09",
+            'C'
         )
         .is_err()
     );
@@ -219,7 +220,7 @@ fn no_taxiway_runway_backtrack_uses_pavement_then_assigned_runway_and_holds() {
     crossing.second.east = 500.0;
     crossing.second.north = 200.0;
     airport.runways.push(crossing);
-    assert!(calculate_runway_taxi_route(&airport, &telemetry, "09").is_err());
+    assert!(calculate_runway_taxi_route(&airport, &telemetry, "09", 'C').is_err());
 }
 
 #[test]
@@ -251,7 +252,7 @@ fn mid_runway_hold_requires_separate_backtrack_to_the_departure_end() {
         ..telemetry
     };
     let runway_route =
-        openatc_core::airport::calculate_runway_taxi_route(&airport, &stopped, "09").unwrap();
+        openatc_core::airport::calculate_runway_taxi_route(&airport, &stopped, "09", 'C').unwrap();
     assert!(runway_route.runway_taxi);
     assert!(!runway_route.approved);
 }
@@ -276,7 +277,7 @@ fn nearby_parallel_runway_is_the_hold_not_the_departure_runway() {
         ..telemetry
     };
     let crossing =
-        openatc_core::airport::calculate_crossing_route(&airport, &holding, "25R").unwrap();
+        openatc_core::airport::calculate_crossing_route(&airport, &holding, "25R", 'C').unwrap();
     assert_eq!(crossing.crossing_runway, "25R");
     let clear = Telemetry {
         latitude: -0.001,
@@ -312,7 +313,8 @@ fn installed_parallel_runway_route_names_actual_first_hold() {
             + end.east / (111320.0 * airport.reference_latitude.to_radians().cos()),
         ..telemetry
     };
-    let cross = openatc_core::airport::calculate_crossing_route(&airport, &holding, "25R").unwrap();
+    let cross =
+        openatc_core::airport::calculate_crossing_route(&airport, &holding, "25R", 'C').unwrap();
     println!("cross={:?}", cross.points);
     let reported = Telemetry {
         latitude: 33.938285,
@@ -325,6 +327,22 @@ fn installed_parallel_runway_route_names_actual_first_hold() {
     ));
     let reported_route = calculate_taxi_route(&airport, &reported, "25L", false, 'C').unwrap();
     assert_eq!(reported_route.hold_short_runway, "25L");
+    let actual_hold = Telemetry {
+        latitude: 33.938318,
+        longitude: -118.383084,
+        ground_speed_knots: 0.19,
+        ..reported
+    };
+    println!(
+        "final hold: {:?}, marker: {:?}",
+        reported_route.points.last(),
+        reported_route.holding_marker_point
+    );
+    assert!(openatc_core::airport::taxi_hold_reached(
+        &airport,
+        &reported_route,
+        &actual_hold
+    ));
 
     let end = cross.points.last().unwrap();
     let clear = Telemetry {
@@ -335,6 +353,15 @@ fn installed_parallel_runway_route_names_actual_first_hold() {
     };
     let onward = calculate_taxi_route(&airport, &clear, "25L", false, 'C').unwrap();
     assert_eq!(onward.hold_short_runway, "25L");
+    println!(
+        "onward: {:?}, marker: {:?}",
+        onward.points, onward.holding_marker_point
+    );
+    assert!(openatc_core::airport::taxi_hold_reached(
+        &airport,
+        &onward,
+        &actual_hold
+    ));
 }
 
 #[test]

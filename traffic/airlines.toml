@@ -1,0 +1,229 @@
+# Relative simulation preferences, not fleet counts or published schedules.
+version = 1
+
+[airline.QFA]
+name = "Qantas"
+operator = "QFA"
+callsign = "Qantas"
+category = "airline"
+home_prefixes = ["Y"]
+serves = []
+fleet = { B738 = 50, A332 = 15, A333 = 10, B789 = 10, A388 = 5, A21N = 10 }
+
+[airline.QFA-regional]
+name = "QantasLink turboprops"
+operator = "QLK"
+callsign = "Q Link"
+category = "regional"
+home_prefixes = ["Y"]
+serves = ["Y"]
+fleet = { DH8D = 70, DH8C = 30 }
+liveries = ["QFA"]
+
+[airline.VOZ]
+name = "Virgin Australia"
+operator = "VOZ"
+callsign = "Velocity"
+category = "airline"
+home_prefixes = ["Y"]
+serves = ["Y","N","W","V","R","O"]
+fleet = { B738 = 80, B38M = 20 }
+
+[airline.JST]
+name = "Jetstar"
+operator = "JST"
+callsign = "Jetstar"
+category = "airline"
+home_prefixes = ["Y"]
+serves = ["Y","N","W","V","R","P"]
+fleet = { A320 = 55, A321 = 15, A21N = 20, B788 = 10 }
+
+[airline.ANZ]
+name = "Air New Zealand"
+operator = "ANZ"
+callsign = "New Zealand"
+category = "airline"
+home_prefixes = ["NZ"]
+serves = []
+fleet = { A320 = 25, A20N = 20, A21N = 20, B789 = 25, B77W = 10 }
+
+[airline.ANZ-regional]
+name = "Air New Zealand regional"
+operator = "ANZ"
+callsign = "New Zealand"
+category = "regional"
+home_prefixes = ["NZ"]
+serves = ["NZ"]
+fleet = { AT76 = 65, DH8C = 35 }
+
+[airline.SIA]
+name = "Singapore Airlines"
+operator = "SIA"
+callsign = "Singapore"
+category = "airline"
+home_prefixes = ["WS"]
+serves = []
+fleet = { A359 = 40, B77W = 20, A388 = 15, B78X = 15, B38M = 10 }
+
+[airline.UAE]
+name = "Emirates"
+operator = "UAE"
+callsign = "Emirates"
+category = "airline"
+home_prefixes = ["OM"]
+serves = []
+fleet = { B77W = 55, A388 = 35, A359 = 10 }
+
+[airline.QTR]
+name = "Qatar Airways"
+operator = "QTR"
+callsign = "Qatari"
+category = "airline"
+home_prefixes = ["OT"]
+serves = []
+fleet = { A320 = 15, A333 = 10, A359 = 20, A35K = 15, B77W = 25, B788 = 5, B789 = 10 }
+
+[airline.CPA]
+name = "Cathay Pacific"
+operator = "CPA"
+callsign = "Cathay"
+category = "airline"
+home_prefixes = ["VH"]
+serves = []
+fleet = { A21N = 15, A333 = 25, A359 = 25, A35K = 15, B77W = 20 }
+
+[airline.ANA]
+name = "All Nippon Airways"
+operator = "ANA"
+callsign = "All Nippon"
+category = "airline"
+home_prefixes = ["RJ","RO"]
+serves = []
+fleet = { B738 = 25, A21N = 20, B788 = 20, B789 = 20, B77W = 10, A388 = 5 }
+
+[airline.ETH]
+name = "Ethiopian Airlines"
+operator = "ETH"
+callsign = "Ethiopian"
+category = "airline"
+home_prefixes = ["HA"]
+serves = []
+fleet = { B738 = 25, B38M = 15, B788 = 25, B789 = 15, A359 = 20 }
+
+[airline.UAL]
+name = "United Airlines"
+operator = "UAL"
+callsign = "United"
+category = "airline"
+home_prefixes = ["K","PH","PG"]
+serves = []
+fleet = { B738 = 30, B739 = 20, A319 = 10, A320 = 10, B772 = 10, B789 = 15, B78X = 5 }
+
+[airline.AAL]
+name = "American Airlines"
+operator = "AAL"
+callsign = "American"
+category = "airline"
+home_prefixes = ["K","PH"]
+serves = []
+fleet = { B738 = 25, B38M = 15, A319 = 10, A321 = 25, A21N = 10, B772 = 5, B77W = 5, B788 = 5 }
+
+[airline.DAL]
+name = "Delta Air Lines"
+operator = "DAL"
+callsign = "Delta"
+category = "airline"
+home_prefixes = ["K","PH"]
+serves = []
+fleet = { A320 = 10, A321 = 20, A21N = 15, B738 = 15, B739 = 15, B752 = 5, A333 = 5, A339 = 5, A359 = 10 }
+
+[airline.SWA]
+name = "Southwest Airlines"
+operator = "SWA"
+callsign = "Southwest"
+category = "airline"
+home_prefixes = ["K","PH"]
+serves = ["K","PH","M","T"]
+fleet = { B737 = 25, B738 = 45, B38M = 30 }
+
+[airline.ASA]
+name = "Alaska Airlines"
+operator = "ASA"
+callsign = "Alaska"
+category = "airline"
+home_prefixes = ["K","PA","PH"]
+serves = ["K","C","PA","PH","M"]
+fleet = { B737 = 10, B738 = 40, B739 = 50 }
+
+[airline.SKW]
+name = "SkyWest Airlines"
+operator = "SKW"
+callsign = "SkyWest"
+category = "regional"
+home_prefixes = ["K"]
+serves = ["K","C","M"]
+fleet = { E75L = 55, CRJ7 = 25, CRJ9 = 10, CRJ2 = 10 }
+liveries = ["UAL","DAL","AAL","ASA"]
+
+[airline.BAW]
+name = "British Airways"
+operator = "BAW"
+callsign = "Speedbird"
+category = "airline"
+home_prefixes = ["EG"]
+serves = []
+fleet = { A319 = 10, A320 = 15, A20N = 15, A321 = 10, A21N = 10, B772 = 10, B77W = 10, B789 = 10, A35K = 5, A388 = 5 }
+
+[airline.DLH]
+name = "Lufthansa"
+operator = "DLH"
+callsign = "Lufthansa"
+category = "airline"
+home_prefixes = ["ED"]
+serves = []
+fleet = { A319 = 15, A320 = 15, A20N = 20, A321 = 15, A21N = 10, A359 = 10, B748 = 10, A388 = 5 }
+
+[airline.KLM]
+name = "KLM"
+operator = "KLM"
+callsign = "KLM"
+category = "airline"
+home_prefixes = ["EH"]
+serves = []
+fleet = { B738 = 25, B739 = 10, A21N = 20, B772 = 10, B77W = 10, B789 = 15, B78X = 10 }
+
+[airline.KLC]
+name = "KLM Cityhopper"
+operator = "KLC"
+callsign = "City"
+category = "regional"
+home_prefixes = ["EH"]
+serves = ["E","L"]
+fleet = { E170 = 20, E190 = 40, E295 = 40 }
+
+[airline.FDX]
+name = "FedEx Express"
+operator = "FDX"
+callsign = "FedEx"
+category = "cargo"
+home_prefixes = ["K"]
+serves = []
+fleet = { A306 = 20, B752 = 25, B763 = 35, B77L = 20 }
+
+[airline.UPS]
+name = "UPS Airlines"
+operator = "UPS"
+callsign = "UPS"
+category = "cargo"
+home_prefixes = ["K"]
+serves = []
+fleet = { A306 = 20, B752 = 25, B763 = 35, B744 = 10, B748 = 10 }
+
+[airline.GA]
+name = "Private IFR aircraft"
+operator = ""
+callsign = ""
+category = "general_aviation"
+home_prefixes = []
+serves = []
+fleet = { C172 = 20, PA28 = 20, BE58 = 15, C208 = 10, PC12 = 15, B350 = 10, C25C = 8, GLF6 = 2 }

@@ -1,0 +1,82 @@
+{
+  "date": "2026-10-13",
+  "status": "isolated prototype; not integrated into OpenATC",
+  "hardware": {
+    "os": "Fedora 44",
+    "cpu": "Intel Core i9-9900K",
+    "gpu": "NVIDIA GeForce RTX 2080 Ti",
+    "driver": "615.71.09",
+    "gpu_mib": 11264
+  },
+  "runtime": {
+    "implementation": "Rust",
+    "llama_cpp_sys": "0.1.158",
+    "tch": "0.22.0",
+    "libtorch": "2.9.0 CPU",
+    "threads": 4,
+    "python": false,
+    "model_revision": "f2eee74f4467855ad58fe16f1fb7b7df473263fd",
+    "weights": "TQ2_1 repacked to Q4_0 retaining ternary scales and values",
+    "decoder": "student_w4"
+  },
+  "assets": {
+    "source_gguf_bytes": 1029076832,
+    "q4_gguf_bytes": 1447458656,
+    "decoder_bytes": 312339253,
+    "voice_data_bytes": 16739255
+  },
+  "cpu": {
+    "attention_offload": false,
+    "operation_offload": false,
+    "kv_type": "F32",
+    "startup_seconds": 1.254784194,
+    "voice": "Bruno",
+    "text": "Charlie Golf Tango Lima Tango, runway two five left, cleared for takeoff.",
+    "runs": [
+      {
+        "lm_seconds": 14.563375779,
+        "decoder_seconds": 2.615756454,
+        "audio_seconds": 5.08,
+        "tokens": 124
+      },
+      {
+        "lm_seconds": 14.525530429,
+        "decoder_seconds": 2.934164341,
+        "audio_seconds": 5.08,
+        "tokens": 124
+      },
+      {
+        "lm_seconds": 14.955190215,
+        "decoder_seconds": 1.070331754,
+        "audio_seconds": 5.24,
+        "tokens": 128
+      }
+    ],
+    "timing_excludes": [
+      "model loading",
+      "context construction",
+      "WAV writing"
+    ],
+    "last_sample_transcription": "Charlie Golf Tango Lima Tango, runway 25 left, cleared for takeoff.",
+    "transcription_input": "mono PCM16 resampled to 16000 Hz"
+  },
+  "gpu": {
+    "backend": "Vulkan",
+    "success": false,
+    "error": "non-finite logits",
+    "attempts": [
+      "Default context and all model layers offloaded",
+      "Flash attention disabled and float32 key/value caches",
+      "Same context, GGML_VK_DISABLE_F16=1",
+      "Same context, GGML_VK_DISABLE_F16=1, GGML_VK_DISABLE_COOPMAT2=1, GGML_VK_DISABLE_COOPMAT=1"
+    ],
+    "successful_timing_seconds": null
+  },
+  "scope": {
+    "voices_in_assets": 47,
+    "voices_synthesized": 1,
+    "default_provider_changed": false,
+    "live_service_replaced": false,
+    "whole_roster_validated": false
+  }
+}

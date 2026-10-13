@@ -22,6 +22,7 @@ pub struct RequestOutcome {
 /// Record a transmission and retain the latest 500 entries.
 pub fn add_transmission(state: &mut State, speaker: &str, text: &str, tag: &SpeechTag) {
     let entry = Transmission {
+        information_only: false,
         pilot_reply: String::new(),
         background: false,
         speaker: speaker.to_owned(),
@@ -253,6 +254,8 @@ const CATALOGUE_TITLES: [&str; 23] = [
 
 /// Request data, airport, voices and policy used by controller handlers.
 pub struct RequestContext<'a> {
+    /// Discrete code allocated by the engine for a new IFR clearance.
+    pub squawk: &'a str,
     /// The pilot request.
     pub request: &'a Request,
     /// The receiving station has Tower authority (including combined duties).
@@ -271,8 +274,7 @@ pub struct RequestContext<'a> {
     pub region: &'a Region,
 }
 
-/// Record the ATC side of an exchange. Go-arounds and emergencies always go
-/// out urgent, like over there.
+/// Record the ATC reply and mark go-arounds and emergencies as urgent.
 fn reply(
     state: &mut State,
     ctx: &RequestContext<'_>,
@@ -304,6 +306,14 @@ fn reply(
 /// Returns `None` for anything else.
 fn apply_simple(state: &mut State, ctx: &RequestContext<'_>) -> Option<RequestOutcome> {
     let intent = ctx.request.intent.as_str();
+    if intent == "clarify" {
+        return Some(reply(
+            state,
+            ctx,
+            false,
+            crate::dialogue::say("say_again_with_a_standard_request", &[]),
+        ));
+    }
     if intent == "radio_check" {
         return Some(reply(
             state,
@@ -402,6 +412,10 @@ fn apply_readback(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome
             crate::dialogue::say(
                 if state.taxi_clearance.runway_taxi {
                     "runway_taxi_readback_correct"
+                } else if state.taxi_clearance.to_parking
+                    && state.taxi_clearance.hold_short_runway.is_empty()
+                {
+                    "parking_taxi_readback_correct"
                 } else {
                     "taxi_readback_correct_follow_the_approved_route"
                 },
@@ -474,7 +488,7 @@ fn apply_clearance(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcom
         altitude_feet: state.plan.initial_altitude_feet,
         route: state.plan.route.clone(),
         runway: state.plan.runway.clone(),
-        squawk: "2105".to_owned(),
+        squawk: ctx.squawk.to_owned(),
         acknowledged: false,
         sequence: state.next_sequence,
         ..Default::default()
@@ -578,17 +592,18 @@ fn apply_taxi(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome {
             crate::dialogue::say("the_loaded_surface_airport_does_not_match", &[]),
         );
     }
-    if request.intent == "gate"
-        && state.plan.arrival_stand.is_empty()
-        && let Some(stand) = airport
-            .parking
-            .iter()
-            .find(|p| p.kind == "gate")
-            .or_else(|| airport.parking.first())
-    {
-        state.plan.arrival_stand.clone_from(&stand.name);
-    }
+    let Some(size) = crate::parking::aircraft_size(state) else {
+        return reply(
+            state,
+            ctx,
+            false,
+            crate::dialogue::say("parking_aircraft_size_unknown", &[]),
+        );
+    };
     let mut position = state.telemetry.clone();
+    if state.demo && position.traffic.is_none() {
+        position.traffic = Some(Vec::new());
+    }
     if state.demo && !position.position_valid && !airport.parking.is_empty() {
         position.latitude = airport.reference_latitude + airport.parking[0].point.north / 111_320.0;
         position.longitude = airport.reference_longitude
@@ -602,13 +617,30 @@ fn apply_taxi(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome {
         state.plan.runway.clone()
     };
     let prefix = if state.demo { "DEMO: " } else { "" };
-    let normal = calculate_taxi_route(
-        airport,
-        &position,
-        &destination,
-        request.intent == "gate",
-        'C',
-    );
+    let normal = if request.intent == "gate" {
+        let mut found = None;
+        for stand in crate::parking::candidates(airport, state, size) {
+            if let Ok(route) = calculate_taxi_route(airport, &position, &stand.name, true, size) {
+                found = Some((stand.name.clone(), route));
+                break;
+            }
+        }
+        if let Some((name, route)) = found {
+            state.plan.arrival_stand = name;
+            Ok(route)
+        } else {
+            Err(crate::dialogue::say(
+                if !state.demo && position.traffic.is_none() {
+                    "parking_traffic_unknown"
+                } else {
+                    "parking_no_available_stand"
+                },
+                &[],
+            ))
+        }
+    } else {
+        calculate_taxi_route(airport, &position, &destination, false, size)
+    };
     let route = if request.intent == "backtrack"
         || ((normal.is_err() || airport.inferred_taxi || airport.nodes.is_empty())
             && request.intent == "taxi"
@@ -625,7 +657,7 @@ fn apply_taxi(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome {
                     crate::dialogue::say(response, &[("runway", destination.clone())]),
                 );
             }
-            super::airport::calculate_runway_taxi_route(airport, &position, &destination)
+            super::airport::calculate_runway_taxi_route(airport, &position, &destination, size)
         } else {
             Err(crate::dialogue::say("runway_taxi_contact_tower", &[]))
         }
@@ -683,6 +715,15 @@ fn apply_ready(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome {
         }
     }
     if !state.demo {
+        if state.departure_wake_seconds > 0.0 {
+            state.taxi_clearance.waiting_for_traffic = true;
+            return reply(
+                state,
+                ctx,
+                false,
+                crate::dialogue::say("holding_wake", &[("runway", state.plan.runway.clone())]),
+            );
+        }
         let blocked = ctx.airport.map_or(Some("holding_standby"), |airport| {
             crate::holding::blocked(airport, &state.plan.runway, &state.telemetry)
         });
@@ -749,7 +790,12 @@ fn apply_ground(state: &mut State, ctx: &RequestContext<'_>) -> Option<RequestOu
                 crate::dialogue::say(blocked, &[("runway", runway)]),
             ));
         }
-        let result = super::airport::calculate_crossing_route(airport, &state.telemetry, &runway);
+        let result = super::airport::calculate_crossing_route(
+            airport,
+            &state.telemetry,
+            &runway,
+            crate::parking::aircraft_size(state).unwrap_or('F'),
+        );
         return Some(match result {
             Ok(mut route) => {
                 route
@@ -908,10 +954,30 @@ fn apply_airborne(state: &mut State, ctx: &RequestContext<'_>) -> Option<Request
         }
         state.phase = PhaseCode::Arrival;
     }
+    proposed.readback_scope = if intent == "direct" {
+        "direct"
+    } else {
+        "altitude"
+    }
+    .into();
     proposed.acknowledged = false;
     proposed.sequence = state.next_sequence;
     let message = crate::dialogue::say(
-        "maintain_route",
+        if intent == "direct" {
+            "amended_direct_clearance"
+        } else if f64::from(request.altitude_feet) > state.telemetry.altitude_feet {
+            if state.telemetry.vertical_speed_fpm > 200.0 {
+                "automatic_continue_climb"
+            } else {
+                "automatic_climb"
+            }
+        } else {
+            if state.telemetry.vertical_speed_fpm < -200.0 {
+                "automatic_continue_descent"
+            } else {
+                "automatic_descent"
+            }
+        },
         &[
             (
                 "prefix",
@@ -922,10 +988,12 @@ fn apply_airborne(state: &mut State, ctx: &RequestContext<'_>) -> Option<Request
                 (altitude_text(f64::from(proposed.altitude_feet), ctx.units, true)).clone(),
             ),
             ("route", (proposed.route).clone()),
+            ("callsign", state.plan.callsign.clone()),
         ],
     );
     state.clearance_cancelled = false;
     state.clearance = Some(proposed);
+    state.atc_offer = None;
     Some(reply(state, ctx, true, message))
 }
 
@@ -1089,7 +1157,10 @@ fn apply_service(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome 
         return reply(state, ctx, true, message);
     }
     if intent == "emergency" {
-        if !ctx.realism.practice_emergencies {
+        if !ctx.realism.practice_emergencies
+            && !(state.mission.running
+                && ["urgent", "emergency"].contains(&state.mission.severity.as_str()))
+        {
             return reply(
                 state,
                 ctx,
@@ -1097,11 +1168,25 @@ fn apply_service(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome 
                 crate::dialogue::say("emergency_practice_is_off_enable_practice_emergencies", &[]),
             );
         }
+        state.emergency_declared = true;
+        let pan = ctx
+            .request
+            .text
+            .to_lowercase()
+            .replace('-', " ")
+            .contains("pan pan");
         return reply(
             state,
             ctx,
             true,
-            crate::dialogue::say("roger_mayday_squawk_state_intentions_and_souls", &[]),
+            crate::dialogue::say(
+                if pan {
+                    "emergency_pan_acknowledged"
+                } else {
+                    "roger_mayday_squawk_state_intentions_and_souls"
+                },
+                &[],
+            ),
         );
     }
     if !ctx.realism.strict_phraseology && !ctx.realism.teaching_corrections {
@@ -1195,11 +1280,15 @@ pub fn apply_request(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutc
             .transcript
             .iter_mut()
             .rev()
-            .find(|entry| entry.speaker == "ATC" && !entry.background);
+            .find(|entry| entry.is_controller_instruction());
         if let Some(entry) = pending
             && entry.sequence == ctx.request.clearance_sequence
             && !entry.pilot_reply.is_empty()
-            && entry.pilot_reply == ctx.request.text
+            && crate::readback::matches_pilot_reply(
+                &ctx.request.text,
+                &entry.pilot_reply,
+                &state.plan.callsign,
+            )
             && entry.position == ctx.atc_tag.position
         {
             entry.pilot_reply.clear();
@@ -1459,6 +1548,7 @@ mod tests {
         let pilot_tag = SpeechTag::default();
         let atc_tag = SpeechTag::default();
         let ctx = RequestContext {
+            squawk: "2105",
             runway_taxi_authorized: false,
             request: &slots,
             airport: airport.as_ref(),

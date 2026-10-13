@@ -36,6 +36,53 @@ fn aircraft_symbol(draw: &imgui::DrawListMut<'_>, center: [f32; 2], heading: f64
         .build();
 }
 
+/// Static map data rebuilt when another airport is loaded.
+#[derive(Default)]
+pub(crate) struct Geometry {
+    bounds: Option<[f64; 4]>,
+    nodes: std::collections::HashMap<i64, Point>,
+    beams: Vec<ApproachBeam>,
+}
+
+impl Geometry {
+    pub(crate) fn new(airport: &Airport) -> Self {
+        let mut bounds = [
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let mut include = |p: &Point| {
+            bounds[0] = bounds[0].min(p.east);
+            bounds[1] = bounds[1].max(p.east);
+            bounds[2] = bounds[2].min(p.north);
+            bounds[3] = bounds[3].max(p.north);
+        };
+        for runway in &airport.runways {
+            include(&runway.first);
+            include(&runway.second);
+        }
+        for p in airport.pavements.iter().flatten() {
+            include(p);
+        }
+        for p in &airport.parking {
+            include(&p.point);
+        }
+        for node in &airport.nodes {
+            include(&node.point);
+        }
+        Self {
+            bounds: (bounds[0] <= bounds[1]).then_some(bounds),
+            nodes: airport
+                .nodes
+                .iter()
+                .map(|node| (node.id, node.point))
+                .collect(),
+            beams: approach_beams(airport),
+        }
+    }
+}
+
 /// Airport canvas: grid, runways, taxiways, approved route, stands, buildings,
 /// navaids, ownship, scale bar. `on_airports` selects the orbit behavior that
 /// only the Airports page gets.
@@ -132,35 +179,29 @@ fn draw_map(
     canvas: &Canvas,
 ) {
     let airport = &interface.airport;
-    let (mut minimum_east, mut maximum_east) = (f64::INFINITY, f64::NEG_INFINITY);
-    let (mut minimum_north, mut maximum_north) = (f64::INFINITY, f64::NEG_INFINITY);
+    let [
+        mut minimum_east,
+        mut maximum_east,
+        mut minimum_north,
+        mut maximum_north,
+    ] = interface.map_geometry.bounds.unwrap_or([
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ]);
     let mut include = |point: &Point| {
         minimum_east = minimum_east.min(point.east);
         maximum_east = maximum_east.max(point.east);
         minimum_north = minimum_north.min(point.north);
         maximum_north = maximum_north.max(point.north);
     };
-    for runway in &airport.runways {
-        include(&runway.first);
-        include(&runway.second);
-    }
-    for contour in &airport.pavements {
-        for point in contour {
-            include(point);
-        }
-    }
-    for parking in &airport.parking {
-        include(&parking.point);
-    }
-    for node in &airport.nodes {
-        include(&node.point);
-    }
-    let beams = if canvas.on_airports && interface.settings.show_ils_beams {
-        approach_beams(airport)
+    let beams: &[ApproachBeam] = if canvas.on_airports && interface.settings.show_ils_beams {
+        &interface.map_geometry.beams
     } else {
-        Vec::new()
+        &[]
     };
-    for beam in &beams {
+    for beam in beams {
         for point in &beam.corners {
             include(point);
         }
@@ -189,9 +230,8 @@ fn draw_map(
     } else {
         std::f64::consts::FRAC_PI_2
     };
-    // Same story: the projection lands on whole pixels.
-    #[allow(clippy::cast_possible_truncation)]
-    // Same story: the projection lands on whole pixels.
+    let (sin_angle, cos_angle) = angle.sin_cos();
+    let (sin_tilt, cos_tilt) = tilt.sin_cos();
     #[allow(clippy::cast_possible_truncation)]
     let project = |point: &Point| {
         let east = point.east - center_east;
@@ -200,10 +240,10 @@ fn draw_map(
             canvas.cursor[0]
                 + canvas.size[0] / 2.0
                 + interface.pan[0]
-                + (east * angle.cos() - north * angle.sin()) as f32 * scale,
+                + (east * cos_angle - north * sin_angle) as f32 * scale,
             canvas.cursor[1] + canvas.size[1] / 2.0 + interface.pan[1]
-                - ((east * angle.sin() + north * angle.cos()) * tilt.sin()
-                    + point.height * tilt.cos()) as f32
+                - ((east * sin_angle + north * cos_angle) * sin_tilt + point.height * cos_tilt)
+                    as f32
                     * scale,
         ]
     };
@@ -311,10 +351,7 @@ fn draw_map(
             }
         }
     }
-    let mut nodes = std::collections::BTreeMap::new();
-    for node in &airport.nodes {
-        nodes.insert(node.id, node.point);
-    }
+    let nodes = &interface.map_geometry.nodes;
     let mut taxi_labels = std::collections::BTreeSet::new();
     if interface.settings.show_taxiways {
         for edge in &airport.edges {
@@ -337,7 +374,7 @@ fn draw_map(
             if interface.settings.show_labels
                 && interface.zoom > 0.65
                 && !edge.name.is_empty()
-                && taxi_labels.insert(edge.name.clone())
+                && taxi_labels.insert(edge.name.as_str())
             {
                 draw.add_text(
                     [
@@ -369,7 +406,7 @@ fn draw_map(
     if interface.show_navaids && canvas.on_airports {
         draw_navaids(draw, interface, airport, &project);
     }
-    for beam in &beams {
+    for beam in beams {
         draw_approach_beam(
             draw,
             beam,
@@ -891,6 +928,22 @@ fn draw_ownship(
 mod beam_tests {
     use super::*;
     use openatc_core::airport::{Navaid, Runway};
+    #[test]
+    fn reloading_the_same_airport_replaces_cached_geometry() {
+        let mut panel = Interface::new("http://127.0.0.1:9");
+        let mut airport = openatc_core::airport::demo_airport();
+        panel.set_airport(airport.clone());
+        assert_eq!(panel.map_geometry.nodes.len(), airport.nodes.len());
+        let old = panel.map_geometry.bounds.unwrap();
+        airport.runways[0].first.east += 100_000.0;
+        airport.nodes.clear();
+        panel.set_airport(airport);
+        assert!(panel.map_geometry.nodes.is_empty());
+        assert!(panel.map_geometry.bounds.unwrap()[1] > old[1]);
+        panel.set_airport(Airport::default());
+        assert!(panel.map_geometry.bounds.is_none());
+        assert!(panel.map_geometry.beams.is_empty());
+    }
     #[test]
     fn glide_beam_rises_outward_from_the_published_threshold() {
         let airport = Airport {

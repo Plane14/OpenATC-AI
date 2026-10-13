@@ -1,0 +1,467 @@
+{
+  "date": "2026-10-13",
+  "model": "KittenML/kitten-tts-2",
+  "revision": "f2eee74f4467855ad58fe16f1fb7b7df473263fd",
+  "weights": "emb4",
+  "runtime": {
+    "kittenml": "0.9.4",
+    "torch": "2.8.0+cu128",
+    "transformers": "4.57.6",
+    "device": "cuda",
+    "language_model_dtype": "bfloat16",
+    "driver": "615.71.09",
+    "gpu": "NVIDIA GeForce RTX 2080 Ti",
+    "gpu_capacity_mib": 11264,
+    "nvidia_reserved_mib": 429,
+    "native_bfloat16_hardware": false
+  },
+  "method": {
+    "harness": "Rust with PyO3 calling the unmodified upstream package in an isolated environment",
+    "seed": 1234,
+    "preset": "stable",
+    "normalize": false,
+    "max_new_tokens": 700,
+    "threads": 4,
+    "gpu_sampling_interval_ms": 100,
+    "background": "Qwen2.5 7B Q4_K_M, 4096-token context, Whisper Tiny and Kokoro resident; no deliberate simultaneous requests during synthesis",
+    "baseline_device_used_mib": 5564,
+    "timing": "Synchronous generate call, including voice conditioning and waveform decoding; GPU synchronized before and after; WAV writes excluded",
+    "scope": "Eight requests per decoder, including one first-use request, three repetitions of the heading/climb phrase and five distinct voices. Not a test of all 47 voices."
+  },
+  "tests": [
+    {
+      "decoder": "student_w4",
+      "device_peak_mib": 10652,
+      "increment_above_baseline_mib": 5088,
+      "events": [
+        {
+          "event": "loaded",
+          "memory": {
+            "allocated_bytes": 4778349568,
+            "peak_allocated_bytes": 4778349568,
+            "peak_reserved_bytes": 4812963840,
+            "reserved_bytes": 4812963840
+          },
+          "sample_rate": 24000,
+          "seconds": 25.847323567,
+          "voices": [
+            "Bella",
+            "Jasper",
+            "Luna",
+            "Bruno",
+            "Rosie",
+            "Hugo",
+            "Kiki",
+            "Leo",
+            "Matthew",
+            "Elliot",
+            "Willow",
+            "Dolores",
+            "Victor",
+            "Dante",
+            "Alfred",
+            "Saoirse",
+            "Claire",
+            "Raven",
+            "Marcus",
+            "Herbert",
+            "Diana",
+            "Laurence",
+            "Maeve",
+            "Walter",
+            "Edith",
+            "Miles",
+            "Grace",
+            "Reginald",
+            "Iris",
+            "Frank",
+            "Serena",
+            "Julian",
+            "Eleanor",
+            "Otis",
+            "Vincent",
+            "Martha",
+            "Sable",
+            "Victoria",
+            "Arabic",
+            "German",
+            "Spanish",
+            "French",
+            "Italian",
+            "Portuguese",
+            "Russian",
+            "Chinese",
+            "Hindi"
+          ]
+        },
+        {
+          "audio_seconds": 3.0,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 13.021018346,
+          "id": "warmup",
+          "memory": {
+            "allocated_bytes": 4816694272,
+            "peak_allocated_bytes": 4945330176,
+            "peak_reserved_bytes": 5064622080,
+            "reserved_bytes": 5064622080
+          },
+          "peak": 0.9900000095367432,
+          "real_time_factor": 4.340339448666667,
+          "text": "Charlie Golf Tango Lima Tango, radio check.",
+          "voice": "Bruno"
+        },
+        {
+          "audio_seconds": 7.32,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 5.624462018,
+          "id": "heading-1",
+          "memory": {
+            "allocated_bytes": 4816694272,
+            "peak_allocated_bytes": 4961321472,
+            "peak_reserved_bytes": 5064622080,
+            "reserved_bytes": 5064622080
+          },
+          "peak": 0.9900000095367432,
+          "real_time_factor": 0.7683691281420765,
+          "text": "Charlie Golf Tango Lima Tango, turn left heading two seven zero. Climb and maintain five thousand feet.",
+          "voice": "Bruno"
+        },
+        {
+          "audio_seconds": 7.32,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 5.661052225,
+          "id": "heading-2",
+          "memory": {
+            "allocated_bytes": 4816694272,
+            "peak_allocated_bytes": 4961321472,
+            "peak_reserved_bytes": 5064622080,
+            "reserved_bytes": 5064622080
+          },
+          "peak": 0.9900000095367432,
+          "real_time_factor": 0.7733677903005464,
+          "text": "Charlie Golf Tango Lima Tango, turn left heading two seven zero. Climb and maintain five thousand feet.",
+          "voice": "Bruno"
+        },
+        {
+          "audio_seconds": 7.32,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 5.627107765,
+          "id": "heading-3",
+          "memory": {
+            "allocated_bytes": 4816694272,
+            "peak_allocated_bytes": 4961321472,
+            "peak_reserved_bytes": 5064622080,
+            "reserved_bytes": 5064622080
+          },
+          "peak": 0.9900000095367432,
+          "real_time_factor": 0.768730568989071,
+          "text": "Charlie Golf Tango Lima Tango, turn left heading two seven zero. Climb and maintain five thousand feet.",
+          "voice": "Bruno"
+        },
+        {
+          "audio_seconds": 12.28,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 9.419292454,
+          "id": "crossing",
+          "memory": {
+            "allocated_bytes": 4816761856,
+            "peak_allocated_bytes": 4981071360,
+            "peak_reserved_bytes": 5121245184,
+            "reserved_bytes": 5121245184
+          },
+          "peak": 0.9900000095367432,
+          "real_time_factor": 0.7670433594462541,
+          "text": "Charlie Golf Tango Lima Tango, cross runway two five right. Report runway vacated.",
+          "voice": "Bella"
+        },
+        {
+          "audio_seconds": 7.0,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 5.481580561,
+          "id": "handoff",
+          "memory": {
+            "allocated_bytes": 4816829440,
+            "peak_allocated_bytes": 4961362432,
+            "peak_reserved_bytes": 5121245184,
+            "reserved_bytes": 5121245184
+          },
+          "peak": 0.9900000095367432,
+          "real_time_factor": 0.7830829372857143,
+          "text": "Charlie Golf Tango Lima Tango, contact Southern California Departure, one two four decimal five. Good day.",
+          "voice": "Marcus"
+        },
+        {
+          "audio_seconds": 12.92,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 9.888807775,
+          "id": "clearance",
+          "memory": {
+            "allocated_bytes": 4816897024,
+            "peak_allocated_bytes": 4993648640,
+            "peak_reserved_bytes": 5121245184,
+            "reserved_bytes": 5121245184
+          },
+          "peak": 0.9900000095367432,
+          "real_time_factor": 0.7653875986842106,
+          "text": "Charlie Golf Tango Lima Tango, cleared to John Wayne Airport via the Los Angeles One departure, then as filed. Climb and maintain five thousand feet. Squawk two one zero five.",
+          "voice": "Martha"
+        },
+        {
+          "audio_seconds": 5.6,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 4.258645123,
+          "id": "accent",
+          "memory": {
+            "allocated_bytes": 4816964608,
+            "peak_allocated_bytes": 4961084416,
+            "peak_reserved_bytes": 5121245184,
+            "reserved_bytes": 5121245184
+          },
+          "peak": 0.9900000095367432,
+          "real_time_factor": 0.7604723433928572,
+          "text": "Charlie Golf Tango Lima Tango, wind two four zero degrees at eight knots. Runway two five left, cleared to land.",
+          "voice": "French"
+        }
+      ]
+    },
+    {
+      "decoder": "default",
+      "device_peak_mib": 10832,
+      "increment_above_baseline_mib": 5268,
+      "events": [
+        {
+          "event": "loaded",
+          "memory": {
+            "allocated_bytes": 4549134848,
+            "peak_allocated_bytes": 4549134848,
+            "peak_reserved_bytes": 4575985664,
+            "reserved_bytes": 4575985664
+          },
+          "sample_rate": 24000,
+          "seconds": 19.55642902,
+          "voices": [
+            "Bella",
+            "Jasper",
+            "Luna",
+            "Bruno",
+            "Rosie",
+            "Hugo",
+            "Kiki",
+            "Leo",
+            "Matthew",
+            "Elliot",
+            "Willow",
+            "Dolores",
+            "Victor",
+            "Dante",
+            "Alfred",
+            "Saoirse",
+            "Claire",
+            "Raven",
+            "Marcus",
+            "Herbert",
+            "Diana",
+            "Laurence",
+            "Maeve",
+            "Walter",
+            "Edith",
+            "Miles",
+            "Grace",
+            "Reginald",
+            "Iris",
+            "Frank",
+            "Serena",
+            "Julian",
+            "Eleanor",
+            "Otis",
+            "Vincent",
+            "Martha",
+            "Sable",
+            "Victoria",
+            "Arabic",
+            "German",
+            "Spanish",
+            "French",
+            "Italian",
+            "Portuguese",
+            "Russian",
+            "Chinese",
+            "Hindi"
+          ]
+        },
+        {
+          "audio_seconds": 2.98,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 3.147026728,
+          "id": "warmup",
+          "memory": {
+            "allocated_bytes": 4600075776,
+            "peak_allocated_bytes": 4712005120,
+            "peak_reserved_bytes": 4806672384,
+            "reserved_bytes": 4806672384
+          },
+          "peak": 0.8105871081352234,
+          "real_time_factor": 1.0560492375838926,
+          "text": "Charlie Golf Tango Lima Tango, radio check.",
+          "voice": "Bruno"
+        },
+        {
+          "audio_seconds": 7.3,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 5.674835499,
+          "id": "heading-1",
+          "memory": {
+            "allocated_bytes": 4600075776,
+            "peak_allocated_bytes": 4791483392,
+            "peak_reserved_bytes": 4928307200,
+            "reserved_bytes": 4928307200
+          },
+          "peak": 0.9388427138328552,
+          "real_time_factor": 0.777374725890411,
+          "text": "Charlie Golf Tango Lima Tango, turn left heading two seven zero. Climb and maintain five thousand feet.",
+          "voice": "Bruno"
+        },
+        {
+          "audio_seconds": 7.3,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 5.693189951,
+          "id": "heading-2",
+          "memory": {
+            "allocated_bytes": 4600075776,
+            "peak_allocated_bytes": 4791483392,
+            "peak_reserved_bytes": 4928307200,
+            "reserved_bytes": 4928307200
+          },
+          "peak": 0.9388425350189209,
+          "real_time_factor": 0.7798890343835616,
+          "text": "Charlie Golf Tango Lima Tango, turn left heading two seven zero. Climb and maintain five thousand feet.",
+          "voice": "Bruno"
+        },
+        {
+          "audio_seconds": 7.3,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 5.66722811,
+          "id": "heading-3",
+          "memory": {
+            "allocated_bytes": 4600075776,
+            "peak_allocated_bytes": 4791483392,
+            "peak_reserved_bytes": 4928307200,
+            "reserved_bytes": 4928307200
+          },
+          "peak": 0.9388427138328552,
+          "real_time_factor": 0.7763326178082192,
+          "text": "Charlie Golf Tango Lima Tango, turn left heading two seven zero. Climb and maintain five thousand feet.",
+          "voice": "Bruno"
+        },
+        {
+          "audio_seconds": 12.28,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 9.545981557,
+          "id": "crossing",
+          "memory": {
+            "allocated_bytes": 4600239616,
+            "peak_allocated_bytes": 4909853184,
+            "peak_reserved_bytes": 5135925248,
+            "reserved_bytes": 5135925248
+          },
+          "peak": 0.9900000095367432,
+          "real_time_factor": 0.7773600616449511,
+          "text": "Charlie Golf Tango Lima Tango, cross runway two five right. Report runway vacated.",
+          "voice": "Bella"
+        },
+        {
+          "audio_seconds": 7.0,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 5.441448534,
+          "id": "handoff",
+          "memory": {
+            "allocated_bytes": 4600403456,
+            "peak_allocated_bytes": 4785759744,
+            "peak_reserved_bytes": 5135925248,
+            "reserved_bytes": 5135925248
+          },
+          "peak": 0.9900000095367432,
+          "real_time_factor": 0.7773497905714286,
+          "text": "Charlie Golf Tango Lima Tango, contact Southern California Departure, one two four decimal five. Good day.",
+          "voice": "Marcus"
+        },
+        {
+          "audio_seconds": 12.92,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 9.615386201,
+          "id": "clearance",
+          "memory": {
+            "allocated_bytes": 4600567296,
+            "peak_allocated_bytes": 4925982720,
+            "peak_reserved_bytes": 5309988864,
+            "reserved_bytes": 5309988864
+          },
+          "peak": 0.9900000095367432,
+          "real_time_factor": 0.7442249381578947,
+          "text": "Charlie Golf Tango Lima Tango, cleared to John Wayne Airport via the Los Angeles One departure, then as filed. Climb and maintain five thousand feet. Squawk two one zero five.",
+          "voice": "Martha"
+        },
+        {
+          "audio_seconds": 5.58,
+          "event": "speech",
+          "finite": true,
+          "generation_seconds": 4.258937809,
+          "id": "accent",
+          "memory": {
+            "allocated_bytes": 4600724992,
+            "peak_allocated_bytes": 4750479360,
+            "peak_reserved_bytes": 5309988864,
+            "reserved_bytes": 5309988864
+          },
+          "peak": 0.9900000095367432,
+          "real_time_factor": 0.7632505034050179,
+          "text": "Charlie Golf Tango Lima Tango, wind two four zero degrees at eight knots. Runway two five left, cleared to land.",
+          "voice": "French"
+        }
+      ]
+    }
+  ],
+  "fp16_trial": {
+    "result": "failed",
+    "reason": "Invalid probability values during generation after converting the language model to FP16",
+    "preliminary_failure": "Converting weights directly on GPU exceeded available VRAM. Moving the model to CPU for conversion avoided that allocation failure but did not fix invalid probabilities."
+  },
+  "kokoro_recheck": {
+    "voice": "af_bella",
+    "same_heading_text": true,
+    "generation_seconds_from_server_log": [
+      0.29,
+      0.21,
+      0.17
+    ],
+    "http_seconds": [
+      0.470421,
+      0.272899,
+      0.473310
+    ],
+    "audio_seconds": 7.214333,
+    "scope": "After Kitten exited; HTTP durations include transfer overhead."
+  },
+  "recognition_check": {
+    "recognizer": "Whisper Tiny",
+    "sample": "default decoder, Bruno, heading-1; resampled to 16 kHz",
+    "transcript": "Charlie Golf Tango Lima Tango. Turn left heading 270. Climb and maintain 5,000 feet.",
+    "scope": "Single sample; not a listening-quality or pronunciation guarantee."
+  },
+  "integration": "Evaluation only. The OpenATC server remains on Kokoro; no KittenTTS 2 provider or Python dependency was added to the application."
+}

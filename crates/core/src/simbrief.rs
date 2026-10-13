@@ -59,13 +59,14 @@ fn push_airport_fix(fixes: &mut Vec<RouteFix>, airport: &serde_json::Value) -> R
             latitude: number_value(airport, "pos_lat", 0.0)?,
             longitude: number_value(airport, "pos_long", 0.0)?,
             altitude_feet: number_value(airport, "elevation", 0.0)?,
+            ..Default::default()
         });
     }
     Ok(())
 }
 
 /// Collect the navlog fixes, skipping entries without coordinates. A lone
-/// object counts as a one-item list, like over there.
+/// object is treated as a one-item list.
 fn navlog_fixes(document: &serde_json::Value) -> Result<Vec<RouteFix>, String> {
     let navlog = section(document, "navlog");
     let mut fixes = if navlog.is_object() {
@@ -92,6 +93,7 @@ fn navlog_fixes(document: &serde_json::Value) -> Result<Vec<RouteFix>, String> {
                 latitude: number_value(fix, "pos_lat", 0.0)?,
                 longitude: number_value(fix, "pos_long", 0.0)?,
                 altitude_feet: number_value(fix, "altitude_feet", 0.0)?,
+                ..Default::default()
             });
         }
     }
@@ -139,13 +141,30 @@ pub fn parse_simbrief(document: &serde_json::Value) -> Result<FlightPlan, String
     push_airport_fix(&mut fixes, &origin)?;
     fixes.extend(navlog_fixes(document)?);
     push_airport_fix(&mut fixes, &destination)?;
+    let route = string_value(&general, "route", "");
+    if let Ok(expression) =
+        regex::Regex::new(r"(?i)\b([A-Z0-9]{2,10})/(?:N|K)[0-9]{3,4}F([0-9]{2,3})\b")
+    {
+        for step in expression.captures_iter(&route) {
+            if let Ok(level) = step[2].parse::<i32>()
+                && let Some(fix) = fixes
+                    .iter_mut()
+                    .find(|f| f.identifier.eq_ignore_ascii_case(&step[1]))
+            {
+                fix.step_altitude_feet = Some(level * 100);
+            }
+        }
+    }
+    let cruise_feet = trunc_int(number_value(&general, "initial_altitude", 32000.0)?);
     let plan = FlightPlan {
         departure: string_value(&origin, "icao_code", ""),
         destination: string_value(&destination, "icao_code", ""),
         runway: string_value(&origin, "plan_rwy", ""),
         arrival_runway: string_value(&destination, "plan_rwy", ""),
         route: string_value(&general, "route", ""),
-        cruise_feet: trunc_int(number_value(&general, "initial_altitude", 32000.0)?),
+        cruise_feet,
+        // SimBrief initial_altitude is the planned cruise level, not an ATC clearance.
+        initial_altitude_feet: FlightPlan::default().initial_altitude_feet.min(cruise_feet),
         callsign,
         registration,
         aircraft: string_value(&aircraft, "icaocode", "A20N"),
@@ -189,6 +208,37 @@ mod tests {
         let path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/simbrief.json");
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn low_level_ofp_imports_airports_route_and_runways() {
+        let document = serde_json::json!({
+            "origin":{"icao_code":"KLAX","plan_rwy":"25L"},
+            "destination":{"icao_code":"KLGB","plan_rwy":"30"},
+            "general":{"route":"LAXX1 SLI KAYOH8","initial_altitude":"4000","sid_ident":"LAXX1","star_ident":"KAYOH8"},
+            "aircraft":{"reg":"C-GTLT","icaocode":"A20N"}
+        });
+        let plan = parse_simbrief(&document).unwrap();
+        assert_eq!(
+            (
+                &*plan.departure,
+                &*plan.runway,
+                &*plan.destination,
+                &*plan.arrival_runway
+            ),
+            ("KLAX", "25L", "KLGB", "30")
+        );
+        assert_eq!(plan.route, "LAXX1 SLI KAYOH8");
+        assert_eq!(plan.cruise_feet, 4000);
+        assert_eq!(plan.initial_altitude_feet, 4000);
+        assert_eq!(plan.sid, "LAXX1");
+        assert_eq!(plan.star, "KAYOH8");
+        let mut higher = document.clone();
+        higher["general"]["initial_altitude"] = serde_json::json!(32000);
+        assert_eq!(parse_simbrief(&higher).unwrap().initial_altitude_feet, 5000);
+        let mut invalid = document;
+        invalid["general"]["initial_altitude"] = serde_json::json!(500);
+        assert!(parse_simbrief(&invalid).is_err());
     }
 
     #[test]

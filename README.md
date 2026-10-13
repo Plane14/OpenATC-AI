@@ -5,169 +5,552 @@
 
 # OpenATC AI
 
-OpenATC AI is a free, MIT-licensed air traffic control plugin for **X-Plane 12**. It combines controller rules, editable TOML speech, voice input/output and cockpit crew conversations. The companion engine runs locally; optional AI and speech services can run on the same computer or another machine.
+Free, open-source ATC and cockpit crew conversations for **X-Plane 12**. OpenATC combines a Rust controller engine, editable TOML phrasebooks, voice input/output, simulator telemetry and aircraft control profiles. You can speak, type or use the available request buttons.
 
-Linux is the current validated build target. Windows and macOS release packaging still needs validation. This is an active project: phrasebook coverage extends beyond the procedures implemented by the controller.
+The **AI server can run on another computer**. Keep its language model, speech recognition and speech synthesis away from the simulator's CPU and GPU, or run everything locally if you prefer. The included models run locally without subscriptions, API token payments or a cloud account. Internet access is needed for the first model download and optional online services such as SimBrief.
 
-## Build and install
+OpenATC's application code is MIT-licensed. Models, libraries, fonts and simulator data have their own terms; see [third-party notices](docs/THIRD_PARTY.md). This is an early-development flight-simulator project. A phrase in the library does not mean that every associated procedure, aircraft or regional rule has been implemented or validated.
 
-Install a current stable Rust toolchain, Python 3, a C/C++ compiler, Clang/libclang and pkg-config. Native dependencies are built through Cargo. From the repository root:
+## Contents
+
+- [What is included](#what-is-included)
+- [Install and connect](#install-and-connect)
+- [AI server, voices and GPU selection](#ai-server-voices-and-gpu-selection)
+- [Fly an IFR flight](#fly-an-ifr-flight)
+- [Copilot, cabin and ground crew](#copilot-cabin-and-ground-crew)
+- [Missions and flight stories](#missions-and-flight-stories)
+- [Emergencies and assistance](#emergencies-and-assistance)
+- [Traffic and performance](#traffic-and-performance)
+- [Maps, stations and simulator guidance](#maps-stations-and-simulator-guidance)
+- [Settings and realism](#settings-and-realism)
+- [Customise speech and aircraft](#customise-speech-and-aircraft)
+- [Builds and packages](#builds-and-packages)
+- [Development and validation](#development-and-validation)
+- [Troubleshooting](#troubleshooting)
+
+## What is included
+
+OpenATC brings the controller and crew into the same flight. Request your IFR clearance, taxi through runway crossings, check in with the next controller, then work through approach, landing and taxi to parking. Speak naturally, type a request, or use buttons that follow the current phase and controller's duties.
+
+- **A helpful copilot:** spoken readbacks, handoff tuning and check-ins, aircraft controls and read-or-perform checklists. Replies wait for controller speech and are tied to the instruction being answered.
+- **Cabin conversations:** ask for coffee, check on passengers, prepare the cabin for turbulence or request mapped door/slide actions. Editable personalities and wording provide variety, with restrained humour when the situation permits it.
+- **Ground services:** ask to remove chocks and disconnect external power in one message. Aircraft controls are confirmed before the crew reports success.
+- **Traffic you can hear and talk to:** control native AI traffic amount, listen to background exchanges, and ask observed traffic about weather, landing conditions or crosswind. ATC can point out traffic, hold for taxi conflicts and protect occupied runways.
+- **Stories you can create:** select an A320-family mission or edit your own triggers, dialogue, choices and outcomes with the mission form and advanced TOML editor.
+- **An open local setup:** run the AI server on a second machine, choose voices, edit phrasebooks and aircraft profiles, and keep model inference local without paid API tokens.
+
+| Area | Current behaviour |
+| --- | --- |
+| IFR departure | Planning/SimBrief import, clearance, readback checks, start-up/pushback permissions, taxi, runway crossings, Tower handoff and takeoff permission. |
+| Airborne controller | Check-ins, sector handoffs, altitude requests, direct-to requests, heading/speed assignments, lateral deviations and selected procedure/runway amendments. Eligibility depends on phase, controller role and available navigation data. |
+| Arrival | Separate approach and landing permissions, Tower check-in, touchdown/runway-exit monitoring, Ground handoff and taxi to a selected stand. |
+| Copilot | Optional spoken readbacks, frequency changes and check-ins, mapped aircraft controls, and two checklist modes. |
+| Ground and cabin crew | Compound control/service requests, one confirmation after simulator acknowledgements, request history, refreshment requests and a simulated passenger cabin. |
+| Missions | Eight A320-family flight stories, mission selection, a form/TOML editor, phase and probability triggers, choices and a flight journal. |
+| Traffic | Simulator traffic inspection, optional native AI count control, taxi conflict holds, runway protection, limited approach spacing and observed-weather pilot conversations. |
+| Speech | Local Whisper recognition, Kokoro synthesis by default, optional Kitten Mini 0.8, editable phrasebooks and optional LLM wording variety. |
+| Simulator data | Published airport frequencies, combined controller duties, taxi networks, runways, stands, installed navigation data and controller coverage. |
+| Interface | Resizable in-simulator window, Light/Dark themes, transparency; Planning, ATC, Radios, Taxi, Arrival, Airports, Traffic, Missions and Settings pages; developer Map and testing tools. |
+
+These are implemented paths, not a claim of complete worldwide ATC coverage. Automated checks exercise important transitions and failure cases. Full aircraft-specific flight testing, separation, procedure interpretation and native platform acceptance remain ongoing; see [Validation](docs/VALIDATION.md) and [Remaining work](docs/ROADMAP.md).
+
+Further work includes random mixed traffic, lightweight Bluebell rendering, wider wake sequencing and arrival holding. The [roadmap](docs/ROADMAP.md) distinguishes these plans from implemented features.
+
+## Install and connect
+
+### The three running components
+
+1. **X-Plane plugin:** displays the interface, captures audio, plays speech, reads simulator state and applies supported aircraft controls on the simulator thread.
+2. **Companion engine:** runs beside the simulator and owns the flight plan, controller state, readbacks, requests, monitoring and conversation. The plugin starts it automatically.
+3. **Optional AI server:** runs the LLM, STT and TTS locally or on another machine. It exposes one HTTP service for all three.
+
+The AI server still launches a bundled `openatc-stt` helper. The language and recognition libraries currently contain incompatible copies of a native dependency, so recognition remains in a child process. Kokoro and Kitten run inside the AI-server process. Install the supplied bundle rather than copying only the main executable.
+
+### Install the plugin
+
+Close X-Plane before replacing plugin files. A packaged plugin installer asks for the **X-Plane root folder**, not the aircraft folder. A complete plugin payload can also be copied into `X-Plane 12/Resources/plugins/OpenATC`.
+
+For a source build:
 
 ```sh
 cargo build --locked --release -p openatc-plugin -p openatc-engine
 cargo xtask install-plugin "/path/to/X-Plane 12"
 ```
 
-Plain `cargo build` and `cargo test` cover the core, engine, UI and plugin. Build optional desktop or AI services with their explicit package targets; `--workspace` builds all members. The Rust source lives in `crates/*/src/`.
+The installer checks speech files, makes a recoverable backup outside the plugin directory, and installs the plugin, engine and editable resources. It preserves personal settings and existing station-role overrides. Do not rename the engine executable into an `.xpl`: the simulator module and companion engine are different binaries.
 
-Close X-Plane before installing. The installer validates speech and backs up the existing OpenATC folder outside the simulator's plugin directory. It installs `OpenATC/64/lin.xpl`, the companion engine, configuration and assets. Personal settings and existing station-role overrides are preserved. Restart X-Plane after installing.
+The simulator module is `64/lin.xpl` on Linux, `64/win.xpl` on Windows and `64/mac.xpl` on macOS. Keep the rest of the OpenATC folder with it. Restart X-Plane and open **Plugins → OpenATC**.
 
-Open OpenATC from X-Plane's plugin menu. In Settings, refresh audio devices, select your microphone and output, and test input. Linux uses PulseAudio, including PipeWire's PulseAudio compatibility server, with ALSA as a fallback. Microphone lists exclude playback monitors. System default follows the operating system's routing.
+### Start the AI server
 
-Configure AI, speech recognition and voice services in Settings. Service URLs are origins without a `/v1` suffix. Settings and engine output are stored at `~/.config/openatc/settings.json` and `~/.config/openatc/engine.log`. `OPENATC_CONFIG_DIR` selects another configuration directory. Optional provider credentials belong in `OPENATC_AI_KEY`, `OPENATC_STT_KEY` and `OPENATC_TTS_KEY`, never in speech files. `OPENATC_AI_URL` and `OPENATC_AI_MODEL` override startup settings. Separately chosen paid providers are optional.
+From an extracted AI-server package:
 
-The plugin starts its bundled engine when needed and shuts down the engine it owns when disabled or closed. A wall-clock heartbeat continues while the simulator is paused. Manually started engines and independently hosted AI/STT/TTS servers keep running.
+```sh
+# This computer only.
+./openatc-launcher
 
-## Fly a departure
+# Accessible from other computers on your LAN.
+./openatc-launcher --host 0.0.0.0 --port 8099
+```
 
-1. Create a flight in Planning or import a SimBrief OFP. Check departure, destination, runway, route and callsign. Clearance requests use the displayed Planning flight automatically.
-2. Power the aircraft radio. In Channels, select a published station to tune COM1. Delivery handles clearance; Ground or Tower assumes this duty when the airport has no separate service.
-3. Request IFR clearance and read back the destination, route, altitude, squawk and runway with your callsign. Unclear or incorrect readbacks leave the clearance pending. **ATC Auto Reply**, beside Replay ATC, submits the complete pending readback or acknowledges start-up/pushback once.
-4. Request start-up, pushback or both, then taxi from the appropriate controller. These permissions do not operate the aircraft or tug. Read back the taxi instruction and hold-short limit to activate guidance.
-5. Stop at each holding point. An intervening runway needs an explicit crossing clearance and readback; Ground or Tower checks traffic and can issue it proactively. Once clear, read back the onward taxi instruction. At the departure runway, Ground directs you to the published Tower frequency. When already on Tower, report ready for departure before the controller checks simulator-reported runway/final traffic and either clears departure or instructs you to hold. Missing traffic data keeps you holding. Runway crossings and backtracking need separate permission.
+On Windows use `openatc-launcher.exe`; in PowerShell prefix it with `.\`. The launcher passes its options to the AI server. First startup downloads and verifies the selected models. Subsequent starts reuse the model cache. Keep `openatc-stt`, the supplied shared libraries and `espeak-ng-data` with the server.
 
-ATC requires a powered radio tuned to a published station within simulated reception range. Unassigned channels receive no reply. Controller duties come from installed airport/controller data, with combined duties inferred from available services and optional station overrides. No airport-specific frequency or duty is hardcoded.
+In **Settings → General**, enter your **AI server address** and apply it to all three services. This preserves model and voice choices. Separate providers can still be configured under **AI** and **STT / TTS**. Example addresses:
 
-Live sessions do not generate fictional aircraft calls or canned traffic clearances. Demo chatter is confined to demo sessions. Runway checks use X-Plane's traffic interface; aircraft absent from that interface cannot be detected. Full sequencing and wake separation are not implemented.
+```text
+http://127.0.0.1:8099        same computer as X-Plane
+http://SERVER-LAN-IP:8099   separate AI computer
+```
 
-## Plugin pages
+Use an origin without `/v1`. If the server is remote, `127.0.0.1` refers to the simulator computer and will not reach it. Allow TCP 8099 on the server's local firewall. The bundled service has no authentication or TLS termination; bind it only where your intended clients can reach it. Local inference does not require provider API keys.
 
-- **ATC:** text and voice conversations, pending clearances and readbacks. Talk addresses the copilot; Transmit addresses the tuned controller. Click a message for selectable text. Text fields support system copy/paste. Debug mode adds conversation export with flight/radio diagnostics and a text-file fallback.
-- **Planning:** manual flight setup and SimBrief import. Review the imported flight before requesting clearance.
-- **Channels:** receivable station names, services, frequencies, distance or sector coverage, and tuned status. The filter starts with the current airport ID; Show all clears it. Selecting a station tunes COM1. Click table headers to switch ascending/descending sorting; airport frequency, navaid, stand and procedure lists also support sorting.
-- **Taxi:** departure/current airport by default, an explicit arrival selector, airport surface layout and approved route. Published taxi graphs take priority; painted centerlines provide a fallback where safe geometry is available. Speech uses published taxiway names when known and does not invent names for unnamed paths. Backtrack wording is used only for an authorized route along the runway.
-- **Arrival:** planned and current descent profiles ending at the destination landing threshold, ground and safe corridor contours, a horizontal safe-altitude floor, transition reference and available ILS intercept reference. Missing terrain remains a gap. This is a geometric preview rather than a complete STAR/FMS path.
-- **Airports:** search airports, procedures and services; view 2D/3D geometry and optional ILS/glideslope beams from published navdata.
-- **Settings:** audio devices, gain, role volumes, voice effects/pacing, service endpoints, realism and optional AI wording variety.
+Check readiness from the simulator computer:
 
-Settings / Realism controls map arrows and illuminated simulator-ground taxi arrows separately. Only approved routes produce simulator guidance; the map also shows pending routes in amber. Unsafe surfaces and missing terrain samples are skipped. Arrows stop at the clearance limit. Existing scenery runway guard lights are preserved; individual native holding-point lighting control has not been established.
+```sh
+curl http://SERVER-LAN-IP:8099/health
+curl http://SERVER-LAN-IP:8099/v1/voices
+```
 
-The ToLiss A320neo profile matches A20N and maps its relevant power/radio controls. Other aircraft use standard controls or an aircraft-specific TOML profile. The plugin window has a bottom-right resize grip.
+A running process is not enough: wait for a healthy response after model loading. The health response includes the selected TTS provider and each component's compute status. See [the AI server guide](docs/AI_SERVER.md) for build commands, GPU requirements, API examples and measurements.
 
-## Weather and station data
+### Select microphone, speakers and voices
 
-Stations are loaded from enabled airport scenery and active custom/default ATC data. Scenery priority and 8.33-kHz channels are supported. Published Tower controller definitions replace scenery Tower frequencies; Ground and Delivery remain sourced from airport scenery. Approach and Center reception uses horizontal coverage plus a simulated 150 NM margin. Transmitter locations and terrain shielding are not modelled.
+In **Settings → Audio & microphone**, refresh devices and select the microphone and output. Test the input before flying. Linux supports PulseAudio/PipeWire, with ALSA fallback; recording lists exclude playback-monitor devices. System default follows the operating system's current routing. After changing hardware, refresh the list and reselect missing devices.
 
-Tuning a receivable ATIS starts a repeating broadcast with an electronic voice effect. Retuning, radio power loss or loss of reception stops it. Weather comes from X-Plane at the station's airport; unavailable distant observations are reported as unavailable. Online METAR data is a separate planning feature. ATIS currently uses English, identifies the planned runway as planned, and does not provide complete regional diction or NOTAM coverage.
+In **Settings → Voices & personalities**, refresh the provider's voice list. Test voices with the editable preview sentence before adding them to the controller pool. Role volume and voice effects are separate from the operating-system output volume.
 
-## Edit speech and configuration
+**Speak my transmitted requests** controls synthesized playback of your own pilot transmissions and is off by default. Copilot radio replies have their own setting. Seeing your text in the log does not imply that pilot playback is enabled.
 
-| Path | Purpose |
-|---|---|
-| `aircraft/*.toml` | Aircraft identities and cockpit control/dataref mappings. |
-| `regions.toml` | Regional units and altitude/procedure references. |
-| `radio-stations.toml` | Combined duties for existing published stations. |
-| `intents.toml` | Requests, aliases and examples. |
-| `speech/runtime/responses.toml` | Live controller, pilot readback, ATIS and crew response templates. |
-| `speech/common`, `speech/<region>` | ATC examples divided into IFR, VFR and shared situations. |
-| `speech/crew` | Global copilot, attendant and ground-service examples. |
-| `prompts/*.txt` | Classifier and crew instructions. |
+### Data locations
 
-Read [speech editing](speech/README.md), [runtime templates](speech/runtime/README.md) and [the situation index](speech/INDEX.md). Runtime alternatives must preserve their named placeholders; startup validates these contracts. Wording edits cannot grant runway permission, change operational values or implement a procedure. Regional folders describe their review boundaries; they do not imply every local procedure has been verified.
+| Data | Default or override |
+| --- | --- |
+| Engine settings and logs, Linux | `~/.config/openatc/settings.json`, `~/.config/openatc/engine.log` |
+| Engine settings and logs, Windows | `%LOCALAPPDATA%/openatc` |
+| Engine directory override | `OPENATC_CONFIG_DIR` |
+| AI models, Linux | `~/.local/share/openatc-ai/models` |
+| AI models on any OS | Platform application-data directory; override with `OPENATC_AI_MODELS` or `--models-dir` |
+| Model integrity record | `models.lock.toml` in the model directory |
+| Persistent controller identities | `controllers.json` in the engine configuration directory |
+| Speech override | `OPENATC_SPEECH_DIR`, or a complete personal speech library |
 
-**Allow AI wording variety** is off by default: ATC uses the validated TOML phrases as written. Turning it on permits natural wording based on the phrase examples. When enabled, the model receives all matching phrase alternatives for the selected role, region and flight rules, without a first-four/first-six cutoff. Examples guide fresh wording rather than verbatim copying; standard ATC terms may repeat. Changes to operational tokens cause a fallback to the original response. Controller authorization remains in Rust.
+Settings, downloaded models and controller identities are separate from packaged binaries. Back them up before moving machines. Optional third-party credentials belong in `OPENATC_AI_KEY`, `OPENATC_STT_KEY` and `OPENATC_TTS_KEY`, not in speech TOMLs. `OPENATC_AI_URL` and `OPENATC_AI_MODEL` override the engine's initial AI settings.
 
-Validate edits without launching X-Plane or AI services:
+## AI server, voices and GPU selection
+
+### Included model choices
+
+| Component | Default | Purpose |
+| --- | --- | --- |
+| Language model | Qwen2.5 7B Instruct, Q4_K_M | Interpret requests and produce optional natural wording. |
+| Speech recognition | Whisper Tiny | Turn microphone audio into English text. |
+| Speech synthesis | Kokoro v1, 82M parameters | 54 voice presets, including 28 English presets. |
+| Optional synthesis | Kitten Mini 0.8, 80M parameters | Eight English presets in a smaller model download. |
+
+Kokoro stays the default. Kitten Mini is selected explicitly; it is not the larger KittenTTS2 model. Only one TTS model is loaded by a server instance. Switching providers requires a server restart and a voice refresh in the plugin. The model files are downloaded separately from the application.
+
+```sh
+openatc-ai --tts-provider kokoro
+openatc-ai --tts-provider kitten
+```
+
+Kitten exposes Bella, Bruno, Hugo, Jasper, Kiki, Leo, Luna and Rosie through `/v1/voices`, using IDs such as `kitten-bella`. Kokoro's roster comes from its loaded voice table. The engine selects from the actual provider roster rather than assuming a fixed set of six names.
+
+**English-language voices only** is enabled by default. It filters language, not accent. Disable it to audition international presets with English text. A model's number of supported languages is not its number of different voices. Kokoro's current OpenATC text preparation is English; non-English presets speaking English require listening tests and do not turn the controller into a multilingual service.
+
+Controller voices are saved by controller identity and reused on later visits. New controllers use unused voices before reusing an exhausted pool. With eight Kitten presets, more than eight controllers necessarily share voices. A saved voice absent from the newly selected provider is replaced with an available one. The selected provider therefore affects both variety and pronunciation.
+
+### GPU preferred, CPU available
+
+An accelerated build tries its GPU backend first and falls back to CPU if initialization or the TTS warm-up fails. There are four independent command-line overrides:
+
+| Flag | Effect |
+| --- | --- |
+| `--force-cpu` | Force LLM, recognition and synthesis to CPU. |
+| `--force-llm-cpu` | Force only the language model to CPU. |
+| `--force-stt-cpu` | Force only Whisper to CPU. |
+| `--force-tts-cpu` | Force only Kokoro or Kitten to CPU. |
+
+For example, leave the larger LLM on the GPU while running speech synthesis on CPU:
+
+```sh
+openatc-ai --tts-provider kokoro --force-tts-cpu
+openatc-ai --tts-provider kitten --force-tts-cpu
+```
+
+Or run without GPU inference:
+
+```sh
+openatc-ai --force-cpu
+```
+
+The global flag takes precedence over individual choices. CPU inference uses system RAM; it does not require dedicated VRAM. It can be slower, particularly for the LLM. Running the server on another computer is usually preferable to taking resources from a busy simulator.
+
+GPU support depends on the compiled features and installed drivers. Linux/Windows native AI release jobs enable Vulkan for the LLM and Whisper, and CUDA for ONNX speech. macOS jobs enable Metal/Apple support and CoreML speech. CUDA TTS needs the matching NVIDIA CUDA/cuDNN runtime libraries; an NVIDIA driver alone is insufficient. AMD/Intel Vulkan can accelerate LLM/STT while TTS falls back to CPU. Plain source builds without these optional features remain usable on CPU.
+
+The server warms up GPU speech before reporting ready because some CUDA libraries load only when inference first runs. `/health` reports a fallback reason if it cannot use the accelerator. Native startup logs identify the actual GPU: a `gpu-requested` status alone is not a VRAM measurement. Hardware requirements, measured usage and source-build flags are in [AI server setup and measurements](docs/AI_SERVER.md).
+
+### Measured VRAM and speech speed
+
+Measured **13 October 2026** on Fedora 44, an **RTX 2080 Ti (11,264 MiB / 11 GiB)**, NVIDIA driver **615.71.09**, Core i9-9900K and 32 GB RAM. Every run loaded Qwen2.5 7B Q4_K_M with a **4,096-token context**, Whisper Tiny and the selected TTS model. The GPU runs used Vulkan for Qwen/Whisper and CUDA for speech, with CUDA 13 and cuDNN 9.27. These are exact observations from this test, not fixed requirements for every installation.
+
+| Configuration | AI/STT process VRAM after startup | Whole-device sampled peak | Speech generation, three requests |
+| --- | ---: | ---: | ---: |
+| Kokoro, all three on GPU | 5,520 MiB | **6,059 MiB** (5.92 GiB) | **0.15–0.20 s** |
+| Kitten Mini, all three on GPU | 5,042 MiB | **5,499 MiB** (5.37 GiB) | **4.51–4.73 s** |
+| Kokoro on CPU; LLM/STT on GPU | 4,794 MiB | 5,025 MiB | 1.90–1.95 s |
+| Kitten on CPU; LLM/STT on GPU | 4,794 MiB | 4,926 MiB | 5.22–5.40 s |
+| Kokoro, LLM and STT all forced to CPU | 8 MiB driver context; no inference tensors on GPU | 20 MiB | 1.78–1.97 s |
+
+The sentence was “Charlie Golf Tango Lima Tango, turn left heading two seven zero. Climb and maintain five thousand feet.” Kokoro's `af_bella` produced 7.21 seconds of audio; Kitten's `kitten-bella` produced about 11.08 seconds. Both were requested at speed 1.0. Different delivery lengths mean this is not a listening-quality ranking. Kokoro was substantially faster here, so it remains the default; Kitten is available for its alternative voices and smaller download.
+
+Startup figures sum the two GPU processes after model loading and the GPU speech warm-up. Peaks were sampled every 100 ms through three speech requests, a JSON completion and recognition of the same sample, with all models resident. Requests ran sequentially. The idle machine baseline was 1 MiB; NVIDIA also reported 429 MiB reserved separately. Sampling can miss shorter peaks, and concurrent inference or longer prompts/utterances can require more memory.
+
+After these requests, the GPU processes retained 6,040 MiB for Kokoro and 5,274 MiB for Kitten, versus 4,802 MiB with TTS on CPU. The extra retained allocation was therefore approximately **1,238 MiB for Kokoro TTS** and **472 MiB for Kitten TTS** in this particular run. Those deltas include allocator/workspace effects and are not standalone model-weight requirements.
+
+All tested configurations fit this 11 GiB card on a separate AI machine. Leave additional headroom if X-Plane or other applications share the GPU. The global CPU flag keeps inference on CPU even though a GPU-enabled binary can create a small driver context during backend discovery. A CPU-only build does not require an NVIDIA card. See [measurement reproduction](docs/AI_SERVER.md#measurements-and-reproduction) for the commands and limits.
+
+### KittenTTS 2 evaluation
+
+KittenTTS 2 has **47 voices (38 English and nine non-English)**. It is a different model from the eight-voice Mini 0.8 option above. It was tested separately on the same RTX 2080 Ti; it is not integrated into the OpenATC server.
+
+The compact `emb4` language-model file is 492,114,467 bytes (469.3 MiB). That is not the complete runtime: the upstream GPU implementation also downloads a 1,064,875,036-byte audio decoder, voice assets and, when selected, a 38,817,934-byte student decoder. The language-model weights are expanded for inference.
+
+With the model already loaded, the heading/climb sentence above took **5.62–5.69 seconds** to generate, compared with **0.17–0.29 seconds** in a fresh Kokoro check. The other tested Kitten instructions took **4.26–9.89 seconds**, depending on voice and text. Kitten added about **4.97–5.14 GiB** to GPU use. The whole device peaked at **10.40–10.58 GiB** while the existing LLM, Whisper and Kokoro also remained loaded. These totals include both TTS models and are not the memory requirement for replacing Kokoro with Kitten.
+
+Both the default and smaller student decoders produced valid audio. Converting the language model to FP16 failed during generation, so that trial supplies no usable faster result. Kokoro remains the recommended built-in model for prompt radio replies. See [the evaluation details](docs/AI_SERVER.md#kittentts-2-evaluation) and [recorded measurements](docs/benchmarks/kitten-tts-2-2026-10-13.json).
+
+A separate Rust native prototype also generated intelligible speech without Python. Its standard Q4 model is 1,447,458,656 bytes, plus a 312,339,253-byte student decoder and voice data. On the same i9-9900K, with four CPU threads, a takeoff instruction took **16.03–17.46 seconds** for 5.08–5.24 seconds of audio. The Vulkan GPU trials returned non-finite logits, so that path is not ready to ship. This prototype is not the selectable Mini provider and has not changed the default server or release dependencies. See the [native experiment](docs/AI_SERVER.md#native-kitten-experiment).
+
+### How AI is allowed to act
+
+The model does not issue simulator commands hidden in its prose. ATC interpretation returns bounded JSON, for example:
+
+```json
+{"intent":"altitude","altitudeFeet":7000,"waypoint":""}
+```
+
+The engine rejects unknown intents, fields and unsupported values. It keeps the original pilot text for readback validation. Model output cannot claim that a clearance was acknowledged, mark itself as controller-initiated, supply a clearance sequence, or write arbitrary datarefs.
+
+Rust then checks the controller's duties, radio state, flight phase, pending exchange, route and constraints. A recognised request may be refused or clarified. Crew interpretation uses a separate bounded list of aircraft-profile control IDs; actual simulator confirmation is still required. Structured JSON improves interpretation without giving the language model control of flight-state transitions.
+
+The bundled chat API supports grammar-constrained `response_format: {"type":"json_object"}`. That guarantees the output format, not the truth or operational correctness of its contents; validation remains in the engine. Unsupported `json_schema` requests return an error.
+
+## Fly an IFR flight
+
+### 1. Plan and request clearance
+
+Create a flight in **Planning** or import a SimBrief OFP. Check the departure, destination, callsign, runway, route and cruise level. A clearance request uses this flight automatically. Aircraft identification and flight callsign can differ, so verify the callsign shown in the plan.
+
+Power the radio and tune a published station in **Channels**. Clearance duties are inferred from installed services: Delivery first, otherwise Ground, otherwise Tower. At an airport with only Tower, that controller can handle clearance and ground duties. Airports and frequencies are not hardcoded for test routes.
+
+Older scenery frequencies restore the omitted final digit: `FREQ 11802` is **118.025 MHz**, so handoffs, copilot tuning, controller replies and request buttons agree with the aircraft radio. Modern 8.33 kHz `CHAN` records retain their exact channel numbers. See [X-Plane's frequency-format explanation](https://developer.x-plane.com/article/8-33-khz-radios-for-users-and-authors/).
+
+Routine pressure calls use **QNH 1022**, without a unit suffix. Settings below 1000 hPa retain “hectopascals” to avoid ambiguity.
+
+The clearance needs a correct readback. **ATC Auto Reply** submits the current pending reply; optional copilot replies can do it for you. A request button is a request, not permission to move. Unclear or incorrect readbacks leave the instruction pending. Routine clearances do not need to announce a list of fields to read back, but those fields remain checked.
+
+### 2. Start-up and pushback
+
+After the IFR readback, Delivery directs you to Ground where one is published. Start-up and pushback are separate permissions; the quick requests reflect existing approvals and observed engine state. A start-up request should not remain available after the engines are running.
+
+ATC approval does not operate the tug or engines. Address **Ground crew** for external power, chocks or the aircraft's pushback control. With ToLiss, set pushback distance and angle in its own panel first; OpenATC can start the configured sequence, but currently cannot apply a spoken distance or angle.
+
+### 3. Taxi and cross intervening runways
+
+Request taxi from Ground or the combined controller. OpenATC builds a route from installed scenery and names published taxiways where available. Read back the route and hold-short limit. The map displays pending routes in amber and approved routes in green; optional simulator arrows appear only for approved portions.
+
+Approved taxiway arrows remain visible from stands within 1,200 metres of the route, even when the stand is outside the published taxi network. A dashed amber ramp connector on the map remains unverified and receives no simulator arrows. Guidance stays bounded to 64 nearby arrow instances.
+
+Each intervening runway is a separate clearance limit. The controller can issue a crossing instruction when you approach the hold and traffic information permits it. A crossing clearance names the runway being crossed, which may differ from the departure runway. Read back the crossing before entering. Unknown traffic information does not count as a clear runway.
+
+After the crossing, the copilot can report vacated at the observed completion point. The next taxi instruction replaces the route and requires its own readback. In manual mode physical completion can advance the crossing workflow; a vacated report is not treated as an altitude readback.
+
+Published taxi networks are preferred. Where they are missing, painted scenery centerlines can provide a conservative fallback. Backtracking is used only when the authorized route runs along the runway. The engine does not invent taxiway names for unnamed scenery paths or treat a drawn path as runway-entry permission.
+
+### 4. Holding point and takeoff
+
+At the final departure hold, Ground sends you to the published Tower frequency. If already on Tower, stay with that controller. Reaching the hold does not invent a ready-for-departure call: report ready yourself or use an available supported copilot exchange.
+
+Holding-point detection considers approach geometry and the aircraft's reference position; it does not require the aircraft to be perfectly stopped to recognise arrival. Tower checks available runway and final-approach traffic and either clears takeoff or explains the hold. A previously reported ready aircraft can receive clearance when blocking traffic clears.
+
+A takeoff instruction may include known wind, pressure and departure guidance. The cleared altitude and departure constraints remain authoritative. The departure handoff is tied to the airborne workflow; accepting a takeoff readback alone should not send the aircraft to another controller while still parked at the hold.
+
+### 5. Departure, enroute requests and constraints
+
+Altitude compliance allows a 300-foot band and a 30-second sustained-deviation delay; an aircraft climbing or descending toward its assigned level is not treated as non-compliant. The plugin supplies geometric, indicated and standard-pressure altitude separately. The engine compares flight-level clearances with standard-pressure altitude using the configured regional transition altitude, and lower assignments with the pilot's barometric altitude. Older clients fall back to geometric altitude when instrument readings are unavailable. Pilot check-ins use the indicated altitude. Debug conversation exports include all three readings for diagnosis.
+
+Check in after tuning the assigned frequency. The airborne check-in includes current altitude and the assigned climb altitude when applicable. Handoffs use current and predicted sector coverage; receiving a frequency is not the same as owning the aircraft's sector. The debug Map displays the controller geometry used by these decisions.
+
+Supported request families include an altitude change, direct to a known fix, a lateral deviation, resuming the route, a speed request, a different approach, and departure/arrival runway amendments. Availability depends on phase and controller role. Requests that cannot be interpreted or supported should be clarified rather than silently applied.
+
+Installed CIFP data supplies selected waypoint altitude restrictions. SimBrief planned levels and step climbs are planning inputs, not permission to climb. The controller must issue an amended clearance, including continued climb/descent where appropriate. Strict constraints preserve published exact, minimum, maximum and window restrictions. Requested climbs also undergo a conservative descent-feasibility check toward the destination.
+
+This is not a complete FMS procedure interpreter: curved/unnamed/vector legs, aircraft performance, winds and local minimum vectoring altitudes remain limitations. MORA corridor checks are conservative terrain references, not a substitute for every local radar vectoring rule. Review the [airborne architecture](docs/ARCHITECTURE.md#airborne-instructions-and-published-restrictions) before relying on a particular route type.
+
+### 6. Approach, touchdown and taxi to parking
+
+Approach permission and landing permission are separate. Follow the selected arrival/approach and controller instructions. When transferred to Tower, check in; a continue-approach instruction is not a landing clearance. Tower's landing decision also depends on available runway traffic information.
+
+Touchdown is detected from simulator telemetry. The arrival controller requests that you vacate the runway. Ground handoff follows observed runway exit, not the first on-ground sample. A combined Tower/Ground station can retain you on the same frequency.
+
+Select a destination stand using the parking list and its filter, then request taxi. Arrival taxi routes have the same runway-crossing and readback limits as departure routes. The flight reaches its completed state only when the approved parking route ends at the selected stand and the aircraft has stopped; stopping at an intermediate runway hold is not the end of the flight.
+
+Stand selection uses the loaded aircraft's wingspan override or ICAO type and the scenery's published A–F width class. An A320/A20N needs at least class C; its departure parking position is not used to guess its size. Too-small, unclassified and observed occupied stands are excluded. If the assigned stand becomes unavailable during taxi-in, Ground holds the aircraft and can issue a new route once stopped. That route needs a readback and retains every runway crossing limit. Static scenery aircraft are not included in the TCAS feed, so their occupancy cannot be guaranteed. OpenATC does not remove another traffic provider's aircraft.
+
+Clearance squawks are allocated per flight from a simulated discrete-code pool and retained through handoffs. New flights avoid recent allocations. This is not a reproduction of each country's operational code allocation.
+
+### Radio turn-taking
+
+Routine automatic ATC transmissions wait while the radio is occupied. Copilot readbacks play before their effects are committed; automatic tuning waits for the exchange, and check-in waits for telemetry to confirm the new frequency. An urgent short-final go-around preempts normal playback. These are separate steps so a fast model response cannot skip a pilot transmission.
+
+**ATC Auto Reply** handles the pending response once. It does not generate permission for unrelated movement or answer background traffic. Quick buttons are filtered by tuned service, flight phase and applicable state; completed start-up/pushback permissions and duplicate readback actions are not intended to clutter the list.
+
+## Copilot, cabin and ground crew
+
+**Talk** addresses the copilot. **Transmit** follows the active radio/interphone role. The ToLiss A320neo profile observes ATTN/CAB and MECH/INT selections for cabin and ground routing. Check the displayed conversation role before transmitting.
+
+Repeated MECH/INT or ATTN/CAB calls retain the selected recipient; selecting a VHF radio restores ATC. Start-up/pushback permission alone does not prevent ground services from disconnecting external power or removing chocks: those actions require a valid, stationary ground position and simulator confirmation. They are refused while moving.
+
+Crew requests can include up to eight explicit control actions, such as “remove chocks and disconnect external power.” The engine validates all targets against the loaded aircraft profile before sending a batch. Each action waits for simulator confirmation; a failure cancels the remaining actions. Unsupported or ambiguous clauses are clarified rather than partly executed and announced as complete.
+
+Stock aircraft use standard X-Plane control mappings. Third-party TOMLs override controls where the aircraft uses its own datarefs or commands. **Settings → Aircraft controls** shows observed availability. A listed command does not prove that every aircraft exposes a reliable confirmation state: button-only mappings confirm a press, not a resulting switch position.
+
+The copilot can change mapped cockpit settings, including heading, autopilot controls, gear and other supported systems. The available profile determines coverage. There is no unrestricted model-to-dataref access. Third-party aircraft can bypass standard simulator controls, so aircraft-specific live testing matters.
+
+Checklists support two modes: the copilot reads a challenge and waits for your response, or you read an item and the copilot performs supported actions and responds. Checklist definitions belong with the aircraft; spoken pilot/copilot wording belongs in the speech library. The included checklists are examples and need operator/aircraft review before expansion.
+
+Cabin conversation receives the live flight phase and ground state. Greetings and refreshment requests do not prepare the cabin for landing. Arming and cross-check requests still depend on the aircraft's mapped indications; an unconfirmed slide indication must not be announced as armed. See [Aircraft controls and checklists](docs/AIRCRAFT_CONTROLS.md) for editing examples and limitations.
+
+Requests such as “coffee, arm the doors and cross-check” keep the service request alongside the control actions. The crew gives one combined result after the controls are acknowledged, including any unconfirmed items. Recent requests, service counts and confirmed outcomes are retained separately: asking for something does not make it true. Repeat-coffee humour is limited to quiet, nonurgent cabin conversation.
+
+The **simulated cabin** uses the imported passenger count when present, flight phase, seated/lavatory activity and turbulence preparation. It can discuss passengers resting or watching movies and follow up when the simulated cabin is ready. Unknown passenger counts remain unknown. This passenger activity is fictional; actual door/slide/seatbelt indications still come from the aircraft. Urgent mission incidents suppress cheerful all-clear reports and jokes.
+
+## Missions and flight stories
+
+Open **Missions** using the flag icon in the title bar. Choose a compatible flight story before taxi; loading a story leaves your IFR plan intact. The eight examples cover a medical priority landing, childbirth, rough air, parts transport, a nervous passenger, an island reunion, cabin smoke and an assisted arrival. Suggested routes are starting points for your own current flight plan, not prevalidated operational dispatches.
+
+The mission editor has ordinary fields and an advanced TOML view. Events support flight phase, unpaused delay, probability, prior-choice conditions, passenger seat, alternative speech and captain responses. The journal records what occurred and which choices were made. An urgent mission permits an explicit emergency declaration even with ordinary emergency practice disabled; a cabin report does not declare one automatically. Full automatic diversion planning is still pending.
+
+Files under `missions/` ship with the plugin. Personal copies are saved under the engine configuration folder's `missions/` directory and override matching IDs. `OPENATC_MISSIONS_DIR` adds an optional catalogue directory. Audio, video and image references with transcripts can be authored now, but media playback is not implemented and the example missions contain no media assets. See [Mission format and editor](missions/README.md).
+
+## Emergencies and assistance
+
+Declare an emergency or urgency explicitly, including when requesting a diversion, direct routing or descent. The request retains its emergency status instead of being reduced to an ordinary route change. Routine training penalties and discretionary traffic speed requests pause during a declared emergency.
+
+Mission incidents can introduce a medical problem, childbirth or cabin smoke, with crew dialogue and captain choices. A cabin report does not declare an emergency for you or change your flight plan automatically. Urgent incidents suppress casual cabin humour and misleading all-clear reports. Full automatic diversion planning and mission-driven runway closures remain in development.
+
+ATC can ask whether you need assistance after repeated deviations, and Ground can offer revised taxi routing from your stopped position. Existing IFR clearances remain active; accepting revised instructions still requires the appropriate readback.
+
+## Traffic and performance
+
+Open **Traffic** from the visible page tabs to see simulator-reported aircraft. **Settings → Traffic** holds model downloads, aircraft amount and the separate **Hear simulated traffic pilot reports** and **Talk to simulated traffic pilots** switches. Select an identified aircraft to ask about weather, its landing or crosswind. Replies use recent simulator weather and observed landing history; missing information gets an honest unavailable response. These are simulated pilot conversations, not messages sent to multiplayer users.
+
+**Set X-Plane AI traffic amount** adjusts the native active-aircraft count, up to 19 and limited by available simulator aircraft. It is off by default, leaves flight models enabled, yields to other traffic plugins and restores the previous count when disabled. Native AI flies its own simulator routes and consumes flight-model CPU. Start with a small count and compare X-Plane's performance readings. The SDK exposes aircraft ownership/count and AI control, but no documented interface for handing arbitrary per-aircraft IFR plans to native ATC. See [XPLMPlanes](https://developer.x-plane.com/sdk/XPLMPlanes/).
+
+OpenATC's monitoring is bounded to 63 reported targets; pilot history updates at most once per second. It can hold taxiing aircraft for an observed conflict and resume when clear, protect individual runway crossings, and issue a short-final go-around for runway conflicts. Crossing completion and arrival Ground handoff include aircraft dimensions and the relevant holding line, so a centre point outside the runway does not immediately mean the tail is clear. Unknown aircraft use conservative dimensions. Limited speed spacing applies to supported narrow-body jets on an established final, outside eight miles, with published speed limits retained. Pilots can answer **Unable**; it does not repeatedly offer the same rejected speed.
+
+**Wake protection** now uses FAA consolidated wake categories for the represented US airports and supported aircraft. Observed departures can produce a **Hold for wake turbulence** instruction, with different intervals for full-length, intersection and opposite-direction departures and qualifying close parallel runways. Timing uses simulator flight time, stops while paused and does not expire instantly after a clock jump. Starting the interval at observed liftoff is conservative; no pilot waiver is assumed. Approach checks consider the aircraft pair, closing speed, parallel runway geometry and displaced landing thresholds. Insufficient spacing at the preceding aircraft's threshold passage remains a conflict after it touches down or disappears from the feed, and can require a go-around. These checks follow the [FAA departure rules](https://www.faa.gov/air_traffic/publications/atpubs/atc_html/chap3_section_9.html) and [approach wake table](https://www.faa.gov/air_traffic/publications/atpubs/atc_html/chap5_section_5.html). Intersecting flight paths, preceding low/missed approaches and complete worldwide separation are still unfinished.
+
+**Download and install Bluebell** downloads the publisher's 12 DDS archives and installs them for you. **Settings → Traffic** shows the current archive, downloaded bytes and extraction progress, with Cancel and Retry controls. Completed archives are reused after an interrupted attempt; an existing installation is replaced only after all archives have extracted successfully. Allow about 6 GB of free disk space for downloads and installation, or more when replacing an existing pack. Models live in `Resources/plugins/OpenATC/Resources/CSL/Bluebell` under your selected X-Plane folder. The companion engine performs the network and disk work off the simulator thread.
+
+Downloads come directly from the [Bluebell publisher's public distribution](https://github.com/oktal3700/bluebell). Textures retain their original licences and are not bundled in OpenATC releases. A publisher quota or network failure appears in Settings → Traffic and can be retried. **Scan installed model catalogue** indexes available aircraft types, operators and liveries on a background worker. Matching prefers the requested type/operator, then an unmarked model of the same type; it does not silently substitute a competing airline. Incomplete models and unsupported texture overrides are reported in the catalogue diagnostics. Native AI uses X-Plane aircraft, not CSL objects; lightweight CSL rendering and randomly generated flights remain unfinished. Installing Bluebell alone does not create traffic.
+
+**Traffic advisories** use observed aircraft position, heading, speed and altitude to predict encounters up to two minutes ahead. Calls include clock position, range, direction, type when known and indicated altitude. Several encounters are tracked independently, so an earlier call cannot hide a more urgent aircraft. Urgent alerts can interrupt ordinary speech while preserving the outstanding clearance; routine calls wait their turn. The ATC page offers **Traffic in sight** and **Negative contact** for the most recently called traffic on the tuned frequency. Follow-up calls distinguish traffic that is no longer a factor from traffic that is no longer observed. Reporting traffic in sight does not grant visual separation or acknowledge another clearance. These calls remain available with background traffic chatter off. Trigger thresholds are conservative simulator heuristics, not a complete regional separation system or a replacement for TCAS.
+
+Copilot playback and acceptance are separate steps. Repeated preparation requests reuse the pending transmission, and the UI identifies the exact transmission when reporting playback complete. A delayed completion cannot acknowledge a replacement reply or one prepared on another frequency. Live audible timing still needs simulator acceptance.
+
+**Background CPU workers** controls the engine's bounded scenery, navigation and model-indexing pool on Linux, Windows and macOS. Zero selects automatic: half the available logical CPU threads, at least one and at most four. Set one to limit background concurrency, or choose a higher limit up to sixteen, capped by available parallelism. This does not change traffic density. The pool starts on demand, its waiting queue holds at most twice the worker count, and an overloaded request returns a retryable error instead of blocking the simulator. Changes apply when the companion engine restarts. `/health` reports the active `cpuWorkers` value. SDK calls remain on the simulator thread. The future generated-traffic simulation will use this same bounded-work approach; it is not implemented by this worker setting alone.
+
+**Airline, hub and aircraft preferences** are editable in `traffic/airlines.toml`, `traffic/hubs.toml` and `traffic/aircraft.toml`. The starter set has 25 operating/private fleet profiles, 47 airport preferences and 46 aircraft envelopes spanning piston aircraft through freighters. Weights are approximate simulation preferences, not market shares or real schedules. The selector checks both endpoints, home-region affinity, runway/parking capacity, range and compatible installed CSL models. Traffic can reload and validate personal overrides, retaining the last valid set after an invalid edit. These are data/selection foundations; the generated moving fleet remains unfinished. See [profile editing and sources](traffic/README.md).
+
+## Maps, stations and simulator guidance
+
+| Page | What it shows |
+| --- | --- |
+| ATC | Conversation, current clearance, text entry, role controls and eligible quick requests. Click a message for selectable/copyable text. |
+| Planning | Editable/imported flight plan, route, procedures and flight identity. |
+| Channels | Automatically shows the airport's stations on the ground and nearby receivable stations in flight, with frequencies, duties, distance/coverage and tuned state. Click to tune COM1; there is no airport filter to maintain. |
+| Taxi | Airport surface geometry, stands, pending/approved taxi route, aircraft and clearance limit. |
+| Arrival | Geometric planned/current descent profiles, installed runway/approach references and sampled terrain where available. |
+| Airports | Airport search, runways, services, navaids, procedures, stands and 2D/3D geometry. |
+| Traffic | Native AI amount, reported aircraft, optional traffic speech and pilot conversation controls. |
+| Missions | Compatible stories, form/TOML editor, captain choices and flight journal. |
+| Map, developer mode | Aircraft-following controller boundaries, altitude bands, airports and current assignment for handoff diagnosis. |
+
+Channels identifies a ground airport using enabled scenery boundaries, pavement and runway footprints before falling back to reference-point proximity. This avoids choosing a nearby heliport or small airfield simply because its reference point is closer. It is scenery containment, not a legal airport-property survey. The station list updates as airport and radio data arrive; there is no airport filter to maintain.
+
+Stations come from enabled scenery and installed ATC/navdata in priority order, including 8.33-kHz channels. Published controller definitions can replace airport Tower entries; Ground and Delivery remain airport services. Approach/Center coverage and receivability are separate concepts. Terrain shielding, actual transmitter sites and full remote-radio coverage are not modelled.
+
+Click an underlined frequency in the conversation to tune COM1 through the same aircraft-control path as Channels. The radio must be powered. Table headers support ascending/descending sorting, and name/identifier filters help narrow airport and stand searches.
+
+Taxi map arrows and simulator-ground arrows are separate settings. Only acknowledged routes produce ground arrows, and unverified stand connectors are not drawn on simulator ground. Guidance stops at the current clearance limit. Terrain probe misses, water and unsafe discontinuities are skipped.
+
+The optional **Holding point marker** is off by default. It draws a translucent amber circle on the map and simulator ground, set back on the approach side of available hold-line geometry. It disappears when the relevant crossing or takeoff permission permits entry. It is plugin guidance, not a replacement for painted markings or native airport lights. Existing scenery runway guard lights are preserved; individual native stop-bar control has not been established.
+
+The Arrival profile is a geometric aid, not a complete STAR/VNAV solver. Missing terrain stays unknown. The debug Map and Arrival profile have different purposes; dense airport labels can be hidden. Use the Map to compare the aircraft position and altitude with loaded sector coverage when diagnosing a missing handoff.
+
+ATIS uses simulator weather sampled at the station's airport and repeats until retuning or radio/reception changes. Online METAR lookup is a separate planning feature. Distant unavailable observations are not replaced by invented weather. Current ATIS does not provide complete worldwide regional diction or NOTAM coverage.
+
+## Settings and realism
+
+Page navigation lives in the title bar: ATC, Radios, Flight plan, Taxi, Arrival, Airports, Settings, Traffic and Missions. The Map icon appears in developer mode. Hover an icon for its name; cyan marks the current page. At narrow widths the navigation icons move together onto a second header row, keeping the title and window controls accessible. The right side holds the debug flight jump (developer mode), New flight, Keep expanded, compact ATC view and pop-out controls.
+
+Clicking **Communications only** keeps the ATC window compact until you expand it, choose another page or start push-to-talk. Hover still expands a window that compacted automatically. The transcript keeps following the latest message across size changes; if you scroll up to read earlier traffic, it preserves that reading position instead.
+
+Settings tabs wrap in narrow windows so every section remains visible. **General** shows the engine connection, current AI/speech addresses, SimBrief ID and scenery folder. It can optionally apply one server address to all three services. **Copilot** holds readbacks, automatic tuning/check-in and the copilot talk button. Advanced service addresses, intercom overrides and CPU limits stay with their relevant sections. Changes save automatically; Save now also submits them immediately.
+
+Dispatch fields adapt to window width and text scale. You can edit a flight plan while the engine is disconnected; SimBrief import becomes available when connected. The Airports page offers departure/destination shortcuts before an airport has been loaded. The debug map keeps controller and airport labels apart and groups overlapping controller frequencies in its hover details.
+
+### Appearance
+
+**Settings → Appearance** contains Light/Dark theme, text scale, background transparency and window behaviour. Dark is the default. **Background transparency** ranges from 0% (solid) to 80%; text and controls retain their contrast. Collapsed-window opacity is separate. The background uses ordinary ImGui blending without scene capture or post-processing.
+
+### Flight realism
+
+Choose **Relaxed**, **Standard** or **Strict**, then review individual settings rather than assuming a preset is appropriate for every aircraft or test. Relevant controls include:
+
+- **Readback and constraint checks:** keep clearances pending until acknowledged, and apply selected published restriction checks.
+- **Deviation monitoring:** track assigned altitude/heading/speed where implemented. Repeated unresolved corrections can prompt ATC to ask whether you can comply or need assistance. IFR service and existing permissions are not automatically cancelled after a warning count. The old `terminateAfterWarnings` settings key is retained for existing files and now controls that assistance prompt.
+- **Transponder monitoring:** compare the simulator's selected code with the acknowledged IFR clearance, with a 30-second adjustment period and at least a minute between reminders. Airborne checks also look for altitude-reporting mode. Missing or invalid observations and emergency codes are excluded from routine code corrections.
+- **Runway permission warnings:** identify runway entry, takeoff and landing without the corresponding permission. Crossing permission applies only to the named physical runway. The monitor does not issue a late takeoff-abort instruction during a high-speed roll; an airborne departure without clearance receives an intentions query. Landing reminders wait until rollout slows.
+- **Taxi assistance:** monitoring starts after the taxi readback and confirmed movement: at least five metres of displacement and two telemetry samples at one knot or more. Sitting at the stand, pushback before taxi readback and small speed fluctuations do not trigger an off-route warning. Once moving, spending 15 seconds more than 60 metres from the approved route prompts the issuing controller to offer assistance when the radio is free. A new taxi clearance starts fresh movement monitoring. Runway-permission checks remain independent.
+- Answer the current taxi-assistance question with **yes**, **affirmative**, **no** or **negative**. This works without AI classification. When stopped, an accepted offer recalculates a route to the same runway or stand, updates the map and requires a new readback, retaining intervening runway holds. Missing safe geometry results in a hold-and-confirm-position response. These are revised route instructions, not continuous step-by-step progressive taxi. A short answer cannot acknowledge an unrelated clearance or a question from another frequency. Invalid AI classification JSON is rejected and ATC asks for clarification rather than executing model-supplied actions.
+- **Copilot replies and tuning:** independently control automatic radio assistance. Keep both enabled if you want the full acknowledge/tune/check-in sequence.
+- **AI wording variety:** off uses validated TOML alternatives; on allows natural model wording that must preserve operational facts.
+- **English-language voices only:** limits controller selection by language while allowing English accents.
+- **Pilot playback:** hear synthesized own transmissions if enabled.
+- **Guidance visibility:** map arrows, ground arrows and holding-point marker are independent.
+- **Developer mode:** exposes the sector Map, detailed errors and controlled surface test jumps. It defaults off for new settings files; existing explicit choices are preserved. Enable it under Appearance → Developer tools.
+
+Optional live-session traffic speech is tied to identified simulator aircraft and observed events. Scripted demo chatter stays in demo sessions. Runway protection can only see traffic provided through the simulator interface; aircraft missing from that interface remain invisible to this check. Complete traffic management, wake sequencing and separation are still in development.
+
+**Allow ATC to offer en-route shortcuts** is an optional Realism setting, off by default, with a minimum interval of 2–60 minutes. Offers require suitable downstream fixes, known terrain clearance, no skipped published restrictions and enough distance left for descent. Use **Accept direct…** or **Keep planned route** in the ATC page. Acceptance requests a new clearance and readback; copilot mode does not accept optional changes for you. Simulated runway closures and broader ATC scenario amendments are still planned. Safety instructions and required handoffs do not depend on this switch.
+
+The three additional monitoring switches default off for existing configurations. Selecting Standard or Strict enables them; Relaxed disables them. They can also be changed individually. Required crossing, takeoff and landing permissions remain in force with reminders off.
+
+Tower keeps checking the runway after issuing landing clearance. A newly observed conflict can trigger a go-around even with a readback outstanding. A missed approach does not immediately become another approach clearance merely because the aircraft is near the destination; request an approach again. Routine exit instructions wait until the aircraft has slowed below 40 knots on rollout. Published missed-approach leg guidance is not yet complete.
+
+**Follow-me car** is an optional aid under Realism → Taxi guidance and on the Taxi page. It uses X-Plane's installed follow-me vehicle, appears only for an acknowledged departure or arrival taxi route, and waits before each clearance limit. It cannot authorize a runway crossing. Pending readback or pause stops its movement; reaching parking, taking off or ending the flight removes it. If the route is too far from the aircraft or the scenery vehicle is unavailable, it is not drawn. It is off by default. Live appearance and placement still need simulator testing.
+
+Simulator work is bounded: telemetry is sampled twice a second and coalesced, so an outstanding request cannot build up a queue of old positions. HTTP and speech run on workers; route planning and compliance run in the engine. The panel shares immutable snapshots instead of copying the entire route and conversation each frame, and response parsing stays outside the UI lock. Static airport bounds, taxi node lookups and ILS beams are cached when the airport loads. Ground guidance displays at most 64 nearby arrows and reuses object instances between updates. The follow-me car uses one scenery instance, no aircraft flight model or AI traffic slot, and updates at up to 20 Hz with one terrain probe per movement update. It caches its route and stops at the acknowledged limit. The arrival terrain sampler is capped at 25 probes per half-second update. These are workload limits, not an FPS guarantee; measure performance with your scenery, aircraft and traffic settings using X-Plane's Plugin Admin performance page.
+
+The header's **New flight** icon opens a confirmation inside the plugin window. Starting a new flight clears the plan, conversation, permissions, guidance and pending crew actions. Settings, controller voices and actual aircraft controls remain. Reset errors expose retry controls. Use this to begin another test instead of unloading a live plugin.
+
+The developer fast-forward icon offers controlled surface jumps: an acknowledged route is required to move to the next hold, and takeoff clearance is required to move to the departure runway start. It does not grant permissions or jump into airborne phases. Third-party aircraft reposition behaviour still needs simulator testing.
+
+## Customise speech and aircraft
+
+| File or directory | Purpose |
+| --- | --- |
+| `aircraft/*.toml` | Aircraft matching, supported commands/datarefs and checklist definitions. |
+| `regions.toml` | Regional unit and procedure references. |
+| `radio-stations.toml` | Optional combined-duty overrides for existing published stations. |
+| `intents.toml` | Request names, aliases and examples. |
+| `speech/runtime/responses.toml` | Live controller, pilot, ATIS, readback and crew response templates. |
+| `speech/common` and `speech/<region>` | IFR, VFR and shared phrase examples. |
+| `speech/crew` | Copilot, cabin and ground-service examples. |
+| `missions/*.toml` | Editable flight stories, phase/probability triggers, dialogue, choices and optional future media references. |
+| `prompts/*.txt` | Editable classifier/crew instructions used by the corresponding paths. |
+| `models.toml`, `models-kitten.toml` | Built-in model download manifests, embedded when the server is compiled. |
+
+All spoken phrase alternatives belong in the speech library. Aircraft profiles describe controls and checklist data; they should not contain a separate collection of pilot/copilot response scripts. See [Speech editing](speech/README.md), [Runtime templates](speech/runtime/README.md) and [Situation index](speech/INDEX.md).
+
+Alternatives must retain required placeholders and operational facts. With wording variety enabled, matching phrases become examples for the LLM, together with its role and context. Repetition can still occur for standard phraseology. The engine remembers phrase selections and protects route, altitude, runway, frequency and other cleared values; a rewrite changing protected facts is discarded.
+
+Displayed identifiers remain compact. Speech expands controller abbreviations such as GND to Ground, uses known airport names, spells registration callsigns phonetically, and applies aviation number pronunciation. IFR/VFR/ILS remain spoken letters. Missing airport-name data can still require an identifier fallback.
+
+Adding TOML text does not implement a new operational permission or simulator action. Add the associated request handling, validation and monitoring before connecting a new scenario to live operations. Regional examples are a starting point and require local procedure review.
+
+Validate edited speech before flying:
 
 ```sh
 target/release/open-atc-engine --check-speech speech
 cargo test --locked -p openatc-core --test shipped_config --test speech_library
-cargo xtask test-radio target/release/open-atc-engine speech
+cargo xtask test-speech target/release/open-atc-engine speech
 ```
 
-Restart the companion engine after changing speech or station duties. `OPENATC_SPEECH_DIR` or a complete speech copy in your personal configuration directory provides a custom phrasebook independent of installation updates.
+Restart the companion engine after changing speech, prompts or duties. Model manifests are compiled into the AI server; editing an installed copy documents the model set but does not change the executable's download plan. Rebuild to change the built-in manifests.
 
-## Development
+## Builds and packages
 
-The Cargo workspace lives at the repository root; first-party implementation is under `crates/`. The legacy top-level C++ source and CMake build were removed. Native audio adapters and third-party SDK, UI and model libraries still contain C/C++ and retain their licenses. Shared fixtures live in `tests/fixtures/`.
+The **Native platform builds** workflow runs on version tags beginning with `v`, or manually through GitHub Actions. Pushes and pull requests do not automatically start the expensive platform matrix. A manual run accepts a version such as `0.0.1-alpha.1` and lets you select one platform and one product.
+
+| Platform | Plugin product | AI-server product |
+| --- | --- | --- |
+| Linux x64 | ZIP/payload installer plus DEB, RPM, AppImage and Flatpak bundles | Separate DEB, RPM, AppImage, Flatpak and archive |
+| Windows x64 | Complete plugin payload and installer | AI runtime and installer |
+| macOS Intel / Apple Silicon | Platform plugin payload and DMG | Platform AI runtime and DMG |
+
+The Linux plugin packages install an **installer application**: use it to select your X-Plane folder. They do not assume that your simulator lives in a system package directory. Flatpak also needs access to the chosen simulator folder. Choose one installation format; installing every format is unnecessary.
+
+Manual runs publish downloadable **Artifacts** on the workflow run's page. Version-tag runs collect package outputs and attach them to a GitHub **Release**. These are release downloads, not GitHub Packages container images. Pre-release suffixes mark the release as a pre-release. The raw native artifacts are useful for diagnosis; normal users should use the complete packaged runtime.
+
+Windows builds use MSVC and the Visual Studio linker. macOS builds run natively, including an ONNX Runtime source build for Intel Macs. That dependency is cached and its unit-test compilation is disabled, but a clean build can still take a long time. Linux cross-checks cannot replace loading the Windows or macOS plugin in its native simulator.
+
+The workflows describe intended outputs; see the validation record for what has actually been run. New GPU-enabled Windows/macOS packaging needs native CI acceptance after this change. No hosted build is started by editing the workflow locally.
+
+## Development and validation
+
+### Source layout
+
+| Directory | Responsibility |
+| --- | --- |
+| `crates/core` | Flight state, controller permissions, geometry, navigation and data readers. |
+| `crates/engine` | Request orchestration, radio/crew workflows, surface and airborne monitoring, provider calls. |
+| `crates/plugin` | X-Plane SDK integration, telemetry, aircraft controls and rendering host. |
+| `crates/ui` | Shared interface and client state. |
+| `crates/desktop` | Standalone UI preview. |
+| `crates/server` | Local AI HTTP service, LLM inference, TTS worker and STT process ownership. |
+| `crates/tts`, `crates/stt` | Speech synthesis/recognition and audio formats. |
+| `crates/ai-core` | Model manifests, downloads and integrity records. |
+| `crates/audio`, `crates/http`, `crates/platform`, `crates/settings` | Shared audio, transport, operating-system support and settings. |
+| `xtask` | Rust build, install, package and integration-test commands. |
+| `tests/fixtures`, `xtask/fixtures` | Synthetic test data; not production airport overrides. |
+
+First-party implementation is Rust. Native dependencies still include C/C++ libraries such as X-Plane bindings, ImGui, audio and inference runtimes. Python is not needed to run OpenATC. Some upstream native builds, especially Intel Mac ONNX Runtime, use Python during compilation.
+
+Install current stable Rust, a native compiler, Clang/libclang, CMake and pkg-config as appropriate for your operating system. Optional accelerated builds need their SDKs; see [AI server building](docs/AI_SERVER.md). The old top-level C++ implementation and Python scripts have been removed.
 
 ```sh
 cargo fmt --all -- --check
-cargo test --locked -p openatc-core -p openatc-engine -p openatc-ui -p openatc-plugin
+cargo test --locked -p openatc-core -p openatc-engine -p openatc-ui -p openatc-plugin -p xtask
+cargo test --locked -p openatc-ai -p openatc-stt -p openatc-tts
+cargo build --locked --release -p openatc-plugin -p openatc-engine
+cargo xtask test-radio target/release/open-atc-engine speech
+cargo xtask test-crew target/release/open-atc-engine speech
+cargo xtask test-speech target/release/open-atc-engine speech
+cargo xtask test-flight target/release/open-atc-engine speech
 cargo xtask audit-linux target/release/libopenatc_plugin.so target/release/open-atc-engine
-cargo xtask package linux-x64
 ```
 
-The package is written under `packages/`. Both `packages/` and `target/` are ignored, along with local assistant configuration, instruction files, histories, generated plans, model downloads, logs and personal environment overrides. `.env.example` and `.env.sample` remain eligible for inclusion. Product AI code, `models.toml`, `prompts/`, `speech/`, Cargo configuration and CI workflows remain project files. The patched `vendor/xplane` source is explicitly included. Ignore rules do not remove files that were previously tracked; maintainers handle that when preparing their commit.
+Default workspace builds cover the plugin stack. Select optional AI/desktop targets explicitly; `--workspace` includes their native dependencies. On Windows, use the `.exe` engine path in integration commands. The Linux dependency audit is platform-specific.
 
-Keep comments focused on behavior, constraints and the reason for a decision. User-facing changes should update this README and [the changelog](docs/CHANGELOG.md) together.
+Integration suites start a real companion engine against temporary scenery/settings and a fake provider. They verify workflow contracts without requiring models or mutating your simulator. Model/audio tests and installed-scenery tests provide separate evidence. None is a substitute for flying the complete route with live audio and the chosen aircraft.
 
-See [workspace/runtime notes](docs/RUST_WORKSPACE.md), [architecture](docs/ARCHITECTURE.md), [validation and simulator checklist](docs/VALIDATION.md), [remaining work](docs/ROADMAP.md) and [third-party notices](docs/THIRD_PARTY.md). Successful builds and automated checks do not replace testing the plugin, audio and weather inside X-Plane.
+Generated packages, model downloads, build directories, logs, personal environment files and local assistant files are ignored. Product prompts, phrasebooks, model manifests, Cargo files and CI workflows belong in the project. Ignore rules cannot remove an already-tracked file; review your own commit contents.
 
-Position requests use an offline GeoNames settlement lookup to report a nearby town or city with approximate distance and direction. Names are factual lookup results, not generated by the LLM. Small settlements and administrative boundaries are not fully covered; the receiving airport is the fallback. Failed TTS requests log the attempted text, voice/model and error or HTTP status in `engine.log`; synthesis failures also log text in the AI server log.
+See [Architecture](docs/ARCHITECTURE.md), [Rust workspace](docs/RUST_WORKSPACE.md), [Validation](docs/VALIDATION.md), [Changelog](docs/CHANGELOG.md) and [Developer commands](xtask/README.md). Contributions are especially useful for native Windows/macOS testing, different airport layouts, aircraft profiles, pronunciation and reviewed regional procedures.
 
-Realism presets are **Relaxed**, **Standard** and **Strict**. Standard and Strict enable **Monitor assigned altitude**: after an acknowledged clearance, a continuing airborne altitude deviation receives three corrective calls, followed by cancellation on the fourth. Correcting the deviation resets the count. This is an optional simulator policy, not a real-world ATC rule. Disabling it leaves readback checks and radio reception rules unchanged. An amended altitude or route still requires controller approval. Heading, speed and published SID/STAR leg constraints are not yet monitored by this setting.
+## Troubleshooting
 
-Crew controls now use stock X-Plane mappings by default, with third-party overrides in the aircraft TOML. The A320neo profile observes ATTN/CAB and MECH/INT commands for cabin and ground routing. Settings → Aircraft controls lists live availability. Explicit control requests, cabin brightness/slide arming and chocks/external-power requests wait for simulator confirmation; button-only mappings report a press. Editable checklists support captain-response and copilot-performing modes. All spoken wording is in speech TOMLs. See [Aircraft controls and checklist editing](docs/AIRCRAFT_CONTROLS.md) for examples and current ToLiss pushback limitations.
+| Symptom | Check |
+| --- | --- |
+| No stations or the wrong airport | Radios shows the occupied airport's services on the ground and nearby stations in the air. Check the X-Plane folder in Settings → General, radio power and the position/loading message. Export the position if an airport footprint is wrong. |
+| Simulator telemetry rejected | Copy the field and value from the error or developer log. The engine can remain connected while simulator data is rejected. A valid new sample clears the error; rejected data does not replace the last accepted flight state. |
+| Cannot find speech or voice settings | Open Settings → STT / TTS, Voices or Audio. Tabs wrap in narrow windows. General shows the currently saved provider addresses; editing becomes available after saved settings load. |
+| Controller rejects a request | Confirm phase, tuned service, airport duties and any pending readback. A recognisable sentence can still be unavailable in the current state. |
+| Taxi stops at a runway | Read back the current route, then wait for or request the applicable crossing. A destination runway does not authorize crossing another runway. |
+| No crossing/takeoff/landing clearance | Check runway/final traffic and whether the simulator supplied traffic data. Unknown traffic is not treated as an empty runway. |
+| Copilot does not tune/check in | Enable the relevant copilot settings, let queued speech finish, and verify COM1 actually changes in telemetry. |
+| Own text is silent | Enable Speak my transmitted requests and check pilot volume/output. |
+| TTS failed | Inspect `engine.log` and AI-server output for the exact text, voice and error. Refresh voices after changing providers. Keep eSpeak data and shared libraries with the runtime. |
+| GPU not used | Check `/health`, startup logs, build features and drivers. CUDA speech additionally needs compatible CUDA/cuDNN libraries. Remove force-CPU flags only if GPU use is intended. |
+| LAN connection fails | Use the server's LAN address, bind with `--host 0.0.0.0`, and check the firewall. URLs should not end in `/v1`. |
+| Aircraft action was not confirmed | Inspect the mapped control's availability and live indication. A custom aircraft may require a corrected TOML mapping. |
+| Copy/paste fails | Check the native clipboard and display session. Debug conversation export also provides a file fallback. |
+| Need to restart the flight | Use New flight in the header; inspect any reset error rather than repeatedly unloading the plugin. |
 
-Cabin conversation receives the live flight phase and aircraft ground state. Greetings do not trigger cabin preparations. ToLiss pushback can be started through ground crew using settings already entered in its ground panel; distance and angle cannot yet be changed through OpenATC.
+`test-flight` runs three complete IFR flights through the real HTTP engine using simulated aircraft telemetry and synthetic scenery: separate Delivery/Ground/Tower, Ground plus Tower, and combined Tower duties. It checks sector handoffs, copilot exchanges, arrival and departure runway crossings, traffic holds, landing, runway exit and taxi to the assigned gate. Reports and transcripts are written to `packages/flight-validation/report.json`. This suite also runs in platform build jobs. It does not prove live audio, third-party aircraft controls or simulator rendering.
 
-Ground-crew pushback requests use the aircraft’s existing ground-panel settings even when the spoken request includes a distance or angle; those spoken parameters are not applied. Attendant replies use the Attendant badge and voice. Unmapped ground-service connection requests report an unconfirmed service instead of claiming completion.
-
-The cabin phrasebook includes friendly interphone conversation throughout the flight, plus separate examples for requested passenger announcements. All wording remains editable in speech TOML; these examples do not trigger announcements or invent cabin events.
-
-ATC phrasing rotates independently of other conversation messages. The engine remembers phrase choices and previous station/task wording across flight resets and restarts. With AI wording variety enabled, role-aware prompts use the phrasebook as examples; otherwise the controller uses TOML wording directly. Protected clearance facts remain unchanged.
-
-ATC frequencies in chat are underlined links: click a decimal COM frequency to tune COM1 using the same aircraft-control path as Channels. The radio must be powered. The panel uses a lighter, more opaque tint with one consistent rounded edge; the current renderer does not blur the simulator image.
-
-Ground-control confirmations wait for stable simulator readback. Requests naming two controls are clarified rather than partially executed. Hold-point detection allows for the aircraft reference point behind the nose, while runway entry still requires a controller instruction.
-
-IFR clearances omit readback coaching. After a correct readback, Delivery assigns the published Ground frequency for start-up/pushback when ready, where a separate Ground station exists. Readback validation and separate movement permissions remain in force.
-
-Start a fresh flight with the **New flight** icon (a page with a plus) in the window header. Confirm to clear the plan, conversation, clearances, taxi guidance and pending crew actions. Settings, controller voices and the aircraft's actual controls are kept. This works without disabling the plugin or restarting the AI server. Re-enable now reuses the window renderer; live reset and re-enable acceptance are tracked in [Validation](docs/VALIDATION.md).
-
-Controller voices are saved across flights and engine restarts. Only English voices are used. New controllers receive unused voices first; once the pool is exhausted, recently assigned voices are avoided where possible. An empty pool uses six English defaults.
-
-After a runway crossing, the next taxi clearance replaces the map route. Amber means the clearance awaits readback; green means it is approved. A runway-vacated report receives the next taxi instruction. Stop at the authorised holding point: Ground directs you to the published Tower frequency, while Tower waits for your ready-for-departure report before checking runway traffic. See [request and monitoring architecture](docs/ARCHITECTURE.md#requests-and-continued-monitoring) for the current workflow boundaries.
-
-The optional **Holding point marker** setting highlights the current route limit on the taxi map and places an illuminated translucent amber circle on simulator ground. It is off by default, independent of taxi arrows, and uses the route endpoint with the shared 45-metre approach detection radius. Nearby scenery holding-line detection remains an additional recognition path. The ground marker requires an acknowledged taxi clearance, stays at the hold and disappears for crossing or takeoff permission. It is plugin guidance, not a scenery stop bar. Terrain probing follows the taxi-arrow placement checks.
-
-The Channels automatic filter uses the active surface-clearance airport, then the simulator airport, before falling back to the nearest station. It refreshes when airport data arrives; manually entered filters and Show all are preserved. This avoids a nearby airport transmitter selecting the wrong filter.
-
-Holding-point graphics use the final taxi approach and a nearby scenery hold-line intersection to choose the approach side. The translucent disc is 30 metres across; its edge is placed four metres before the line, accounting for oblique approaches. Where no line is available, it is set back from the route endpoint. This is visual guidance derived from available scenery, not aircraft nose-position measurement.
-
-Debug mode adds a `>>` header button for surface test jumps. Next holding point requires an acknowledged taxi route; departure runway start requires takeoff clearance and loaded departure scenery. Jumps follow the stored geometry, preserve gear clearance using terrain probes, stop motion, align heading and set the parking brake. They do not grant ATC permission or jump to airborne phases. Standard writable X-Plane position controls are used; third-party aircraft reposition behaviour needs simulator testing.
-
-Outgoing controller transcript/speech messages include the flight callsign via an editable TOML addressing wrapper when it is not already present. Controller decisions and raw API result messages remain unchanged. Surface holding monitoring is restricted to Taxi/TaxiIn; departure clearance cannot send an acknowledged flight back to Delivery.
-
-Copilot readbacks and automatic tuning wait until queued radio speech has finished. This includes onward taxi clearances after runway crossings and takeoff acknowledgements. Holding-point detection works while approaching; reaching the final hold does not report ready or grant takeoff permission for you. Channels refreshes installed airport geometry to select the airport containing the aircraft, rather than a neighbouring airport reference.
-
-Radio turn-taking uses a two-step copilot exchange: record and play the readback, then apply it after playback finishes. Telemetry marks the radio busy during playback, recording or pending crew replies, delaying automatic surface and airborne calls. A previously reported ready aircraft can receive takeoff clearance after blocking traffic clears. Crossing eligibility follows holding-point detection without a conflicting stopped-aircraft gate. Unknown runway status produces an explained standby instruction and retries when confirmation becomes available. The debug header uses a vector fast-forward icon with the same dimensions as other controls. Unit and engine regressions cover prepared readbacks, occupied-radio suppression, moving hold recognition and traffic-clearance retry; embedded simulator layout and live audio need user verification.
-
-ATC quick requests follow the live flight phase and the published duties of the receivable tuned controller, including combined duties. ATIS and untuned frequencies do not expose controller requests. In flight, **Check in with controller** sends the tuned station name, callsign and current altitude using editable speech TOML. Crossing and landing requests are included when appropriate.
-
-Typed ATC requests add missing controller and callsign addressing. Spoken transmissions retain the words recognized by speech-to-text. AI intent recovery tolerates clear request-word typos and recognition errors; operational values and readback checks remain authoritative. Crew requests can contain up to eight explicit actions, such as “remove chocks and external power.” Clauses inherit the action verb where appropriate. All targets are validated against the aircraft profile before the batch becomes visible to the simulator; each action needs confirmation, and failure cancels the remaining actions. Duplicate controls and unsupported clauses are rejected. The LLM can return a bounded actions array using mapped control IDs, never raw simulator refs. Settings → Voices → Pilot (own transmissions) → Speak my transmitted requests enables synthesized playback of the pilot requests. It is off by default. Engine regression tests use mocked model responses and simulator acknowledgements; live control effects remain a simulator check.
-
-### Platform build checks
-
-Build workflows run only for `v*` version tags or from **Actions → Native platform builds → Run workflow**. No tag is needed for a manual build. Pushes and pull requests do not start builds. The native matrix builds the plugin with its companion engine and, separately, the AI server with its speech-to-text sidecar on Linux x64, Windows x64 (MSVC), Intel macOS and Apple Silicon. Artifacts are raw build outputs; Windows/macOS installers and Linux distribution packages remain separate packaging work. The existing Linux workflow still packages and publishes development releases on version tags. Native matrix artifacts are not attached to those releases yet.
-
-From Linux, shared code can be checked with Rust's Windows and macOS targets. Full builds also need native audio, SDK and inference dependencies: installing a Rust target alone is insufficient. See [platform validation](docs/VALIDATION.md#platform-build-validation) for the checks performed and their limits.
-
-Windows native CI runs Cargo commands in PowerShell and selects the Visual Studio linker explicitly. Git Bash also supplies a `link.exe` utility, which must not be used to link MSVC binaries. The initial Windows CI failure occurred before application compilation; the corrected workflow still needs a native rerun.
-
-The Intel macOS AI-server job builds ONNX Runtime 1.28.0 from source because `ort-sys` 2.0.0-rc.13 does not supply Intel Mac prebuilt libraries. Cargo links that shared library, includes it in the build artifact, and uses `@loader_path` so the server can find it beside the executable. Other platform jobs retain their existing dependency setup. The source build disables ONNX Runtime unit-test compilation with `onnxruntime_BUILD_UNIT_TESTS=OFF`; `--skip_tests` alone only skips running those tests. Runtime model support is unchanged. This configuration still needs a native Intel Mac CI run.
-
-### Rust developer tools
-
-Build, install, package and integration-test commands now use `cargo xtask`; see [the command reference](xtask/README.md). The Python scripts and obsolete speech gateway were removed, along with `scripts/`. OpenATC users do not need Python. Intel Mac server CI still needs Python to compile ONNX Runtime using its upstream build script. A portable systemd user-unit example is in `packaging/systemd/openatc-ai.service`.
-
-The maintained SDK binding patch generates only XPLM/XP functions, excluding Windows CRT declarations from the SDK's `C-unwind` ABI. The plugin launches its Windows companion as a detached process and loads OpenGL from the host's native library; Windows extension symbols use `wglGetProcAddress`. Windows engine configuration and logs default to `%LOCALAPPDATA%/openatc`, with `OPENATC_CONFIG_DIR` available as an override.
-
-### Controller check-ins and copilot handoffs
-
-The check-in quick request is available on Delivery, Ground and Tower while on the ground, and on Tower, Departure, Approach and Center in flight. Ground calls use “with you”; departure calls include the current altitude and the cleared climb altitude when applicable. “Checking in”, “check-in” and “with you” are recognised as check-ins.
-
-With copilot replies and tuning enabled, the copilot acknowledges a handoff after ATC finishes speaking, the plugin changes COM1, and the copilot checks in after telemetry confirms the new frequency. The controller responds after the copilot transmission finishes. Takeoff speech does not repeat an expected altitude equal to the cleared initial altitude. Routine taxi instructions omit prompts to read back; required readbacks remain enforced.
-
-Cabin requests support “arm and cross-check” and an additional coffee request after a comma. Slide arming still requires simulator confirmation; it waits up to ten seconds for the indication to settle and logs the observed values on failure. An unconfirmed indication is never announced as armed.
+When reporting a flight issue, include the conversation export, aircraft/profile, installed scenery/navdata, phase, COM frequency, position and the action you expected. For audio issues also include the provider, voice, relevant server error and whether CPU or GPU was selected. Remove credentials and unrelated personal information before sharing logs.

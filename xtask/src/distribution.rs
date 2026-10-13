@@ -83,6 +83,8 @@ pub(crate) fn install_plugin(sim: &Path, backup: bool) -> Result {
         "aircraft",
         "prompts",
         "speech",
+        "missions",
+        "traffic",
         "assets/taxi-arrow",
         "assets/licenses",
         "assets/branding",

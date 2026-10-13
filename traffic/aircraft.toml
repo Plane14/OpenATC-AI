@@ -1,0 +1,784 @@
+# Nominal simulation envelopes. These are not dispatch performance tables.
+version = 1
+
+[aircraft.C172]
+cwt = "I"
+name = "Cessna 172"
+wingspan = 11
+length = 8.3
+wake = "L"
+approach_category = "A"
+runway = 650
+range_nm = 640
+cruise_knots = 115
+ceiling = 13000
+approach_knots = 65
+climb_fpm = 650
+descent_fpm = 500
+propeller = true
+rnav = true
+
+[aircraft.PA28]
+cwt = "I"
+name = "Piper PA-28"
+wingspan = 10.7
+length = 7.3
+wake = "L"
+approach_category = "A"
+runway = 700
+range_nm = 650
+cruise_knots = 125
+ceiling = 14000
+approach_knots = 70
+climb_fpm = 700
+descent_fpm = 500
+propeller = true
+rnav = true
+
+[aircraft.BE58]
+cwt = "I"
+name = "Beechcraft Baron"
+wingspan = 11.5
+length = 9.1
+wake = "L"
+approach_category = "A"
+runway = 850
+range_nm = 1100
+cruise_knots = 190
+ceiling = 18000
+approach_knots = 90
+climb_fpm = 1000
+descent_fpm = 800
+propeller = true
+rnav = true
+
+[aircraft.C208]
+cwt = "I"
+name = "Cessna Caravan"
+wingspan = 15.9
+length = 12.7
+wake = "L"
+approach_category = "A"
+runway = 900
+range_nm = 1000
+cruise_knots = 170
+ceiling = 20000
+approach_knots = 85
+climb_fpm = 1000
+descent_fpm = 800
+propeller = true
+rnav = true
+
+[aircraft.PC12]
+cwt = "I"
+name = "Pilatus PC-12"
+wingspan = 16.3
+length = 14.4
+wake = "L"
+approach_category = "B"
+runway = 1100
+range_nm = 1800
+cruise_knots = 260
+ceiling = 30000
+approach_knots = 105
+climb_fpm = 1500
+descent_fpm = 1200
+propeller = true
+rnav = true
+
+[aircraft.B350]
+cwt = "H"
+name = "Beechcraft King Air 350"
+wingspan = 17.7
+length = 14.2
+wake = "M"
+approach_category = "B"
+runway = 1300
+range_nm = 1800
+cruise_knots = 290
+ceiling = 35000
+approach_knots = 110
+climb_fpm = 1600
+descent_fpm = 1400
+propeller = true
+rnav = true
+
+[aircraft.C25C]
+cwt = "H"
+name = "Cessna Citation CJ4"
+wingspan = 15.5
+length = 16.3
+wake = "L"
+approach_category = "B"
+runway = 1500
+range_nm = 2100
+cruise_knots = 410
+ceiling = 45000
+approach_knots = 115
+climb_fpm = 2200
+descent_fpm = 1500
+propeller = false
+rnav = true
+
+[aircraft.GLF6]
+cwt = "F"
+name = "Gulfstream G650"
+wingspan = 30.4
+length = 30.4
+wake = "M"
+approach_category = "C"
+runway = 2100
+range_nm = 7000
+cruise_knots = 480
+ceiling = 51000
+approach_knots = 130
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.DH8C]
+cwt = "G"
+name = "Dash 8-300"
+wingspan = 27.4
+length = 25.7
+wake = "M"
+approach_category = "B"
+runway = 1300
+range_nm = 950
+cruise_knots = 270
+ceiling = 25000
+approach_knots = 110
+climb_fpm = 1600
+descent_fpm = 1200
+propeller = true
+rnav = true
+
+[aircraft.DH8D]
+cwt = "F"
+name = "Dash 8-400"
+wingspan = 28.4
+length = 32.8
+wake = "M"
+approach_category = "C"
+runway = 1600
+range_nm = 1100
+cruise_knots = 350
+ceiling = 27000
+approach_knots = 125
+climb_fpm = 1800
+descent_fpm = 1500
+propeller = true
+rnav = true
+
+[aircraft.AT76]
+cwt = "G"
+name = "ATR 72-600"
+wingspan = 27.1
+length = 27.2
+wake = "M"
+approach_category = "B"
+runway = 1500
+range_nm = 900
+cruise_knots = 275
+ceiling = 25000
+approach_knots = 110
+climb_fpm = 1400
+descent_fpm = 1200
+propeller = true
+rnav = true
+
+[aircraft.E170]
+cwt = "G"
+name = "Embraer E170"
+wingspan = 26
+length = 29.9
+wake = "M"
+approach_category = "C"
+runway = 1700
+range_nm = 2000
+cruise_knots = 420
+ceiling = 41000
+approach_knots = 125
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.E75L]
+cwt = "G"
+name = "Embraer E175 long wing"
+wingspan = 28.7
+length = 31.7
+wake = "M"
+approach_category = "C"
+runway = 1800
+range_nm = 2200
+cruise_knots = 430
+ceiling = 41000
+approach_knots = 125
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.E190]
+cwt = "F"
+name = "Embraer E190"
+wingspan = 28.7
+length = 36.2
+wake = "M"
+approach_category = "C"
+runway = 1800
+range_nm = 2400
+cruise_knots = 440
+ceiling = 41000
+approach_knots = 130
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.E290]
+cwt = "F"
+name = "Embraer E190-E2"
+wingspan = 33.7
+length = 36.2
+wake = "M"
+approach_category = "C"
+runway = 1800
+range_nm = 2800
+cruise_knots = 445
+ceiling = 41000
+approach_knots = 130
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.E295]
+cwt = "F"
+name = "Embraer E195-E2"
+wingspan = 35.1
+length = 41.5
+wake = "M"
+approach_category = "C"
+runway = 2000
+range_nm = 2600
+cruise_knots = 445
+ceiling = 41000
+approach_knots = 135
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.CRJ2]
+cwt = "G"
+name = "Bombardier CRJ200"
+wingspan = 21.2
+length = 26.8
+wake = "M"
+approach_category = "C"
+runway = 1800
+range_nm = 1600
+cruise_knots = 420
+ceiling = 41000
+approach_knots = 130
+climb_fpm = 2000
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.CRJ7]
+cwt = "G"
+name = "Bombardier CRJ700"
+wingspan = 23.2
+length = 32.5
+wake = "M"
+approach_category = "C"
+runway = 1900
+range_nm = 1800
+cruise_knots = 440
+ceiling = 41000
+approach_knots = 130
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.CRJ9]
+cwt = "G"
+name = "Bombardier CRJ900"
+wingspan = 24.9
+length = 36.2
+wake = "M"
+approach_category = "C"
+runway = 2000
+range_nm = 1800
+cruise_knots = 440
+ceiling = 41000
+approach_knots = 135
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.A319]
+cwt = "F"
+name = "Airbus A319"
+wingspan = 34.1
+length = 33.8
+wake = "M"
+approach_category = "C"
+runway = 1900
+range_nm = 3600
+cruise_knots = 440
+ceiling = 39000
+approach_knots = 130
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.A320]
+cwt = "F"
+name = "Airbus A320"
+wingspan = 35.8
+length = 37.6
+wake = "M"
+approach_category = "C"
+runway = 2100
+range_nm = 3300
+cruise_knots = 450
+ceiling = 39000
+approach_knots = 135
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.A20N]
+cwt = "F"
+name = "Airbus A320neo"
+wingspan = 35.8
+length = 37.6
+wake = "M"
+approach_category = "C"
+runway = 2100
+range_nm = 3500
+cruise_knots = 450
+ceiling = 39000
+approach_knots = 135
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.A321]
+cwt = "F"
+name = "Airbus A321"
+wingspan = 35.8
+length = 44.5
+wake = "M"
+approach_category = "C"
+runway = 2300
+range_nm = 3200
+cruise_knots = 450
+ceiling = 39000
+approach_knots = 140
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.A21N]
+cwt = "F"
+name = "Airbus A321neo"
+wingspan = 35.8
+length = 44.5
+wake = "M"
+approach_category = "C"
+runway = 2300
+range_nm = 3900
+cruise_knots = 450
+ceiling = 39000
+approach_knots = 140
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.BCS3]
+cwt = "F"
+name = "Airbus A220-300"
+wingspan = 35.1
+length = 38.7
+wake = "M"
+approach_category = "C"
+runway = 1900
+range_nm = 3400
+cruise_knots = 440
+ceiling = 41000
+approach_knots = 130
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.B737]
+cwt = "F"
+name = "Boeing 737-700"
+wingspan = 35.8
+length = 33.6
+wake = "M"
+approach_category = "C"
+runway = 1900
+range_nm = 3000
+cruise_knots = 440
+ceiling = 41000
+approach_knots = 130
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.B738]
+cwt = "F"
+name = "Boeing 737-800"
+wingspan = 35.8
+length = 39.5
+wake = "M"
+approach_category = "C"
+runway = 2300
+range_nm = 2900
+cruise_knots = 450
+ceiling = 41000
+approach_knots = 140
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.B739]
+cwt = "F"
+name = "Boeing 737-900"
+wingspan = 35.8
+length = 42.1
+wake = "M"
+approach_category = "C"
+runway = 2400
+range_nm = 2900
+cruise_knots = 450
+ceiling = 41000
+approach_knots = 145
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.B38M]
+cwt = "F"
+name = "Boeing 737 MAX 8"
+wingspan = 35.9
+length = 39.5
+wake = "M"
+approach_category = "C"
+runway = 2300
+range_nm = 3500
+cruise_knots = 450
+ceiling = 41000
+approach_knots = 140
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.B752]
+cwt = "E"
+name = "Boeing 757-200"
+wingspan = 38.1
+length = 47.3
+wake = "M"
+approach_category = "C"
+runway = 2400
+range_nm = 3900
+cruise_knots = 460
+ceiling = 42000
+approach_knots = 140
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.B763]
+cwt = "C"
+name = "Boeing 767-300"
+wingspan = 47.6
+length = 54.9
+wake = "H"
+approach_category = "C"
+runway = 2600
+range_nm = 5700
+cruise_knots = 460
+ceiling = 41000
+approach_knots = 140
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.A306]
+cwt = "C"
+name = "Airbus A300-600"
+wingspan = 44.8
+length = 54.1
+wake = "H"
+approach_category = "C"
+runway = 2500
+range_nm = 4000
+cruise_knots = 450
+ceiling = 39000
+approach_knots = 140
+climb_fpm = 2000
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.A332]
+cwt = "B"
+name = "Airbus A330-200"
+wingspan = 60.3
+length = 58.8
+wake = "H"
+approach_category = "C"
+runway = 2700
+range_nm = 6700
+cruise_knots = 470
+ceiling = 41000
+approach_knots = 140
+climb_fpm = 2100
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.A333]
+cwt = "B"
+name = "Airbus A330-300"
+wingspan = 60.3
+length = 63.7
+wake = "H"
+approach_category = "C"
+runway = 2800
+range_nm = 6300
+cruise_knots = 470
+ceiling = 41000
+approach_knots = 140
+climb_fpm = 2100
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.A339]
+cwt = "D"
+name = "Airbus A330-900"
+wingspan = 64
+length = 63.7
+wake = "H"
+approach_category = "C"
+runway = 2800
+range_nm = 7000
+cruise_knots = 470
+ceiling = 41000
+approach_knots = 140
+climb_fpm = 2100
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.A359]
+cwt = "B"
+name = "Airbus A350-900"
+wingspan = 64.8
+length = 66.8
+wake = "H"
+approach_category = "C"
+runway = 2900
+range_nm = 8100
+cruise_knots = 480
+ceiling = 43000
+approach_knots = 140
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.A35K]
+cwt = "D"
+name = "Airbus A350-1000"
+wingspan = 64.8
+length = 73.8
+wake = "H"
+approach_category = "D"
+runway = 3100
+range_nm = 8500
+cruise_knots = 480
+ceiling = 43000
+approach_knots = 145
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.B772]
+cwt = "B"
+name = "Boeing 777-200"
+wingspan = 60.9
+length = 63.7
+wake = "H"
+approach_category = "C"
+runway = 2900
+range_nm = 6500
+cruise_knots = 480
+ceiling = 43000
+approach_knots = 140
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.B77W]
+cwt = "B"
+name = "Boeing 777-300ER"
+wingspan = 64.8
+length = 73.9
+wake = "H"
+approach_category = "D"
+runway = 3100
+range_nm = 7300
+cruise_knots = 480
+ceiling = 43000
+approach_knots = 150
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.B77L]
+cwt = "B"
+name = "Boeing 777-200LR or Freighter"
+wingspan = 64.8
+length = 63.7
+wake = "H"
+approach_category = "D"
+runway = 3100
+range_nm = 8000
+cruise_knots = 480
+ceiling = 43000
+approach_knots = 145
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.B788]
+cwt = "B"
+name = "Boeing 787-8"
+wingspan = 60.1
+length = 56.7
+wake = "H"
+approach_category = "C"
+runway = 2700
+range_nm = 7300
+cruise_knots = 480
+ceiling = 43000
+approach_knots = 135
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.B789]
+cwt = "B"
+name = "Boeing 787-9"
+wingspan = 60.1
+length = 62.8
+wake = "H"
+approach_category = "C"
+runway = 2900
+range_nm = 7600
+cruise_knots = 480
+ceiling = 43000
+approach_knots = 140
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.B78X]
+cwt = "D"
+name = "Boeing 787-10"
+wingspan = 60.1
+length = 68.3
+wake = "H"
+approach_category = "C"
+runway = 3000
+range_nm = 6300
+cruise_knots = 480
+ceiling = 41000
+approach_knots = 140
+climb_fpm = 2200
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.B744]
+cwt = "B"
+name = "Boeing 747-400"
+wingspan = 64.4
+length = 70.7
+wake = "H"
+approach_category = "D"
+runway = 3100
+range_nm = 7000
+cruise_knots = 480
+ceiling = 45000
+approach_knots = 150
+climb_fpm = 2000
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.B748]
+cwt = "B"
+name = "Boeing 747-8"
+wingspan = 68.4
+length = 76.3
+wake = "H"
+approach_category = "D"
+runway = 3200
+range_nm = 7700
+cruise_knots = 480
+ceiling = 43000
+approach_knots = 150
+climb_fpm = 2000
+descent_fpm = 1800
+propeller = false
+rnav = true
+
+[aircraft.A388]
+cwt = "A"
+name = "Airbus A380-800"
+wingspan = 79.8
+length = 72.7
+wake = "J"
+approach_category = "C"
+runway = 3200
+range_nm = 8200
+cruise_knots = 480
+ceiling = 43000
+approach_knots = 140
+climb_fpm = 2000
+descent_fpm = 1800
+propeller = false
+rnav = true

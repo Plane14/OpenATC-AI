@@ -1,0 +1,21 @@
+# Kitten Mini 0.8. Downloaded only when --tts-provider kitten is selected.
+[[model]]
+name = "kitten-mini-0.8"
+path = "tts/kitten/kitten_tts_mini_v0_8.onnx"
+url = "https://huggingface.co/KittenML/kitten-tts-mini-0.8/resolve/c02725660cea441db4c383af69f1f26f5cd00947/kitten_tts_mini_v0_8.onnx"
+size = 78268016
+sha256 = "0f5bbae4fc4800c98dbc544a87ecfa79510de2fb8222db30d12e5bfe9177df91"
+
+[[model]]
+name = "kitten-mini-0.8-voices"
+path = "tts/kitten/voices.npz"
+url = "https://huggingface.co/KittenML/kitten-tts-mini-0.8/resolve/c02725660cea441db4c383af69f1f26f5cd00947/voices.npz"
+size = 3278902
+sha256 = "40ad2638952b77b7b2f30127e2608e169fc69dd256b53bd8aaa3409a33193c42"
+
+[[model]]
+name = "kitten-mini-0.8-config"
+path = "tts/kitten/config.json"
+url = "https://huggingface.co/KittenML/kitten-tts-mini-0.8/resolve/c02725660cea441db4c383af69f1f26f5cd00947/config.json"
+size = 470
+sha256 = "6b160bc9b19e24ecb21e84bc14f8a7da21fdf47ec72d42450bc5cf514b61804a"

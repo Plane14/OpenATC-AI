@@ -33,6 +33,8 @@ pub struct AircraftElectrical {
 /// One aircraft family profile.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AircraftProfile {
+    /// Published wingspan override for aircraft whose type is not in the size catalogue.
+    pub wingspan_meters: Option<f64>,
     /// Editable crew actions and checklists.
     pub crew: crate::crew::CrewProfile,
     /// Display name.
@@ -174,6 +176,18 @@ pub fn load_aircraft_profile(path: &std::path::Path) -> Result<AircraftProfile, 
         return Err("aircraft min_volts must not be negative".to_owned());
     }
     Ok(AircraftProfile {
+        wingspan_meters: root
+            .get("wingspan_meters")
+            .map(|value| {
+                let span = value
+                    .as_float()
+                    .or_else(|| value.as_integer().map(|v| v as f64));
+                span.filter(|v| v.is_finite() && *v > 0.0 && *v < 80.0)
+                    .ok_or_else(|| {
+                        "aircraft wingspan_meters must be between zero and 80 metres".to_owned()
+                    })
+            })
+            .transpose()?,
         crew: {
             let custom: crate::crew::CrewProfile = root
                 .get("crew")

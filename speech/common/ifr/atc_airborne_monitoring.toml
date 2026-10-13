@@ -1,0 +1,190 @@
+# Airborne instruction examples. Runtime decisions still come from the controller engine.
+
+[monitor.course_correction_heading]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["course_correction_heading"]
+slots = ["callsign", "direction", "wpt", "heading"]
+say = ["{callsign}, you are off course. Turn {direction} heading {heading}, vectors to {wpt}.", "{callsign}, turn {direction} heading {heading} to rejoin the route to {wpt}.", "{callsign}, check your course. Turn {direction} heading {heading}, vectors to {wpt}.", "{callsign}, turn {direction} heading {heading}, vector to {wpt}. You are off your cleared route.", "{callsign}, verify navigation. Turn {direction} heading {heading}, vectors to {wpt}.", "{callsign}, turn {direction} heading {heading} to intercept the course to {wpt}."]
+
+[monitor.course_correction_relative]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["course_correction_relative"]
+slots = ["callsign", "turn", "direction"]
+say = ["{callsign}, you are off course. Turn {turn} degrees {direction}.", "{callsign}, turn {turn} degrees {direction} to rejoin your route.", "{callsign}, check your course. Turn {turn} degrees {direction}.", "{callsign}, turn {turn} degrees {direction}, vector to rejoin the cleared route.", "{callsign}, verify navigation. Turn {turn} degrees {direction}."]
+
+[monitor.deviation_approved]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["deviation_approved"]
+slots = ["callsign", "turn", "direction"]
+say = ["{callsign}, deviation up to {turn} degrees {direction} of course approved. Advise when clear.", "{callsign}, deviate up to {turn} degrees {direction}. Report when able to resume your route.", "{callsign}, up to {turn} degrees {direction} of course approved. Advise when able to return on course.", "{callsign}, deviation {turn} degrees {direction} approved. Advise clear of the conditions."]
+
+[monitor.deviation_resume]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["deviation_resume"]
+slots = ["callsign", "wpt"]
+say = ["{callsign}, proceed direct {wpt}.", "{callsign}, when able proceed direct {wpt}.", "{callsign}, resume your route direct {wpt}.", "{callsign}, cleared direct {wpt}, resume your route."]
+
+[monitor.assigned_speed]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["assigned_speed"]
+slots = ["callsign", "speed"]
+say = ["{callsign}, maintain {speed} knots.", "{callsign}, speed {speed} knots.", "{callsign}, maintain indicated airspeed {speed} knots.", "{callsign}, requested speed approved, maintain {speed} knots."]
+
+[monitor.speed_correction]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["speed_correction"]
+slots = ["callsign", "speed"]
+say = ["{callsign}, check your speed. Maintain {speed} knots.", "{callsign}, assigned speed {speed} knots. Correct your speed.", "{callsign}, reduce or increase to the assigned {speed} knots.", "{callsign}, verify indicated airspeed, maintain {speed} knots."]
+
+[monitor.automatic_climb]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["automatic_climb"]
+slots = ["alt", "callsign"]
+say = ["{callsign}, climb and maintain {alt}.", "{callsign}, climb to {alt}.", "{callsign}, climb now, maintain {alt}.", "{callsign}, cleared to climb to {alt}."]
+
+[monitor.automatic_continue_climb]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["automatic_continue_climb"]
+slots = ["alt", "callsign"]
+say = ["{callsign}, continue climb to {alt}.", "{callsign}, continue climbing, maintain {alt}.", "{callsign}, continue your climb to {alt}.", "{callsign}, cleared to continue climb to {alt}."]
+
+[monitor.automatic_descent]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["automatic_descent"]
+slots = ["alt", "callsign"]
+say = ["{callsign}, descend and maintain {alt}.", "{callsign}, descend to {alt}.", "{callsign}, descend now, maintain {alt}.", "{callsign}, cleared to descend to {alt}."]
+
+[monitor.automatic_continue_descent]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["automatic_continue_descent"]
+slots = ["alt", "callsign"]
+say = ["{callsign}, continue descent to {alt}.", "{callsign}, continue descending, maintain {alt}.", "{callsign}, continue your descent to {alt}.", "{callsign}, cleared to continue descent to {alt}."]
+
+[monitor.crossing_at]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["crossing_at"]
+slots = ["alt", "callsign", "wpt"]
+say = ["{callsign}, cross {wpt} at {alt}.", "{callsign}, maintain the restriction, cross {wpt} at {alt}.", "{callsign}, cross {wpt} at {alt} as published."]
+
+[monitor.crossing_above]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["crossing_above"]
+slots = ["alt", "callsign", "wpt"]
+say = ["{callsign}, cross {wpt} at or above {alt}.", "{callsign}, cross {wpt} at or above {alt} as published.", "{callsign}, the crossing restriction at {wpt} is at or above {alt}."]
+
+[monitor.crossing_below]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["crossing_below"]
+slots = ["alt", "callsign", "wpt"]
+say = ["{callsign}, cross {wpt} at or below {alt}.", "{callsign}, cross {wpt} at or below {alt} as published.", "{callsign}, the crossing restriction at {wpt} is at or below {alt}."]
+
+[monitor.crossing_window]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["crossing_window"]
+slots = ["callsign", "wpt", "block", "level"]
+say = ["{callsign}, cross {wpt} at or above {level} and at or below {block}.", "{callsign}, cross {wpt} between {level} and {block}.", "{callsign}, the crossing window at {wpt} is {level} to {block}."]
+
+[monitor.crossing_restriction_missed]
+service = ["Approach", "Departure", "Center"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["crossing_restriction_missed"]
+slots = ["callsign", "wpt"]
+say = ["{callsign}, verify altitude and speed. You did not meet the crossing restriction at {wpt}.", "{callsign}, the published restriction at {wpt} was not met. Say intentions.", "{callsign}, check your crossing at {wpt}. Advise if unable to comply with the published restriction."]
+
+[monitor.altitude_descent_distance_unable]
+service = ["Approach", "Departure", "Center", "Tower"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["altitude_descent_distance_unable"]
+slots = []
+say = ["Unable requested altitude, insufficient distance remaining for descent.", "Unable that climb, remain at your cleared altitude for the arrival.", "Unable higher, descent required for the destination.", "Unable requested level, insufficient distance to meet the arrival profile.", "Unable higher at this point, maintain your present cleared altitude.", "Unable that altitude, insufficient track miles remaining for descent."]
+
+[monitor.altitude_restriction_unable]
+service = ["Approach", "Departure", "Center", "Tower"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["altitude_restriction_unable"]
+slots = []
+say = ["Unable that altitude due to the next published crossing restriction.", "Unable requested altitude. The published crossing restriction remains in effect.", "Unable that level with the current procedure. Request a revised clearance.", "Unable requested altitude due to the published crossing restriction.", "Unable that level, the next published crossing restriction must be met.", "Unable requested level with the current crossing restriction.", "Unable altitude change, maintain the cleared restriction."]
+
+[monitor.arrival_continue_no_landing]
+service = ["Approach", "Departure", "Center", "Tower"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["arrival_continue_no_landing"]
+slots = ["callsign"]
+say = ["{callsign}, continue approach. Runway occupied.", "{callsign}, continue approach, expect late landing clearance, traffic on the runway.", "{callsign}, continue approach, runway still occupied. Landing clearance to follow.", "{callsign}, continue approach. Traffic has not yet vacated the runway."]
+
+[monitor.arrival_go_around_blocked]
+service = ["Approach", "Departure", "Center", "Tower"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["arrival_go_around_blocked"]
+slots = ["callsign"]
+say = ["{callsign}, go around. Runway occupied.", "{callsign}, go around, traffic on the runway.", "{callsign}, go around, runway not clear.", "{callsign}, go around. Traffic has not vacated the runway."]
+
+[monitor.arrival_approach_clearance]
+service = ["Approach", "Departure", "Center", "Tower"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["arrival_approach_clearance"]
+slots = ["callsign", "approach", "rwy"]
+say = ["{callsign}, cleared {approach} approach, runway {rwy}.", "{callsign}, cleared for the {approach} approach to runway {rwy}.", "{callsign}, cleared {approach} approach to runway {rwy}.", "{callsign}, cleared for {approach}, runway {rwy}."]
+
+[monitor.instruction_readback_reminder]
+service = ["Approach", "Departure", "Center", "Tower"]
+role = "atc"
+phase = ["departure", "cruise", "arrival", "approach"]
+variant = "common"
+situation = ["instruction_readback_reminder"]
+slots = ["callsign"]
+say = ["{callsign}, acknowledge your last clearance.", "{callsign}, read back your last clearance.", "{callsign}, confirm receipt of the last instruction.", "{callsign}, say again your readback."]

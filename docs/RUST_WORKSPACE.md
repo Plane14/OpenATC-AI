@@ -10,13 +10,13 @@ Crates:
 - `crates/stt` — embedded speech-to-text (`whisper-rs`, ggml-tiny): WAV bytes
   in, transcript out, plus the `openatc-stt` sidecar binary. Own process
   because `whisper.cpp` and `llama.cpp` each vendor `ggml` and cannot link
-  into one binary. GPU-first by design (`--stt-backend auto|cpu|cuda`;
-  `cuda` needs a toolkit build, CPU is the fallback and the force option).
-- `crates/tts` — embedded text-to-speech (kokoro ONNX via `ort`, phonemes via
+  into one binary. Automatic mode prefers a compiled CUDA/Vulkan/Metal backend;
+  `--force-stt-cpu` and `--force-cpu` disable recognition acceleration.
+- `crates/tts` — embedded text-to-speech (Kokoro or Kitten Mini ONNX via `ort`, phonemes via
   source-built espeak-ng, voice table from `voices-v1.0.bin`): text in,
   24 kHz WAV bytes out, plus the radio FX chain (`fx.rs`: bandpass, hiss,
   crackle, static — seeded, deterministic, perceptually matched to the old
-  gateway rather than byte-identical). Zero system dependencies.
+  gateway rather than byte-identical). CUDA acceleration additionally needs matching host CUDA/cuDNN libraries; CPU inference remains available.
 - `crates/core` — controller and simulator data logic, regression-tested against the shared fixtures in `tests/fixtures/`. The earlier C++ implementation has been removed.
 
 Conventions: `cargo fmt --check` and `cargo clippy -- -D warnings` must pass;

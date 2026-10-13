@@ -18,16 +18,18 @@ pub struct LocalNotice {
     pub text: String,
 }
 
-/// Page indices in sidebar order.
-pub const PAGES: [&str; 8] = [
+/// Stable page indices used by saved navigation and the desktop preview.
+pub const PAGES: [&str; 10] = [
     "ATC",
     "Flight Plan",
     "Taxi",
     "Arrival",
     "Airports",
     "Settings",
-    "Channels",
-    "Radio sectors",
+    "Radios",
+    "Map",
+    "Traffic",
+    "Missions",
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -65,22 +67,58 @@ pub struct WindowActions {
 /// State shared by the interface pages and frame updates.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Interface {
+    pub(crate) settings_section: usize,
+    pub(crate) setup_server_url: String,
+    pub(crate) traffic_profiles: serde_json::Value,
+    /// Native simulator traffic ownership and active count.
+    pub native_traffic_status: String,
+    pub(crate) traffic_selected: u32,
+    pub(crate) traffic_notice: String,
+    pub(crate) model_install_status: serde_json::Value,
+    pub(crate) model_install_checked: f64,
+    pub(crate) model_install_pending: bool,
+    pub(crate) missions: crate::missions::Browser,
     /// Engine connection plus snapshot cache.
     pub engine: EngineClient,
+    /// Airport containing the aircraft according to scenery boundaries or pavement.
+    pub occupied_airport: String,
     /// Receivable published stations around the aircraft.
     pub nearby_stations: Vec<openatc_core::stations::Station>,
     /// Station/weather reception status.
     pub radio_notice: String,
+    /// Voice names returned by the configured TTS service.
+    pub available_voices: Vec<openatc_core::voices::Voice>,
+    /// Voice catalogue request is pending.
+    pub voices_loading: bool,
+    /// Voice API progress or error message.
+    pub voices_notice: String,
+    voices_origin: String,
+    /// Search text for voice names and languages.
+    pub voice_filter: String,
+    /// English text shared by voice auditions.
+    pub voice_preview_text: String,
+    /// Controller polygons around the current map viewport.
+    pub map_stations: Vec<openatc_core::stations::Station>,
+    /// Airport markers around the current map viewport.
+    pub map_airports: Vec<openatc_core::stations::AirportMarker>,
+    /// Show published volumes outside the aircraft altitude band.
+    pub map_all_altitudes: bool,
+    /// Show airport markers and their hover details.
+    pub map_airports_visible: bool,
+    /// Include heliports among the airport markers.
+    pub map_heliports: bool,
+    /// Map catalogue status.
+    pub map_notice: String,
+    map_checked: f64,
+    map_loading: bool,
     /// Debug sector map scale, in nautical miles from the aircraft.
     pub radio_map_range: f32,
     /// Debug map follows the aircraft until dragged.
     pub radio_map_center: Option<[f64; 2]>,
-    /// User-editable station search, defaulting to the current surface airport.
-    pub station_filter: String,
+    /// Arrival stand name or terminal search.
+    pub parking_filter: String,
     /// Search configured aircraft crew controls.
     pub crew_control_filter: String,
-    /// Preserve a filter deliberately entered or cleared by the user.
-    pub station_filter_manual: bool,
     /// Station index/discovery request is pending.
     pub stations_loading: bool,
     stations_checked: f64,
@@ -102,6 +140,7 @@ pub struct Interface {
     pub draft: FlightPlan,
     /// Airport under inspection.
     pub airport: Airport,
+    pub(crate) map_geometry: crate::maps::Geometry,
     /// Destination geometry and installed approach reference.
     pub arrival: openatc_core::arrival::ArrivalAirport,
     /// Main-thread scenery samples for the destination profile.
@@ -226,6 +265,9 @@ pub struct Interface {
     pub pitch: f32,
     /// Last transcript sequence spoken.
     pub last_transcript_sequence: u32,
+    pub(crate) transcript_scroll: f32,
+    pub(crate) transcript_follow_latest: bool,
+    pub(crate) transcript_layout: Option<([f32; 2], bool)>,
     /// Last transcript sequence queued for speech.
     pub last_speech_sequence: u32,
     /// Pending speech entries.
@@ -251,29 +293,74 @@ pub struct Interface {
     pub confirm_reset: bool,
     /// Session reset awaiting an engine response.
     pub reset_pending: bool,
+    /// Reset failure shown beside the retry controls.
+    pub reset_error: String,
+    #[cfg(test)]
+    pub(crate) reset_button_bounds: [[f32; 4]; 2],
+    #[cfg(test)]
+    pub(crate) toolbar_bounds: [[f32; 4]; 11],
+    #[cfg(test)]
+    pub(crate) collapse_bounds: [f32; 4],
+    #[cfg(test)]
+    pub(crate) plan_callsign_bounds: [f32; 4],
     /// Notifies the simulator host to clear flight-local callbacks and guidance.
     pub flight_reset_generation: u64,
     can_pop_out: bool,
     popped_out: bool,
     expanded_height: f32,
-    compact_until_mouse_leaves: bool,
+    manual_compact: bool,
     window_actions: WindowActions,
     pending_settings_json: String,
 }
 
 impl Interface {
+    /// Open a settings section without relying on its position in the window.
+    pub fn show_settings_section(&mut self, section: usize) {
+        self.settings_section = section.min(10);
+        self.set_page(5);
+    }
+    /// Refresh controller choices after an aircraft-confirmed manual tune.
+    pub fn radio_tuned(&mut self, frequency: i32) {
+        self.last_action = format!("COM1 tuned to {:.3} MHz", f64::from(frequency) / 1000.0);
+        self.search.clear();
+        self.stations_checked = 0.0;
+    }
     /// Connect to the engine at the endpoint.
     #[must_use]
     pub fn new(endpoint: &str) -> Self {
         Self {
+            settings_section: 0,
+            setup_server_url: "http://127.0.0.1:8099".into(),
+            traffic_profiles: serde_json::Value::Null,
+            native_traffic_status: String::new(),
+            traffic_selected: 0,
+            traffic_notice: String::new(),
+            model_install_status: serde_json::Value::Null,
+            model_install_checked: 0.0,
+            model_install_pending: false,
+            missions: crate::missions::Browser::default(),
             engine: EngineClient::new(endpoint),
+            occupied_airport: String::new(),
             nearby_stations: Vec::new(),
             radio_notice: String::new(),
+            available_voices: Vec::new(),
+            voices_loading: false,
+            voices_notice: String::new(),
+            voices_origin: String::new(),
+            voice_filter: String::new(),
+            voice_preview_text: String::new(),
+            map_stations: Vec::new(),
+            map_airports: Vec::new(),
+            map_all_altitudes: false,
+            map_airports_visible: true,
+            map_heliports: false,
+            map_notice: String::new(),
+            map_checked: 0.0,
+            map_loading: false,
             radio_map_range: 80.0,
             radio_map_center: None,
-            station_filter: String::new(),
+            parking_filter: String::new(),
             crew_control_filter: String::new(),
-            station_filter_manual: false,
             stations_loading: false,
             stations_checked: 0.0,
             atis_checked: 0.0,
@@ -287,6 +374,7 @@ impl Interface {
             settings: Settings::default(),
             draft: FlightPlan::default(),
             airport: Airport::default(),
+            map_geometry: crate::maps::Geometry::default(),
             arrival: ArrivalAirport::default(),
             arrival_terrain: TerrainProfile::default(),
             arrival_loading: false,
@@ -349,6 +437,9 @@ impl Interface {
             yaw: 0.35,
             pitch: 0.85,
             last_transcript_sequence: 0,
+            transcript_scroll: 0.0,
+            transcript_follow_latest: true,
+            transcript_layout: None,
             last_speech_sequence: 0,
             speech_queue: std::collections::VecDeque::new(),
             window_offset: [0.0, 0.0],
@@ -361,11 +452,20 @@ impl Interface {
             background_opacity: 0.96,
             confirm_reset: false,
             reset_pending: false,
+            reset_error: String::new(),
+            #[cfg(test)]
+            reset_button_bounds: [[0.0; 4]; 2],
+            #[cfg(test)]
+            toolbar_bounds: [[0.0; 4]; 11],
+            #[cfg(test)]
+            collapse_bounds: [0.0; 4],
+            #[cfg(test)]
+            plan_callsign_bounds: [0.0; 4],
             flight_reset_generation: 0,
             can_pop_out: false,
             popped_out: false,
             expanded_height: 760.0,
-            compact_until_mouse_leaves: false,
+            manual_compact: false,
             window_actions: WindowActions::default(),
             pending_settings_json: String::new(),
         }
@@ -438,7 +538,20 @@ impl Interface {
             "Submitting the Planning flight for clearance…".clone_into(&mut self.notice);
             return;
         }
-        let body = serde_json::to_value(request).unwrap_or(serde_json::Value::Null);
+        let mut request = request.clone();
+        if !matches!(request.role.as_str(), "copilot" | "cabin" | "ground")
+            && !request.controller_initiated
+            && !request.text.is_empty()
+        {
+            let state = self.engine.state();
+            let nearby = openatc_core::stations::nearby(&self.nearby_stations, &state.telemetry);
+            if let Some(station) = openatc_core::stations::tuned(&nearby, state.telemetry.com1_khz)
+            {
+                request.text =
+                    format_typed_transmission(&station.name, &state.plan.callsign, &request.text);
+            }
+        }
+        let body = serde_json::to_value(&request).unwrap_or(serde_json::Value::Null);
         self.engine.post("/request", body);
     }
 
@@ -466,8 +579,15 @@ impl Interface {
             let nearby = openatc_core::stations::nearby(&self.nearby_stations, &state.telemetry);
             if let Some(station) = openatc_core::stations::tuned(&nearby, state.telemetry.com1_khz)
             {
-                full.text =
-                    format_typed_transmission(&station.name, &state.plan.callsign, &full.text);
+                full.text = format_typed_transmission(
+                    &station.name,
+                    if full.intent == "clearance" {
+                        &self.draft.callsign
+                    } else {
+                        &state.plan.callsign
+                    },
+                    &full.text,
+                );
             }
         }
         self.notice.clear();
@@ -573,10 +693,14 @@ impl Interface {
         }
     }
 
-    /// Current engine refusal line for error reports.
+    /// Current refusal or simulator-data error for reports.
     #[must_use]
     pub fn last_notice(&self) -> String {
-        self.notice.clone()
+        if self.notice.is_empty() {
+            self.engine.telemetry_error().unwrap_or_default()
+        } else {
+            self.notice.clone()
+        }
     }
 
     /// Drain engine replies into page notices.
@@ -639,7 +763,7 @@ impl Interface {
                 match serde_json::from_value::<Airport>(reply.data) {
                     Ok(airport) => {
                         if self.airport.icao.is_empty() && !self.loading_airport {
-                            self.airport = airport.clone();
+                            self.set_airport(airport.clone());
                             self.airport_code.clone_from(&airport.icao);
                             self.airport_notice =
                                 format!("Loaded {} from installed scenery.", airport.icao);
@@ -659,7 +783,7 @@ impl Interface {
             if reply.success {
                 match serde_json::from_value::<Airport>(reply.data) {
                     Ok(airport) => {
-                        self.airport = airport;
+                        self.set_airport(airport);
                         self.zoom = 1.0;
                         self.pan = [0.0, 0.0];
                         self.airport_notice =
@@ -724,7 +848,9 @@ impl Interface {
                 *self = fresh;
             } else {
                 self.reset_pending = false;
-                reply.error.clone_into(&mut self.notice);
+                self.confirm_reset = true;
+                self.reset_error = reply.error;
+                self.notice.clone_from(&self.reset_error);
             }
         }
         for endpoint in ["/request/copilot-prepare", "/request/copilot-checkin"] {
@@ -732,10 +858,21 @@ impl Interface {
                 self.copilot_reply_prepared = reply.success;
                 self.copilot_prepared_sequence = reply.data["state"]["transcript"]
                     .as_array()
-                    .and_then(|entries| entries.last())
+                    .and_then(|entries| entries.iter().rev().find(|e| e["speaker"] == "COPILOT"))
                     .and_then(|e| e["sequence"].as_u64())
                     .and_then(|s| u32::try_from(s).ok())
                     .unwrap_or(0);
+                let superseded = self
+                    .engine
+                    .state()
+                    .transcript
+                    .iter()
+                    .any(|e| e.urgent && e.sequence > self.copilot_prepared_sequence);
+                if superseded {
+                    self.copilot_reply_prepared = false;
+                    self.auto_reply_pending = false;
+                    self.last_copilot_reply_sequence = 0;
+                }
                 if !reply.success {
                     self.auto_reply_pending = false;
                     self.notice = reply.error;
@@ -829,13 +966,27 @@ impl Interface {
         }
         for entry in &state.transcript {
             if entry.sequence > self.last_speech_sequence {
+                if entry.urgent && entry.speaker == "ATC" {
+                    self.speech.stop_speech();
+                    self.speech_queue.clear();
+                    if self.copilot_prepared_sequence <= entry.sequence {
+                        self.copilot_reply_prepared = false;
+                        self.auto_reply_pending = false;
+                        if entry.information_only {
+                            self.last_copilot_reply_sequence = 0;
+                        }
+                    }
+                }
                 let controller = entry.speaker == "ATC";
+                let traffic = entry.position == "Traffic";
                 let pilot = !controller
+                    && !traffic
                     && entry.speaker != "COPILOT"
                     && entry.speaker != "CABIN"
                     && entry.speaker != "ATTENDANT"
                     && entry.speaker != "GROUND";
-                if (controller && self.settings.controller_speech)
+                if (traffic && (self.settings.hear_traffic_radio || self.settings.talk_to_traffic))
+                    || (controller && self.settings.controller_speech)
                     || (entry.speaker == "COPILOT" && self.settings.copilot_speech)
                     || (pilot && self.settings.pilot_speech)
                     || matches!(entry.speaker.as_str(), "CABIN" | "ATTENDANT")
@@ -909,6 +1060,11 @@ impl Interface {
         let state = self.engine.state();
         if self.engine.connected() && !self.settings_loaded {
             self.settings = self.engine.settings();
+            if self.settings.ai_url == self.settings.stt_url
+                && self.settings.ai_url == self.settings.tts_url
+            {
+                self.setup_server_url.clone_from(&self.settings.ai_url);
+            }
             self.last_settings_json = serde_json::to_string(&self.settings).unwrap_or_default();
             self.settings_loaded = true;
             self.last_speech_sequence = state.transcript.last().map_or(0, |entry| entry.sequence);
@@ -933,8 +1089,10 @@ impl Interface {
                 .transcript
                 .iter()
                 .rev()
-                .find(|e| e.speaker == "ATC" && !e.background)
-            && last.sequence > self.last_copilot_reply_sequence
+                .find(|e| e.is_controller_instruction())
+            && (last.sequence > self.last_copilot_reply_sequence
+                || state.taxi_clearance.stage()
+                    == openatc_core::state::SurfaceStage::CrossingComplete)
             && openatc_core::readback::auto_reply(&state).is_some()
         {
             self.last_copilot_reply_sequence = last.sequence;
@@ -949,8 +1107,10 @@ impl Interface {
             && self.speech_queue.is_empty()
         {
             self.copilot_reply_prepared = false;
-            self.engine
-                .post("/request/copilot-reply", serde_json::json!({}));
+            self.engine.post(
+                "/request/copilot-reply",
+                serde_json::json!({"sequence": self.copilot_prepared_sequence}),
+            );
         }
         if self.settings.copilot_replies
             && (self.settings.copilot_tunes || self.settings.auto_tune_handoff)
@@ -964,7 +1124,7 @@ impl Interface {
                 .transcript
                 .iter()
                 .rev()
-                .find(|e| e.speaker == "ATC" && !e.background)
+                .find(|e| e.is_controller_instruction())
                 .is_some_and(|e| e.sequence == state.frequency_sequence && e.pilot_reply.is_empty())
             && let Some(_station) = self
                 .nearby_stations
@@ -988,10 +1148,68 @@ impl Interface {
         }
     }
 
+    /// Refresh provider voices after saving the selected TTS endpoint.
+    pub fn refresh_voices(&mut self) {
+        if !self.voices_loading {
+            self.save_settings();
+            self.voices_loading = true;
+            self.voices_origin.clone_from(&self.settings.tts_url);
+            self.available_voices.clear();
+            self.voices_notice = "Loading voices from the TTS service…".into();
+            self.engine.post("/speech/voices", serde_json::json!({}));
+        }
+    }
+
     fn update_radio(&mut self, state: &State, now: f64) {
+        if self.settings_loaded
+            && self.engine.connected()
+            && self.voices_origin != self.settings.tts_url
+        {
+            self.refresh_voices();
+        }
+        if let Some(reply) = self.engine.take_reply("/speech/voices") {
+            self.voices_loading = false;
+            if reply.success {
+                self.available_voices =
+                    serde_json::from_value(reply.data["voices"].clone()).unwrap_or_default();
+                self.voices_notice = format!(
+                    "{} voices returned by the TTS service",
+                    self.available_voices.len()
+                );
+            } else {
+                self.available_voices.clear();
+                self.voices_notice = reply.error;
+            }
+        }
+        if let Some(reply) = self.engine.take_reply("/debug/map") {
+            self.map_loading = false;
+            if reply.success {
+                self.map_airports =
+                    serde_json::from_value(reply.data["airports"].clone()).unwrap_or_default();
+                self.map_stations =
+                    serde_json::from_value(reply.data["stations"].clone()).unwrap_or_default();
+                self.map_notice = reply.data["notice"].as_str().unwrap_or("").into();
+            } else {
+                self.map_notice = reply.error;
+            }
+        }
+        if self.settings.dev_mode
+            && self.page == 7
+            && !self.map_loading
+            && self.engine.connected()
+            && (self.map_checked == 0.0 || now - self.map_checked > 1.0)
+        {
+            self.map_loading = true;
+            self.map_checked = now;
+            let center = self
+                .radio_map_center
+                .unwrap_or([state.telemetry.latitude, state.telemetry.longitude]);
+            self.engine.post("/debug/map", serde_json::json!({"latitude":center[0],"longitude":center[1],"rangeNm":self.radio_map_range}));
+        }
         if let Some(reply) = self.engine.take_reply("/stations/nearby") {
             self.stations_loading = false;
             if reply.success {
+                self.occupied_airport = reply.data["occupiedAirport"].as_str().unwrap_or("").into();
                 self.nearby_stations =
                     serde_json::from_value(reply.data["stations"].clone()).unwrap_or_default();
                 self.radio_notice = reply.data["notice"].as_str().unwrap_or("").to_owned();
@@ -1040,6 +1258,7 @@ impl Interface {
                     self.atis_frequency = state.telemetry.com1_khz;
                     self.atis_airport = reply.data["airport"].as_str().unwrap_or("").to_owned();
                     self.speak_entry(&Transmission {
+                        information_only: false,
                         pilot_reply: String::new(),
                         background: false,
                         speaker: "ATC".to_owned(),
@@ -1125,6 +1344,12 @@ impl Interface {
         }
     }
 
+    /// Replace the inspected airport and its static map geometry together.
+    pub fn set_airport(&mut self, airport: Airport) {
+        self.map_geometry = crate::maps::Geometry::new(&airport);
+        self.airport = airport;
+    }
+
     /// Switch page, clamped.
     pub fn set_page(&mut self, page: usize) {
         let page = page.min(PAGES.len() - 1);
@@ -1165,7 +1390,7 @@ impl Interface {
     /// Expand to the full panel layout.
     pub fn expand(&mut self) {
         self.last_interaction = now_seconds();
-        self.compact_until_mouse_leaves = false;
+        self.manual_compact = false;
         if self.compact {
             self.compact = false;
             self.window_actions.height = Some(self.expanded_height);
@@ -1178,7 +1403,7 @@ impl Interface {
         }
         self.expanded_height = self.window_size[1];
         self.compact = true;
-        self.compact_until_mouse_leaves = manual;
+        self.manual_compact = manual;
         let scale = self.settings.ui_scale;
         let compact_height = (self.window_size[1] * self.transcript_fraction + 36.0 * scale)
             .max(200.0 * scale)
@@ -1193,19 +1418,20 @@ impl Interface {
             && mouse[1] >= self.window_offset[1]
             && mouse[0] < self.window_offset[0] + self.window_size[0]
             && mouse[1] < self.window_offset[1] + self.window_size[1];
-        if !hovered {
-            self.compact_until_mouse_leaves = false;
+        // An explicit collapse stays put until the pilot opens the controls again.
+        if self.manual_compact
+            && self.page == 0
+            && !self.speech.recording()
+            && !self.ptt_armed
+            && self.modal_intent.is_empty()
+        {
+            return;
         }
         let editing = !self.message.is_empty()
             || !self.modal_intent.is_empty()
             || self.show_voice_popup
             || ui.is_any_item_active();
-        if self.page != 0
-            || self.speech.recording()
-            || self.ptt_armed
-            || editing
-            || (hovered && !self.compact_until_mouse_leaves)
-        {
+        if self.page != 0 || self.speech.recording() || self.ptt_armed || editing || hovered {
             self.expand();
         } else if self.last_interaction == 0.0 {
             self.last_interaction = now;
@@ -1229,25 +1455,26 @@ impl Interface {
         self.requested_frequency_khz = None;
         self.flight_reset_generation = self.flight_reset_generation.wrapping_add(1);
         self.reset_pending = true;
+        self.reset_error.clear();
         self.confirm_reset = false;
         self.engine.post("/session/reset", serde_json::Value::Null);
     }
 
     /// Draw the panel, returning one-frame window requests for the host.
     pub fn draw(&mut self, ui: &imgui::Ui) -> WindowActions {
+        let _theme = crate::theme::apply(ui, self.settings.light_theme);
         self.update_visibility(ui);
         let state = self.engine.state();
         let opacity = if self.compact {
             self.settings.faded_opacity.clamp(0.1, 0.85)
         } else {
-            0.96
+            self.settings.window_opacity.clamp(0.2, 1.0)
         };
         self.background_opacity +=
             (opacity - self.background_opacity) * (ui.io().delta_time * 12.0).min(1.0);
-        let _background = ui.push_style_color(
-            imgui::StyleColor::WindowBg,
-            [0.205, 0.25, 0.29, self.background_opacity],
-        );
+        let mut background = ui.style_color(imgui::StyleColor::WindowBg);
+        background[3] = self.background_opacity;
+        let _background = ui.push_style_color(imgui::StyleColor::WindowBg, background);
         ui.window("OpenATC AI")
             .position(self.window_offset, imgui::Condition::Always)
             .size(self.window_size, imgui::Condition::Always)
@@ -1259,28 +1486,21 @@ impl Interface {
                     | imgui::WindowFlags::NO_SCROLL_WITH_MOUSE,
             )
             .build(|| {
-                self.draw_toolbar(ui);
+                {
+                    let _disabled = ui.begin_disabled(self.confirm_reset || self.reset_pending);
+                    self.draw_toolbar(ui);
+                }
                 let _page_background = ui.push_style_color(imgui::StyleColor::ChildBg, [0.0; 4]);
                 ui.child_window("##page")
                     .size([0.0, (ui.content_region_avail()[1] - 24.0).max(1.0)])
                     .scroll_bar(self.page != 0)
                     .build(|| {
-                        if self.reset_pending { ui.text("Starting a new flight..."); }
-                        else { self.draw_body(ui, &state); }
+                        if self.confirm_reset || self.reset_pending {
+                            self.draw_reset_confirmation(ui);
+                        } else {
+                            self.draw_body(ui, &state);
+                        }
                     });
-                if self.confirm_reset { ui.open_popup("New flight?"); }
-                ui.modal_popup("New flight?", || {
-                    ui.text_wrapped("Clear the flight plan, conversation, clearances and pending crew actions? Settings and controller voices are kept. Aircraft controls stay as they are.");
-                    if ui.button("New flight") {
-                        self.new_flight();
-                        ui.close_current_popup();
-                    }
-                    ui.same_line();
-                    if ui.button("Cancel") {
-                        self.confirm_reset = false;
-                        ui.close_current_popup();
-                    }
-                });
                 self.resize_grip(ui);
             });
         let mut actions = std::mem::take(&mut self.window_actions);
@@ -1290,6 +1510,66 @@ impl Interface {
             (if self.compact { 180.0 } else { 460.0 }) * self.settings.ui_scale,
         ];
         actions
+    }
+
+    fn draw_reset_confirmation(&mut self, ui: &imgui::Ui) {
+        let scale = ui.current_font_size() / 18.0;
+        let available = ui.content_region_avail();
+        let size = [
+            (480.0 * scale).min(available[0]),
+            (310.0 * scale).min(available[1]),
+        ];
+        let cursor = ui.cursor_pos();
+        ui.set_cursor_pos([
+            cursor[0] + (available[0] - size[0]) * 0.5,
+            cursor[1] + (available[1] - size[1]) * 0.5,
+        ]);
+        let _background =
+            ui.push_style_color(imgui::StyleColor::ChildBg, widgets::panel_color(ui, 1.0));
+        let _padding =
+            ui.push_style_var(imgui::StyleVar::WindowPadding([20.0 * scale, 18.0 * scale]));
+        let _rounding = ui.push_style_var(imgui::StyleVar::ChildRounding(10.0 * scale));
+        ui.child_window("##new-flight-confirmation")
+            .size(size)
+            .border(true)
+            .always_use_window_padding(true)
+            .scroll_bar(false)
+            .build(|| {
+                ui.text_colored(crate::widgets::accent(ui), if self.reset_pending { "Starting a new flight" } else { "Start a new flight?" });
+                ui.spacing();
+                ui.text_wrapped("Clear the current flight plan, conversation, clearances and pending crew actions.");
+                ui.spacing();
+                ui.text_wrapped("Your settings and controller voices are kept. Aircraft controls stay as they are.");
+                if !self.reset_error.is_empty() {
+                    ui.spacing();
+                    ui.text_colored(crate::widgets::warning(ui), "Could not reset the flight");
+                    ui.text_wrapped(&self.reset_error);
+                }
+                ui.set_cursor_pos([20.0 * scale, size[1] - 58.0 * scale]);
+                if self.reset_pending {
+                    ui.text_disabled("Waiting for the engine...");
+                } else {
+                    let width = ((size[0] - 48.0 * scale) * 0.5).max(1.0);
+                    if ui.button_with_size(if self.reset_error.is_empty() { "Start new flight" } else { "Retry" }, [width, 36.0 * scale]) {
+                        self.new_flight();
+                    }
+                    #[cfg(test)]
+                    {
+                        let a = ui.item_rect_min(); let b = ui.item_rect_max();
+                        self.reset_button_bounds[0] = [a[0], a[1], b[0], b[1]];
+                    }
+                    ui.same_line();
+                    if ui.button_with_size("Cancel", [width, 36.0 * scale]) {
+                        self.confirm_reset = false;
+                        self.reset_error.clear();
+                    }
+                    #[cfg(test)]
+                    {
+                        let a = ui.item_rect_min(); let b = ui.item_rect_max();
+                        self.reset_button_bounds[1] = [a[0], a[1], b[0], b[1]];
+                    }
+                }
+            });
     }
 
     fn resize_grip(&mut self, ui: &imgui::Ui) {
@@ -1330,50 +1610,60 @@ impl Interface {
 
     fn draw_toolbar(&mut self, ui: &imgui::Ui) {
         let scale = ui.current_font_size() / 18.0;
+        let page_count = if self.settings.dev_mode { 10 } else { 9 };
+        let action_count = 3 + usize::from(self.can_pop_out) + usize::from(self.settings.dev_mode);
+        let wrap = ui.content_region_avail()[0]
+            < ((1 + page_count + action_count) as f32 * 39.0 + 140.0) * scale;
         let _padding = ui.push_style_var(imgui::StyleVar::WindowPadding([0.0, 0.0]));
         let _spacing = ui.push_style_var(imgui::StyleVar::ItemSpacing([7.0 * scale, 7.0 * scale]));
         let _background = ui.push_style_color(imgui::StyleColor::ChildBg, [0.0; 4]);
         ui.child_window("##toolbar")
-            .size([0.0, 34.0 * scale])
+            .size([0.0, if wrap { 73.0 } else { 34.0 } * scale])
             .scroll_bar(false)
             .build(|| {
-                self.toolbar_pages(ui, scale);
+                if widgets::icon_button(ui, "Close OpenATC AI", widgets::ToolbarIcon::Close, false)
+                {
+                    self.window_actions.close = true;
+                }
+                if !wrap {
+                    self.toolbar_pages(ui, true);
+                }
                 self.toolbar_drag(ui, scale);
                 self.toolbar_right(ui, scale);
+                if wrap {
+                    self.toolbar_pages(ui, false);
+                }
             });
     }
 
-    /// Page switch icons on the left of the toolbar.
-    fn toolbar_pages(&mut self, ui: &imgui::Ui, _scale: f32) {
-        use widgets::{ToolbarIcon, icon_button};
-        if icon_button(ui, "Close OpenATC AI", ToolbarIcon::Close, false) {
-            self.window_actions.close = true;
-        }
-        for (page, label, icon) in [
-            (0, "ATC communications", ToolbarIcon::Messages),
-            (6, "Radio frequencies", ToolbarIcon::Headset),
-            (1, "Flight plan / SimBrief", ToolbarIcon::FlightPlan),
-        ] {
-            ui.same_line();
-            if icon_button(ui, label, icon, self.page == page) {
+    fn toolbar_pages(&mut self, ui: &imgui::Ui, inline: bool) {
+        use widgets::ToolbarIcon;
+        const PAGES: [(usize, &str, ToolbarIcon); 10] = [
+            (0, "ATC and crew", ToolbarIcon::Messages),
+            (6, "Radios", ToolbarIcon::Headset),
+            (1, "Flight plan", ToolbarIcon::FlightPlan),
+            (2, "Taxi", ToolbarIcon::Taxi),
+            (3, "Arrival", ToolbarIcon::Arrival),
+            (4, "Airports", ToolbarIcon::Airports),
+            (5, "Settings", ToolbarIcon::Settings),
+            (8, "Traffic", ToolbarIcon::Traffic),
+            (9, "Missions", ToolbarIcon::Missions),
+            (7, "Map (debug)", ToolbarIcon::Map),
+        ];
+        for (index, &(page, label, icon)) in PAGES.iter().enumerate() {
+            if page == 7 && !self.settings.dev_mode {
+                continue;
+            }
+            if inline || index > 0 {
+                ui.same_line();
+            }
+            if widgets::icon_button(ui, label, icon, self.page == page) {
                 self.set_page(page);
             }
-        }
-        for (page, label, symbol) in [
-            (2, "Taxi", 2),
-            (3, "Arrival", 3),
-            (4, "Airports", 4),
-            (5, "Settings", 5),
-        ] {
-            ui.same_line();
-            if page_icon_button(ui, label, symbol, self.page == page) {
-                self.set_page(page);
-            }
-        }
-        if self.settings.dev_mode {
-            ui.same_line();
-            if icon_button(ui, "Radio sectors", ToolbarIcon::Headset, self.page == 7) {
-                self.set_page(7);
+            #[cfg(test)]
+            {
+                let (a, b) = (ui.item_rect_min(), ui.item_rect_max());
+                self.toolbar_bounds[page] = [a[0], a[1], b[0], b[1]];
             }
         }
     }
@@ -1398,7 +1688,7 @@ impl Interface {
                     position[0] + (drag_width - text_size[0]) * 0.5,
                     position[1] + (32.0 * scale - text_size[1]) * 0.5,
                 ],
-                widgets::MUTED,
+                widgets::muted(ui),
                 text,
             );
         }
@@ -1428,6 +1718,7 @@ impl Interface {
         {
             let _disabled = ui.begin_disabled(self.reset_pending);
             if icon_button(ui, "New flight", ToolbarIcon::NewFile, false) {
+                self.collapse(false);
                 self.confirm_reset = true;
             }
         }
@@ -1466,6 +1757,12 @@ impl Interface {
                 self.collapse(true);
             }
         }
+        #[cfg(test)]
+        {
+            let (a, b) = (ui.item_rect_min(), ui.item_rect_max());
+            self.collapse_bounds = [a[0], a[1], b[0], b[1]];
+        }
+        drop(_disabled);
         if self.can_pop_out {
             ui.same_line();
             if icon_button(
@@ -1480,12 +1777,21 @@ impl Interface {
             ) {
                 self.window_actions.toggle_pop_out = true;
             }
+            #[cfg(test)]
+            {
+                let (a, b) = (ui.item_rect_min(), ui.item_rect_max());
+                self.toolbar_bounds[10] = [a[0], a[1], b[0], b[1]];
+            }
         }
     }
 
     fn draw_body(&mut self, ui: &imgui::Ui, state: &openatc_core::state::State) {
         if self.page == 7 && !self.settings.dev_mode {
             self.set_page(0);
+        }
+        if self.compact && self.page == 0 {
+            crate::pages::atc_page(ui, self, state);
+            return;
         }
         let descriptions = [
             "Talk with your crew and air traffic control.",
@@ -1496,6 +1802,8 @@ impl Interface {
             "Configure your crew, audio and flight preferences.",
             "Nearby radio stations. Select a station to tune COM1.",
             "Controller boundaries used by flight handoffs. Debug view.",
+            "Nearby aircraft, traffic settings and radio conversations.",
+            "Choose a flight story, create your own and follow the flight journal.",
         ];
         crate::widgets::page_heading(ui, PAGES[self.page], descriptions[self.page]);
         match self.page {
@@ -1506,44 +1814,11 @@ impl Interface {
             5 => crate::pages::settings_page(ui, self, state),
             6 => crate::pages::radio_page(ui, self, state),
             7 => crate::sectors::page(ui, self, state),
+            8 => crate::traffic::tab(ui, self, state),
+            9 => self.missions.page(ui, &self.engine, state),
             _ => crate::pages::atc_page(ui, self, state),
         }
     }
-}
-
-fn page_icon_button(ui: &imgui::Ui, label: &str, symbol: i32, selected: bool) -> bool {
-    let scale = ui.current_font_size() / 18.0;
-    let size = 32.0 * scale;
-    let position = ui.cursor_screen_pos();
-    let clicked = ui.invisible_button(label, [size, size]);
-    let hovered = ui.is_item_hovered();
-    let draw = ui.get_window_draw_list();
-    let center = [position[0] + size * 0.5, position[1] + size * 0.5];
-    let color = if selected {
-        [1.0; 4]
-    } else {
-        [0.84, 0.88, 0.90, 1.0]
-    };
-    let background = if selected {
-        [0.0, 0.59, 0.75, 1.0]
-    } else if hovered {
-        [0.43, 0.49, 0.53, 0.96]
-    } else {
-        [0.37, 0.41, 0.44, 0.70]
-    };
-    draw.add_rect(
-        position,
-        [position[0] + size, position[1] + size],
-        background,
-    )
-    .filled(true)
-    .rounding(3.0 * scale)
-    .build();
-    widgets::draw_symbol(&draw, symbol, center, color, 10.0 * scale);
-    if hovered {
-        ui.tooltip_text(label);
-    }
-    clicked
 }
 
 /// Steady-clock seconds for interaction timing.
@@ -1556,7 +1831,7 @@ pub fn now_seconds() -> f64 {
         .as_secs_f64()
 }
 
-fn format_typed_transmission(station: &str, callsign: &str, message: &str) -> String {
+pub(crate) fn format_typed_transmission(station: &str, callsign: &str, message: &str) -> String {
     let compact = |text: &str| {
         text.chars()
             .filter(char::is_ascii_alphanumeric)

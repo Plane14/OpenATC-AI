@@ -9,6 +9,15 @@ pub fn blocked(airport: &Airport, runway: &str, telemetry: &Telemetry) -> Option
     let Some(targets) = &telemetry.traffic else {
         return Some("holding_standby");
     };
+    blocked_targets(airport, runway, targets.iter().take(63))
+}
+
+/// Check a bounded traffic view without copying telemetry or aircraft lists.
+pub fn blocked_targets<'a>(
+    airport: &Airport,
+    runway: &str,
+    targets: impl Iterator<Item = &'a crate::state::TrafficTarget>,
+) -> Option<&'static str> {
     let Some(r) = airport
         .runways
         .iter()
@@ -43,8 +52,10 @@ pub fn blocked(airport: &Airport, runway: &str, telemetry: &Telemetry) -> Option
         let along = (east * dx + north * dn) / length;
         let across = (east * dn - north * dx).abs() / length;
         let agl = t.altitude_feet - airport.elevation_feet;
-        if (-50.0..=length + 50.0).contains(&along)
-            && across < r.width / 2.0 + 25.0
+        let (fore_aft, lateral) =
+            crate::traffic::footprint(&t.aircraft, t.wingspan_meters, t.track_degrees, heading);
+        if (-fore_aft - 10.0..=length + fore_aft + 10.0).contains(&along)
+            && across < r.width / 2.0 + lateral + 10.0
             && (t.on_ground || agl < 150.0)
         {
             return Some("holding_runway_occupied");
@@ -69,6 +80,76 @@ pub fn blocked(airport: &Airport, runway: &str, telemetry: &Telemetry) -> Option
 mod tests {
     use super::*;
     use crate::state::{Point, TrafficTarget};
+    #[test]
+    fn crossing_tail_and_arrival_exit_stay_protected_beyond_the_painted_line() {
+        let airport = Airport {
+            runways: vec![crate::airport::Runway {
+                first_name: "09".into(),
+                second_name: "27".into(),
+                width: 45.0,
+                second: Point {
+                    east: 2000.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            taxi_hold_lines: vec![[
+                Point {
+                    east: 900.0,
+                    north: 75.0,
+                    height: 0.0,
+                },
+                Point {
+                    east: 1100.0,
+                    north: 75.0,
+                    height: 0.0,
+                },
+            ]],
+            ..Default::default()
+        };
+        let route = crate::state::TaxiClearance {
+            crossing_runway: "09".into(),
+            points: vec![
+                Point {
+                    east: 1000.0,
+                    north: -100.0,
+                    height: 0.0,
+                },
+                Point {
+                    east: 1000.0,
+                    north: 130.0,
+                    height: 0.0,
+                },
+            ],
+            ..Default::default()
+        };
+        let mut t = Telemetry {
+            aircraft_icao: "A320".into(),
+            longitude: 1000.0 / 111320.0,
+            latitude: 100.0 / 111320.0,
+            heading_degrees: 0.0,
+            on_ground: true,
+            position_valid: true,
+            ..Default::default()
+        };
+        assert!(!crate::airport::crossing_vacated(&airport, &route, &t));
+        assert!(crate::airport::aircraft_on_runway(&airport, &t));
+        t.latitude = 125.0 / 111320.0;
+        assert!(crate::airport::crossing_vacated(&airport, &route, &t));
+        assert!(!crate::airport::aircraft_on_runway(&airport, &t));
+        let target = TrafficTarget {
+            aircraft: "B77W".into(),
+            longitude: 1000.0 / 111320.0,
+            latitude: 65.0 / 111320.0,
+            on_ground: true,
+            track_degrees: 0.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            blocked_targets(&airport, "09", std::iter::once(&target)),
+            Some("holding_runway_occupied")
+        );
+    }
     #[test]
     fn distinguishes_clear_runway_incoming_occupied_and_unavailable() {
         let a = Airport {

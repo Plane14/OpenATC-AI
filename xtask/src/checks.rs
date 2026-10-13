@@ -1,4 +1,5 @@
 mod crew;
+mod flight;
 mod radio;
 mod speech;
 use crate::{Result, distribution::tree, repo};
@@ -139,7 +140,11 @@ fn serve(
         .unwrap_or("")
         .contains("/audio/speech")
     {
+        let request: Value = serde_json::from_slice(&body)?;
+        requests.lock().unwrap().push(request);
         (503, "test provider unavailable".into())
+    } else if header.lines().next().unwrap_or("").contains("/v1/voices") {
+        (200, json!({"voices":["af_bella","ff_siwis",{"id":"custom_en","language":"en-AU","name":"Australian"}]}).to_string())
     } else {
         let request: Value = serde_json::from_slice(&body)?;
         requests.lock().unwrap().push(request.clone());
@@ -154,6 +159,10 @@ fn serve(
             .as_str()
             .unwrap_or("")
             .starts_with("Classify the pilot message")
+            && request["messages"][1]["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("reqest taxy")
         {
             json!({"intent":"taxi","altitudeFeet":0,"waypoint":""}).to_string()
         } else {
@@ -189,7 +198,7 @@ impl Drop for Engine {
     }
 }
 impl Engine {
-    fn new(binary: &Path, speech: &Path, model: &Model, radio: bool) -> Result<Self> {
+    fn new(binary: &Path, speech: &Path, model: &Model, kind: &str) -> Result<Self> {
         let folder = tempfile::tempdir()?;
         let config = folder.path().join("config");
         fs::create_dir(&config)?;
@@ -198,7 +207,22 @@ impl Engine {
         let sim = folder.path().join("sim");
         let apt = sim.join("Global Scenery/Global Airports/Earth nav data/apt.dat");
         fs::create_dir_all(apt.parent().unwrap())?;
-        fs::write(apt, include_str!("../fixtures/radio-apt.dat"))?;
+        fs::write(
+            apt,
+            if kind == "test-flight" {
+                include_str!("../fixtures/flight-apt.dat")
+            } else {
+                include_str!("../fixtures/radio-apt.dat")
+            },
+        )?;
+        if kind == "test-flight" {
+            let atc = sim.join("Custom Data/1200 atc data/Earth nav data/atc.dat");
+            fs::create_dir_all(atc.parent().unwrap())?;
+            fs::write(atc, include_str!("../fixtures/flight-atc.dat"))?;
+            let cifp = sim.join("Custom Data/CIFP");
+            fs::create_dir_all(&cifp)?;
+            fs::write(cifp.join("DEST.dat"), "APPCH:010,A,I09R,,FINAL,\n")?;
+        }
         let unrelated = sim.join("Custom Scenery/Unrelated/Earth nav data");
         fs::create_dir_all(&unrelated)?;
         fs::write(
@@ -209,7 +233,7 @@ impl Engine {
             sim.join("Custom Scenery/scenery_packs.ini"),
             "SCENERY_PACK Custom Scenery/Unrelated/\n",
         )?;
-        if radio {
+        if kind == "test-radio" {
             let runtime = library.join("runtime/responses.toml");
             let mut text = fs::read_to_string(&runtime)?;
             for (id, phrase) in [
@@ -410,11 +434,12 @@ fn clearance(e: &Engine) -> Result {
 }
 pub(crate) fn exercise(kind: &str, binary: &Path, speech: &Path) -> Result {
     let model = Model::new("Cleared to FAKE. Climb to 99000 feet, squawk 7777.")?;
-    let mut engine = Engine::new(binary, speech, &model, kind == "test-radio")?;
+    let mut engine = Engine::new(binary, speech, &model, kind)?;
     match kind {
         "test-radio" => radio::radio(&mut engine, &model)?,
         "test-crew" => crew::crew(&mut engine, &model)?,
         "test-speech" => speech::speech_examples(&engine, &model)?,
+        "test-flight" => flight::flight(&mut engine)?,
         _ => return Err("Unknown integration suite".into()),
     };
     println!("{} passed against the real engine", kind);

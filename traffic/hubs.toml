@@ -1,0 +1,190 @@
+# Local operator preferences. Weights need not sum to 100.
+version = 1
+
+[airport.YSSY]
+name = "Sydney"
+airlines = { QFA = 55, VOZ = 25, JST = 20, QFA-regional = 30, ANZ = 8, SIA = 5, UAE = 4 }
+
+[airport.YMML]
+name = "Melbourne"
+airlines = { QFA = 55, VOZ = 25, JST = 20, QFA-regional = 20, SIA = 5, UAE = 5 }
+
+[airport.YBBN]
+name = "Brisbane"
+airlines = { QFA = 45, VOZ = 40, JST = 20, QFA-regional = 35 }
+
+[airport.YPPH]
+name = "Perth"
+airlines = { QFA = 55, VOZ = 25, JST = 15, QFA-regional = 20, SIA = 8 }
+
+[airport.YADL]
+name = "Adelaide"
+airlines = { QFA = 45, VOZ = 30, JST = 20, QFA-regional = 20 }
+
+[airport.YMHB]
+name = "Hobart"
+airlines = { QFA = 35, VOZ = 30, JST = 35 }
+
+[airport.YBCG]
+name = "Gold Coast"
+airlines = { QFA = 15, VOZ = 35, JST = 50 }
+
+[airport.YBCS]
+name = "Cairns"
+airlines = { QFA = 35, VOZ = 20, JST = 45, QFA-regional = 25 }
+
+[airport.NZAA]
+name = "Auckland"
+airlines = { ANZ = 65, ANZ-regional = 55, JST = 20, QFA = 15, SIA = 5 }
+
+[airport.NZCH]
+name = "Christchurch"
+airlines = { ANZ = 55, ANZ-regional = 55, JST = 25, QFA = 20 }
+
+[airport.NZWN]
+name = "Wellington"
+airlines = { ANZ = 50, ANZ-regional = 70, JST = 20, QFA = 10 }
+
+[airport.WSSS]
+name = "Singapore Changi"
+airlines = { SIA = 85, QFA = 10, CPA = 10, ANA = 10, UAE = 10 }
+
+[airport.OMDB]
+name = "Dubai"
+airlines = { UAE = 90, QFA = 5, BAW = 5 }
+
+[airport.OTHH]
+name = "Doha"
+airlines = { QTR = 90, BAW = 10 }
+
+[airport.VHHH]
+name = "Hong Kong"
+airlines = { CPA = 90, SIA = 15, ANA = 15, QFA = 10 }
+
+[airport.RJTT]
+name = "Tokyo Haneda"
+airlines = { ANA = 85, UAL = 10, DAL = 10 }
+
+[airport.RJAA]
+name = "Tokyo Narita"
+airlines = { ANA = 75, UAL = 15, SIA = 10, FDX = 20 }
+
+[airport.HAAB]
+name = "Addis Ababa"
+airlines = { ETH = 90 }
+
+[airport.KLAX]
+name = "Los Angeles"
+airlines = { UAL = 30, DAL = 30, AAL = 30, SWA = 20, ASA = 20, SKW = 50, FDX = 15, UPS = 15 }
+
+[airport.KSNA]
+name = "John Wayne"
+airlines = { SWA = 40, UAL = 20, AAL = 20, DAL = 10, ASA = 20, SKW = 35 }
+
+[airport.KLGB]
+name = "Long Beach"
+airlines = { SWA = 80, DAL = 20 }
+
+[airport.KSFO]
+name = "San Francisco"
+airlines = { UAL = 80, ASA = 25, SKW = 60, AAL = 10, DAL = 10 }
+
+[airport.KSEA]
+name = "Seattle Tacoma"
+airlines = { ASA = 80, DAL = 45, SKW = 25 }
+
+[airport.KPDX]
+name = "Portland"
+airlines = { ASA = 65, SKW = 40, SWA = 25 }
+
+[airport.KDEN]
+name = "Denver"
+airlines = { UAL = 70, SWA = 45, SKW = 50 }
+
+[airport.KORD]
+name = "Chicago O'Hare"
+airlines = { UAL = 65, AAL = 60, SKW = 70 }
+
+[airport.KMDW]
+name = "Chicago Midway"
+airlines = { SWA = 90 }
+
+[airport.KDFW]
+name = "Dallas Fort Worth"
+airlines = { AAL = 90, SKW = 30 }
+
+[airport.KDAL]
+name = "Dallas Love Field"
+airlines = { SWA = 90 }
+
+[airport.KATL]
+name = "Atlanta"
+airlines = { DAL = 95, SWA = 20 }
+
+[airport.KJFK]
+name = "New York Kennedy"
+airlines = { DAL = 45, AAL = 40, BAW = 20 }
+
+[airport.KEWR]
+name = "Newark"
+airlines = { UAL = 95 }
+
+[airport.KIAH]
+name = "Houston Intercontinental"
+airlines = { UAL = 85, SKW = 45 }
+
+[airport.KHOU]
+name = "Houston Hobby"
+airlines = { SWA = 90 }
+
+[airport.KPHX]
+name = "Phoenix"
+airlines = { AAL = 55, SWA = 50, SKW = 40 }
+
+[airport.KSLC]
+name = "Salt Lake City"
+airlines = { DAL = 80, SKW = 70 }
+
+[airport.KMSP]
+name = "Minneapolis Saint Paul"
+airlines = { DAL = 80, SKW = 50 }
+
+[airport.KDTW]
+name = "Detroit"
+airlines = { DAL = 85, SKW = 50 }
+
+[airport.KMIA]
+name = "Miami"
+airlines = { AAL = 85, FDX = 15, UPS = 15 }
+
+[airport.KMEM]
+name = "Memphis"
+airlines = { FDX = 100, AAL = 15, DAL = 15, SWA = 20 }
+
+[airport.KSDF]
+name = "Louisville"
+airlines = { UPS = 100, AAL = 15, DAL = 15, SWA = 20 }
+
+[airport.PHNL]
+name = "Honolulu"
+airlines = { UAL = 25, DAL = 20, AAL = 20, ASA = 20, SWA = 20, ANA = 10 }
+
+[airport.EGLL]
+name = "London Heathrow"
+airlines = { BAW = 90, UAL = 15, AAL = 15, DAL = 15 }
+
+[airport.EGKK]
+name = "London Gatwick"
+airlines = { BAW = 55 }
+
+[airport.EDDF]
+name = "Frankfurt"
+airlines = { DLH = 90, UAL = 15 }
+
+[airport.EDDM]
+name = "Munich"
+airlines = { DLH = 90, UAL = 10 }
+
+[airport.EHAM]
+name = "Amsterdam"
+airlines = { KLM = 90, KLC = 90, DAL = 15 }

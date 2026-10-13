@@ -1,5 +1,60 @@
 # Unreleased
 
+## Barometric altitude monitoring and QNH wording — 13 October 2026
+
+- Keep geometric, indicated and standard-pressure altitude separate. Flight-level compliance uses standard pressure; lower altitude assignments and pilot reports use the altimeter reading. Preserve the existing 300-foot tolerance, sustained-deviation delay and allowance for climbing/descending toward the clearance.
+- Routine QNH calls omit the unit suffix; settings below 1000 hPa retain hectopascals. Added exported altitude-source diagnostics and regressions for the reported 18,000-foot false warning, normal variation, genuine deviations and low-pressure wording.
+
+## Crew recipient selection and ramp guidance — 13 October 2026
+
+- Repeated MECH/INT and ATTN/CAB calls retain the crew recipient instead of toggling communication back to ATC. Recipient-change logs identify the command that selected it. VHF selection still restores ATC.
+- Keep approved taxiway arrows visible from nearby stands outside the taxi network; unverified apron gaps still receive no invented route. The 64-instance and 1,200-metre bounds remain.
+- Tested compound ground-service requests after start-up/pushback approval while stationary, refusal while moving, and installed LFMN taxi guidance from the reported stand.
+
+## Center handoff and radio availability — 13 October 2026
+
+- Decode truncated legacy COM frequencies correctly in both airport and controller data. A record such as `FREQ 11802` now gives 118.025 MHz, matching the actual aircraft radio instead of leaving Center silent and hiding ATC requests. Modern 8.33 kHz channels remain unchanged.
+- Added the reported Los Angeles Center position/frequency regression, a completed copilot handoff/check-in exchange and airborne request-button checks.
+
+## Taxi monitoring, assistance replies and ATC window resizing — 13 October 2026
+
+- Wait for observed taxi movement after readback before starting the off-route timer. Stationary aircraft and speed jitter no longer produce taxi complaints. New clearances reset movement evidence; runway-entry checks remain separate.
+- Remember the taxi-assistance question so yes/no replies work without an LLM. Accepted assistance replans from the stopped position to the same destination, preserves runway holds and requests a fresh readback. Wrong-format model output asks for clarification instead of showing a JSON parser error. ATC context no longer instructs the model to issue crew-control actions.
+- Keep a manually collapsed ATC window compact under the mouse. Preserve transcript follow/reading position through compact and expanded layouts.
+
+## Title-bar icons and UI audit — 13 October 2026
+
+- Restored icon navigation in the title bar, matching the original layout. Added consistent Traffic and Missions glyphs, scaled strokes, selected/disabled states and hover names. Narrow windows use a second icon row; settings keep visible section tabs.
+- Fixed pop-out being disabled outside ATC and SimBrief import disabling the entire planning form. Dispatch columns, mission fields, ATC request inputs, audio selectors and long settings labels now fit smaller windows.
+- Added departure/destination shortcuts to the empty airport browser. Map labels avoid each other and controller hover details group repeated frequencies instead of covering the whole window.
+- Exercised every navigation icon at three text scales and two widths, checked offline flight-plan editing and inspected desktop page/settings renders. Native simulator appearance and FPS still require the user's test.
+
+## Connection, station visibility and settings repairs — 13 October 2026
+
+- Separated engine connectivity from simulator-data rejection. Errors remain visible until a valid sample arrives, and requests cannot proceed on falsely acknowledged telemetry.
+- Treated invalid optional airspeed, heading, track and clock readings as unavailable. Required position/motion validation remains active and reports the offending field and value.
+- Restored visible page navigation and wrapping settings tabs. AI, STT/TTS, Voices and Audio remain independently configurable; General displays the saved service addresses. Traffic configuration and Bluebell downloads are under Settings → Traffic, with aircraft and pilot conversations on Traffic.
+- Removed background scene capture, shaders and their controls. Light/Dark themes and ordinary transparency remain. Older saved settings keep their service and voice choices.
+- Verified installed KLAX station discovery, Delivery request availability after tuning, engine-running button filtering and release-engine flight replays. Native X-Plane testing remains outstanding; the simulator must be launched by the user through Steam.
+
+## AI compute, Kitten voices and controller validation — 13 October 2026
+
+Added optional Kitten Mini 0.8 synthesis with its eight discovered English voices; Kokoro remains the default. Removed the experimental Breeze integration. GPU-capable builds prefer an accelerator, with global and per-component CPU overrides. TTS warm-up catches late-loaded CUDA dependency failures before readiness, and Whisper prefers a discrete GPU when one is available. Health diagnostics expose the selected provider and compute choices. Native AI build jobs now enable accelerated backends.
+
+The bundled LLM supports grammar-constrained JSON requests. Engine classification accepts only known request fields and preserves original pilot text for readback checks. Fixed repeated JSON sampling and large-prompt handling in the inference worker. Controller assignment uses the provider's complete allowed voice roster and remembers identities across flights.
+
+Airport filtering checks installed boundary, pavement and runway containment before nearby reference points. Added installed-KLAX regression coverage. Arrival monitoring separates touchdown, runway exit and Ground handoff, and arrival taxi crossings remain monitored. Reaching an intermediate runway hold cannot finish a parking route.
+
+Reorganised and expanded the README and AI-server guide with installation, complete flight workflow, editable resources, hardware measurements, build flags, packaging and current limitations. New native platform GPU builds and a complete live simulator flight still require acceptance testing.
+
+## New flight confirmation — 12 October 2026
+
+Replaced the screen-wide modal with a centered confirmation inside the plugin window, keeping its controls within X-Plane’s mouse-input area. Added clear reset progress and visible failure/retry controls. Session reset also discards prepared copilot replies.
+
+## Radio exchanges and debug map — 10 October 2026
+
+Removed duplicate readback buttons and the stale hold-point banner above the conversation. Copilot crossing reports now precede the onward taxi clearance. Airborne check-ins reaffirm the assigned altitude instead of a greeting alone. Destination wording uses scenery airport names where available; IFR, VFR and ILS are spoken as letters. Added airport visibility and a local scenery elevation layer to the debug map.
+
 ## Platform warning cleanup — 9 October 2026
 
 ZIP permission options now use a Unix-only shadowed value, removing the Windows unused-mut warning. The vendored SDK binding crate suppresses unnecessary-transmute warnings only on Windows; generated ABI conversions remain unchanged.
@@ -422,3 +477,28 @@ Replaced the Python installers, ZIP packager, Linux dependency checker, artifact
 - Remove development-controller wording and routine taxi readback prompts from speech. Keep hold-short readbacks in the instruction form.
 - Avoid duplicate expected/initial altitude wording and use a conservative SID instruction without claiming an unmodelled climb-via clearance.
 - Recognise cabin arming/cross-check variants and handle a comma-separated coffee request independently. Allow slide indications time to settle and include actual readback values in failure logs.
+
+### Radio identification and spoken callsigns
+
+- Fixed copilot check-ins being recorded a second time under the pilot's callsign.
+- Added identified quick requests and TOML phrase variants for clearance, taxi, start-up, pushback and departure readiness.
+- Kept display text intact while speech spells the aircraft callsign and reads runway, squawk, heading and frequency digits, including niner and runway left/right/center suffixes.
+- Added pronunciation and real-engine transcript regression checks.
+
+
+### Voice discovery and the developer map
+
+- Query the configured TTS voice API and show a searchable voice preview table with editable English text and controller-pool controls.
+- Add English-language voices only, enabled by default. International voices pass through unchanged when disabled; provider language metadata supports custom English voices.
+- Expand spoken service abbreviations and known airport identifiers while preserving chat text.
+- Fix clearance quick requests using the previous flight's callsign before Planning submission.
+- Rename the developer sector view to Map; add airport markers, aircraft tracking, controller labels, altitude limits and optional heliports.
+- Reduce repeated polygon drawing and verify dense-map rendering.
+
+## 12 October 2026 — airborne monitoring and phrase alternatives
+
+Removed the slow terrain overlay from the developer sector map; Arrival profile terrain remains. Added route-leg monitoring, IAS and magnetic-heading telemetry, published crossing limits, planned step-climb markers, bounded deviation and speed requests, runway/approach amendments and nominal descent-distance checks. Sector handoffs use ownership and lookahead rather than the closest unrelated airport. Pending readbacks block new airborne instructions. Added TOML alternatives for amendments, corrections, climbs, descents, crossing limits, arrival clearances and refusals. Shared role context includes relevant fresh controls and flight state without permitting unconfirmed actions.
+
+## 12 October 2026 — low-altitude SimBrief import
+
+A SimBrief cruise level below 5,000 feet no longer fails validation because of the default initial clearance level. The provisional initial altitude is capped at the planned cruise altitude; normal altitude validation remains in place. Airports, runways and route import together.

@@ -23,10 +23,18 @@ pub fn phase_name(phase: PhaseCode) -> String {
     .to_owned()
 }
 
-/// Whether an intent is available in the current state.
 /// Check whether the request is available in the current flight phase.
 #[must_use]
 pub fn request_available(state: &State, intent: &str) -> bool {
+    if ["traffic_sighted", "traffic_not_sighted"].contains(&intent) {
+        return !state.telemetry.on_ground
+            && state.traffic_call.as_ref().is_some_and(|call| {
+                call.frequency_khz == state.telemetry.com1_khz && !call.sighted
+            });
+    }
+    if intent == "resume_course" {
+        return !state.telemetry.on_ground && state.clearance.is_some();
+    }
     if intent == "radio_check" || intent == "emergency" || intent == "position" {
         return true;
     }
@@ -52,6 +60,23 @@ fn ground_request_available(state: &State, intent: &str) -> Option<bool> {
         .clearance
         .as_ref()
         .is_some_and(|clearance| !clearance.acknowledged);
+    if intent == "departure_runway" {
+        return Some(
+            !airborne
+                && state.clearance.is_some()
+                && !pending
+                && !matches!(
+                    state.phase,
+                    PhaseCode::Departure
+                        | PhaseCode::Landed
+                        | PhaseCode::TaxiIn
+                        | PhaseCode::Finished
+                ),
+        );
+    }
+    if intent == "arrival_runway" || intent == "change_approach" {
+        return Some(airborne && state.clearance.is_some() && !pending);
+    }
     if intent == "clearance" {
         return Some(
             !airborne
@@ -60,8 +85,18 @@ fn ground_request_available(state: &State, intent: &str) -> Option<bool> {
         );
     }
     if ["pushback", "start", "start_pushback"].contains(&intent) {
+        let outstanding = match intent {
+            "start" => !state.startup_approved && !state.telemetry.engines_running,
+            "pushback" => !state.pushback_approved,
+            _ => {
+                !state.startup_approved
+                    && !state.pushback_approved
+                    && !state.telemetry.engines_running
+            }
+        };
         return Some(
-            !airborne
+            outstanding
+                && !airborne
                 && (state.phase == PhaseCode::Clearance
                     || (intent == "start" && state.phase == PhaseCode::Pushback))
                 && state.clearance.is_some()
@@ -201,20 +236,120 @@ fn airborne_request_available(state: &State, intent: &str) -> Option<bool> {
 /// Update the flight phase after four consistent telemetry ticks.
 /// Reject invalid telemetry before changing state.
 pub fn update_flight_phase(state: &mut State, telemetry: &Telemetry) -> Result<(), String> {
-    if !telemetry.latitude.is_finite()
-        || !telemetry.longitude.is_finite()
-        || !telemetry.altitude_feet.is_finite()
-        || !telemetry.vertical_speed_fpm.is_finite()
-        || !telemetry.ground_speed_knots.is_finite()
-        || telemetry.latitude.abs() > 90.0
-        || telemetry.longitude.abs() > 180.0
-        || telemetry.ground_speed_knots < 0.0
+    for (field, value, min, max) in [
+        ("latitude", Some(telemetry.latitude), -90.0, 90.0),
+        ("longitude", Some(telemetry.longitude), -180.0, 180.0),
+        (
+            "altitudeFeet",
+            Some(telemetry.altitude_feet),
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+        ),
+        (
+            "verticalSpeedFpm",
+            Some(telemetry.vertical_speed_fpm),
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+        ),
+        (
+            "indicatedAltitudeFeet",
+            telemetry.indicated_altitude_feet,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+        ),
+        (
+            "pressureAltitudeFeet",
+            telemetry.pressure_altitude_feet,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+        ),
+        (
+            "groundSpeedKnots",
+            Some(telemetry.ground_speed_knots),
+            0.0,
+            f64::INFINITY,
+        ),
+        (
+            "headingDegrees",
+            Some(telemetry.heading_degrees),
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+        ),
+        (
+            "heightAglFeet",
+            Some(telemetry.height_agl_feet),
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+        ),
+        (
+            "simulationSeconds",
+            telemetry.simulation_seconds,
+            0.0,
+            f64::INFINITY,
+        ),
+        (
+            "indicatedSpeedKnots",
+            telemetry.indicated_speed_knots,
+            0.0,
+            f64::INFINITY,
+        ),
+        (
+            "magneticHeadingDegrees",
+            telemetry.magnetic_heading_degrees,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+        ),
+        (
+            "groundTrackDegrees",
+            telemetry.ground_track_degrees,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+        ),
+    ] {
+        if let Some(value) = value
+            && (!value.is_finite() || value < min || value > max)
+        {
+            return Err(format!("Invalid telemetry: {field} = {value}"));
+        }
+    }
+    if telemetry
+        .traffic
+        .as_ref()
+        .is_some_and(|targets| targets.len() > 63)
     {
-        return Err("Invalid telemetry".to_owned());
+        return Err("Invalid telemetry: traffic exceeds 63 targets".to_owned());
     }
     state.telemetry = telemetry.clone();
     if telemetry.paused {
         return Ok(());
+    }
+    if state.phase == PhaseCode::TaxiIn
+        && state.taxi_clearance.approved
+        && !state.taxi_clearance.parking_hold
+        && (state.demo || crate::parking::endpoint_available(state, telemetry) == Some(true))
+        && state.taxi_clearance.to_parking
+        && state.taxi_clearance.hold_short_runway.is_empty()
+        && state.taxi_clearance.crossing_runway.is_empty()
+        && telemetry.on_ground
+        && telemetry.position_valid
+        && telemetry.ground_speed_knots < 0.5
+    {
+        let route = &state.taxi_clearance;
+        let reference = Airport {
+            reference_latitude: route.reference_latitude,
+            reference_longitude: route.reference_longitude,
+            ..Default::default()
+        };
+        let here = airport_point(&reference, telemetry.latitude, telemetry.longitude);
+        if route
+            .points
+            .last()
+            .is_some_and(|p| (p.east - here.east).hypot(p.north - here.north) <= 8.0)
+        {
+            state.phase = PhaseCode::Finished;
+            state.taxi_clearance.guidance_complete = true;
+            state.taxi_clearance.approved = false;
+        }
     }
     if state.taxi_clearance.approved
         && !state.taxi_clearance.guidance_complete
@@ -367,6 +502,13 @@ pub fn validate_flight_plan(plan: &FlightPlan) -> Result<(), String> {
             || !fix.altitude_feet.is_finite()
             || fix.latitude.abs() > 90.0
             || fix.longitude.abs() > 180.0
+            || fix
+                .minimum_altitude_feet
+                .is_some_and(|v| !(0..=60000).contains(&v))
+            || fix
+                .maximum_altitude_feet
+                .is_some_and(|v| !(0..=60000).contains(&v))
+            || matches!((fix.minimum_altitude_feet,fix.maximum_altitude_feet),(Some(a),Some(b)) if a > b)
         {
             return Err(crate::dialogue::say("plan_invalid_route_coordinate", &[]));
         }
@@ -700,6 +842,69 @@ mod tests {
     use super::super::state::{FlightPlan, PhaseCode, State, Telemetry};
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn invalid_motion_does_not_replace_last_valid_flight_state() {
+        let mut state = State {
+            phase: PhaseCode::Approach,
+            ..Default::default()
+        };
+        let before = state.clone();
+        for telemetry in [
+            Telemetry {
+                heading_degrees: f64::NAN,
+                ..Default::default()
+            },
+            Telemetry {
+                ground_track_degrees: Some(f64::INFINITY),
+                ..Default::default()
+            },
+            Telemetry {
+                height_agl_feet: f64::NAN,
+                ..Default::default()
+            },
+            Telemetry {
+                simulation_seconds: Some(-1.0),
+                ..Default::default()
+            },
+        ] {
+            assert!(update_flight_phase(&mut state, &telemetry).is_err());
+            assert_eq!(state, before);
+        }
+    }
+
+    #[test]
+    fn parking_completion_requires_the_final_stand_and_a_stopped_aircraft() {
+        let mut state = State::default();
+        state.phase = PhaseCode::TaxiIn;
+        state.has_departed = true;
+        state.taxi_clearance = crate::state::TaxiClearance {
+            approved: true,
+            to_parking: true,
+            points: vec![crate::state::Point::default()],
+            ..Default::default()
+        };
+        let mut telemetry = Telemetry {
+            position_valid: true,
+            on_ground: true,
+            latitude: 0.0002,
+            ..Default::default()
+        };
+        update_flight_phase(&mut state, &telemetry).unwrap();
+        assert_eq!(state.phase, PhaseCode::TaxiIn);
+        telemetry.latitude = 0.0;
+        telemetry.ground_speed_knots = 4.0;
+        update_flight_phase(&mut state, &telemetry).unwrap();
+        assert_eq!(state.phase, PhaseCode::TaxiIn);
+        telemetry.ground_speed_knots = 0.0;
+        state.taxi_clearance.hold_short_runway = "09".into();
+        update_flight_phase(&mut state, &telemetry).unwrap();
+        assert_eq!(state.phase, PhaseCode::TaxiIn);
+        state.taxi_clearance.hold_short_runway.clear();
+        update_flight_phase(&mut state, &telemetry).unwrap();
+        assert_eq!(state.phase, PhaseCode::Finished);
+        assert!(!state.taxi_clearance.approved);
+    }
 
     fn fixtures() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")

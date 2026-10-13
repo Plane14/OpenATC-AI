@@ -41,34 +41,62 @@ fn error(text: &str) -> Response {
     )
         .into_response()
 }
-/// Index scenery outside the state lock and return shared reception results.
-pub async fn nearby(AxumState(shared): AxumState<Shared>, Json(_): Json<Value>) -> Response {
+/// Requests must work even when the pilot has never opened the station browser.
+pub async fn ensure_index(shared: &Shared) -> Result<(), String> {
+    let scan = shared.read().await.station_index_lock.clone();
+    let _scan = scan.lock().await;
     let (root, old) = {
         let s = shared.read().await;
         (s.settings.simulator_root.clone(), s.station_root.clone())
     };
     if root.is_empty() {
-        return Json(json!({"stations":[],"notice":"Set the X-Plane folder"})).into_response();
+        return Err("Set the X-Plane folder".into());
     }
     if root != old {
         let copy = root.clone();
-        let result =
-            tokio::task::spawn_blocking(move || openatc_core::stations::load_index(&copy)).await;
+        let workers = shared.read().await.workers.clone();
+        let result = workers
+            .run(move || {
+                let stations = openatc_core::stations::load_index(&copy)?;
+                let airports = openatc_core::stations::map_airports(&copy)?;
+                Ok::<_, String>((stations, airports))
+            })
+            .await;
         let index = match result {
             Ok(Ok(v)) => v,
-            Ok(Err(e)) => return error(&e),
-            Err(_) => return error("Station indexing failed"),
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err("Station indexing failed".into()),
         };
         let mut s = shared.write().await;
         if s.settings.simulator_root == root {
+            s.map_root = root.clone();
             s.station_root = root;
-            s.stations = index;
+            s.stations = index.0;
+            s.map_airports = index.1;
             s.sim_weather.clear();
             s.atis_information.clear();
         }
     }
+    Ok(())
+}
+
+/// Index scenery outside the state lock and return shared reception results.
+pub async fn nearby(AxumState(shared): AxumState<Shared>, Json(_): Json<Value>) -> Response {
+    if shared.read().await.settings.simulator_root.is_empty() {
+        return Json(
+            json!({"stations":[], "occupiedAirport":null, "notice":"Set the X-Plane folder"}),
+        )
+        .into_response();
+    }
+    if let Err(message) = ensure_index(&shared).await {
+        return error(&message);
+    }
     let s = shared.read().await;
-    Json(json!({"stations":openatc_core::stations::nearby(&s.stations,&s.session.telemetry)}))
+    let airport = openatc_core::stations::occupied_airport(&s.map_airports, &s.session.telemetry)
+        .map(|a| a.id.as_str());
+    Json(json!({"stations":openatc_core::stations::nearby(&s.stations,&s.session.telemetry),
+        "occupiedAirport": airport,
+        "notice": if s.stations.is_empty() { "No radio stations found in the installed scenery" } else { "" }}))
         .into_response()
 }
 /// Store actual simulator samples, without accepting invented/stale observations.
@@ -243,7 +271,25 @@ pub fn apply_wording(
     };
     let slots = openatc_core::catalog::Slots {
         callsign: Some(state.session.plan.callsign.clone()),
-        dest: Some(state.session.plan.destination.clone()),
+        dest: Some(
+            state
+                .stations
+                .iter()
+                .find(|s| s.airport == state.session.plan.destination && !s.airport_name.is_empty())
+                .map_or_else(
+                    || {
+                        state
+                            .map_airports
+                            .iter()
+                            .find(|a| a.id == state.session.plan.destination)
+                            .map_or_else(
+                                || state.session.plan.destination.clone(),
+                                |a| a.name.clone(),
+                            )
+                    },
+                    |s| s.airport_name.clone(),
+                ),
+        ),
         runway: Some(clearance.runway.clone()),
         altitude_feet: Some(clearance.altitude_feet),
         squawk: Some(clearance.squawk.clone()),
@@ -319,6 +365,81 @@ pub fn safe_variety(original: &str, candidate: &str) -> bool {
         }
     }
     expected.next().is_none()
+}
+
+/// The debug map reads the same controller catalogue used for handoffs.
+pub async fn debug_map(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>) -> Response {
+    let (root, indexed_root, latitude, longitude) = {
+        let s = shared.read().await;
+        if !s.settings.dev_mode {
+            return error("Map is available in developer mode.");
+        }
+        (
+            s.settings.simulator_root.clone(),
+            s.map_root.clone(),
+            s.session.telemetry.latitude,
+            s.session.telemetry.longitude,
+        )
+    };
+    if root.is_empty() {
+        return error("Set the X-Plane folder to load the map.");
+    }
+    if root != indexed_root {
+        let path = root.clone();
+        let workers = shared.read().await.workers.clone();
+        let airports = match workers
+            .run(move || openatc_core::stations::map_airports(&path))
+            .await
+        {
+            Ok(Ok(v)) => v,
+            _ => return error("Could not index airport markers."),
+        };
+        let mut s = shared.write().await;
+        if s.settings.simulator_root != root {
+            return error("Simulator folder changed; refresh the map.");
+        }
+        s.map_airports = airports;
+        s.map_root = root.clone();
+    }
+    let s = shared.read().await;
+    let lat = body
+        .get("latitude")
+        .and_then(Value::as_f64)
+        .unwrap_or(latitude);
+    let lon = body
+        .get("longitude")
+        .and_then(Value::as_f64)
+        .unwrap_or(longitude);
+    let range = body
+        .get("rangeNm")
+        .and_then(Value::as_f64)
+        .unwrap_or(80.)
+        .clamp(2., 1500.);
+    if !lat.is_finite() || !lon.is_finite() || lat.abs() > 90. || lon.abs() > 180. {
+        return error("Invalid map position.");
+    }
+    let mut t = s.session.telemetry.clone();
+    t.latitude = lat;
+    t.longitude = lon;
+    let distance = |a, b| openatc_core::ops::distance_nm(lat, lon, a, b);
+    let stations: Vec<_> = s
+        .stations
+        .iter()
+        .filter(|station| {
+            distance(station.latitude, station.longitude) <= range * 1.5
+                || station
+                    .coverage
+                    .iter()
+                    .any(|volume| volume.radio_distance_nm(&t) <= range * 1.5)
+        })
+        .collect();
+    let airports: Vec<_> = s
+        .map_airports
+        .iter()
+        .filter(|a| distance(a.latitude, a.longitude) <= range * 1.5)
+        .collect();
+    Json(json!({"stations":stations,"airports":airports,
+        "notice":if s.station_root != root { "Waiting for the radio station index." } else { "Installed airport data and published ATC coverage. Green outlines contain the aircraft on the tuned frequency." }})).into_response()
 }
 
 #[cfg(test)]

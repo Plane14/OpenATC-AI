@@ -9,19 +9,25 @@ pub mod catalog;
 pub mod compliance;
 pub mod crew;
 pub mod dialogue;
+pub mod escort;
 pub mod hazards;
 pub mod identify;
 pub mod intents;
 pub mod metar;
+pub mod missions;
+pub mod navigation;
 pub mod ops;
+pub mod parking;
 mod parse;
 pub mod profiles;
+pub mod radiotelephony;
 pub mod readback;
 pub mod regions;
 pub mod simbrief;
 pub mod speech;
 pub mod state;
 pub mod stations;
+pub mod voices;
 
 /// Effective display/speech units. Hybrid flies feet aloft.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -36,7 +42,7 @@ pub enum UnitSystem {
 }
 
 /// Resolve the effective system from the `units` setting and departure ICAO.
-/// Mirrors `resolveUnits`: unknown preferences fall back to imperial.
+/// Unknown preferences fall back to imperial.
 #[must_use]
 pub fn resolve_units(preference: &str, departure: &str) -> UnitSystem {
     if preference == "metric" {
@@ -251,6 +257,7 @@ mod tests {
 
 /// Runway occupancy and final-approach checks using simulator traffic.
 pub mod holding;
+pub mod traffic;
 
 /// Offline named-place position references.
 pub mod places;

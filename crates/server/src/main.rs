@@ -8,7 +8,9 @@
 //! dedicated thread. HTTP handlers post jobs to it and await oneshot replies;
 //! only owned data (`String`, numbers) ever crosses threads.
 
-mod voices;
+mod compute;
+mod json_mode;
+mod synthesis;
 
 use axum::{
     Json, Router,
@@ -22,8 +24,8 @@ use llama_cpp_2::{
     model::LlamaModel, model::params::LlamaModelParams, sampling::LlamaSampler,
 };
 use openatc_ai_core::{LockedModel, Lockfile, Manifest, ModelEntry, ensure, resolve, sha256_hex};
-use openatc_platform::{detect_gpu, models_dir};
-use openatc_tts::{TtsEngine, fx::Fx, fx::apply_fx, wav_bytes};
+use openatc_platform::models_dir;
+use openatc_tts::fx::Fx;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -33,6 +35,11 @@ use tokio::sync::oneshot;
 
 #[derive(Parser)]
 struct Args {
+    #[command(flatten)]
+    cpu: compute::CpuOptions,
+    /// Local speech model. Kokoro is the default; Kitten uses Mini 0.8.
+    #[arg(long, value_enum, default_value_t = synthesis::Provider::Kokoro)]
+    tts_provider: synthesis::Provider,
     /// Local port to listen on.
     #[arg(long, default_value_t = 8099)]
     port: u16,
@@ -45,7 +52,7 @@ struct Args {
     /// KV context size for the LLM.
     #[arg(long, default_value_t = 4096)]
     ctx_size: u32,
-    /// STT compute: auto (CUDA when built for it, else CPU), cpu, or cuda.
+    /// STT compute: auto prefers the compiled GPU backend and falls back to CPU.
     #[arg(long, default_value = "auto")]
     stt_backend: String,
     /// `openatc-stt` binary override (default: beside this binary, else PATH).
@@ -55,6 +62,7 @@ struct Args {
 
 /// One inference request crossing into the llama thread.
 struct InferenceJob {
+    json: bool,
     messages: Vec<ChatMessage>,
     temperature: f32,
     max_tokens: u32,
@@ -186,58 +194,8 @@ struct AppState {
     model_status: BTreeMap<String, String>,
     backend: String,
     stt_backend: String,
-}
-
-/// Run synthesis on the TTS thread. The engine loads here so a bad model
-/// fails fast at startup, mirroring the inference loop.
-fn tts_loop(
-    model_path: &std::path::Path,
-    voices_path: &std::path::Path,
-    jobs: mpsc::Receiver<TtsJob>,
-) {
-    let mut engine = match TtsEngine::load(model_path, voices_path) {
-        Ok(engine) => engine,
-        Err(error) => {
-            eprintln!("openatc-ai: TTS load failed: {error}");
-            return;
-        }
-    };
-    eprintln!(
-        "openatc-ai: TTS ready ({} voices)",
-        engine.voice_names().len()
-    );
-    for job in jobs {
-        let result = engine
-            .synthesize(
-                &job.text,
-                &job.voice,
-                job.speed,
-                job.sentence_pause,
-                job.clause_pause,
-            )
-            .map(|samples| {
-                let seed = format!(
-                    "{}|{}|{}|{}|{}|{}/{}/{}/{}",
-                    job.text,
-                    job.voice,
-                    job.speed,
-                    job.sentence_pause,
-                    job.clause_pause,
-                    job.fx.hiss,
-                    job.fx.crackle,
-                    job.fx.static_,
-                    job.fx.bandpass
-                );
-                wav_bytes(&apply_fx(&samples, openatc_tts::SAMPLE_RATE, job.fx, &seed))
-            });
-        if let Err(error) = &result {
-            eprintln!(
-                "openatc-ai: TTS failed: voice={} text={:?} error={error}",
-                job.voice, job.text
-            );
-        }
-        let _ = job.reply.send(result);
-    }
+    llm_device: compute::DeviceStatus,
+    tts_status: synthesis::Status,
 }
 
 /// One `OpenAI` chat message.
@@ -250,6 +208,7 @@ struct ChatMessage {
 /// `OpenAI` chat completion request (subset we honor).
 #[derive(Debug, Deserialize)]
 struct ChatRequest {
+    response_format: Option<serde_json::Value>,
     #[serde(default)]
     model: String,
     messages: Vec<ChatMessage>,
@@ -289,7 +248,9 @@ fn complete(
     messages: &[ChatMessage],
     temperature: f32,
     max_new: u32,
+    json: bool,
 ) -> Result<Completion, String> {
+    context.clear_kv_cache();
     let prompt = chatml_prompt(messages);
     let vocab = model.vocab();
     let tokens = vocab.tokenize(prompt.as_bytes(), true, true);
@@ -314,7 +275,7 @@ fn complete(
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(42, |time| time.subsec_nanos());
-    let mut sampler = if temperature <= 0.0 {
+    let sampling = if temperature <= 0.0 {
         LlamaSampler::greedy()
     } else {
         LlamaSampler::chain_simple([
@@ -324,13 +285,19 @@ fn complete(
             LlamaSampler::dist(seed),
         ])
     };
+    let mut sampler = if json {
+        let grammar = LlamaSampler::grammar(model, json_mode::GRAMMAR, "root")
+            .map_err(|e| format!("JSON grammar: {e}"))?;
+        LlamaSampler::chain_simple([grammar, sampling])
+    } else {
+        sampling
+    };
     let mut output = Vec::new();
     let mut generated = 0u32;
     // Token counts stay far below i32 range in practice.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     for position in (tokens.len() as i32..).take(max_new) {
         let token = sampler.sample(context, -1);
-        sampler.accept(token);
         if vocab.is_eog(token) {
             break;
         }
@@ -344,8 +311,12 @@ fn complete(
             .decode(&mut batch)
             .map_err(|error| format!("decode failed: {error:?}"))?;
     }
+    let text = String::from_utf8_lossy(&output).into_owned();
+    if json && !serde_json::from_str::<serde_json::Value>(&text).is_ok_and(|v| v.is_object()) {
+        return Err("Model did not finish its JSON object within max_tokens".into());
+    }
     Ok(Completion {
-        text: String::from_utf8_lossy(&output).into_owned(),
+        text,
         prompt_tokens: u32::try_from(tokens.len()).unwrap_or(u32::MAX),
         output_tokens: generated,
     })
@@ -355,31 +326,78 @@ fn complete(
 fn inference_loop(
     llm_path: &std::path::Path,
     ctx_size: u32,
-    jobs: mpsc::Receiver<InferenceJob>,
+    jobs: &mpsc::Receiver<InferenceJob>,
+    force_cpu: bool,
+    ready: &mpsc::Sender<Result<compute::DeviceStatus, String>>,
 ) -> Result<(), String> {
     let backend =
         LlamaBackend::init().map_err(|error| format!("backend init failed: {error:?}"))?;
-    let model = LlamaModel::load_from_file(&backend, llm_path, &LlamaModelParams::default())
-        .map_err(|error| format!("model load failed: {error:?}"))?;
-    eprintln!("openatc-ai: model ready ({} params)", model.n_params());
-    let mut context = model
-        .new_context(
+    let gpu = !force_cpu && backend.supports_gpu_offload();
+    let mut device = compute::DeviceStatus::new(
+        if gpu { "gpu-requested" } else { "cpu" },
+        if force_cpu {
+            "Forced by option"
+        } else if gpu {
+            "All model layers requested on GPU; startup log identifies actual devices"
+        } else {
+            "No GPU backend available in this build"
+        },
+    );
+    for use_gpu in [true, false].into_iter().filter(|enabled| !*enabled || gpu) {
+        let model = match LlamaModel::load_from_file(
             &backend,
-            LlamaContextParams::default().with_n_ctx(std::num::NonZeroU32::new(ctx_size)),
-        )
-        .map_err(|error| format!("context init failed: {error:?}"))?;
-    for job in jobs {
-        let result = complete(
-            &model,
-            &mut context,
-            ctx_size,
-            &job.messages,
-            job.temperature,
-            job.max_tokens,
-        );
-        let _ = job.reply.send(result);
+            llm_path,
+            &LlamaModelParams::default().with_n_gpu_layers(if use_gpu { u32::MAX } else { 0 }),
+        ) {
+            Ok(model) => model,
+            Err(error) if use_gpu => {
+                device =
+                    compute::DeviceStatus::new("cpu", format!("GPU model load failed: {error:?}"));
+                continue;
+            }
+            Err(error) => {
+                let message = format!("model load failed: {error:?}");
+                let _ = ready.send(Err(message.clone()));
+                return Err(message);
+            }
+        };
+        let params = LlamaContextParams::default()
+            .with_n_ctx(std::num::NonZeroU32::new(ctx_size))
+            .with_n_batch(ctx_size)
+            .with_offload_kqv(use_gpu)
+            .with_op_offload(use_gpu);
+        let mut context = match model.new_context(&backend, params) {
+            Ok(context) => context,
+            Err(error) if use_gpu => {
+                device = compute::DeviceStatus::new(
+                    "cpu",
+                    format!("GPU context allocation failed: {error:?}"),
+                );
+                continue;
+            }
+            Err(error) => {
+                let message = format!("context init failed: {error:?}");
+                let _ = ready.send(Err(message.clone()));
+                return Err(message);
+            }
+        };
+        context.print_memory_breakdown();
+        let _ = ready.send(Ok(device));
+        for job in jobs {
+            let result = complete(
+                &model,
+                &mut context,
+                ctx_size,
+                &job.messages,
+                job.temperature,
+                job.max_tokens,
+                job.json,
+            );
+            let _ = job.reply.send(result);
+        }
+        return Ok(());
     }
-    Ok(())
+    unreachable!("CPU initialization is always attempted")
 }
 
 /// One transcription result, gateway-compatible shape.
@@ -468,6 +486,8 @@ async fn chat_completions(
     };
     let (reply_tx, reply_rx) = oneshot::channel();
     let job = InferenceJob {
+        json: json_mode::enabled(request.response_format.as_ref())
+            .map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?,
         messages: request.messages,
         temperature: request.temperature,
         max_tokens,
@@ -517,13 +537,17 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "status": "ok",
         "backend": state.backend,
         "stt": state.stt_backend,
+        "compute": {"llm": state.llm_device, "stt": state.stt_backend, "tts": state.tts_status.device},
+        "ttsProvider": state.tts_status.provider,
         "models": state.model_status,
     }))
 }
 
-/// Kokoro v1 voice roster, matching the voices table on disk.
-async fn list_voices() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "voices": voices::KOKORO_V1 }))
+/// Voices in the selected model's loaded table.
+async fn list_voices(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(
+        serde_json::json!({ "provider": state.tts_status.provider, "voices": state.tts_status.voices }),
+    )
 }
 
 /// Speech-to-text: multipart `file` (16 kHz mono WAV) plus ignored `model`.
@@ -723,11 +747,22 @@ fn ensure_all(
 /// Returns the resolved root, manifest and per-model status.
 async fn ensure_models(
     root: std::path::PathBuf,
+    provider: synthesis::Provider,
 ) -> Result<(std::path::PathBuf, Manifest, BTreeMap<String, String>), String> {
     std::fs::create_dir_all(&root)
         .map_err(|error| format!("cannot create {}: {error}", root.display()))?;
-    let manifest =
+    let mut manifest =
         Manifest::parse(include_str!("../../../models.toml")).map_err(|error| error.to_string())?;
+    if provider == synthesis::Provider::Kitten {
+        manifest
+            .model
+            .retain(|entry| !entry.path.starts_with("tts/"));
+        manifest.model.extend(
+            Manifest::parse(include_str!("../../../models-kitten.toml"))
+                .map_err(|error| error.to_string())?
+                .model,
+        );
+    }
     let lock_path = root.join("models.lock.toml");
     let lockfile: Lockfile = std::fs::read_to_string(&lock_path)
         .ok()
@@ -753,7 +788,7 @@ async fn ensure_models(
 async fn main() -> Result<(), String> {
     let args = Args::parse();
     let root = args.models_dir.clone().unwrap_or_else(models_dir);
-    let (root, manifest, status) = ensure_models(root).await?;
+    let (root, manifest, status) = ensure_models(root, args.tts_provider).await?;
     let llm_path = resolve(
         &root,
         manifest
@@ -765,8 +800,12 @@ async fn main() -> Result<(), String> {
     if !llm_path.exists() {
         return Err(format!("LLM file missing: {}", llm_path.display()));
     }
-    let stt_backend = match args.stt_backend.as_str() {
-        "auto" | "cpu" | "cuda" => args.stt_backend.clone(),
+    let stt_backend = match if args.cpu.stt() {
+        "cpu"
+    } else {
+        args.stt_backend.as_str()
+    } {
+        value @ ("auto" | "cpu" | "cuda") => value.to_owned(),
         other => {
             return Err(format!(
                 "unknown --stt-backend {other:?}; want auto, cpu or cuda"
@@ -785,42 +824,41 @@ async fn main() -> Result<(), String> {
         return Err(format!("STT file missing: {}", stt_path.display()));
     }
     let (job_tx, job_rx) = mpsc::channel();
-    let loader = std::thread::spawn(move || inference_loop(&llm_path, args.ctx_size, job_rx));
+    let (llm_ready_tx, llm_ready_rx) = mpsc::channel();
+    let force_llm_cpu = args.cpu.llm();
+    let loader = std::thread::spawn(move || {
+        inference_loop(
+            &llm_path,
+            args.ctx_size,
+            &job_rx,
+            force_llm_cpu,
+            &llm_ready_tx,
+        )
+    });
     let sidecar_bin = sidecar_path(args.stt_bin.as_deref());
     let (stt_child, stt_base_url, stt_backend_name) =
         start_sidecar(&sidecar_bin, &stt_path, &stt_backend).await?;
-    let tts_path = resolve(
-        &root,
-        manifest
-            .model
-            .iter()
-            .find(|entry| entry.name == "kokoro-v1.0")
-            .ok_or("manifest has no kokoro entry")?,
-    );
-    let voices_path = resolve(
-        &root,
-        manifest
-            .model
-            .iter()
-            .find(|entry| entry.name == "kokoro-voices-v1.0")
-            .ok_or("manifest has no kokoro voices entry")?,
-    );
-    if !tts_path.exists() {
-        return Err(format!("TTS file missing: {}", tts_path.display()));
-    }
-    if !voices_path.exists() {
-        return Err(format!("TTS voices missing: {}", voices_path.display()));
-    }
     let (tts_tx, tts_rx) = mpsc::channel();
-    let tts_loader = std::thread::spawn(move || tts_loop(&tts_path, &voices_path, tts_rx));
-    // Fail fast when a model itself cannot load (bad file, OOM).
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    if loader.is_finished() {
-        return Err("inference thread exited during load".to_owned());
-    }
-    if tts_loader.is_finished() {
-        return Err("TTS thread exited during load".to_owned());
-    }
+    let (tts_ready_tx, tts_ready_rx) = mpsc::channel();
+    let config = synthesis::Config {
+        provider: args.tts_provider,
+        force_cpu: args.cpu.tts(),
+        root,
+    };
+    let tts_loader = std::thread::spawn(move || synthesis::run(&config, tts_rx, &tts_ready_tx));
+    let (llm_device, tts_status) = tokio::task::spawn_blocking(move || {
+        let timeout = std::time::Duration::from_secs(300);
+        Ok::<_, String>((
+            llm_ready_rx
+                .recv_timeout(timeout)
+                .map_err(|e| format!("LLM startup: {e}"))??,
+            tts_ready_rx
+                .recv_timeout(timeout)
+                .map_err(|e| format!("TTS startup: {e}"))??,
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     let state = Arc::new(AppState {
         inference: InferenceHandle { jobs: job_tx },
         tts: TtsHandle { jobs: tts_tx },
@@ -831,13 +869,10 @@ async fn main() -> Result<(), String> {
         },
         model_name: "qwen2.5:7b-instruct".to_owned(),
         model_status: status,
-        backend: match detect_gpu() {
-            openatc_platform::GpuBackend::Cuda => "cpu (cuda toolkit absent)",
-            openatc_platform::GpuBackend::Metal => "cpu (metal pending)",
-            openatc_platform::GpuBackend::Cpu => "cpu",
-        }
-        .to_owned(),
+        backend: llm_device.device.clone(),
         stt_backend: stt_backend_name,
+        llm_device,
+        tts_status,
     });
     serve(state, args.host.clone(), args.port).await?;
     let _ = loader.join();

@@ -61,6 +61,8 @@ pub fn scenery_paths(root: &str) -> Vec<String> {
     paths.push(format!(
         "{root}/Resources/default scenery/default apt dat/Earth nav data/apt.dat"
     ));
+    let mut seen = BTreeSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
     paths
 }
 fn append_airport(text: &str, id: &str, seen: &mut BTreeSet<String>, stations: &mut Vec<Station>) {
@@ -85,11 +87,15 @@ pub fn load_index(root: &str) -> Result<Vec<Station>, String> {
         let mut id = String::new();
         let mut block = String::new();
         for line in text.lines() {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            let Some(record) = fields.first().and_then(|v| v.parse::<i32>().ok()) else {
+            let Some(record) = line
+                .split_ascii_whitespace()
+                .next()
+                .and_then(|v| v.parse::<i32>().ok())
+            else {
                 continue;
             };
             if [1, 16, 17, 99].contains(&record) {
+                let fields: Vec<_> = line.split_ascii_whitespace().collect();
                 append_airport(&block, &id, &mut seen, &mut stations);
                 block.clear();
                 id.clear();
@@ -218,15 +224,28 @@ pub fn nearby(index: &[Station], t: &Telemetry) -> Vec<Station> {
 pub fn tuned(stations: &[Station], khz: i32) -> Option<&Station> {
     stations.iter().find(|s| s.receivable && s.khz == khz)
 }
+
+// Five-digit COM records omit the last 5: 11802 means 118.025 MHz.
+// Modern CHAN records already contain all six digits and must stay unchanged.
+pub(crate) fn legacy_com_khz(frequency: i32) -> i32 {
+    frequency.saturating_mul(10) + if frequency.rem_euclid(5) == 2 { 5 } else { 0 }
+}
 /// Primary role capabilities; combined airport duties are assigned during indexing.
 #[must_use]
 pub fn serves(service: &str, intent: &str) -> bool {
     match intent {
+        "traffic_sighted" | "traffic_not_sighted" => {
+            ["Tower", "Departure", "Approach", "Center"].contains(&service)
+        }
         "clearance" => service == "Clearance",
+        "departure_runway" => ["Clearance", "Ground", "Tower"].contains(&service),
+        "arrival_runway" | "change_approach" => {
+            ["Approach", "Departure", "Center", "Tower"].contains(&service)
+        }
         "start" | "pushback" | "start_pushback" | "taxi" | "gate" | "progressive" => {
             service == "Ground"
         }
-        "cross_runway" => service == "Ground" || service == "Tower",
+        "cross_runway" | "vacated" => service == "Ground" || service == "Tower",
         "ready" | "backtrack" | "landing" => service == "Tower",
         "checkin" => [
             "Clearance",
@@ -237,8 +256,10 @@ pub fn serves(service: &str, intent: &str) -> bool {
             "Center",
         ]
         .contains(&service),
-        "altitude" | "direct" | "descent" | "cancel_ifr" | "route" | "deviation" | "hold"
-        | "speed" | "divert" => ["Approach", "Departure", "Center"].contains(&service),
+        "resume_course" | "altitude" | "direct" | "descent" | "cancel_ifr" | "route"
+        | "deviation" | "hold" | "speed" | "divert" => {
+            ["Approach", "Departure", "Center"].contains(&service)
+        }
         "approach" | "runway" => ["Approach", "Center"].contains(&service),
         "go_around" | "visual" | "localizer" => ["Tower", "Approach"].contains(&service),
         _ => [
@@ -319,7 +340,7 @@ pub struct Coverage {
 impl Coverage {
     /// Radio discovery uses horizontal coverage, not the controller's assigned
     /// altitude band. Airport aircraft can tune approach before entering it.
-    fn radio_distance_nm(&self, t: &Telemetry) -> f64 {
+    pub fn radio_distance_nm(&self, t: &Telemetry) -> f64 {
         if self.points.len() < 3 {
             return f64::INFINITY;
         }
@@ -386,26 +407,25 @@ impl Coverage {
 /// otherwise Tower delivers clearance. Tower handles ground duties if no Ground
 /// is published. Separate published services keep their own responsibilities.
 pub fn assign_airport_capabilities(stations: &mut [Station]) {
-    let airports: BTreeSet<_> = stations.iter().map(|s| s.airport.clone()).collect();
-    for airport in airports {
-        let has = |role: &str| {
-            stations
-                .iter()
-                .any(|s| s.airport == airport && s.service == role)
-        };
-        let clearance = if has("Clearance") {
+    let mut roles = std::collections::BTreeMap::<String, (bool, bool)>::new();
+    for station in stations.iter() {
+        let entry = roles.entry(station.airport.clone()).or_default();
+        entry.0 |= station.service == "Clearance";
+        entry.1 |= station.service == "Ground";
+    }
+    for station in stations {
+        let (has_clearance, has_ground) = roles[&station.airport];
+        let clearance = if has_clearance {
             "Clearance"
-        } else if has("Ground") {
+        } else if has_ground {
             "Ground"
         } else {
             "Tower"
         };
-        let ground = if has("Ground") { "Ground" } else { "Tower" };
-        for station in stations.iter_mut().filter(|s| s.airport == airport) {
-            for (primary, capability) in [(clearance, "Clearance"), (ground, "Ground")] {
-                if station.service == primary && !station.services.iter().any(|s| s == capability) {
-                    station.services.push(capability.to_owned());
-                }
+        let ground = if has_ground { "Ground" } else { "Tower" };
+        for (primary, capability) in [(clearance, "Clearance"), (ground, "Ground")] {
+            if station.service == primary && !station.services.iter().any(|s| s == capability) {
+                station.services.push(capability.to_owned());
             }
         }
     }
@@ -453,5 +473,259 @@ mod coverage_tests {
             altitude_feet: 20000.,
             ..t
         }));
+    }
+}
+
+/// Airport markers are separate from frequencies so uncontrolled fields appear too.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AirportMarker {
+    /// Simulator airport identifier.
+    pub id: String,
+    /// Airport name from the scenery header.
+    pub name: String,
+    /// Latitude of the first published runway or pad.
+    pub latitude: f64,
+    /// Longitude of the first published runway or pad.
+    pub longitude: f64,
+    /// Heliports can be hidden to keep regional views readable.
+    #[serde(default)]
+    pub heliport: bool,
+    /// Scenery boundaries and paved contours used only for airport ownership.
+    #[serde(skip)]
+    pub footprints: Vec<Vec<[f64; 2]>>,
+    /// Latitude/longitude bounds to avoid scanning distant polygons.
+    #[serde(skip)]
+    pub bounds: Option<[f64; 4]>,
+}
+
+/// Index enabled airport scenery in priority order, including fields without radios.
+pub fn map_airports(root: &str) -> Result<Vec<AirportMarker>, String> {
+    use std::io::BufRead;
+    let mut markers = Vec::new();
+    let mut seen = BTreeSet::new();
+    for path in scenery_paths(root) {
+        let Ok(file) = std::fs::File::open(path) else {
+            continue;
+        };
+        let mut airport: Option<AirportMarker> = None;
+        let mut positioned = false;
+        let mut contour = Vec::new();
+        let mut surface = false;
+        for line in std::io::BufReader::new(file).lines() {
+            let line = line.map_err(|e| e.to_string())?;
+            let f: Vec<_> = line.split_whitespace().collect();
+            let Some(record) = f.first().and_then(|v| v.parse::<i32>().ok()) else {
+                continue;
+            };
+            if [1, 16, 17, 99].contains(&record) {
+                if positioned && let Some(marker) = airport.take() {
+                    markers.push(marker);
+                }
+                positioned = false;
+                surface = false;
+                contour.clear();
+                airport = if f.len() > 5 && record != 99 && seen.insert(f[4].to_owned()) {
+                    Some(AirportMarker {
+                        id: f[4].into(),
+                        name: f[5..].join(" "),
+                        heliport: record == 17,
+                        ..Default::default()
+                    })
+                } else {
+                    None
+                };
+            } else if airport.is_some() {
+                if matches!(record, 110 | 130) {
+                    surface = true;
+                    contour.clear();
+                } else if surface && (111..=114).contains(&record) {
+                    if let Some(point) = f
+                        .get(1)
+                        .zip(f.get(2))
+                        .and_then(|(a, b)| a.parse::<f64>().ok().zip(b.parse::<f64>().ok()))
+                        && point.0.is_finite()
+                        && point.1.is_finite()
+                    {
+                        contour.push([point.0, point.1]);
+                    }
+                    if matches!(record, 113 | 114) {
+                        if contour.len() >= 3 {
+                            airport
+                                .as_mut()
+                                .unwrap()
+                                .footprints
+                                .push(std::mem::take(&mut contour));
+                        }
+                        contour.clear();
+                    }
+                } else {
+                    surface = false;
+                }
+                if record == 100
+                    && let Some(polygon) = runway_footprint(&f)
+                {
+                    airport.as_mut().unwrap().footprints.push(polygon);
+                }
+                if positioned {
+                    continue;
+                }
+
+                let coordinate = match record {
+                    100 => f.get(9).zip(f.get(10)),
+                    101 => f.get(4).zip(f.get(5)),
+                    102 => f.get(2).zip(f.get(3)),
+                    _ => None,
+                }
+                .and_then(|(a, b)| a.parse::<f64>().ok().zip(b.parse::<f64>().ok()));
+                if let Some((latitude, longitude)) = coordinate.filter(|(a, b)| {
+                    a.is_finite() && b.is_finite() && a.abs() <= 90. && b.abs() <= 180.
+                }) {
+                    let marker = airport.as_mut().unwrap();
+                    marker.latitude = latitude;
+                    marker.longitude = longitude;
+                    positioned = true;
+                }
+            }
+        }
+        if positioned && let Some(marker) = airport {
+            markers.push(marker);
+        }
+    }
+    for marker in &mut markers {
+        marker.bounds = marker.footprints.iter().flatten().fold(None, |bounds, p| {
+            Some(bounds.map_or([p[0], p[1], p[0], p[1]], |b: [f64; 4]| {
+                [
+                    b[0].min(p[0]),
+                    b[1].min(p[1]),
+                    b[2].max(p[0]),
+                    b[3].max(p[1]),
+                ]
+            }))
+        });
+    }
+    Ok(markers)
+}
+
+fn runway_footprint(fields: &[&str]) -> Option<Vec<[f64; 2]>> {
+    let number = |i: usize| fields.get(i)?.parse::<f64>().ok();
+    let width = number(1)?;
+    let a = [number(9)?, number(10)?];
+    let b = [number(18)?, number(19)?];
+    if ![width, a[0], a[1], b[0], b[1]]
+        .iter()
+        .all(|v| v.is_finite())
+        || width <= 0.0
+    {
+        return None;
+    }
+    let scale = ((a[0] + b[0]) * 0.5).to_radians().cos().abs().max(0.01);
+    let east = (b[1] - a[1]) * scale;
+    let north = b[0] - a[0];
+    let length = east.hypot(north);
+    if length < 1e-8 {
+        return None;
+    }
+    let offset = width * 0.5 / 111320.0;
+    let dlat = -east / length * offset;
+    let dlon = north / length * offset / scale;
+    Some(vec![
+        [a[0] + dlat, a[1] + dlon],
+        [b[0] + dlat, b[1] + dlon],
+        [b[0] - dlat, b[1] - dlon],
+        [a[0] - dlat, a[1] - dlon],
+    ])
+}
+
+/// Locate the airport containing the aircraft, rather than the nearest reference point.
+#[must_use]
+pub fn occupied_airport<'a>(
+    airports: &'a [AirportMarker],
+    telemetry: &Telemetry,
+) -> Option<&'a AirportMarker> {
+    if !telemetry.on_ground || !telemetry.position_valid {
+        return None;
+    }
+    airports
+        .iter()
+        .filter(|a| {
+            a.bounds.is_none_or(|b| {
+                telemetry.latitude >= b[0]
+                    && telemetry.longitude >= b[1]
+                    && telemetry.latitude <= b[2]
+                    && telemetry.longitude <= b[3]
+            })
+        })
+        .filter(|airport| {
+            airport.footprints.iter().any(|polygon| {
+                point_in_footprint([telemetry.latitude, telemetry.longitude], polygon)
+            })
+        })
+        .min_by(|a, b| {
+            a.heliport.cmp(&b.heliport).then_with(|| {
+                distance_nm(
+                    telemetry.latitude,
+                    telemetry.longitude,
+                    a.latitude,
+                    a.longitude,
+                )
+                .total_cmp(&distance_nm(
+                    telemetry.latitude,
+                    telemetry.longitude,
+                    b.latitude,
+                    b.longitude,
+                ))
+            })
+        })
+}
+fn point_in_footprint(point: [f64; 2], polygon: &[[f64; 2]]) -> bool {
+    if polygon.len() < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut previous = polygon[polygon.len() - 1];
+    for &current in polygon {
+        if (current[0] > point[0]) != (previous[0] > point[0])
+            && point[1]
+                < (previous[1] - current[1]) * (point[0] - current[0]) / (previous[0] - current[0])
+                    + current[1]
+        {
+            inside = !inside;
+        }
+        previous = current;
+    }
+    inside
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    #[test]
+    fn property_beats_nearby_reference_and_never_claims_airborne_ownership() {
+        let field = AirportMarker {
+            id: "FIELD".into(),
+            latitude: 1.0,
+            longitude: 1.0,
+            footprints: vec![vec![[1., 1.], [1., 1.04], [1.04, 1.04], [1.04, 1.]]],
+            ..Default::default()
+        };
+        let nearby = AirportMarker {
+            id: "PAD".into(),
+            latitude: 1.035,
+            longitude: 1.035,
+            heliport: true,
+            ..Default::default()
+        };
+        let fields = vec![nearby, field];
+        let mut t = Telemetry {
+            on_ground: true,
+            position_valid: true,
+            latitude: 1.03,
+            longitude: 1.03,
+            ..Default::default()
+        };
+        assert_eq!(occupied_airport(&fields, &t).unwrap().id, "FIELD");
+        t.on_ground = false;
+        assert!(occupied_airport(&fields, &t).is_none());
     }
 }

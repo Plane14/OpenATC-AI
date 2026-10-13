@@ -179,6 +179,10 @@ pub fn package(product: &str, platform: &str, requested_version: &str) -> Result
         #[cfg(target_os = "linux")]
         bundle_linux_libraries(&bundle.join("bin"))?;
         fs::copy(repo().join("models.toml"), bundle.join("models.toml"))?;
+        fs::copy(
+            repo().join("models-kitten.toml"),
+            bundle.join("models-kitten.toml"),
+        )?;
     }
     let launcher = if product == "plugin" {
         "openatc-install"
@@ -207,6 +211,7 @@ pub fn package(product: &str, platform: &str, requested_version: &str) -> Result
         fs::copy(repo().join(name), bundle.join(name))?;
     }
     distribution::tree(&repo().join("assets/licenses"), &bundle.join("licenses"))?;
+    distribution::tree(&repo().join("docs"), &bundle.join("docs"))?;
     write(
         &bundle.join("INSTALL.txt"),
         &format!(

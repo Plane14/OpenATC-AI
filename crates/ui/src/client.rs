@@ -17,6 +17,7 @@ struct Command {
     path: String,
     body: Json,
     generation: u64,
+    telemetry_revision: u64,
 }
 
 /// Reply slot per path, latest wins.
@@ -32,11 +33,15 @@ pub struct EngineReply {
 struct Inner {
     pending: VecDeque<Command>,
     replies: HashMap<String, EngineReply>,
-    snapshot: State,
+    snapshot: Arc<State>,
     settings: Settings,
     status: String,
     connected: bool,
+    telemetry_error: Option<String>,
     latest_telemetry: Option<Telemetry>,
+    observed_telemetry: Option<Telemetry>,
+    telemetry_revision: u64,
+    delivered_revision: u64,
     running: bool,
     generation: u64,
 }
@@ -58,11 +63,15 @@ impl EngineClient {
             Mutex::new(Inner {
                 pending: VecDeque::new(),
                 replies: HashMap::new(),
-                snapshot: State::default(),
+                snapshot: Arc::new(State::default()),
                 settings: Settings::default(),
                 status: "Connecting to engine".to_owned(),
                 connected: false,
+                telemetry_error: None,
                 latest_telemetry: None,
+                observed_telemetry: None,
+                telemetry_revision: 0,
+                delivered_revision: 0,
                 running: true,
                 generation: 0,
             }),
@@ -92,22 +101,52 @@ impl EngineClient {
 
     fn poll_loop(inner: &Arc<(Mutex<Inner>, Condvar)>, endpoint: &str, cancelled: &AtomicBool) {
         loop {
-            let (telemetry, generation) = {
+            let (telemetry, generation, revision) = {
                 let mut guard = inner
                     .0
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                (guard.latest_telemetry.take(), guard.generation)
+                (
+                    guard.latest_telemetry.take(),
+                    guard.generation,
+                    guard.telemetry_revision,
+                )
             };
-            if let Some(telemetry) = telemetry {
+            let sent_telemetry = telemetry.is_some();
+            let telemetry_result = if let Some(telemetry) = telemetry {
                 let body = serde_json::to_value(&telemetry).unwrap_or(Json::Null);
-                let _ = openatc_http::post_json_cancelled(
+                openatc_http::post_json_cancelled(
                     endpoint,
                     "/telemetry",
                     &body,
                     std::time::Duration::from_secs(2),
                     cancelled,
-                );
+                )
+                .and_then(|(status, data)| {
+                    if status == 200 {
+                        Ok(())
+                    } else {
+                        Err(data["error"]
+                            .as_str()
+                            .unwrap_or("Engine rejected simulator telemetry")
+                            .to_owned())
+                    }
+                })
+            } else {
+                Ok(())
+            };
+            if sent_telemetry {
+                let mut guard = inner
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if guard.generation == generation {
+                    guard.telemetry_error = telemetry_result.as_ref().err().cloned();
+                    if telemetry_result.is_ok() {
+                        guard.delivered_revision = revision;
+                    }
+                    inner.1.notify_all();
+                }
             }
             let response = openatc_http::get_json_cancelled(
                 endpoint,
@@ -115,6 +154,17 @@ impl EngineClient {
                 std::time::Duration::from_secs(2),
                 cancelled,
             );
+            // Parse off the UI lock; large transcripts must not stall the draw callback.
+            let response = response.map(|mut data| {
+                let settings = data
+                    .as_object_mut()
+                    .and_then(|map| map.remove("settings"))
+                    .and_then(|value| serde_json::from_value::<Settings>(value).ok());
+                (
+                    serde_json::from_value::<State>(data).map(Arc::new),
+                    settings,
+                )
+            });
             {
                 let mut guard = inner
                     .0
@@ -128,29 +178,30 @@ impl EngineClient {
                 }
                 guard.connected = false;
                 match response {
-                    Ok(mut data) => {
-                        let settings = data.as_object_mut().and_then(|map| map.remove("settings"));
-                        match serde_json::from_value::<State>(data) {
-                            Ok(snapshot) => {
-                                let demo = snapshot.demo;
-                                guard.snapshot = snapshot;
-                                if let Some(settings) = settings
-                                    && let Ok(settings) = serde_json::from_value(settings)
-                                {
-                                    guard.settings = settings;
-                                }
-                                guard.connected = true;
-                                if demo {
-                                    "Demo controller connected".clone_into(&mut guard.status);
-                                } else {
-                                    "X-Plane connected".clone_into(&mut guard.status);
-                                }
+                    Ok((snapshot, settings)) => match snapshot {
+                        Ok(mut snapshot) => {
+                            let demo = snapshot.demo;
+                            if let Some(observed) = &guard.observed_telemetry {
+                                Arc::make_mut(&mut snapshot).telemetry = observed.clone();
                             }
-                            Err(_) => {
-                                "Incompatible engine response".clone_into(&mut guard.status);
+                            guard.snapshot = snapshot;
+                            if let Some(settings) = settings {
+                                guard.settings = settings;
+                            }
+                            guard.connected = true;
+                            if demo {
+                                "Demo controller connected".clone_into(&mut guard.status);
+                            } else {
+                                "X-Plane connected".clone_into(&mut guard.status);
+                            }
+                            if let Some(error) = &guard.telemetry_error {
+                                guard.status = format!("Simulator telemetry rejected: {error}");
                             }
                         }
-                    }
+                        Err(_) => {
+                            "Incompatible engine response".clone_into(&mut guard.status);
+                        }
+                    },
                     Err(_) => "Engine disconnected".clone_into(&mut guard.status),
                 }
             }
@@ -195,10 +246,40 @@ impl EngineClient {
                     path: String::new(),
                     body: Json::Null,
                     generation: guard.generation,
+                    telemetry_revision: 0,
                 })
             };
             if command.path.is_empty() {
                 continue;
+            }
+            // A click immediately after tuning must reach the newly tuned controller.
+            if command.telemetry_revision > 0 {
+                let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                let mut guard = inner
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while guard.running
+                    && guard.generation == command.generation
+                    && guard.delivered_revision < command.telemetry_revision
+                    && std::time::Instant::now() < deadline
+                {
+                    guard = inner
+                        .1
+                        .wait_timeout(guard, Duration::from_millis(100))
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .0;
+                }
+                if !guard.running || guard.generation != command.generation {
+                    continue;
+                }
+                if guard.delivered_revision < command.telemetry_revision {
+                    guard.replies.insert(command.path, EngineReply {
+                        success: false, data: Json::Null,
+                        error: "The engine has not received the current aircraft radio state. Try again once connected.".into(),
+                    });
+                    continue;
+                }
             }
             let mut reply = EngineReply {
                 success: false,
@@ -245,9 +326,9 @@ impl EngineClient {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Latest engine snapshot.
+    /// Share the latest immutable snapshot without copying routes or conversation history.
     #[must_use]
-    pub fn state(&self) -> State {
+    pub fn state(&self) -> Arc<State> {
         self.lock().snapshot.clone()
     }
 
@@ -269,6 +350,12 @@ impl EngineClient {
         self.lock().status.clone()
     }
 
+    /// Retained until a fresh simulator sample is accepted.
+    #[must_use]
+    pub fn telemetry_error(&self) -> Option<String> {
+        self.lock().telemetry_error.clone()
+    }
+
     /// Engine base URL.
     #[must_use]
     pub fn endpoint(&self) -> String {
@@ -288,10 +375,16 @@ impl EngineClient {
         }
         if guard.pending.len() < 32 {
             let generation = guard.generation;
+            let telemetry_revision = if path == "/request" || path.starts_with("/request/") {
+                guard.telemetry_revision
+            } else {
+                0
+            };
             guard.pending.push_back(Command {
                 path: path.to_owned(),
                 body,
                 generation,
+                telemetry_revision,
             });
             self.inner.1.notify_one();
         } else {
@@ -310,7 +403,8 @@ impl EngineClient {
     pub fn accept_reset(&self, data: &Json) {
         if let Ok(snapshot) = serde_json::from_value::<State>(data.clone()) {
             let mut guard = self.lock();
-            guard.snapshot = snapshot;
+            guard.snapshot = Arc::new(snapshot);
+            guard.latest_telemetry = None;
             guard.pending.clear();
             guard.replies.clear();
             guard.generation = guard.generation.wrapping_add(1);
@@ -325,7 +419,11 @@ impl EngineClient {
 
     /// Offer fresh telemetry for the next poll.
     pub fn telemetry(&self, value: Telemetry) {
-        self.lock().latest_telemetry = Some(value);
+        let mut guard = self.lock();
+        Arc::make_mut(&mut guard.snapshot).telemetry = value.clone();
+        guard.observed_telemetry = Some(value.clone());
+        guard.telemetry_revision = guard.telemetry_revision.wrapping_add(1);
+        guard.latest_telemetry = Some(value);
     }
 }
 
@@ -346,6 +444,207 @@ impl Drop for EngineClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_telemetry_keeps_connection_and_error_until_a_valid_sample_arrives() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_polls = polls.clone();
+        let accept_sample = Arc::new(AtomicBool::new(false));
+        let accepted = accept_sample.clone();
+        let server = std::thread::spawn(move || {
+            while !stopping.load(Ordering::SeqCst) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buffer = [0; 4096];
+                    let size = stream.read(&mut buffer).unwrap();
+                    assert!(size > 0);
+                    bytes.extend_from_slice(&buffer[..size]);
+                    if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                        let head = std::str::from_utf8(&bytes[..end]).unwrap();
+                        let length = head
+                            .lines()
+                            .filter_map(|line| line.split_once(':'))
+                            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                            .map_or(0, |(_, value)| value.trim().parse::<usize>().unwrap());
+                        if bytes.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let request = String::from_utf8_lossy(&bytes);
+                let (status, body) = if request.starts_with("POST /telemetry ")
+                    && !accepted.load(Ordering::SeqCst)
+                {
+                    (
+                        400,
+                        serde_json::json!({"error":"Invalid telemetry: latitude = 95"}).to_string(),
+                    )
+                } else if request.starts_with("GET /state ") {
+                    server_polls.fetch_add(1, Ordering::SeqCst);
+                    let mut state = serde_json::to_value(State::default()).unwrap();
+                    let settings = Settings {
+                        tts_url: "http://speech-server:8099".into(),
+                        ..Default::default()
+                    };
+                    state["settings"] = serde_json::to_value(settings).unwrap();
+                    (200, state.to_string())
+                } else {
+                    (200, "{}".into())
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} Reply\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let client = EngineClient::new(&endpoint);
+        client.telemetry(Telemetry {
+            latitude: 95.0,
+            ..Default::default()
+        });
+        let wait_for = |predicate: &dyn Fn() -> bool| {
+            let start = std::time::Instant::now();
+            while !predicate() {
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "client did not reach expected state"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait_for(&|| client.connected() && client.telemetry_error().is_some());
+        let before = polls.load(Ordering::SeqCst);
+        wait_for(&|| polls.load(Ordering::SeqCst) >= before + 3);
+        assert!(client.connected());
+        assert!(client.status().contains("latitude = 95"));
+        assert_eq!(client.settings().tts_url, "http://speech-server:8099");
+        assert_eq!(client.lock().delivered_revision, 0);
+        accept_sample.store(true, Ordering::SeqCst);
+        client.telemetry(Telemetry {
+            latitude: 33.938318,
+            ..Default::default()
+        });
+        wait_for(&|| client.telemetry_error().is_none() && client.lock().delivered_revision == 2);
+        assert!(client.connected());
+        drop(client);
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn telemetry_stays_fresh_while_a_command_waits_and_snapshots_are_shared() {
+        use std::io::{Read, Write};
+        use std::sync::mpsc;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (held_tx, held_rx) = mpsc::channel();
+        let (seen_tx, seen_rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let server = std::thread::spawn(move || {
+            let mut held = None;
+            while !server_stop.load(Ordering::SeqCst) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let (header_end, length) = loop {
+                    let mut buffer = [0; 4096];
+                    let n = stream.read(&mut buffer).unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&buffer[..n]);
+                    if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                        let head = std::str::from_utf8(&bytes[..end]).unwrap();
+                        let length = head
+                            .lines()
+                            .filter_map(|l| l.split_once(':'))
+                            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                            .map_or(0, |(_, v)| v.trim().parse::<usize>().unwrap());
+                        if bytes.len() >= end + 4 + length {
+                            break (end + 4, length);
+                        }
+                    }
+                };
+                let path = std::str::from_utf8(&bytes[..header_end])
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap();
+                if path == "/request" {
+                    held = Some(stream);
+                    held_tx.send(()).unwrap();
+                    continue;
+                }
+                if path == "/telemetry" {
+                    let t: Telemetry =
+                        serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+                    seen_tx.send(t.altitude_feet).unwrap();
+                }
+                let body = if path == "/state" {
+                    serde_json::to_string(&State::default()).unwrap()
+                } else {
+                    "{}".into()
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+            drop(held);
+        });
+        let client = EngineClient::new(&origin);
+        client.post("/request", Json::Null);
+        held_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let before = client.state();
+        let mut reset = State::default();
+        reset.plan.departure = "NEW".into();
+        client.accept_reset(&serde_json::to_value(&reset).unwrap());
+        let first = client.state();
+        let second = client.state();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.plan.departure, "NEW");
+        assert!(before.plan.departure.is_empty());
+        for altitude in 0..10_000 {
+            client.telemetry(Telemetry {
+                altitude_feet: f64::from(altitude),
+                ..Default::default()
+            });
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let value = seen_rx
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .unwrap();
+            if value == 9999.0 {
+                break;
+            }
+        }
+        assert!(client.lock().pending.is_empty());
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        drop(client);
+    }
+
     #[test]
     fn response_started_before_reset_cannot_restore_old_flight() {
         use std::io::{Read, Write};
@@ -356,7 +655,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buffer = [0; 8192];
-            stream.read(&mut buffer).unwrap();
+            assert!(stream.read(&mut buffer).unwrap() > 0);
             ready_tx.send(()).unwrap();
             release_rx.recv().unwrap();
             let mut old = State::default();

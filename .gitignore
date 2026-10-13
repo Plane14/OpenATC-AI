@@ -119,3 +119,14 @@ models.lock.toml
 !.env.sample
 # Local notes and scratch
 scratch/
+# Markdown notes stay local; public product guides remain distributable.
+*.md
+!README.md
+!/docs/AI_SERVER.md
+MEMORY*
+TASKS*
+TODO*
+PLAN*
+agent-notes/
+task-notes/
+memory/

@@ -15,10 +15,13 @@ Run these commands from the repository root. `cargo xtask` uses the locked works
 | `cargo xtask test-radio <engine> speech` | Exercise radio roles, readbacks, taxi/crossings, weather, voices and flight resets |
 | `cargo xtask test-crew <engine> speech` | Exercise crew controls, confirmations, compound requests and checklists |
 | `cargo xtask test-speech <engine> speech` | Exercise regional speech examples and prompt selection |
+| `cargo xtask test-flight <engine> speech` | Replay IFR flights across three controller setups, including both taxi crossings, arrival, a mission and parking |
 
 Build the requested release binaries first. Close X-Plane before replacing an installed plugin. The installer checks the speech library before modifying the destination, preserves the installed `radio-stations.toml`, and disables old flat speech files as `.legacy` copies. Backups are stored under the operating system's application data directory in `openatc-ai/backups/`.
 
 Integration suites launch the real engine with temporary scenery and settings, and a local fake model. They do not contact your configured AI provider or change your simulator installation. Child engines are stopped on success or failure. `xtask/fixtures/radio-apt.dat` is synthetic test scenery, not production airport data.
+
+The flight replay supplies A320 identity and dimensions, checks that the arrival handoff waits for the tail to clear, and verifies that repeated copilot preparation does not duplicate a transmission. Playback completion carries the prepared sequence. Focused engine tests additionally cover stale playback on another frequency, simultaneous urgent encounters and wake violations retained after touchdown. These checks do not exercise physical audio devices or SDK drawing.
 
 The plugin ZIP includes executable permissions, editable resources, maintained dependency sources and third-party license notices. AI artifacts include the eSpeak data required when moving the installation to another computer. Model weights remain separate downloads.
 

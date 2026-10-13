@@ -1,6 +1,8 @@
 //! Aircraft-profile crew controls and checklist exchanges.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+#[path = "crew_request.rs"]
+pub mod request;
 fn one() -> f64 {
     1.0
 }

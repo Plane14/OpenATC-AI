@@ -62,7 +62,7 @@ fn dispatch() -> Result {
             }
             Ok(())
         }
-        "test-radio" | "test-crew" | "test-speech" => checks::exercise(
+        "test-radio" | "test-crew" | "test-speech" | "test-flight" => checks::exercise(
             &args[0],
             Path::new(arg(1)?),
             Path::new(args.get(2).map(String::as_str).unwrap_or("speech")),
@@ -90,11 +90,14 @@ fn dispatch() -> Result {
                 "-p",
                 "openatc-plugin",
             ]))?;
-            checks::exercise(
-                "test-radio",
-                &root.join("target/release/open-atc-engine"),
-                &root.join("speech"),
-            )?;
+            let engine = root.join(if cfg!(windows) {
+                "target/release/open-atc-engine.exe"
+            } else {
+                "target/release/open-atc-engine"
+            });
+            for suite in ["test-radio", "test-crew", "test-speech", "test-flight"] {
+                checks::exercise(suite, &engine, &root.join("speech"))?;
+            }
             if cfg!(target_os = "linux") {
                 distribution::audit(&root.join("target/release/libopenatc_plugin.so"))?;
                 distribution::audit(&root.join("target/release/open-atc-engine"))?;
@@ -112,7 +115,7 @@ fn dispatch() -> Result {
         }
         "help" => {
             println!(
-                "cargo xtask <command>\n  build [preview]\n  install-plugin <X-Plane directory>\n  install-ai <service directory>\n  package linux-x64\n  collect-artifacts <plugin|ai-server> [output]\n  audit-linux <binary>...\n  test-radio|test-crew|test-speech <engine> [speech directory]"
+                "cargo xtask <command>\n  build [preview]\n  install-plugin <X-Plane directory>\n  install-ai <service directory>\n  package linux-x64\n  collect-artifacts <plugin|ai-server> [output]\n  audit-linux <binary>...\n  test-radio|test-crew|test-speech|test-flight <engine> [speech directory]"
             );
             Ok(())
         }

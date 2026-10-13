@@ -1,0 +1,52 @@
+version = 1
+id = "parts-shuttle"
+title = "The parts shuttle"
+briefing = "A short A320 positioning flight carries a documented maintenance component to Southampton. Cargo loading and acceptance are story events, not edits to the aircraft's weight and balance. Use the real aircraft load sheet and ask for suitable parking on arrival."
+aircraft = ["A320", "A20N", "A319", "A19N", "A321", "A21N"]
+departure = "EGKK"
+destination = "EGHI"
+duration_minutes = 25
+media = []
+
+[[events]]
+id = "cabin_call"
+phase = "clearance"
+delay_seconds = 20
+probability = 100
+severity = "normal"
+seat = ""
+say = [
+  "Captain, dispatch has confirmed the maintenance component is accompanying this flight. Please confirm the load sheet before we close up.",
+  "Captain, our maintenance shipment is ready for this flight. Can you confirm the final load sheet is accepted?",
+  "Captain, the component for the Southampton team is on the shipment list. Let us know when the load sheet is accepted.",
+]
+
+[[events.choices]]
+id = "coordinate"
+label = "The load sheet is accepted; prepare for departure."
+aliases = ["I will coordinate with ATC"]
+outcome = "coordinating"
+say = ["Thanks, Captain. We will continue the departure preparations and keep the shipment paperwork with the arrival handover.", "Understood, Captain. We will wait for your confirmation before continuing."]
+
+[[events.choices]]
+id = "assess"
+label = "Hold boarding while I check the load sheet."
+aliases = ["Keep me updated"]
+outcome = "assessing"
+say = ["Understood, Captain. We will wait for your confirmation before continuing.", "Thanks, Captain. We will continue the departure preparations and keep the shipment paperwork with the arrival handover."]
+
+[[events]]
+id = "arrival_handover"
+phase = "taxi_in"
+delay_seconds = 5
+probability = 100
+severity = "normal"
+say = ["Captain, we are ready for the arrival handover. Please let us know when the aircraft is parked and it is safe to begin.", "Captain, the cabin team is standing by for parking and the arrival handover. We will wait for your instructions."]
+
+[[events.choices]]
+id = "wait_for_parking"
+label = "Remain seated until we are parked; I will let you know."
+aliases = ["Wait until we are parked", "Remain seated"]
+outcome = "waiting_for_parking"
+say = ["Understood, Captain. We will remain seated and wait for your call.", "Understood. We will keep everyone seated until you advise."]
+

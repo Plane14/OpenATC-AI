@@ -2,15 +2,16 @@
 //!
 //! One ggml model (tiny today) via `whisper-rs`. The engine owns the context on
 //! a single worker thread; this crate only parses, decodes and infers.
-//! GPU-first by design: `Auto` takes CUDA when this crate is built with the
-//! `cuda` feature, otherwise CPU. `Cpu` forces CPU either way.
+//! `Auto` prefers the compiled CUDA, Vulkan or Metal backend and retries on CPU
+//! if loading fails. `Cpu` disables GPU use even in an accelerated build.
 
 use std::path::Path;
+mod device;
 
 /// Which compute backend transcribes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SttBackend {
-    /// CUDA when built with the `cuda` feature, else CPU.
+    /// Prefer the compiled accelerator, with CPU fallback.
     #[default]
     Auto,
     /// Always CPU, even with CUDA available.
@@ -32,7 +33,7 @@ impl SttEngine {
     ///
     /// Missing/unreadable model, unsupported backend, or CUDA without support.
     pub fn load(path: &Path, backend: SttBackend) -> Result<Self, String> {
-        let use_cuda = match backend {
+        let use_gpu = match backend {
             SttBackend::Cpu => false,
             SttBackend::Cuda => {
                 if !cfg!(feature = "cuda") {
@@ -43,18 +44,44 @@ impl SttEngine {
                 }
                 true
             }
-            SttBackend::Auto => cfg!(feature = "cuda"),
+            SttBackend::Auto => cfg!(any(feature = "cuda", feature = "vulkan", feature = "metal")),
         };
-        let params = whisper_rs::WhisperContextParameters::default();
-        let context = whisper_rs::WhisperContext::new_with_params(path, params)
-            .map_err(|error| format!("cannot load {}: {error}", path.display()))?;
+        let mut params = whisper_rs::WhisperContextParameters::default();
+        params.use_gpu(use_gpu);
+        if use_gpu && let Some((index, name)) = device::preferred_gpu() {
+            eprintln!("STT GPU device: {index} ({name})");
+            params.gpu_device(index);
+        }
+        let (context, accelerated) = match whisper_rs::WhisperContext::new_with_params(path, params)
+        {
+            Ok(context) => (context, use_gpu),
+            Err(error) if use_gpu && backend == SttBackend::Auto => {
+                eprintln!("STT GPU initialization failed; retrying on CPU: {error}");
+                let mut cpu = whisper_rs::WhisperContextParameters::default();
+                cpu.use_gpu(false);
+                (
+                    whisper_rs::WhisperContext::new_with_params(path, cpu)
+                        .map_err(|error| format!("cannot load {}: {error}", path.display()))?,
+                    false,
+                )
+            }
+            Err(error) => return Err(format!("cannot load {}: {error}", path.display())),
+        };
         Ok(Self {
             context,
-            backend: if use_cuda { "cuda" } else { "cpu" },
+            backend: if !accelerated {
+                "cpu"
+            } else if cfg!(feature = "cuda") {
+                "cuda requested"
+            } else if cfg!(feature = "metal") {
+                "metal requested"
+            } else {
+                "vulkan requested"
+            },
         })
     }
 
-    /// Backend actually selected by [`SttEngine::load`].
+    /// Requested backend; native startup logs identify the selected device.
     #[must_use]
     pub fn backend(&self) -> &'static str {
         self.backend

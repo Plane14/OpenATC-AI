@@ -654,6 +654,21 @@ pub fn calculate_taxi_route(
         ));
     }
     let start_point = airport_point(airport, telemetry.latitude, telemetry.longitude);
+    if to_parking {
+        let stand = airport
+            .parking
+            .iter()
+            .find(|p| p.name == destination)
+            .ok_or_else(|| crate::dialogue::say("taxi_arrival_stand_missing", &[]))?;
+        if !crate::parking::fits(stand, aircraft_size) {
+            return Err(crate::dialogue::say("parking_size_unavailable", &[]));
+        }
+        match crate::parking::occupied(airport, stand, telemetry, aircraft_size) {
+            Some(true) => return Err(crate::dialogue::say("parking_occupied", &[])),
+            None => return Err(crate::dialogue::say("parking_traffic_unknown", &[])),
+            Some(false) => (),
+        }
+    }
     let target_point = route_target(airport, destination, to_parking)?;
     let nodes: BTreeMap<i64, Point> = airport
         .nodes
@@ -812,7 +827,7 @@ pub fn calculate_taxi_route(
         crate::dialogue::say("taxi_to_holding_point", &[("runway", hold_short.clone())])
     } else if via.is_empty() && to_parking {
         crate::dialogue::say(
-            "taxi_toward_parking_hold",
+            "taxi_to_parking",
             &[("destination", destination.to_owned())],
         )
     } else if needs_backtrack {
@@ -827,7 +842,7 @@ pub fn calculate_taxi_route(
         )
     } else if to_parking {
         crate::dialogue::say(
-            "taxi_via_toward_stop_at_the_end",
+            "taxi_to_parking_via",
             &[
                 ("via", (via).clone()),
                 ("destination", (destination).to_string()),
@@ -840,6 +855,8 @@ pub fn calculate_taxi_route(
         )
     };
     Ok(TaxiClearance {
+        traffic_hold: false,
+        parking_hold: false,
         airport: airport.icao.clone(),
         destination: destination.to_owned(),
         instructions,
@@ -894,7 +911,7 @@ fn name_after_tokens(line: &str, used: usize) -> String {
 
 /// Read one airport from an apt.dat file, supporting these records:
 /// headers pick the airport, then runways, taxi nodes/edges, stands and
-/// frequencies. Anything we do not understand is skipped, like over there.
+/// frequencies. Unsupported records are skipped.
 pub fn load_airport(text: &str, icao: &str) -> Result<Airport, String> {
     let mut builder = AirportBuilder::default();
     let mut selected = false;
@@ -1309,7 +1326,7 @@ impl AirportBuilder {
                 khz: if record >= 1000 {
                     frequency
                 } else {
-                    frequency * 10
+                    crate::stations::legacy_com_khz(frequency)
                 },
             });
         }
@@ -1339,8 +1356,8 @@ impl AirportBuilder {
     }
 }
 
-/// Reads navaids out of `earth_nav.dat`. Only keeps the kinds we care about,
-/// and only the ones near our airport (or nailed to it, for ILS bits).
+/// Read supported navaids from `earth_nav.dat`, retaining nearby facilities
+/// and ILS components assigned to this airport.
 pub fn load_navaids(airport: &mut Airport, text: &str) {
     for raw in text.lines() {
         let fields = tokens(raw);
@@ -1735,6 +1752,7 @@ pub fn calculate_runway_taxi_route(
     airport: &Airport,
     telemetry: &Telemetry,
     destination: &str,
+    size: char,
 ) -> Result<TaxiClearance, String> {
     let failure = || crate::dialogue::say("runway_taxi_unavailable", &[]);
     if !telemetry.on_ground || !telemetry.position_valid {
@@ -1802,7 +1820,7 @@ pub fn calculate_runway_taxi_route(
         }
     }
     let nodes: BTreeMap<_, _> = airport.nodes.iter().map(|n| (n.id, n.point)).collect();
-    let graph = taxi_graph(&surface, &nodes, 'C');
+    let graph = taxi_graph(&surface, &nodes, size);
     let mut points = Vec::new();
     if let Some(start) = nodes
         .keys()
@@ -1899,7 +1917,7 @@ fn clear_runway_connector(
     })
 }
 
-/// Radius around the route limit used for stopped-aircraft recognition.
+/// Radius of the optional holding-point disc.
 pub const HOLDING_MARKER_RADIUS_METRES: f64 = 15.0;
 
 /// Find a holding-line intersection along the final approach, then keep the disc behind it.
@@ -1942,7 +1960,7 @@ pub fn holding_marker_position(airport: &Airport, points: &[Point]) -> Option<Po
     })
 }
 
-/// Radius around the route limit used for stopped-aircraft recognition.
+/// Arrival tolerance around a taxi route's endpoint.
 pub const HOLD_POINT_RADIUS_METRES: f64 = 45.0;
 
 /// Recognize the route endpoint or its nearby painted holding line on approach.
@@ -1959,6 +1977,13 @@ pub fn taxi_hold_reached(airport: &Airport, route: &TaxiClearance, telemetry: &T
         return false;
     };
     let here = airport_point(airport, telemetry.latitude, telemetry.longitude);
+    if !route.hold_short_runway.is_empty()
+        && route.holding_marker_point.is_some_and(|marker| {
+            flat_distance(&here, &marker) <= HOLDING_MARKER_RADIUS_METRES + 5.0
+        })
+    {
+        return true;
+    }
     if flat_distance(&here, end) <= HOLD_POINT_RADIUS_METRES {
         return true;
     }
@@ -1998,7 +2023,90 @@ pub fn crossing_vacated(airport: &Airport, route: &TaxiClearance, telemetry: &Te
         ((p.east - runway.first.east) * dn - (p.north - runway.first.north) * dx) / length
     };
     let here = airport_point(airport, telemetry.latitude, telemetry.longitude);
-    across(*start) * across(here) < 0.0 && across(here).abs() >= runway.width / 2.0 + 40.0
+    let side = across(*start);
+    let heading = dx.atan2(dn).to_degrees();
+    let (_, lateral) = crate::traffic::footprint(
+        &telemetry.aircraft_icao,
+        telemetry.wingspan_meters,
+        telemetry.heading_degrees,
+        heading,
+    );
+    let far_line = airport
+        .taxi_hold_lines
+        .iter()
+        .filter_map(|line| {
+            route.points.windows(2).find_map(|leg| {
+                let (t, _) = intersection(leg[0], leg[1], line[0], line[1])?;
+                let point = Point {
+                    east: leg[0].east + t * (leg[1].east - leg[0].east),
+                    north: leg[0].north + t * (leg[1].north - leg[0].north),
+                    height: 0.0,
+                };
+                let offset = across(point);
+                // A later runway's hold line is a new clearance limit, not this runway's exit.
+                let nearer_other = airport
+                    .runways
+                    .iter()
+                    .filter(|r| r.first_name != runway.first_name)
+                    .any(|r| segment_distance(point, r.first, r.second) < offset.abs());
+                (offset * side < 0.0 && offset.abs() <= 150.0 && !nearer_other)
+                    .then_some(offset.abs())
+            })
+        })
+        .fold(runway.width / 2.0 + 10.0, f64::max);
+    side * across(here) < 0.0 && across(here).abs() >= far_line + lateral + 5.0
+}
+
+/// Keep arrival monitoring on Tower until the aircraft's extremities clear the runway.
+#[must_use]
+pub fn aircraft_on_runway(airport: &Airport, telemetry: &Telemetry) -> bool {
+    let here = airport_point(airport, telemetry.latitude, telemetry.longitude);
+    airport.runways.iter().any(|runway| {
+        let dx = runway.second.east - runway.first.east;
+        let dn = runway.second.north - runway.first.north;
+        let length = dx.hypot(dn);
+        if length < 100.0 {
+            return false;
+        }
+        let (fore_aft, lateral) = crate::traffic::footprint(
+            &telemetry.aircraft_icao,
+            telemetry.wingspan_meters,
+            telemetry.heading_degrees,
+            dx.atan2(dn).to_degrees(),
+        );
+        let east = here.east - runway.first.east;
+        let north = here.north - runway.first.north;
+        let along = (east * dx + north * dn) / length;
+        let across = (east * dn - north * dx).abs() / length;
+        let projection = runway_projection(here, runway.first, runway.second);
+        let delta = difference(here, projection);
+        let separation = flat_distance(&here, &projection);
+        let ray = Point {
+            east: projection.east + delta.east * 150.0 / separation.max(1.0),
+            north: projection.north + delta.north * 150.0 / separation.max(1.0),
+            height: 0.0,
+        };
+        let limit = airport
+            .taxi_hold_lines
+            .iter()
+            .filter_map(|line| {
+                let (t, _) = intersection(projection, ray, line[0], line[1])?;
+                let point = Point {
+                    east: projection.east + (ray.east - projection.east) * t,
+                    north: projection.north + (ray.north - projection.north) * t,
+                    height: 0.0,
+                };
+                let offset = flat_distance(&projection, &point);
+                let nearer_other = airport
+                    .runways
+                    .iter()
+                    .filter(|r| r.first_name != runway.first_name)
+                    .any(|r| segment_distance(point, r.first, r.second) < offset);
+                (!nearer_other).then_some(offset)
+            })
+            .fold(runway.width / 2.0 + 10.0, f64::max);
+        (-fore_aft - 10.0..=length + fore_aft + 10.0).contains(&along) && across <= limit + lateral
+    })
 }
 
 /// Authorize one transverse published-network crossing, ending clear of that runway.
@@ -2007,6 +2115,7 @@ pub fn calculate_crossing_route(
     airport: &Airport,
     telemetry: &Telemetry,
     runway: &str,
+    size: char,
 ) -> Result<TaxiClearance, String> {
     let fail = || crate::dialogue::say("crossing_route_unavailable", &[]);
     let r = airport
@@ -2041,7 +2150,7 @@ pub fn calculate_crossing_route(
         let (Some(a), Some(b)) = (nodes.get(&e.first), nodes.get(&e.second)) else {
             continue;
         };
-        if e.size < 'C' || flat_distance(a, b) > 300.0 {
+        if e.size < size || flat_distance(a, b) > 300.0 {
             continue;
         }
         let edge_length = flat_distance(a, b);

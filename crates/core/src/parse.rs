@@ -29,9 +29,7 @@ const DEFINITIONS: [(&str, &str); 26] = [
     ("emergency", "declare emergency"),
 ];
 
-/// Parse pilot text, including
-/// evaluation order (exacts, emergency substring, altitude/direct regexes,
-/// catalogue titles) and the meters-to-feet rounding.
+/// Match requests before falling back to catalogue titles. Emergency calls take priority.
 pub(crate) fn interpret(text: &str) -> super::identify::Interpreted {
     let normalized = text.to_ascii_lowercase();
     let mut request = super::identify::Interpreted {
@@ -63,6 +61,11 @@ pub(crate) fn interpret(text: &str) -> super::identify::Interpreted {
     }
     // Callsign-bearing transmissions use the same deterministic workflow parser.
     for (phrase, intent) in [
+        ("traffic not in sight", "traffic_not_sighted"),
+        ("traffic not sighted", "traffic_not_sighted"),
+        ("negative contact", "traffic_not_sighted"),
+        ("traffic in sight", "traffic_sighted"),
+        ("traffic sighted", "traffic_sighted"),
         ("request landing clearance", "landing"),
         ("vacated", "vacated"),
         ("vacted", "vacated"),
@@ -96,10 +99,12 @@ pub(crate) fn interpret(text: &str) -> super::identify::Interpreted {
     }
     if normalized.contains("mayday")
         || normalized.contains("pan pan")
+        || normalized.contains("pan-pan")
         || normalized == "emergency"
         || normalized == "declare emergency"
     {
         "emergency".clone_into(&mut request.intent);
+        return request;
     }
     let altitude =
         regex::Regex::new(r"(?:request )?(?:altitude |climb |descend |descent )(?:to )?(fl\s*)?([0-9]{2,5})(?: feet| meters)?")
@@ -128,6 +133,48 @@ pub(crate) fn interpret(text: &str) -> super::identify::Interpreted {
         "direct".clone_into(&mut request.intent);
         request.waypoint = waypoint.as_str().to_ascii_uppercase();
     }
+    for (pattern, intent) in [
+        (
+            r"(?:change|request|use)(?: the)? (?:departure|departing) runway ([0-9]{1,2}[lrc]?)",
+            "departure_runway",
+        ),
+        (
+            r"(?:change|request|use)(?: the)? (?:arrival|landing) runway ([0-9]{1,2}[lrc]?)",
+            "arrival_runway",
+        ),
+        (
+            r"(?:change|request)(?: the)? approach(?: to)? ([a-z0-9]+)",
+            "change_approach",
+        ),
+        (
+            r"(?:request |maintain )?(?:speed |airspeed )([0-9]{2,3})(?: knots)?",
+            "speed",
+        ),
+        (
+            r"(?:request |can we |may we )?(?:deviate|deviation)(?: up to)? ([0-9]{1,2})(?: degrees)? (left|right)",
+            "deviation",
+        ),
+    ] {
+        if let Ok(expression) = regex::Regex::new(pattern)
+            && let Some(found) = expression.captures(&normalized)
+        {
+            request.intent = intent.into();
+            request.waypoint = found.get(1).map_or("", |m| m.as_str()).to_uppercase();
+            if intent == "deviation" {
+                request.waypoint = format!(
+                    "{} {}",
+                    found.get(2).map_or("", |m| m.as_str()),
+                    request.waypoint
+                );
+            }
+        }
+    }
+    if normalized.contains("clear of weather")
+        || normalized.contains("resume planned route")
+        || normalized.contains("back on course")
+    {
+        request.intent = "resume_course".into();
+    }
     if request.intent == "conversation" {
         for (intent, title) in DEFINITIONS {
             if title == normalized {
@@ -142,6 +189,16 @@ pub(crate) fn interpret(text: &str) -> super::identify::Interpreted {
 #[cfg(test)]
 mod checkin_tests {
     #[test]
+    fn emergency_keeps_priority_over_an_embedded_amendment() {
+        for text in [
+            "mayday, request direct SLI",
+            "pan pan, request descent to 3000",
+            "pan-pan, request descent to 3000",
+        ] {
+            assert_eq!(super::interpret(text).intent, "emergency");
+        }
+    }
+    #[test]
     fn accepts_natural_controller_checkins() {
         for text in [
             "SOCAL Approach, C-GTLT, checking in",
@@ -150,5 +207,19 @@ mod checkin_tests {
         ] {
             assert_eq!(super::interpret(text).intent, "checkin");
         }
+    }
+    #[test]
+    fn traffic_reports_keep_the_negation() {
+        for text in [
+            "Negative contact",
+            "SOCAL Approach, C-GTLT, traffic not in sight",
+            "traffic not sighted",
+        ] {
+            assert_eq!(super::interpret(text).intent, "traffic_not_sighted");
+        }
+        assert_eq!(
+            super::interpret("C-GTLT, traffic in sight").intent,
+            "traffic_sighted"
+        );
     }
 }

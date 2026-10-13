@@ -37,7 +37,11 @@ fn controllers(text: &str) -> Vec<Controller> {
             }
             "FREQ" | "CHAN" => {
                 if let Ok(number) = value.parse::<i32>() {
-                    let khz = if key == "FREQ" { number * 10 } else { number };
+                    let khz = if key == "FREQ" {
+                        crate::stations::legacy_com_khz(number)
+                    } else {
+                        number
+                    };
                     if (118_000..=136_990).contains(&khz) {
                         controller.frequencies.push(khz);
                     }
@@ -135,6 +139,27 @@ pub fn extend_index(root: &str, stations: &mut Vec<Station>) -> Result<(), Strin
 mod tests {
     use super::*;
     use crate::{state::Telemetry, stations::nearby};
+    #[test]
+    fn legacy_frequencies_restore_the_omitted_digit_without_changing_channels() {
+        let parsed = controllers(
+            "CONTROLLER\nNAME LOS ANGELES\nFACILITY_ID KZLA\nROLE ctr\nFREQ 11802\nFREQ 12527\nFREQ 12572\nFREQ 13697\nCHAN 118020\nCHAN 118030\nCONTROLLER_END\n",
+        );
+        assert_eq!(
+            parsed[0].frequencies,
+            [118025, 125275, 125725, 136975, 118020, 118030]
+        );
+        for record in [54, 1054] {
+            let input = format!(
+                "1 100 0 0 TEST Test airport\n100 45 1 0 0 1 1 0 25L 33.93 -118.38 0 0 1 0 0 0 07R 33.93 -118.42 0 0 1 0 0 0\n{record} {} Test Tower\n99\n",
+                if record == 54 { 11802 } else { 118020 }
+            );
+            let airport = crate::airport::load_airport(&input, "TEST").unwrap();
+            assert_eq!(
+                airport.frequencies[0].khz,
+                if record == 54 { 118025 } else { 118020 }
+            );
+        }
+    }
     #[test]
     fn custom_controller_overrides_tower_and_preserves_ground() {
         let root = std::env::temp_dir().join(format!("openatc-atc-{}", std::process::id()));

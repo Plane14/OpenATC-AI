@@ -27,7 +27,7 @@ struct Args {
     /// ggml model file.
     #[arg(long)]
     model: PathBuf,
-    /// Compute: auto (CUDA when built for it, else CPU), cpu, or cuda.
+    /// Compute: auto prefers a compiled GPU backend, cpu forces CPU, cuda requires CUDA.
     #[arg(long, default_value = "auto")]
     backend: String,
 }
