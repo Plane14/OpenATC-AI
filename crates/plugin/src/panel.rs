@@ -10,7 +10,7 @@ use xplane::data::{ArrayRead, DataRead, ReadOnly, borrowed::DataRef};
 /// Scalar or array readings, optionally selecting a TOML array index.
 pub type Readings = Box<dyn Fn() -> Vec<f64>>;
 
-fn find_readings(data: &mut xplane::data::DataApi, name: &str) -> Option<Readings> {
+pub(crate) fn find_readings(data: &mut xplane::data::DataApi, name: &str) -> Option<Readings> {
     let (root, index) = name
         .strip_suffix(']')
         .and_then(|v| v.rsplit_once('['))

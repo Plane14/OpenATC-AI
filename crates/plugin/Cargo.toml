@@ -10,14 +10,17 @@ crate-type = ["cdylib"]
 path = "src/lib.rs"
 
 [dependencies]
-xplane = { version = "0.1.0-alpha.1", features = ["XPLM400"] }
-xplane-sys = { version = "4.0", features = ["XPLM400"] }
-imgui = { version = "0.12", features = ["tables-api"] }
-imgui-glow-renderer = "0.13"
-glow = "0.14"
-libc = "0.2"
-libloading = "0.8"
-serde_json = "1"
+xplane = { version = "=0.1.0-alpha.1", features = ["XPLM400"] }
+xplane-sys = { version = "=4.0.109", features = ["XPLM400"] }
+imgui = { version = "=0.12.0", features = ["tables-api"] }
+imgui-glow-renderer = "=0.13.0"
+glow = "=0.14.2"
+libc = "=0.2.190"
+libloading = "=0.8.9"
+serde_json = "=1.0.151"
+serde = { version = "=1.0.229", features = ["derive"] }
+toml = "=0.8.23"
+openatc-audio = { path = "../audio" }
 openatc-ui = { path = "../ui" }
 openatc-core = { path = "../core" }
 openatc-settings = { path = "../settings" }

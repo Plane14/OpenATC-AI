@@ -8,6 +8,8 @@ Current Rust work includes native audio selection, plugin-owned engine lifecycle
 
 Still needed for a complete ATC system:
 
+- Native acceptance of preloaded copilot V1/VR/optional V2 callouts: verify actual ToLiss and default-aircraft speed sources, short-gap timing, rejection/reset, pause and output devices. Source trigger and crew replay tests do not close this acceptance item.
+
 - Simulator runtime validation across X-Plane UI scales, multi-monitor and pop-out configurations; native SDK 4.4 graphics integration, non-ASCII keyboard entry.
 - Complete traffic separation, wake sequencing and plausible random traffic generation without real-world timetables. Native AI amount control, predictive taxi holds, whole-aircraft runway clearance, concurrent traffic advisories, limited jet approach spacing and simulated pilot weather/landing exchanges are implemented. FAA pair-specific departure/approach wake checks cover observed same/close-parallel runway traffic; intersecting paths and preceding low/missed approaches remain incomplete. These paths need live traffic-provider and performance acceptance.
 - Complete the generated airborne lifecycle on the bounded CPU pool. Scenery/navigation loading, CSL indexing, generated ground-route preparation and movement already use workers. Queue/reset regression tests and immutable snapshot publication pass; distance-based work budgets and measured simulator frame time remain acceptance requirements on Linux, Windows and macOS.

@@ -1127,6 +1127,42 @@ mod conversation_routing_tests {
                 .text
                 .contains("biscuit")
         );
+        drop(state);
+        for (role, speaker, text) in [
+            (
+                "cabin",
+                "ATTENDANT",
+                "what about the joke? can you tell me one?",
+            ),
+            ("copilot", "COPILOT", "are you okay?"),
+            ("ground", "GROUND", "can you tell me something funny?"),
+        ] {
+            shared.write().await.crew.observed_at = Some(std::time::Instant::now());
+            let response = request(
+                &shared,
+                &Request {
+                    role: role.into(),
+                    intent: "conversation".into(),
+                    text: text.into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(response.status().is_success());
+            let state = shared.read().await;
+            assert!(state.session.crew_actions.is_empty());
+            assert_eq!(state.session.transcript.last().unwrap().speaker, speaker);
+            assert!(
+                state
+                    .session
+                    .transcript
+                    .last()
+                    .unwrap()
+                    .text
+                    .contains("biscuit")
+            );
+        }
         server.abort();
     }
 }

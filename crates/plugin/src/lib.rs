@@ -5,6 +5,7 @@
 
 mod arrival;
 mod atis;
+mod callouts;
 mod crew;
 mod debug_jump;
 mod follow_me;
@@ -40,6 +41,7 @@ struct Shared {
     tcas: tcas::Tcas,
     native_traffic: traffic::NativeTraffic,
     crew: crew::Runtime,
+    callouts: callouts::Runtime,
     interface: Option<Interface>,
     window: Option<window::Floater>,
     window_state: Option<Box<window::WindowState>>,
@@ -490,6 +492,17 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
             .as_ref()
             .and_then(|p| p.wingspan_meters);
     }
+    if let Some(t) = telemetry.as_ref() {
+        let aircraft = locked.panel.aircraft_path.clone();
+        let Shared {
+            interface,
+            callouts,
+            ..
+        } = &mut *locked;
+        if let Some(interface) = interface {
+            callouts.update(&mut xpapi.data, &aircraft, interface, t);
+        }
+    }
     let Some(interface) = locked.interface.as_mut() else {
         return;
     };
@@ -542,6 +555,7 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
             |()| "Debug jump complete; parking brake set. ATC permissions remain unchanged.".into(),
         );
         locked.crew = crew::Runtime::default();
+        locked.callouts.reset();
         locked.follow_me = follow_me::FollowMe::new();
         locked.debug_cancel_pending = pending;
         return;
@@ -693,6 +707,7 @@ impl Plugin for OpenAtc {
             tcas: tcas::Tcas::default(),
             native_traffic: traffic::NativeTraffic::default(),
             crew: crew::Runtime::default(),
+            callouts: callouts::Runtime::default(),
             interface: None,
             native_atis: atis::NativeAtis::default(),
             native_radio: atis::NativeRadio::default(),
@@ -841,7 +856,10 @@ impl Plugin for OpenAtc {
                     return LoopResult::NextLoop;
                 }
                 LoopResult::Seconds(
-                    if shared.follow_me.active() || shared.generated_traffic.active() {
+                    if shared.follow_me.active()
+                        || shared.generated_traffic.active()
+                        || shared.callouts.active
+                    {
                         0.05
                     } else {
                         0.5
@@ -877,6 +895,7 @@ impl Plugin for OpenAtc {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         shared.enabled = false;
+        shared.callouts = callouts::Runtime::default();
         shared.native_atis.update(false);
         shared.native_radio.update(false);
         shared.generated_traffic = generated_traffic::Renderer::default();

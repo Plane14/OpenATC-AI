@@ -16,6 +16,7 @@ use std::{
 };
 mod airborne;
 mod departure;
+mod environment;
 mod flight;
 mod landing;
 mod policy;
@@ -55,6 +56,7 @@ pub struct Runtime {
     tower_ready: BTreeSet<u32>,
     flights: BTreeMap<u32, Arc<flight::Prepared>>,
     terminal_routes: Vec<routing::Terminal>,
+    environments: BTreeMap<String, environment::Environment>,
     active_flights: BTreeSet<u32>,
     handoff_targets: BTreeMap<u32, usize>,
     pending_checkins: BTreeSet<(u32, usize)>,
@@ -129,6 +131,7 @@ struct Preparation {
     runway: String,
     arrival_runway: String,
     config: std::path::PathBuf,
+    weather: BTreeMap<String, (serde_json::Value, Instant)>,
 }
 struct Scene {
     frames: Vec<GeneratedTraffic>,
@@ -142,6 +145,7 @@ struct Scene {
     published_holds: Option<Arc<openatc_core::traffic::holding::published::Catalogue>>,
     nominal_departures: BTreeMap<u32, Arc<departure::Surface>>,
     terminal_routes: Vec<routing::Terminal>,
+    environments: BTreeMap<String, environment::Environment>,
     policy: Operations,
     fixed_gear: BTreeSet<u32>,
     channels: BTreeMap<String, animation::Channel>,
@@ -655,12 +659,29 @@ fn ground_route(
     }
     Err("Surface route exceeds crossing budget".into())
 }
-fn prepare_scene(input: Preparation) -> Result<Scene, String> {
+fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
     let (Some(origin), Some(destination)) = (port(&input.origin), port(&input.destination)) else {
         return Err(
             "Generated traffic needs published runway and stand capacities at both airports".into(),
         );
     };
+    let mut environments = BTreeMap::new();
+    for (airport, runway) in [
+        (&input.origin, &mut input.runway),
+        (&input.destination, &mut input.arrival_runway),
+    ] {
+        if let Some(sample) = input.weather.get(&airport.icao)
+            && let Ok(weather) = environment::Environment::from_sample(airport, sample)
+        {
+            *runway = crate::radio::atis_runway(
+                &airport.runways,
+                runway,
+                weather.wind_from,
+                weather.wind_knots,
+            );
+            environments.insert(airport.icao.clone(), weather);
+        }
+    }
     let distance = openatc_core::arrival::distance_nm(
         [
             input.origin.reference_latitude,
@@ -964,6 +985,14 @@ fn prepare_scene(input: Preparation) -> Result<Scene, String> {
             .next()
             .unwrap_or_else(|| "No eligible generated aircraft".into()));
     }
+    for airport in [&input.origin, &input.destination] {
+        if !environments.contains_key(&airport.icao) {
+            warnings.push(format!(
+                "{} needs fresh airport weather before an airborne flight can be planned",
+                airport.icao
+            ));
+        }
+    }
     Ok(Scene {
         frames: result,
         world,
@@ -976,6 +1005,7 @@ fn prepare_scene(input: Preparation) -> Result<Scene, String> {
         published_holds,
         nominal_departures,
         terminal_routes,
+        environments,
         policy,
         fixed_gear,
         channels,
@@ -1003,7 +1033,20 @@ fn scene_key(state: &EngineState) -> String {
 }
 
 pub async fn prepare(shared: Shared) {
-    let (job, key, epoch, settings, plan, profiles, models, config, workers, own, observed) = {
+    let (
+        job,
+        key,
+        epoch,
+        settings,
+        plan,
+        profiles,
+        models,
+        config,
+        workers,
+        own,
+        observed,
+        weather,
+    ) = {
         let mut state = shared.write().await;
         if !state.settings.generated_traffic || !state.session.telemetry.position_valid {
             return;
@@ -1052,6 +1095,18 @@ pub async fn prepare(shared: Shared) {
                 state.session.telemetry.longitude,
             ],
             state.session.telemetry.traffic.clone().unwrap_or_default(),
+            [
+                &state.session.plan.departure,
+                &state.session.plan.destination,
+            ]
+            .into_iter()
+            .filter_map(|id| {
+                state
+                    .sim_weather
+                    .get(id)
+                    .map(|sample| (id.clone(), sample.clone()))
+            })
+            .collect(),
         )
     };
     let result = async {
@@ -1078,6 +1133,7 @@ pub async fn prepare(shared: Shared) {
                     runway: plan.runway.clone(),
                     arrival_runway: plan.arrival_runway.clone(),
                     config,
+                    weather,
                 })
             })
             .await?
@@ -1101,6 +1157,7 @@ pub async fn prepare(shared: Shared) {
                 scene.terminal_routes.len()
             );
             state.generated.terminal_routes = scene.terminal_routes;
+            state.generated.environments = scene.environments;
             state.generated.key = key;
             state.generated.frames = scene.frames;
             state.generated.world = scene.world;
@@ -1697,6 +1754,7 @@ mod tests {
             runway: "04R".into(),
             arrival_runway: "35R".into(),
             config: std::path::PathBuf::new(),
+            weather: BTreeMap::new(),
         })
         .unwrap();
         assert!(!scene.frames.is_empty(), "No compatible installed aircraft");
@@ -1935,6 +1993,7 @@ mod tests {
             runway: "09".into(),
             arrival_runway: "09".into(),
             config: std::path::PathBuf::new(),
+            weather: BTreeMap::new(),
         })
         .unwrap();
         assert_eq!(scene.frames.len(), scene.movement.len());
@@ -1989,6 +2048,7 @@ mod tests {
             runway,
             arrival_runway: "04R".into(),
             config: std::path::PathBuf::new(),
+            weather: BTreeMap::new(),
         })
         .unwrap();
         assert!(!scene.frames.is_empty());

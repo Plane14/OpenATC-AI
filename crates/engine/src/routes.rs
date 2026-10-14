@@ -1590,7 +1590,7 @@ async fn crew_chat(
                     let samples = sample_slots();
                     state
                         .speech
-                        .select(role, &[], &phase, "icao", 4)
+                        .select(role, &["actor_conversation"], &phase, "icao", 4)
                         .into_iter()
                         .flat_map(|example| {
                             example
@@ -1769,9 +1769,9 @@ async fn copilot_chat(shared: &Shared, settings: &Settings, request: &Request) -
         let phase = format!("{:?}", state.session.phase).to_lowercase();
         system += &crate::context::prompt(&state, "copilot", &request.text);
         system += state.prompts.guidance.get("examples");
-        system += &social
-            .clone()
-            .unwrap_or_else(|| few_shots(&state.speech, "copilot", &[], &phase));
+        system += &social.clone().unwrap_or_else(|| {
+            few_shots(&state.speech, "copilot", &["actor_conversation"], &phase)
+        });
     }
     let voice = if settings.copilot_voice.is_empty() {
         "alloy"

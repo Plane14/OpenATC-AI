@@ -53,26 +53,26 @@ name = "menus"
 crate-type = ["cdylib"]
 
 [dependencies.libfmod]
-version = "~2.206"
+version = "=2.206.7"
 optional = true
 
 [dependencies.num_enum]
-version = "~0.7"
+version = "=0.7.6"
 
 [dependencies.snafu]
-version = "~0.7"
+version = "=0.7.5"
 
 [dependencies.tailcall]
-version = "~0.1"
+version = "=0.1.6"
 
 [dependencies.xplane-sys]
-version = ">= 4.0.109, < 4.1.0"
+version = "=4.0.109"
 
 [dev-dependencies.mockall]
-version = "~0.12"
+version = "=0.12.1"
 
 [dev-dependencies.xplane-sys]
-version = ">= 4.0.109, < 4.1.0"
+version = "=4.0.109"
 features = ["mockall"]
 
 [features]

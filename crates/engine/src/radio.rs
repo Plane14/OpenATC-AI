@@ -430,7 +430,7 @@ pub async fn atis(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
     Json(json!({"text":text,"airport":station.airport,"information":code,"source":"simulator","frequency":station.khz,"radio":radio})).into_response()
 }
 
-fn atis_runway(
+pub(crate) fn atis_runway(
     runways: &[openatc_core::airport::Runway],
     assigned: &str,
     wind: f64,

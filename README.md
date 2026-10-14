@@ -77,6 +77,9 @@ cargo build --locked --release -p openatc-plugin -p openatc-engine
 cargo xtask install-plugin "/path/to/X-Plane 12"
 ```
 
+External Cargo dependencies use exact version requirements, and the committed `Cargo.lock` fixes the transitive dependency graph. Keep `--locked` on build and test commands. Dependency upgrades are deliberate changes: update the relevant manifest pins and lockfile together, then validate the affected components before installing.
+
+
 The installer checks speech files, makes a recoverable backup outside the plugin directory, and installs the plugin, engine and editable resources. It preserves personal settings and existing station-role overrides. Do not rename the engine executable into an `.xpl`: the simulator module and companion engine are different binaries.
 
 The simulator module is `64/lin.xpl` on Linux, `64/win.xpl` on Windows and `64/mac.xpl` on macOS. Keep the rest of the OpenATC folder with it. Restart X-Plane and open **Plugins → OpenATC**.
@@ -313,6 +316,10 @@ Routine automatic ATC transmissions wait while the radio is occupied. Copilot re
 The debug Map offers **Flight path**, showing the engine’s expanded route and installed SID/STAR fixes. Hover waypoints for altitude/flight-level and speed limits. A filed connection into the STAR’s initial fix stays continuous; genuinely unresolved vectors or curves retain dashed connectors. These are schematic rather than direct clearances. Controller volumes containing the aircraft at its current altitude receive a dark translucent tint derived from their border colour, independently of the tuned frequency. The tuned controller keeps its stronger border. Taxi arrows and holding-point markers appear when instructions are issued; readback still controls operational permission.
 
 ## Copilot, cabin and ground crew
+
+The **Copilot** button always addresses the copilot directly, including when ATTN or MECH is selected. **Transmit** addresses the selected recipient. Default cabin and copilot prompts support warm conversation, follow-up questions and brief humour in quiet phases while preserving verified control outcomes.
+
+Takeoff callouts prepare the copilot's TTS audio during taxi and trigger from observed indicated airspeed and configured V-speed bugs. “Rotate” uses VR and takes priority over V1 when speeds are close; V2 is a separate configurable callout. Wording, source datarefs and timing limits live in `aircraft/callouts.toml`. Missing or invalid speeds are skipped rather than guessed; default aircraft must expose or have their appropriate speed bugs set. ToLiss custom V1/VR sources are included alongside stock fallback bugs. Native ToLiss/default-aircraft timing and playback still require simulator testing.
 
 Crew conversation uses the LLM when enabled, including recognised service requests and replies after confirmed aircraft actions. The original message, recent conversation with that character and current facts are supplied together, so jokes and follow-up questions are not discarded. `speech/crew/actor_conversation.toml` supplies a bounded selection of editable style examples; `crew_response` in `prompts/prompts.toml` guides composition. Control names, targets and unconfirmed outcomes remain protected, with TOML fallbacks for failed or invalid replies. The fictional cabin retains passenger seating and an editable baseline mood (`passenger_mood` in `cabin/behaviour.toml`).
 

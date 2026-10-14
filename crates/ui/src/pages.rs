@@ -825,17 +825,14 @@ fn talk_row(ui: &imgui::Ui, interface: &mut Interface, crew: &str) {
     let power_ok =
         openatc_core::intents::can_transmit(crew, interface.radio_power, interface.bus_power);
     if interface.settings.copilot_button {
-        let enabled = interface.engine.connected() && (crew == "atc" || power_ok);
-        let _talk_disabled = ui.begin_disabled(!enabled);
-        if ui.button_with_size(
-            if crew == "atc" { "Copilot" } else { "Talk" },
-            [102.0 * scale, 0.0],
-        ) {
-            if crew == "atc" {
-                interface.transmit_box_to_copilot();
-            } else {
-                interface.transmit_box();
-            }
+        let _talk_disabled = ui.begin_disabled(!interface.engine.connected());
+        if ui.button_with_size("Copilot", [102.0 * scale, 0.0]) {
+            interface.transmit_box_to_copilot();
+        }
+        if ui.is_item_hovered() {
+            ui.tooltip_text(
+                "Talk to the copilot. Transmit addresses the selected radio or crew member.",
+            );
         }
         ui.same_line();
     }

@@ -12,14 +12,14 @@ path = "src/main.rs"
 openatc-ai-core = { path = "../ai-core" }
 openatc-platform = { path = "../platform" }
 openatc-tts = { path = "../tts" }
-axum = { version = "0.8", features = ["multipart"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-clap = { version = "4", features = ["derive"] }
-llama-cpp-2 = "0.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-toml = "1"
+axum = { version = "=0.8.9", features = ["multipart"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+clap = { version = "=4.6.7", features = ["derive"] }
+llama-cpp-2 = "=0.1.158"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.2", features = ["full"] }
+toml = "=1.1.6+spec-1.1.0"
 
 [features]
 tts-cuda = ["openatc-tts/cuda"]

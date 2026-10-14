@@ -160,6 +160,15 @@ pub struct SpeakRequest<'a> {
     pub delivery: &'a str,
 }
 
+struct WarmContext(usize);
+impl Drop for WarmContext {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            unsafe { oatc_context_free(self.0 as *mut MaContext) };
+        }
+    }
+}
+
 /// Audio recording, playback and status for the interface.
 pub struct Speech {
     context: *mut MaContext,
@@ -181,6 +190,9 @@ pub struct Speech {
     status: Arc<Mutex<String>>,
     cached_inputs: Vec<AudioDevice>,
     cached_outputs: Vec<AudioDevice>,
+    preload_cancelled: Arc<AtomicBool>,
+    warming: Option<std::sync::mpsc::Receiver<WarmContext>>,
+    prepared: Arc<Mutex<std::collections::BTreeMap<String, Option<Arc<Vec<f32>>>>>>,
 }
 
 impl Default for Speech {
@@ -219,6 +231,9 @@ impl Speech {
             status: Arc::new(Mutex::new("Microphone off".to_owned())),
             cached_inputs: Vec::new(),
             cached_outputs: Vec::new(),
+            preload_cancelled: Arc::new(AtomicBool::new(false)),
+            warming: None,
+            prepared: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
         }
     }
 
@@ -559,6 +574,135 @@ impl Speech {
         self.spawn_speak(request.engine_endpoint.to_owned(), body);
     }
 
+    fn warm_output(&mut self) -> bool {
+        if !self.context.is_null() {
+            return true;
+        }
+        if let Some(receiver) = &self.warming {
+            if let Ok(mut context) = receiver.try_recv() {
+                self.context = context.0 as *mut MaContext;
+                context.0 = 0;
+            }
+            return !self.context.is_null();
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.warming = Some(receiver);
+        self.track_job(std::thread::spawn(move || {
+            let context = unsafe {
+                let context = oatc_context_new();
+                if !context.is_null() && oatc_context_init(context) != 0 {
+                    oatc_context_free(context);
+                    std::ptr::null_mut()
+                } else {
+                    context
+                }
+            };
+            let _ = sender.send(WarmContext(context as usize));
+        }));
+        false
+    }
+
+    /// Prepare a bounded short utterance without playing it or occupying the radio.
+    pub fn preload(&mut self, key: &str, endpoint: &str, text: &str, voice: &str, speed: f32) {
+        {
+            let cache = self
+                .prepared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if cache.contains_key(key) || cache.len() >= 8 {
+                return;
+            }
+        }
+        if !self.warm_output() {
+            return;
+        }
+        if !self.output_key.is_empty() && self.cached_outputs.is_empty() {
+            self.refresh_devices();
+        }
+        if let Err(error) = Self::selected_index(&self.output_key, &self.cached_outputs) {
+            self.set_status(error);
+            return;
+        }
+        let mut cache = self
+            .prepared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.insert(key.to_owned(), None);
+        drop(cache);
+        let cache = self.prepared.clone();
+        let endpoint = endpoint.to_owned();
+        let key = key.to_owned();
+        let body = serde_json::json!({"text":text,"speaker":"copilot","voice":voice,"speed":speed,"delivery":"normal","urgent":false});
+        let cancelled = self.preload_cancelled.clone();
+        self.track_job(std::thread::spawn(move || {
+            let frames = openatc_http::post_wav_cancelled(
+                &endpoint,
+                "/speech/speak",
+                &body,
+                std::time::Duration::from_secs(35),
+                &cancelled,
+            )
+            .map_err(|_| "Callout synthesis failed".to_owned())
+            .and_then(|bytes| decode_wav(&bytes))
+            .ok()
+            .filter(|frames| !frames.is_empty() && frames.len() <= 48000 * 2 * 5);
+            let mut cache = cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // A failed asset stays unavailable until the next flight/configuration reset.
+            cache.insert(key, Some(Arc::new(frames.unwrap_or_default())));
+        }));
+    }
+
+    /// Start already decoded audio; no synthesis request occurs at the trigger speed.
+    pub fn play_preloaded(&mut self, key: &str, volume: f32) -> bool {
+        if self.busy() || self.recording {
+            return false;
+        }
+        let frames = self
+            .prepared
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(key).cloned().flatten());
+        let Some(frames) = frames.filter(|frames| !frames.is_empty()) else {
+            return false;
+        };
+        if self.context.is_null() {
+            return false;
+        }
+        self.cancelled.store(false, Ordering::SeqCst);
+        self.busy_job.store(true, Ordering::SeqCst);
+        let context = self.context as usize;
+        let output = self.output_key.clone();
+        let cancelled = self.cancelled.clone();
+        let busy = self.busy_job.clone();
+        let playing = self.playing.clone();
+        self.track_job(std::thread::spawn(move || {
+            playing.store(true, Ordering::SeqCst);
+            let _ = play_frames(
+                context as *mut MaContext,
+                &output,
+                &frames,
+                volume.clamp(0.0, 1.0),
+                &cancelled,
+            );
+            playing.store(false, Ordering::SeqCst);
+            busy.store(false, Ordering::SeqCst);
+        }));
+        true
+    }
+
+    /// Forget assets after a voice, aircraft or flight change.
+    pub fn clear_preloaded(&mut self) {
+        self.stop_speech();
+        self.preload_cancelled.store(true, Ordering::SeqCst);
+        self.preload_cancelled = Arc::new(AtomicBool::new(false));
+        if self.context.is_null() {
+            self.warming = None;
+        }
+        self.prepared = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    }
+
     /// Pump background jobs: the full-recording notice lands here.
     pub fn poll(&mut self) {
         if self.recording {
@@ -657,6 +801,7 @@ impl Speech {
 
 impl Drop for Speech {
     fn drop(&mut self) {
+        self.preload_cancelled.store(true, Ordering::SeqCst);
         self.stop_capture();
         self.stop_speech();
         let jobs = self
