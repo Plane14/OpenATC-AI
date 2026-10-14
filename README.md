@@ -598,3 +598,5 @@ Click an underlined squawk in the clearance summary or conversation to select th
 Default aircraft use the standard X-Plane squawk dataref. Aircraft-specific digit bindings apply only when the complete custom control group is available; setting a code preserves the default aircraft’s transponder mode. Custom controls and the standard fallback are editable in `aircraft/transponder.toml`.
 
 The floating plugin window remembers its position, expanded size and ATC transcript divider in settings. Compact mode preserves the expanded layout, and restored windows stay within the current screen bounds.
+
+Crew requests can combine controls with a friendly remark. Editable language rules separate recognised social clauses from actions while preserving the complete request for the actor’s reply; unknown controls and negations still require clarification.

@@ -102,6 +102,8 @@ pub struct Grammar {
     drink: String,
     #[serde(default)]
     statement: Option<String>,
+    #[serde(default)]
+    social: Option<String>,
     replacements: std::collections::BTreeMap<String, String>,
     services: std::collections::BTreeMap<String, Service>,
 }
@@ -122,7 +124,7 @@ impl Grammar {
         for pattern in [&result.split, &result.cross_check, &result.drink] {
             regex::Regex::new(pattern).map_err(|error| error.to_string())?;
         }
-        if let Some(pattern) = &result.statement {
+        for pattern in [&result.statement, &result.social].into_iter().flatten() {
             regex::Regex::new(pattern).map_err(|error| error.to_string())?;
         }
         if result.replacements.len() > 128
@@ -136,6 +138,26 @@ impl Grammar {
             return Err("Crew corrections must contain words only".into());
         }
         Ok(result)
+    }
+    /// Route purely social remarks to conversation rather than action classification.
+    pub fn social_only(&self, text: &str) -> bool {
+        let Some(pattern) = self
+            .social
+            .as_ref()
+            .and_then(|pattern| regex::Regex::new(pattern).ok())
+        else {
+            return false;
+        };
+        let Ok(split) = regex::Regex::new(&self.split) else {
+            return false;
+        };
+        let normalized = self.normalize(text);
+        let clauses = split
+            .split(&normalized)
+            .map(str::trim)
+            .filter(|clause| !clause.is_empty())
+            .collect::<Vec<_>>();
+        !clauses.is_empty() && clauses.iter().all(|clause| pattern.is_match(clause))
     }
     /// Preserve punctuation and numbers while replacing only explicitly listed words.
     pub fn normalize(&self, text: &str) -> String {
@@ -165,7 +187,24 @@ pub fn parse_with(
     text: &str,
     grammar: &Grammar,
 ) -> Option<Intent> {
-    let lower = grammar.normalize(text);
+    let normalized = grammar.normalize(text);
+    let split = regex::Regex::new(&grammar.split).ok()?;
+    let social = grammar
+        .social
+        .as_ref()
+        .map(|pattern| regex::Regex::new(pattern))
+        .transpose()
+        .ok()?;
+    let lower = split
+        .split(&normalized)
+        .filter(|clause| !clause.trim().is_empty())
+        .filter(|clause| {
+            !social
+                .as_ref()
+                .is_some_and(|pattern| pattern.is_match(clause.trim()))
+        })
+        .collect::<Vec<_>>()
+        .join(" and ");
     let mut intent = Intent::default();
     let mut controls = Vec::new();
     if role == "cabin" {
@@ -254,6 +293,49 @@ mod tests {
         assert_eq!(intent.actions.len(), 2);
         assert!(intent.actions.iter().all(|action| action.value == 0.0));
         assert!(parse(&profile(), "cabin", "do not arm dorrs and coffee please").is_none());
+    }
+    #[test]
+    fn ground_banter_does_not_hide_actions_or_unknown_requests() {
+        let intent = parse(&profile(), "ground", "disoconnect external power and chocks please kind sir, and have a beer for me after that! you deserve it haha").unwrap();
+        assert_eq!(intent.actions.len(), 2);
+        for (role, text, control) in [
+            (
+                "cabin",
+                "turn off cabin lights and have a beer for me",
+                "cabin_brightness",
+            ),
+            (
+                "copilot",
+                "set heading 270 and have a beer for me",
+                "heading",
+            ),
+        ] {
+            let parsed = parse(&profile(), role, text).unwrap();
+            assert_eq!(parsed.actions.len(), 1);
+            assert_eq!(parsed.actions[0].control, control);
+        }
+        let grammar: Grammar =
+            toml::from_str(include_str!("../../../cabin/language.toml")).unwrap();
+        assert!(grammar.social_only("have a beer for me after that! you deserve it haha"));
+        assert!(!grammar.social_only("disconnect power and have a beer for me"));
+
+        assert!(intent.actions.iter().all(|action| action.value == 0.0));
+        assert!(
+            parse(
+                &profile(),
+                "ground",
+                "disconnect external power and connect imaginary thing and have a beer for me"
+            )
+            .is_none()
+        );
+        assert!(
+            parse(
+                &profile(),
+                "ground",
+                "do not disconnect external power and have a beer for me"
+            )
+            .is_none()
+        );
     }
     #[test]
     fn cabin_preparation_and_watch_are_services_not_switch_changes() {

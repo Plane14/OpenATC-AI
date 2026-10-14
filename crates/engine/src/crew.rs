@@ -602,6 +602,12 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
     let profile = s.crew.profile.clone();
     let grammar =
         openatc_core::crew::request::Grammar::load(&s.config_dir.join("cabin/language.toml")).ok();
+    if grammar
+        .as_ref()
+        .is_some_and(|grammar| grammar.social_only(&text))
+    {
+        return None;
+    }
     let parsed = grammar.as_ref().and_then(|grammar| {
         openatc_core::crew::request::parse_with(&profile, role, &text, grammar)
     });

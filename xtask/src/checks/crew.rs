@@ -317,6 +317,42 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     assert!(latest(&narrated["state"]).contains("coffee first"));
     assert!(m.prompt().contains("confirmed result"));
     assert!(m.prompt().contains("have a beer for me"));
+    m.set(json!({"reply":"External power disconnected and chocks removed, Captain. Ha, thanks! Enjoy your flight."}));
+    let banter = c.request("ground", "disoconnect external power and chocks please kind sir, and have a beer for me after that! you deserve it haha")?;
+    accepted(&banter);
+    let tasks = banter["state"]["crewActions"].as_array().unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert!(tasks.iter().all(|task| task["value"] == 0.0));
+    c.ack(&tasks[0], true)?;
+    let done = c.ack(&tasks[1], true)?;
+    assert!(latest(&done["state"]).contains("Ha, thanks"));
+    assert!(
+        m.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.to_string().contains("you deserve it haha"))
+    );
+    for (role, request, control, value, response) in [
+        (
+            "cabin",
+            "turn off cabin lights and have a beer for me",
+            "cabin_brightness",
+            0.,
+            "Cabin lights off. Ha, coffee will do for now!",
+        ),
+        (
+            "copilot",
+            "set heading 270 and have a beer for me",
+            "heading",
+            270.,
+            "Heading 270 set. Ha, after we finish!",
+        ),
+    ] {
+        m.set(json!({"reply":response}));
+        let done = c.action(role, request, control, value)?;
+        assert!(latest(&done["state"]).contains("Ha,"));
+    }
     m.set(json!({"reply":"They seem comfortable, Captain. It's calm back here."}));
     let mood = c.request("cabin", "how are the passengers? are they happy?")?;
     accepted(&mood);

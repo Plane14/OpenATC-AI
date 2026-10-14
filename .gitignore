@@ -130,3 +130,6 @@ PLAN*
 agent-notes/
 task-notes/
 memory/
+
+# Private assistant handovers and working notes.
+/.ai/
