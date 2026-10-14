@@ -45,9 +45,76 @@ impl Drop for NativeAtis {
     }
 }
 
+#[derive(Default)]
+struct VolumeOwnership {
+    previous: Option<f32>,
+}
+impl VolumeOwnership {
+    fn update(&mut self, current: f32, mute: bool) -> Option<f32> {
+        if !current.is_finite() {
+            return None;
+        }
+        if mute {
+            self.previous.get_or_insert(current);
+            (current != 0.0).then_some(0.0)
+        } else {
+            let previous = self.previous.take()?;
+            (current == 0.0 && previous != 0.0).then_some(previous)
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct NativeRadio {
+    volumes: Vec<(DataRef<f32, ReadWrite>, VolumeOwnership)>,
+}
+impl NativeRadio {
+    pub fn bind(&mut self, data: &mut xplane::data::DataApi) {
+        self.update(false);
+        self.volumes.clear();
+        for name in [
+            "sim/operation/sound/radio_volume_ratio",
+            "sim/operation/sound/radio_copilot_audio_panel_volume_ratio",
+        ] {
+            if let Some(value) = data
+                .find(name)
+                .ok()
+                .and_then(|value: DataRef<f32, ReadOnly>| value.writeable().ok())
+            {
+                self.volumes.push((value, VolumeOwnership::default()));
+            }
+        }
+    }
+    pub fn update(&mut self, mute: bool) {
+        for (volume, ownership) in &mut self.volumes {
+            if let Some(value) = ownership.update(volume.get(), mute) {
+                volume.set(value);
+            }
+        }
+    }
+}
+impl Drop for NativeRadio {
+    fn drop(&mut self) {
+        self.update(false);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_radio_restores_independent_panel_volumes() {
+        let mut captain = VolumeOwnership::default();
+        let mut copilot = VolumeOwnership::default();
+        assert_eq!(captain.update(0.8, true), Some(0.0));
+        assert_eq!(copilot.update(0.4, true), Some(0.0));
+        assert_eq!(captain.update(0.0, true), None);
+        assert_eq!(captain.update(0.0, false), Some(0.8));
+        assert_eq!(copilot.update(0.0, false), Some(0.4));
+        assert_eq!(captain.update(0.0, true), None);
+        assert_eq!(captain.update(0.0, false), None);
+    }
 
     #[test]
     fn one_native_override_covers_both_receivers_and_restores_once() {

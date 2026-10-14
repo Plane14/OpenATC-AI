@@ -131,6 +131,8 @@ pub struct Settings {
     pub atc_offer_interval_minutes: u8,
     /// Let OpenATC set the native simulator AI count; other providers keep ownership.
     pub manage_native_traffic: bool,
+    /// Suppress X-Plane AI while OpenATC is connected; other plugins retain ownership.
+    pub suppress_native_traffic: bool,
     /// Native AI aircraft excluding ownship, limited to nineteen SDK slots.
     pub native_traffic_count: u8,
     /// Enable OpenATC's lightweight generated model instances.
@@ -381,6 +383,7 @@ impl Default for Settings {
             atc_shortcut_offers: false,
             atc_offer_interval_minutes: 10,
             manage_native_traffic: false,
+            suppress_native_traffic: true,
             native_traffic_count: 4,
             generated_traffic: false,
             airline_traffic: 8,

@@ -53,10 +53,14 @@ impl NativeTraffic {
             xp::XPLMCountAircraft(&raw mut total, &raw mut active, &raw mut controller);
         }
         self.applied = Some(i32::from(count));
-        self.status = format!(
-            "X-Plane AI: {} aircraft active. X-Plane supplies their flight models and routes.",
-            (active - 1).max(0)
-        );
+        self.status = if count == 0 {
+            "X-Plane AI traffic suppressed. OpenATC generated traffic is separate.".into()
+        } else {
+            format!(
+                "X-Plane AI: {} aircraft active. X-Plane supplies their flight models and routes.",
+                (active - 1).max(0)
+            )
+        };
         &self.status
     }
     pub fn yield_to_provider(&mut self) {

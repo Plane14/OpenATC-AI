@@ -34,6 +34,7 @@ use xplane::{
 /// Shared plugin state behind the command handlers.
 struct Shared {
     native_atis: atis::NativeAtis,
+    native_radio: atis::NativeRadio,
     generated_traffic: generated_traffic::Renderer,
     tcas: tcas::Tcas,
     native_traffic: traffic::NativeTraffic,
@@ -413,6 +414,8 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     let receives_atis = locked.interface.as_ref().is_some_and(|interface|
         interface.engine.connected() && interface.receives_atis);
     locked.native_atis.update(receives_atis);
+    let connected = locked.interface.as_ref().is_some_and(|interface| interface.engine.connected());
+    locked.native_radio.update(connected);
     let requested_frequency = locked.interface.as_mut().and_then(|i| {
         i.requested_frequency_khz
             .take()
@@ -537,6 +540,7 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
         .join("Resources/plugins/OpenATC/Resources/CSL");
     let follow_me_enabled = interface.settings.show_follow_me;
     let native_enabled = interface.settings.manage_native_traffic;
+    let suppress_native = interface.engine.connected() && interface.settings.suppress_native_traffic;
     let native_count = interface.settings.native_traffic_count;
     let arrival_target = openatc_core::arrival::target(
         &interface.arrival,
@@ -586,8 +590,8 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     let status = locked
         .native_traffic
         .update(
-            native_enabled && state.generated_traffic.is_empty(),
-            native_count,
+            (native_enabled || suppress_native) && state.generated_traffic.is_empty(),
+            if suppress_native { 0 } else { native_count },
         )
         .to_owned();
     if let Some(interface) = locked.interface.as_mut() {
@@ -669,6 +673,7 @@ impl Plugin for OpenAtc {
             crew: crew::Runtime::default(),
             interface: None,
             native_atis: atis::NativeAtis::default(),
+            native_radio: atis::NativeRadio::default(),
             window: None,
             window_state: None,
             refs: None,
@@ -709,6 +714,7 @@ impl Plugin for OpenAtc {
             let mut lines = Vec::new();
             shared.refs = Some(telemetry::find_refs(&mut xpapi.data, &mut lines));
             shared.native_atis.bind(&mut xpapi.data);
+            shared.native_radio.bind(&mut xpapi.data);
             for line in lines {
                 debug_log(&line);
             }
@@ -850,6 +856,7 @@ impl Plugin for OpenAtc {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         shared.enabled = false;
         shared.native_atis.update(false);
+        shared.native_radio.update(false);
         shared.generated_traffic = generated_traffic::Renderer::default();
         shared.tcas = tcas::Tcas::default();
         shared.native_traffic = traffic::NativeTraffic::default();

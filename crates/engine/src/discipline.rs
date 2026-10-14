@@ -27,6 +27,7 @@ struct TaxiMovement {
     origin: Option<(f64, f64)>,
     rolling: bool,
     started: bool,
+    joined_route: bool,
 }
 
 impl TaxiMovement {
@@ -44,6 +45,38 @@ impl TaxiMovement {
             && openatc_core::ops::distance_nm(origin.0, origin.1, t.latitude, t.longitude) * 1852.0
                 >= 5.0;
         self.rolling = moving;
+        self.joined_route |= !off_route(state);
+    }
+
+    fn joining_route(&self, state: &EngineState) -> bool {
+        if self.joined_route {
+            return false;
+        }
+        let Some((latitude, longitude)) = self.origin else {
+            return false;
+        };
+        let route = &state.session.taxi_clearance;
+        let Some(first) = route.points.first() else {
+            return false;
+        };
+        let Some(airport) = state
+            .airport
+            .as_ref()
+            .filter(|airport| airport.icao == route.airport)
+        else {
+            return false;
+        };
+        let origin = airport_point(airport, latitude, longitude);
+        let point = airport_point(
+            airport,
+            state.session.telemetry.latitude,
+            state.session.telemetry.longitude,
+        );
+        // Scenery often leaves the apron between the stand and the first network node unmapped.
+        // Keep the same corridor tolerance as the mapped route, without inventing a runway permission.
+        segment_distance(point, origin, *first) <= 60.0
+            && (point.east - first.east).hypot(point.north - first.north)
+                <= (origin.east - first.east).hypot(origin.north - first.north) + 5.0
     }
 }
 
@@ -271,7 +304,10 @@ fn tick_at(state: &mut EngineState, radio_available: bool, now: Instant) -> bool
     }
     monitor.taxi_movement.observe(state);
     monitor.taxi.observe(
-        if monitor.taxi_movement.started && off_route(state) {
+        if monitor.taxi_movement.started
+            && off_route(state)
+            && !monitor.taxi_movement.joining_route(state)
+        {
             "off_route".into()
         } else {
             String::new()
@@ -702,6 +738,32 @@ mod tests {
             },
         );
         s
+    }
+
+    #[test]
+    fn apron_join_does_not_warn_until_the_aircraft_leaves_its_connector() {
+        let mut state = taxi_state();
+        state.session.phase = PhaseCode::Taxi;
+        state.session.telemetry.longitude = 0.0;
+        state.session.telemetry.latitude = 300.0 / 111320.0;
+        let mut movement = TaxiMovement::default();
+        movement.observe(&state);
+        state.session.telemetry.ground_speed_knots = 5.0;
+        for north in [280.0, 250.0, 150.0, 70.0] {
+            state.session.telemetry.latitude = north / 111320.0;
+            movement.observe(&state);
+            assert!(off_route(&state));
+            assert!(movement.joining_route(&state));
+        }
+        state.session.telemetry.longitude = 100.0 / 111320.0;
+        assert!(!movement.joining_route(&state));
+        state.session.telemetry.longitude = 0.0;
+        state.session.telemetry.latitude = 30.0 / 111320.0;
+        movement.observe(&state);
+        assert!(movement.joined_route);
+        state.session.telemetry.latitude = 150.0 / 111320.0;
+        assert!(off_route(&state));
+        assert!(!movement.joining_route(&state));
     }
 
     #[test]

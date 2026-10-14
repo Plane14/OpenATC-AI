@@ -4,7 +4,7 @@ use openatc_core::state::State;
 
 pub fn settings(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
     widgets::section_title(ui, "TRAFFIC SOURCE");
-    ui.text_wrapped("X-Plane AI aircraft currently provide moving traffic. Bluebell models and the editable airline preferences below prepare OpenATC's generated traffic; installing models alone does not create flights.");
+    ui.text_wrapped("OpenATC generated traffic is still in development. Native X-Plane AI is optional; installing Bluebell models alone does not create flights.");
     if let Some(reply) = interface.engine.take_reply("/traffic/models/index") {
         interface.traffic_notice = if reply.success {
             format!(
@@ -30,6 +30,9 @@ pub fn settings(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
     }
     {
         let _disabled = ui.begin_disabled(!interface.simulator_host);
+        ui.checkbox("Suppress X-Plane AI traffic", &mut interface.settings.suppress_native_traffic);
+        ui.text_wrapped("Keeps native AI out of OpenATC's traffic flow. Other traffic plugins retain ownership. X-Plane's Draw Parked Aircraft option is separate.");
+        let _native_disabled = ui.begin_disabled(interface.settings.suppress_native_traffic);
         ui.checkbox(
             "Set X-Plane AI traffic amount",
             &mut interface.settings.manage_native_traffic,
