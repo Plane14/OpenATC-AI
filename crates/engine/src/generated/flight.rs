@@ -175,6 +175,7 @@ pub(super) fn install(runtime: &mut Runtime, id: u32, prepared: &Prepared) -> Re
         }
     }
     runtime.world = world;
+    runtime.flights.insert(id, Arc::new(prepared.clone()));
     runtime
         .approved_orders
         .retain(|(aircraft, _)| *aircraft != id);
@@ -556,11 +557,13 @@ mod tests {
         let mut broken = prepared.clone();
         broken.recovery.remove(&2);
         assert!(install(&mut state.generated, 1, &broken).is_err());
+        assert!(state.generated.flights.is_empty());
+        assert!(state.generated.active_flights.is_empty());
         assert_eq!(state.generated.world.snapshot()[0].stage, Stage::TaxiOut);
         assert!(state.generated.world.snapshot()[0].complete);
         install(&mut state.generated, 1, &prepared).unwrap();
         assert!(state.generated.world.snapshot()[0].awaiting_clearance);
-        state.generated.flights.insert(1, Arc::new(prepared));
+        assert!(state.generated.flights.contains_key(&1));
         let mut seen = BTreeSet::new();
         let mut frequencies = BTreeSet::new();
         let mut checkins = BTreeSet::new();

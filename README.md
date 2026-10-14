@@ -600,3 +600,5 @@ Default aircraft use the standard X-Plane squawk dataref. Aircraft-specific digi
 The floating plugin window remembers its position, expanded size and ATC transcript divider in settings. Compact mode preserves the expanded layout, and restored windows stay within the current screen bounds.
 
 Crew requests can combine controls with a friendly remark. Editable language rules separate recognised social clauses from actions while preserving the complete request for the actor’s reply; unknown controls and negations still require clarification.
+
+Generated-traffic flight installation now retains its controller plan atomically. Joint airborne scheduling is tested across departure, en-route, arrival and approach restrictions; connection to the production full-flight factory remains unfinished, so this is not yet a complete generated traffic lifecycle.

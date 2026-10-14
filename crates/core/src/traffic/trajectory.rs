@@ -110,7 +110,7 @@ pub fn compile(
         {
             return Err(format!("Invalid airborne crossing at {index}"));
         }
-        let speed = fix.ground_knots * 0.514444;
+        let speed = fix.ground_knots * (1852.0 / 3600.0);
         let radius = (speed.powi(2) / (9.80665 * envelope.bank_degrees.to_radians().tan()))
             .max(speed / envelope.turn_rate_degrees_sec.to_radians());
         let heading = fix.arrival_heading.unwrap_or_else(|| {

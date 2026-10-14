@@ -163,7 +163,9 @@ impl Route {
                 }
                 let seconds = nm / segment.knots * 3600.0;
                 let vertical = (to.altitude_feet - from.altitude_feet) * 60.0 / seconds;
-                if vertical > climb_fpm || -vertical > descent_fpm {
+                // Sampled interpolation can exceed an exact rate by floating-point roundoff.
+                let tolerance = climb_fpm.max(descent_fpm) * 1e-9;
+                if vertical > climb_fpm + tolerance || -vertical > descent_fpm + tolerance {
                     return Err("Traffic route exceeds climb or descent performance".into());
                 }
                 compiled.push(Leg {
