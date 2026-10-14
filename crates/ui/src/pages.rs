@@ -229,6 +229,10 @@ fn radio_header(
     } else {
         ui.text_disabled(format!("{radio} unavailable"));
     }
+    if !interface.radio_power {
+        ui.same_line();
+        ui.text_colored(widgets::warning(ui), "Radio power off");
+    }
     ui.text_wrapped(if interface.simulator_host {
         "Select a station to tune the selected radio. Its current station is highlighted."
     } else {
@@ -241,15 +245,6 @@ fn radio_header(
     });
     if !interface.aircraft_profile.is_empty() {
         ui.text_disabled(&interface.aircraft_profile);
-    }
-    if !interface.radio_power {
-        ui.text_colored(widgets::warning(ui), "Aircraft radio power is off.");
-    }
-    if interface.stations_loading {
-        ui.text_disabled("Loading nearby stations…");
-    }
-    if !interface.radio_notice.is_empty() {
-        ui.text_wrapped(&interface.radio_notice);
     }
 }
 
@@ -425,6 +420,10 @@ fn radio_list(
 fn radio_footer(ui: &imgui::Ui, interface: &mut Interface) {
     if radio_assistance(ui, &mut interface.settings) {
         interface.save_settings();
+    }
+    // Refresh notices belong below the controls so station rows stay under the pointer.
+    if !interface.radio_notice.is_empty() {
+        ui.text_wrapped(&interface.radio_notice);
     }
 }
 
