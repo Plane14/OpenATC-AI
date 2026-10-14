@@ -1,0 +1,6 @@
+# Descent planning margins; crossing restrictions remain clearance limits.
+version = 1
+descent_degrees = 3.0
+lead_nm = 15.0
+level_step_feet = 1000
+minimum_change_feet = 500

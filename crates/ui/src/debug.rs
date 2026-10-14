@@ -21,6 +21,19 @@ pub fn conversation(state: &State) -> String {
     );
     let _ = writeln!(
         text,
+        "COM2: {} | controlling radio: {}",
+        state.telemetry.com2_khz.map_or_else(
+            || "Unavailable".into(),
+            |frequency| format!("{:.3} MHz", f64::from(frequency) / 1000.0)
+        ),
+        if state.control_radio == openatc_core::state::Radio::Com2 {
+            "COM2"
+        } else {
+            "COM1"
+        }
+    );
+    let _ = writeln!(
+        text,
         "Altitude: geometric {:.1} ft | indicated {:?} ft | standard-pressure {:?} ft",
         state.telemetry.altitude_feet,
         state.telemetry.indicated_altitude_feet,

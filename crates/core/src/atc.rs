@@ -115,7 +115,16 @@ pub fn extend_index(root: &str, stations: &mut Vec<Station>) -> Result<(), Strin
                 station.longitude = points.iter().map(|p| p[1]).sum::<f64>()
                     / f64::from(u32::try_from(points.len()).unwrap_or(u32::MAX));
             }
-            station.name = format!("{} {}", c.name, c.service);
+            station.name = if c
+                .name
+                .trim()
+                .to_ascii_lowercase()
+                .ends_with(&c.service.to_ascii_lowercase())
+            {
+                c.name.trim().to_owned()
+            } else {
+                format!("{} {}", c.name.trim(), c.service)
+            };
             station.service.clone_from(&c.service);
             station.services.clear();
             station.coverage = c.volumes;

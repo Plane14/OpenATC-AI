@@ -7,6 +7,7 @@ use axum::{
 };
 use openatc_core::{
     apply::add_transmission,
+    dialogue::say,
     missions::{Mission, Status},
     state::{PhaseCode, SpeechTag},
 };
@@ -92,7 +93,10 @@ pub async fn list(AxumState(shared): AxumState<Shared>) -> Response {
         Ok((missions, errors)) => {
             Json(json!({"missions":missions,"errors":errors})).into_response()
         }
-        Err(_) => bad_request("Could not read mission catalogue."),
+        Err(_) => bad_request(openatc_core::dialogue::say(
+            "notice_could_not_read_mission_catalogue_53196b63",
+            &[],
+        )),
     }
 }
 
@@ -113,7 +117,10 @@ pub async fn save(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
     .await;
     match result {
         Ok(Ok(())) => Json(json!({"accepted":true,"mission":mission})).into_response(),
-        _ => bad_request("Could not save mission file."),
+        _ => bad_request(openatc_core::dialogue::say(
+            "notice_could_not_save_mission_file_2d41c78c",
+            &[],
+        )),
     }
 }
 
@@ -124,10 +131,16 @@ pub async fn start(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>
         (s.config_dir.clone(), s.session_generation)
     };
     let Ok((catalogue, _)) = tokio::task::spawn_blocking(move || catalogue(&dir)).await else {
-        return bad_request("Could not read mission catalogue.");
+        return bad_request(openatc_core::dialogue::say(
+            "notice_could_not_read_mission_catalogue_53196b63",
+            &[],
+        ));
     };
     let Some(mission) = catalogue.into_iter().find(|m| m.id == id) else {
-        return bad_request("Mission not found.");
+        return bad_request(openatc_core::dialogue::say(
+            "notice_mission_not_found_7e10c47e",
+            &[],
+        ));
     };
     let mut state = shared.write().await;
     if state.session_generation != generation
@@ -137,7 +150,10 @@ pub async fn start(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>
         )
         || state.session.mission.running
     {
-        return bad_request("Start a mission before taxi, with no other mission running.");
+        return bad_request(openatc_core::dialogue::say(
+            "notice_start_a_mission_before_taxi_with_no_other_mission_runnin_01a2d004",
+            &[],
+        ));
     }
     let aircraft = if state.session.telemetry.aircraft_icao.is_empty() {
         &state.session.plan.aircraft
@@ -145,7 +161,10 @@ pub async fn start(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>
         &state.session.telemetry.aircraft_icao
     };
     if !mission.compatible(aircraft) {
-        return bad_request("This mission is not suitable for the loaded aircraft type.");
+        return bad_request(openatc_core::dialogue::say(
+            "notice_this_mission_is_not_suitable_for_the_loaded_aircraft_typ_8187f302",
+            &[],
+        ));
     }
     state.session.mission = Status {
         id: mission.id.clone(),
@@ -170,7 +189,7 @@ pub async fn stop(AxumState(shared): AxumState<Shared>) -> Response {
     s.session
         .mission
         .debrief
-        .push("Mission stopped by the pilot.".into());
+        .push(say("mission_stopped_by_pilot", &[]));
     s.mission = Runtime::default();
     Json(json!({"accepted":true})).into_response()
 }
@@ -236,7 +255,7 @@ pub fn tick(state: &mut EngineState) {
             .session
             .mission
             .debrief
-            .push("Stopped: loaded aircraft no longer matches the mission.".into());
+            .push(say("mission_aircraft_changed", &[]));
         state.session.mission.active_event.clear();
         state.session.mission.choices.clear();
         state.session.mission.severity.clear();
@@ -261,7 +280,7 @@ pub fn tick(state: &mut EngineState) {
             .session
             .mission
             .debrief
-            .push("Flight reached parking. Review the recorded event outcomes.".into());
+            .push(say("mission_reached_parking", &[]));
         return;
     }
     if state.mission.active.is_some() {
@@ -363,7 +382,10 @@ pub async fn choose(AxumState(shared): AxumState<Shared>, Json(body): Json<Value
                     .any(|t| t.sequence > seen && !t.background)
             })
     {
-        return bad_request("Wait for the current transmission to finish.");
+        return bad_request(openatc_core::dialogue::say(
+            "notice_wait_for_the_current_transmission_to_finish_44e12dd6",
+            &[],
+        ));
     }
     let id = body["choice"].as_str().unwrap_or("");
     let Some(label) = state
@@ -374,10 +396,16 @@ pub async fn choose(AxumState(shared): AxumState<Shared>, Json(body): Json<Value
         .find(|c| c.id == id)
         .map(|c| c.label.clone())
     else {
-        return bad_request("This mission choice is no longer available.");
+        return bad_request(openatc_core::dialogue::say(
+            "notice_this_mission_choice_is_no_longer_available_b5a3eeae",
+            &[],
+        ));
     };
     let Some(reply) = respond(&mut state, id) else {
-        return bad_request("No active mission event.");
+        return bad_request(openatc_core::dialogue::say(
+            "notice_no_active_mission_event_b6db1eb1",
+            &[],
+        ));
     };
     let callsign = state.session.plan.callsign.clone();
     let phase = state.session.phase;

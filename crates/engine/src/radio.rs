@@ -34,7 +34,8 @@ impl PhraseHistory {
     }
 }
 
-fn error(text: &str) -> Response {
+fn error(text: impl Into<String>) -> Response {
+    let text = text.into();
     (
         axum::http::StatusCode::BAD_REQUEST,
         Json(json!({"error":text})),
@@ -102,7 +103,10 @@ pub async fn nearby(AxumState(shared): AxumState<Shared>, Json(_): Json<Value>) 
 /// Store actual simulator samples, without accepting invented/stale observations.
 pub async fn weather(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>) -> Response {
     let Some(airport) = body.get("airport").and_then(Value::as_str) else {
-        return error("Airport required");
+        return error(openatc_core::dialogue::say(
+            "notice_airport_required_af12598c",
+            &[],
+        ));
     };
     if ![
         "temperatureC",
@@ -118,17 +122,29 @@ pub async fn weather(AxumState(shared): AxumState<Shared>, Json(body): Json<Valu
             .and_then(Value::as_f64)
             .is_some_and(f64::is_finite)
     }) {
-        return error("Incomplete simulator weather");
+        return error(openatc_core::dialogue::say(
+            "notice_incomplete_simulator_weather_a96360ec",
+            &[],
+        ));
     }
     if !(800.0..1100.0).contains(&body["pressureHpa"].as_f64().unwrap_or(0.)) {
-        return error("Invalid simulator pressure");
+        return error(openatc_core::dialogue::say(
+            "notice_invalid_simulator_pressure_eb56730f",
+            &[],
+        ));
     }
     let mut s = shared.write().await;
     if s.station_root != s.settings.simulator_root {
-        return error("Station catalogue not ready");
+        return error(openatc_core::dialogue::say(
+            "notice_station_catalogue_not_ready_213e537d",
+            &[],
+        ));
     }
     let Some(station) = s.stations.iter().find(|v| v.airport == airport) else {
-        return error("Unknown weather airport");
+        return error(openatc_core::dialogue::say(
+            "notice_unknown_weather_airport_53c2de2b",
+            &[],
+        ));
     };
     if !["latitude", "longitude", "sampleAltitudeFeet"]
         .iter()
@@ -144,8 +160,13 @@ pub async fn weather(AxumState(shared): AxumState<Shared>, Json(body): Json<Valu
         || !(0.0..=400.0).contains(&body["windKnots"].as_f64().unwrap_or(-1.))
         || !(0.0..=360.0).contains(&body["windDegrees"].as_f64().unwrap_or(-1.))
         || !(0.0..=1_000_000.0).contains(&body["visibilityMeters"].as_f64().unwrap_or(-1.))
+        || !(-100.0..=70.0).contains(&body["temperatureC"].as_f64().unwrap_or(f64::NAN))
+        || !(-100.0..=70.0).contains(&body["dewpointC"].as_f64().unwrap_or(f64::NAN))
     {
-        return error("Weather must be a valid airport surface sample");
+        return error(openatc_core::dialogue::say(
+            "notice_weather_must_be_a_valid_airport_surface_sample_786d4f09",
+            &[],
+        ));
     }
     let signature = format!(
         "{:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{}",
@@ -171,27 +192,59 @@ pub async fn weather(AxumState(shared): AxumState<Shared>, Json(body): Json<Valu
     Json(json!({"accepted":true})).into_response()
 }
 /// Deterministic simulated ATIS. Never use online METAR or aircraft-local weather.
-pub async fn atis(AxumState(shared): AxumState<Shared>, Json(_): Json<Value>) -> Response {
+pub async fn atis(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>) -> Response {
+    let radio = match body.get("radio") {
+        None => openatc_core::state::Radio::Com1,
+        Some(value) => match serde_json::from_value(value.clone()) {
+            Ok(radio) => radio,
+            Err(_) => {
+                return error(openatc_core::dialogue::say(
+                    "notice_invalid_request_330509ca",
+                    &[],
+                ));
+            }
+        },
+    };
     let s = shared.read().await;
     if s.station_root != s.settings.simulator_root {
-        return error("Station catalogue not ready");
+        return error(openatc_core::dialogue::say(
+            "notice_station_catalogue_not_ready_213e537d",
+            &[],
+        ));
     }
     if !s.session.telemetry.radio_power {
-        return error("Radio power off");
+        return error(openatc_core::dialogue::say(
+            "notice_radio_power_off_c2267a7a",
+            &[],
+        ));
     }
     let nearby = openatc_core::stations::nearby(&s.stations, &s.session.telemetry);
-    let Some(station) = openatc_core::stations::tuned(&nearby, s.session.telemetry.com1_khz) else {
-        return error("No station receiving");
+    let Some(station) = s
+        .session
+        .telemetry
+        .frequency(radio)
+        .and_then(|frequency| openatc_core::stations::tuned(&nearby, frequency))
+    else {
+        return error(openatc_core::dialogue::say(
+            "notice_no_station_receiving_42659d5f",
+            &[],
+        ));
     };
     if station.service != "ATIS" {
-        return error("Not tuned to ATIS");
+        return error(openatc_core::dialogue::say(
+            "notice_not_tuned_to_atis_f8ae1999",
+            &[],
+        ));
     }
     let Some((weather, when)) = s
         .sim_weather
         .get(&station.airport)
         .filter(|(_, t)| t.elapsed().as_secs() < 45)
     else {
-        return error("Simulator airport weather unavailable");
+        return error(openatc_core::dialogue::say(
+            "notice_simulator_airport_weather_unavailable_8fc27abd",
+            &[],
+        ));
     };
     let number = |key: &str| weather[key].as_f64().unwrap_or(0.);
     let clouds = weather.get("clouds").and_then(Value::as_str).map_or_else(
@@ -215,6 +268,20 @@ pub async fn atis(AxumState(shared): AxumState<Shared>, Json(_): Json<Value>) ->
             &[("runway", (runway).to_string())],
         )
     };
+    let pressure = if station.airport.starts_with('K') {
+        openatc_core::dialogue::say(
+            "altimeter",
+            &[(
+                "pressure",
+                format!("{:.2}", number("pressureHpa") * 0.029_529_983),
+            )],
+        )
+    } else {
+        openatc_core::dialogue::say(
+            "qnh",
+            &[("pressure", format!("{:.0}", number("pressureHpa")))],
+        )
+    };
     let text = openatc_core::dialogue::say(
         "automatic_terminal_information_information_simulator_observation_wind",
         &[
@@ -226,12 +293,12 @@ pub async fn atis(AxumState(shared): AxumState<Shared>, Json(_): Json<Value>) ->
             ("clouds", (clouds).clone()),
             ("temperature", format!("{:.0}", number("temperatureC"))),
             ("dewpoint", format!("{:.0}", number("dewpointC"))),
-            ("pressure", format!("{:.0}", number("pressureHpa"))),
+            ("pressure", pressure),
             ("runway_text", (runway_text).clone()),
         ],
     );
     let _ = when;
-    Json(json!({"text":text,"airport":station.airport,"information":code,"source":"simulator","frequency":station.khz})).into_response()
+    Json(json!({"text":text,"airport":station.airport,"information":code,"source":"simulator","frequency":station.khz,"radio":radio})).into_response()
 }
 
 /// Render the appropriate speech event after the structured controller decision.
@@ -293,16 +360,22 @@ pub fn apply_wording(
         runway: Some(clearance.runway.clone()),
         altitude_feet: Some(clearance.altitude_feet),
         squawk: Some(clearance.squawk.clone()),
-        via: Some(
-            if state.session.plan.sid.is_empty()
-                || clearance.route.split_whitespace().next()
-                    == Some(state.session.plan.sid.as_str())
-            {
-                clearance.route.clone()
+        via: Some(if clearance.as_filed {
+            if clearance.departure_readback.is_empty() {
+                openatc_core::dialogue::say("filed_routing", &[])
             } else {
-                format!("{} then {}", state.session.plan.sid, clearance.route)
-            },
-        ),
+                openatc_core::dialogue::say(
+                    "departure_then_filed",
+                    &[("sid", clearance.departure_readback.clone())],
+                )
+            }
+        } else if state.session.plan.sid.is_empty()
+            || clearance.route.split_whitespace().next() == Some(state.session.plan.sid.as_str())
+        {
+            clearance.route.clone()
+        } else {
+            format!("{} then {}", state.session.plan.sid, clearance.route)
+        }),
         ..Default::default()
     };
     let next = state.phrase_history.choices.get(id).copied().unwrap_or(0);
@@ -372,7 +445,10 @@ pub async fn debug_map(AxumState(shared): AxumState<Shared>, Json(body): Json<Va
     let (root, indexed_root, latitude, longitude) = {
         let s = shared.read().await;
         if !s.settings.dev_mode {
-            return error("Map is available in developer mode.");
+            return error(openatc_core::dialogue::say(
+                "notice_map_is_available_in_developer_mode_282def75",
+                &[],
+            ));
         }
         (
             s.settings.simulator_root.clone(),
@@ -382,7 +458,10 @@ pub async fn debug_map(AxumState(shared): AxumState<Shared>, Json(body): Json<Va
         )
     };
     if root.is_empty() {
-        return error("Set the X-Plane folder to load the map.");
+        return error(openatc_core::dialogue::say(
+            "notice_set_the_x_plane_folder_to_load_the_map_c68b9a0c",
+            &[],
+        ));
     }
     if root != indexed_root {
         let path = root.clone();
@@ -392,11 +471,19 @@ pub async fn debug_map(AxumState(shared): AxumState<Shared>, Json(body): Json<Va
             .await
         {
             Ok(Ok(v)) => v,
-            _ => return error("Could not index airport markers."),
+            _ => {
+                return error(openatc_core::dialogue::say(
+                    "notice_could_not_index_airport_markers_bb8fa639",
+                    &[],
+                ));
+            }
         };
         let mut s = shared.write().await;
         if s.settings.simulator_root != root {
-            return error("Simulator folder changed; refresh the map.");
+            return error(openatc_core::dialogue::say(
+                "notice_simulator_folder_changed_refresh_the_map_d952617e",
+                &[],
+            ));
         }
         s.map_airports = airports;
         s.map_root = root.clone();
@@ -416,7 +503,10 @@ pub async fn debug_map(AxumState(shared): AxumState<Shared>, Json(body): Json<Va
         .unwrap_or(80.)
         .clamp(2., 1500.);
     if !lat.is_finite() || !lon.is_finite() || lat.abs() > 90. || lon.abs() > 180. {
-        return error("Invalid map position.");
+        return error(openatc_core::dialogue::say(
+            "notice_invalid_map_position_5a458578",
+            &[],
+        ));
     }
     let mut t = s.session.telemetry.clone();
     t.latitude = lat;
@@ -445,6 +535,97 @@ pub async fn debug_map(AxumState(shared): AxumState<Shared>, Json(body): Json<Va
 #[cfg(test)]
 mod tests {
     use super::safe_variety;
+    #[test]
+    fn controller_identity_belongs_to_the_station_not_the_receiver() {
+        let mut state = crate::test_state();
+        let mut station = openatc_core::stations::Station {
+            airport: "TEST".into(),
+            name: "Test Tower".into(),
+            service: "Tower".into(),
+            khz: 118700,
+            ..Default::default()
+        };
+        let settings = state.settings.clone();
+        let key = crate::flight::station_key(&station);
+        state.session.telemetry.com1_khz = station.khz;
+        let first =
+            crate::routes::assign_airspace_controller(&mut state, &settings, &key, "standard");
+        state.session.telemetry.com2_khz = Some(station.khz);
+        let second =
+            crate::routes::assign_airspace_controller(&mut state, &settings, &key, "standard");
+        assert_eq!(first, second);
+        assert_eq!(state.controllers.assignments.len(), 1);
+        station.airport = "OTHER".into();
+        assert_ne!(key, crate::flight::station_key(&station));
+    }
+    #[tokio::test]
+    async fn atis_uses_the_selected_radio_and_rejects_stale_weather() {
+        use axum::{Json, extract::State};
+        use serde_json::json;
+        let mut state = crate::test_state();
+        state
+            .station_root
+            .clone_from(&state.settings.simulator_root);
+        state.session.telemetry.position_valid = true;
+        state.session.telemetry.com1_khz = 121400;
+        state.session.telemetry.com2_khz = Some(118700);
+        state.stations.push(openatc_core::stations::Station {
+            airport: "TEST".into(),
+            airport_name: "Test Airport".into(),
+            name: "Test Information".into(),
+            service: "ATIS".into(),
+            khz: 118700,
+            ..Default::default()
+        });
+        let sample = json!({"windDegrees":240,"windKnots":8,"visibilityMeters":10000,
+            "temperatureC":20,"dewpointC":12,"pressureHpa":1015,"clouds":"Clear"});
+        state
+            .sim_weather
+            .insert("TEST".into(), (sample, std::time::Instant::now()));
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+        let response = super::atis(State(shared.clone()), Json(json!({"radio":"com2"}))).await;
+        assert!(response.status().is_success());
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["radio"], "com2");
+        assert_eq!(result["frequency"], 118700);
+        assert_eq!(result["airport"], "TEST");
+        assert!(result["text"].as_str().is_some_and(|text| !text.is_empty()));
+        assert!(
+            !super::atis(State(shared.clone()), Json(json!({})))
+                .await
+                .status()
+                .is_success()
+        );
+        assert!(
+            !super::atis(State(shared.clone()), Json(json!({"radio":"com3"})))
+                .await
+                .status()
+                .is_success()
+        );
+        {
+            let mut state = shared.write().await;
+            state.sim_weather.get_mut("TEST").unwrap().1 =
+                std::time::Instant::now() - std::time::Duration::from_secs(46);
+        }
+        assert!(
+            !super::atis(State(shared.clone()), Json(json!({"radio":"com2"})))
+                .await
+                .status()
+                .is_success()
+        );
+        shared.write().await.session.telemetry.com2_khz = None;
+        assert!(
+            !super::atis(State(shared.clone()), Json(json!({"radio":"com2"})))
+                .await
+                .status()
+                .is_success()
+        );
+        assert_eq!(shared.read().await.session.telemetry.com1_khz, 121400);
+    }
+
     #[test]
     fn phrase_history_survives_reload() {
         let dir = std::env::temp_dir().join(format!(

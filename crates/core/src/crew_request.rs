@@ -18,6 +18,10 @@ pub enum Service {
     Snack,
     /// Request juice.
     Juice,
+    /// Report the observed simulated cabin state.
+    PassengerStatus,
+    /// Acknowledge preparation without claiming the checks are complete.
+    DeparturePreparation,
 }
 
 impl Service {
@@ -30,6 +34,8 @@ impl Service {
             Self::Meal => "crew_service_meal",
             Self::Snack => "crew_service_snack",
             Self::Juice => "crew_service_juice",
+            Self::PassengerStatus => "cabin_request_passengers",
+            Self::DeparturePreparation => "cabin_departure_preparing",
         }
     }
 }
@@ -93,6 +99,20 @@ pub fn parse(profile: &CrewProfile, role: &str, text: &str) -> Option<Intent> {
         for clause in split.split(&lower).map(str::trim).filter(|s| !s.is_empty()) {
             if check.is_match(clause) {
                 intent.cross_check = true;
+            } else if let Some(service) = [
+                ("cabin_request_passengers", Service::PassengerStatus),
+                ("cabin_request_departure", Service::DeparturePreparation),
+            ]
+            .into_iter()
+            .find_map(|(key, service)| {
+                crate::dialogue::phrases(key)
+                    .iter()
+                    .any(|phrase| clause.contains(phrase))
+                    .then_some(service)
+            }) {
+                if !intent.services.contains(&service) {
+                    intent.services.push(service);
+                }
             } else if let Some(capture) = drink.captures(clause) {
                 let service = match &capture[1] {
                     "coffee" | "coffe" => Service::Coffee,
@@ -157,5 +177,37 @@ mod tests {
         assert!(parse(&profile(), "ground", "coffee please").is_none());
         let intent = parse(&profile(), "cabin", "cross check and tea please").unwrap();
         assert!(intent.actions.is_empty());
+    }
+    #[test]
+    fn passenger_question_does_not_discard_explicit_light_command() {
+        let intent = parse(
+            &profile(),
+            "cabin",
+            "how are the passengers and get you turn off cabin lights and get ready for depature?",
+        )
+        .unwrap();
+        assert_eq!(intent.actions.len(), 1);
+        assert_eq!(intent.actions[0].control, "cabin_brightness");
+        assert_eq!(intent.actions[0].value, 0.0);
+        assert_eq!(
+            intent.services,
+            vec![Service::PassengerStatus, Service::DeparturePreparation]
+        );
+        assert!(
+            parse(
+                &profile(),
+                "cabin",
+                "how are the passengers and do not turn off cabin lights"
+            )
+            .is_none()
+        );
+        assert!(
+            parse(
+                &profile(),
+                "cabin",
+                "how are the passengers and set mystery switch"
+            )
+            .is_none()
+        );
     }
 }

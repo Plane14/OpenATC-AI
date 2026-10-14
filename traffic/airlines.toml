@@ -220,10 +220,50 @@ serves = []
 fleet = { A306 = 20, B752 = 25, B763 = 35, B744 = 10, B748 = 10 }
 
 [airline.GA]
-name = "Private IFR aircraft"
+registration_alphabets = { K = "ABCDEFGHJKLMNPQRSTUVWXYZ" }
+registrations = { LF = ["F-????"], LI = ["I-????"], Y = ["VH-???"], K = ["N1###?"], EG = ["G-????"], C = ["C-F???", "C-G???"], ED = ["D-E???"], NZ = ["ZK-???"], "" = ["SIM####"] }
+name = "Private aircraft"
 operator = ""
 callsign = ""
 category = "general_aviation"
 home_prefixes = []
 serves = []
 fleet = { C172 = 20, PA28 = 20, BE58 = 15, C208 = 10, PC12 = 15, B350 = 10, C25C = 8, GLF6 = 2 }
+
+[airline.AFR]
+name = "Air France"
+operator = "AFR"
+callsign = "Air France"
+category = "airline"
+home_prefixes = ["LF"]
+serves = []
+fleet = { A319 = 20, A320 = 40, A321 = 20, A359 = 10, B77W = 10 }
+
+[airline.HOP]
+name = "Air France HOP"
+operator = "HOP"
+callsign = "Air Hop"
+category = "regional"
+home_prefixes = ["LF"]
+serves = ["L", "E"]
+fleet = { E170 = 40, E190 = 60 }
+liveries = ["AFR"]
+
+[airline.EZY]
+name = "easyJet"
+operator = "EZY"
+callsign = "Easy"
+category = "airline"
+home_prefixes = ["EG", "LF", "LI", "LS", "LO"]
+serves = ["E", "L", "G", "DA", "DT"]
+fleet = { A319 = 20, A320 = 60, A20N = 15, A21N = 5 }
+
+[airline.CCM]
+name = "Air Corsica"
+operator = "CCM"
+callsign = "Corsica"
+category = "regional"
+home_prefixes = ["LF"]
+serves = ["LF", "LI", "EB"]
+# The historic pack's AT72 model is kept under its actual type.
+fleet = { AT72 = 70, A320 = 30 }

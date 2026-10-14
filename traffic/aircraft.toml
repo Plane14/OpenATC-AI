@@ -1,7 +1,24 @@
 # Nominal simulation envelopes. These are not dispatch performance tables.
 version = 1
 
+[spacing]
+start_nm = 8.0
+end_nm = 20.0
+release_nm = 5.0
+maximum_altitude_feet = 10000.0
+lateral_meters = 500.0
+alignment_degrees = 20.0
+vertical_feet = 1500.0
+gap_min_nm = 3.0
+gap_max_nm = 6.0
+closing_knots = 15.0
+speed_step_knots = 10.0
+minimum_change_knots = 5.0
+
 [aircraft.C172]
+spacing_speed = { minimum_knots = 80.0, maximum_knots = 105.0 }
+fixed_gear = true
+handling = "piston"
 cwt = "I"
 name = "Cessna 172"
 wingspan = 11
@@ -19,6 +36,10 @@ propeller = true
 rnav = true
 
 [aircraft.PA28]
+spacing_speed = { minimum_knots = 80.0, maximum_knots = 110.0 }
+model_aliases = ["P28A"]
+fixed_gear = true
+handling = "piston"
 cwt = "I"
 name = "Piper PA-28"
 wingspan = 10.7
@@ -36,6 +57,8 @@ propeller = true
 rnav = true
 
 [aircraft.BE58]
+spacing_speed = { minimum_knots = 105.0, maximum_knots = 145.0 }
+handling = "piston"
 cwt = "I"
 name = "Beechcraft Baron"
 wingspan = 11.5
@@ -53,6 +76,9 @@ propeller = true
 rnav = true
 
 [aircraft.C208]
+spacing_speed = { minimum_knots = 100.0, maximum_knots = 140.0 }
+fixed_gear = true
+handling = "turboprop"
 cwt = "I"
 name = "Cessna Caravan"
 wingspan = 15.9
@@ -70,6 +96,8 @@ propeller = true
 rnav = true
 
 [aircraft.PC12]
+spacing_speed = { minimum_knots = 115.0, maximum_knots = 160.0 }
+handling = "turboprop"
 cwt = "I"
 name = "Pilatus PC-12"
 wingspan = 16.3
@@ -87,6 +115,8 @@ propeller = true
 rnav = true
 
 [aircraft.B350]
+spacing_speed = { minimum_knots = 125.0, maximum_knots = 170.0 }
+handling = "turboprop"
 cwt = "H"
 name = "Beechcraft King Air 350"
 wingspan = 17.7
@@ -104,6 +134,8 @@ propeller = true
 rnav = true
 
 [aircraft.C25C]
+spacing_speed = { minimum_knots = 155.0, maximum_knots = 200.0 }
+handling = "regional_jet"
 cwt = "H"
 name = "Cessna Citation CJ4"
 wingspan = 15.5
@@ -121,6 +153,8 @@ propeller = false
 rnav = true
 
 [aircraft.GLF6]
+spacing_speed = { minimum_knots = 155.0, maximum_knots = 200.0 }
+handling = "regional_jet"
 cwt = "F"
 name = "Gulfstream G650"
 wingspan = 30.4
@@ -138,6 +172,8 @@ propeller = false
 rnav = true
 
 [aircraft.DH8C]
+spacing_speed = { minimum_knots = 130.0, maximum_knots = 170.0 }
+handling = "turboprop"
 cwt = "G"
 name = "Dash 8-300"
 wingspan = 27.4
@@ -155,6 +191,8 @@ propeller = true
 rnav = true
 
 [aircraft.DH8D]
+spacing_speed = { minimum_knots = 135.0, maximum_knots = 180.0 }
+handling = "turboprop"
 cwt = "F"
 name = "Dash 8-400"
 wingspan = 28.4
@@ -172,6 +210,8 @@ propeller = true
 rnav = true
 
 [aircraft.AT76]
+spacing_speed = { minimum_knots = 125.0, maximum_knots = 170.0 }
+handling = "turboprop"
 cwt = "G"
 name = "ATR 72-600"
 wingspan = 27.1
@@ -189,6 +229,8 @@ propeller = true
 rnav = true
 
 [aircraft.E170]
+spacing_speed = { minimum_knots = 155.0, maximum_knots = 200.0 }
+handling = "regional_jet"
 cwt = "G"
 name = "Embraer E170"
 wingspan = 26
@@ -206,6 +248,8 @@ propeller = false
 rnav = true
 
 [aircraft.E75L]
+spacing_speed = { minimum_knots = 155.0, maximum_knots = 200.0 }
+handling = "regional_jet"
 cwt = "G"
 name = "Embraer E175 long wing"
 wingspan = 28.7
@@ -223,6 +267,8 @@ propeller = false
 rnav = true
 
 [aircraft.E190]
+spacing_speed = { minimum_knots = 155.0, maximum_knots = 200.0 }
+handling = "regional_jet"
 cwt = "F"
 name = "Embraer E190"
 wingspan = 28.7
@@ -240,6 +286,8 @@ propeller = false
 rnav = true
 
 [aircraft.E290]
+spacing_speed = { minimum_knots = 155.0, maximum_knots = 200.0 }
+handling = "regional_jet"
 cwt = "F"
 name = "Embraer E190-E2"
 wingspan = 33.7
@@ -257,6 +305,8 @@ propeller = false
 rnav = true
 
 [aircraft.E295]
+spacing_speed = { minimum_knots = 155.0, maximum_knots = 200.0 }
+handling = "regional_jet"
 cwt = "F"
 name = "Embraer E195-E2"
 wingspan = 35.1
@@ -274,6 +324,8 @@ propeller = false
 rnav = true
 
 [aircraft.CRJ2]
+spacing_speed = { minimum_knots = 155.0, maximum_knots = 200.0 }
+handling = "regional_jet"
 cwt = "G"
 name = "Bombardier CRJ200"
 wingspan = 21.2
@@ -291,6 +343,8 @@ propeller = false
 rnav = true
 
 [aircraft.CRJ7]
+spacing_speed = { minimum_knots = 155.0, maximum_knots = 200.0 }
+handling = "regional_jet"
 cwt = "G"
 name = "Bombardier CRJ700"
 wingspan = 23.2
@@ -308,6 +362,8 @@ propeller = false
 rnav = true
 
 [aircraft.CRJ9]
+spacing_speed = { minimum_knots = 155.0, maximum_knots = 200.0 }
+handling = "regional_jet"
 cwt = "G"
 name = "Bombardier CRJ900"
 wingspan = 24.9
@@ -325,6 +381,8 @@ propeller = false
 rnav = true
 
 [aircraft.A319]
+spacing_speed = { minimum_knots = 170.0, maximum_knots = 210.0 }
+handling = "jet"
 cwt = "F"
 name = "Airbus A319"
 wingspan = 34.1
@@ -342,6 +400,8 @@ propeller = false
 rnav = true
 
 [aircraft.A320]
+spacing_speed = { minimum_knots = 170.0, maximum_knots = 210.0 }
+handling = "jet"
 cwt = "F"
 name = "Airbus A320"
 wingspan = 35.8
@@ -359,6 +419,8 @@ propeller = false
 rnav = true
 
 [aircraft.A20N]
+spacing_speed = { minimum_knots = 170.0, maximum_knots = 210.0 }
+handling = "jet"
 cwt = "F"
 name = "Airbus A320neo"
 wingspan = 35.8
@@ -376,6 +438,8 @@ propeller = false
 rnav = true
 
 [aircraft.A321]
+spacing_speed = { minimum_knots = 170.0, maximum_knots = 210.0 }
+handling = "jet"
 cwt = "F"
 name = "Airbus A321"
 wingspan = 35.8
@@ -393,6 +457,8 @@ propeller = false
 rnav = true
 
 [aircraft.A21N]
+spacing_speed = { minimum_knots = 170.0, maximum_knots = 210.0 }
+handling = "jet"
 cwt = "F"
 name = "Airbus A321neo"
 wingspan = 35.8
@@ -410,6 +476,8 @@ propeller = false
 rnav = true
 
 [aircraft.BCS3]
+spacing_speed = { minimum_knots = 170.0, maximum_knots = 210.0 }
+handling = "jet"
 cwt = "F"
 name = "Airbus A220-300"
 wingspan = 35.1
@@ -427,6 +495,8 @@ propeller = false
 rnav = true
 
 [aircraft.B737]
+spacing_speed = { minimum_knots = 170.0, maximum_knots = 210.0 }
+handling = "jet"
 cwt = "F"
 name = "Boeing 737-700"
 wingspan = 35.8
@@ -444,6 +514,8 @@ propeller = false
 rnav = true
 
 [aircraft.B738]
+spacing_speed = { minimum_knots = 170.0, maximum_knots = 210.0 }
+handling = "jet"
 cwt = "F"
 name = "Boeing 737-800"
 wingspan = 35.8
@@ -461,6 +533,8 @@ propeller = false
 rnav = true
 
 [aircraft.B739]
+spacing_speed = { minimum_knots = 170.0, maximum_knots = 210.0 }
+handling = "jet"
 cwt = "F"
 name = "Boeing 737-900"
 wingspan = 35.8
@@ -478,6 +552,8 @@ propeller = false
 rnav = true
 
 [aircraft.B38M]
+spacing_speed = { minimum_knots = 170.0, maximum_knots = 210.0 }
+handling = "jet"
 cwt = "F"
 name = "Boeing 737 MAX 8"
 wingspan = 35.9
@@ -495,6 +571,8 @@ propeller = false
 rnav = true
 
 [aircraft.B752]
+spacing_speed = { minimum_knots = 170.0, maximum_knots = 210.0 }
+handling = "jet"
 cwt = "E"
 name = "Boeing 757-200"
 wingspan = 38.1
@@ -512,6 +590,8 @@ propeller = false
 rnav = true
 
 [aircraft.B763]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "C"
 name = "Boeing 767-300"
 wingspan = 47.6
@@ -529,6 +609,8 @@ propeller = false
 rnav = true
 
 [aircraft.A306]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "C"
 name = "Airbus A300-600"
 wingspan = 44.8
@@ -546,6 +628,8 @@ propeller = false
 rnav = true
 
 [aircraft.A332]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "B"
 name = "Airbus A330-200"
 wingspan = 60.3
@@ -563,6 +647,8 @@ propeller = false
 rnav = true
 
 [aircraft.A333]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "B"
 name = "Airbus A330-300"
 wingspan = 60.3
@@ -580,6 +666,8 @@ propeller = false
 rnav = true
 
 [aircraft.A339]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "D"
 name = "Airbus A330-900"
 wingspan = 64
@@ -597,6 +685,8 @@ propeller = false
 rnav = true
 
 [aircraft.A359]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "B"
 name = "Airbus A350-900"
 wingspan = 64.8
@@ -614,6 +704,8 @@ propeller = false
 rnav = true
 
 [aircraft.A35K]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "D"
 name = "Airbus A350-1000"
 wingspan = 64.8
@@ -631,6 +723,8 @@ propeller = false
 rnav = true
 
 [aircraft.B772]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "B"
 name = "Boeing 777-200"
 wingspan = 60.9
@@ -648,6 +742,8 @@ propeller = false
 rnav = true
 
 [aircraft.B77W]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "B"
 name = "Boeing 777-300ER"
 wingspan = 64.8
@@ -665,6 +761,8 @@ propeller = false
 rnav = true
 
 [aircraft.B77L]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "B"
 name = "Boeing 777-200LR or Freighter"
 wingspan = 64.8
@@ -682,6 +780,8 @@ propeller = false
 rnav = true
 
 [aircraft.B788]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "B"
 name = "Boeing 787-8"
 wingspan = 60.1
@@ -699,6 +799,8 @@ propeller = false
 rnav = true
 
 [aircraft.B789]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "B"
 name = "Boeing 787-9"
 wingspan = 60.1
@@ -716,6 +818,8 @@ propeller = false
 rnav = true
 
 [aircraft.B78X]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "D"
 name = "Boeing 787-10"
 wingspan = 60.1
@@ -733,6 +837,8 @@ propeller = false
 rnav = true
 
 [aircraft.B744]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "B"
 name = "Boeing 747-400"
 wingspan = 64.4
@@ -750,6 +856,8 @@ propeller = false
 rnav = true
 
 [aircraft.B748]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "B"
 name = "Boeing 747-8"
 wingspan = 68.4
@@ -767,6 +875,8 @@ propeller = false
 rnav = true
 
 [aircraft.A388]
+spacing_speed = { minimum_knots = 190.0, maximum_knots = 230.0 }
+handling = "heavy_jet"
 cwt = "A"
 name = "Airbus A380-800"
 wingspan = 79.8
@@ -781,4 +891,22 @@ approach_knots = 140
 climb_fpm = 2000
 descent_fpm = 1800
 propeller = false
+rnav = true
+[aircraft.AT72]
+spacing_speed = { minimum_knots = 125.0, maximum_knots = 170.0 }
+handling = "turboprop"
+name = "ATR 72"
+wingspan = 27.05
+length = 27.17
+wake = "M"
+cwt = "G"
+approach_category = "B"
+runway = 1300.0
+range_nm = 900.0
+cruise_knots = 270.0
+ceiling = 25000.0
+approach_knots = 110.0
+climb_fpm = 1400.0
+descent_fpm = 1500.0
+propeller = true
 rnav = true

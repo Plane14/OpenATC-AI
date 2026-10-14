@@ -289,12 +289,15 @@ fn tick_at(state: &mut EngineState, radio_available: bool, now: Instant) -> bool
     let channel: Vec<_> = state
         .stations
         .iter()
-        .filter(|s| s.khz == t.com1_khz)
+        .filter(|s| Some(s.khz) == state.session.control_frequency())
         .cloned()
         .collect();
     let stations = nearby(&channel, t);
-    let station =
-        tuned(&stations, t.com1_khz).filter(|s| !["Unicom", "ATIS"].contains(&s.service.as_str()));
+    let station = state
+        .session
+        .control_frequency()
+        .and_then(|frequency| tuned(&stations, frequency))
+        .filter(|s| !["Unicom", "ATIS"].contains(&s.service.as_str()));
     let mut message = None;
     if radio_available
         && t.radio_power
@@ -378,7 +381,7 @@ pub fn assistance_answer(
         || state.session.telemetry.paused
         || !state.session.telemetry.radio_power
         || offer.route_sequence != state.session.taxi_clearance.sequence
-        || offer.frequency != state.session.telemetry.com1_khz
+        || Some(offer.frequency) != state.session.control_frequency()
         || waiting_for_reply(state)
         || state
             .session
@@ -456,6 +459,7 @@ pub fn answer_assistance(
     };
     let callsign = state.session.plan.callsign.clone();
     let pilot = openatc_core::state::SpeechTag {
+        radio: Some(request.radio),
         voice: state.settings.pilot_voice.clone(),
         speed: state.settings.pilot_speed,
         ..Default::default()
@@ -470,6 +474,9 @@ pub fn answer_assistance(
     }
     state.flow.discipline.assistance = None;
     transmit(state, station, phrase, &slots);
+    if let Some(reply) = state.session.transcript.last_mut() {
+        reply.radio = Some(request.radio);
+    }
     if phrase == "taxi_assistance_stop" {
         state.flow.discipline.assistance = Some(TaxiAssistance {
             sequence: state.session.next_sequence - 1,

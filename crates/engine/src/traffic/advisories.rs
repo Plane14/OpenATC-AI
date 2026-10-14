@@ -77,7 +77,7 @@ fn refresh(state: &mut EngineState, station: &Station) -> Vec<(TrafficTarget, En
         .as_ref()
         .into_iter()
         .flatten()
-        .take(63)
+        .take(126)
         .filter(|t| t.id != 0)
         .filter_map(|t| {
             let climb = state.traffic.pilots.get(&t.id).and_then(|p| p.climb_fpm);
@@ -211,7 +211,12 @@ pub(crate) fn urgent(state: &mut EngineState) -> bool {
         return false;
     }
     let stations = nearby(&state.stations, t);
-    let Some(station) = tuned(&stations, t.com1_khz).cloned() else {
+    let Some(station) = state
+        .session
+        .control_frequency()
+        .and_then(|frequency| tuned(&stations, frequency))
+        .cloned()
+    else {
         return false;
     };
     let candidates = refresh(state, &station);
@@ -341,7 +346,10 @@ pub(crate) fn reply(state: &mut EngineState, station: &Station, request: &Reques
             &mut state.session,
             &call,
             &request.text,
-            &SpeechTag::default(),
+            &SpeechTag {
+                radio: Some(request.radio),
+                ..Default::default()
+            },
         );
     }
     let key = if accepted {
@@ -368,6 +376,9 @@ pub(crate) fn reply(state: &mut EngineState, station: &Station, request: &Reques
         &[("callsign", state.session.plan.callsign.clone())],
         false,
     );
+    if let Some(reply) = state.session.transcript.last_mut() {
+        reply.radio = Some(request.radio);
+    }
     Some(accepted)
 }
 #[cfg(test)]

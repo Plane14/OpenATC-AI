@@ -28,7 +28,7 @@ fn reply(e: &mut Engine) -> Result {
         before["taxiClearance"] == prepared["taxiClearance"],
         "Preparing speech prematurely changed taxi authority",
     )?;
-    let frequency = e.telemetry["com1Khz"].as_u64().unwrap() as u32;
+    let frequency = e.frequency();
     e.tune(frequency, json!({"radioBusy":true}))?;
     require(
         count(&e.state()?) == count(&prepared),
@@ -140,7 +140,12 @@ fn run(e: &mut Engine, steps: &mut Vec<Value>, variant: &str) -> Result {
     let mut p = plan();
     merge(
         &mut p,
-        json!({"callsign":"C-GTLT","runway":"09R","arrivalRunway":"09R","arrivalStand":"Gate C1","approach":"I09R","cruiseFeet":5000}),
+        json!({"callsign":"C-GTLT","runway":"09R","arrivalRunway":"09R","arrivalStand":"Gate C1","approach":"I09R","cruiseFeet":5000,
+            "star":"TEST1","fixes":[{"identifier":"TEST","latitude":0.0,"longitude":0.0},
+                {"identifier":"DEPART","latitude":0.0,"longitude":0.4,"pathTerminator":"CF"},
+                {"identifier":"ENROUTE","latitude":0.0,"longitude":1.0,"pathTerminator":"TF"},
+                {"identifier":"ENTRY","latitude":0.0,"longitude":3.0},
+                {"identifier":"DEST","latitude":0.0,"longitude":4.0}]}),
     );
     e.post("plan", p)?;
     if variant == "separate" {
@@ -283,6 +288,22 @@ fn run(e: &mut Engine, steps: &mut Vec<Value>, variant: &str) -> Result {
     )?;
     handoff(e, 123100, 123200, json!({"longitude":1.98}))?;
     record(e, steps, "Center-to-Center boundary handoff")?;
+    ticks(e, 123200, json!({"longitude":3.0}), 1)?;
+    ticks(e, 123200, json!({"longitude":3.25}), 2)?;
+    let descent = e.state()?;
+    require(
+        descent["clearance"]["altitudeFeet"] == 2500
+            && descent["clearance"]["acknowledged"] == false
+            && latest(&descent).contains("RESTR"),
+        "No proactive descent clearance before the imported STAR ceiling",
+    )?;
+    reply(e)?;
+    ticks(e, 123200, json!({"verticalSpeedFpm":-700}), 2)?;
+    record(
+        e,
+        steps,
+        "Automatic descent and readback before published STAR restriction",
+    )?;
     handoff(e, 123200, 119300, json!({"longitude":3.38}))?;
     record(e, steps, "Arrival Approach handoff")?;
     // Descend on the final approach course. No phase is injected into the engine.
@@ -435,7 +456,16 @@ pub(super) fn flight(e: &mut Engine) -> Result {
     let output = repo().join("packages/flight-validation");
     fs::create_dir_all(&output)?;
     let mut reports = Vec::new();
-    for variant in ["separate", "ground-tower", "tower-only"] {
+    for (variant, radio) in [
+        ("separate", openatc_core::state::Radio::Com1),
+        ("ground-tower", openatc_core::state::Radio::Com1),
+        ("tower-only", openatc_core::state::Radio::Com1),
+        ("separate", openatc_core::state::Radio::Com2),
+    ] {
+        e.radio = radio;
+        if radio == openatc_core::state::Radio::Com2 {
+            e.telemetry["com1Khz"] = json!(123450);
+        }
         let sim = e.folder.path().join("sim");
         let apt = include_str!("../../fixtures/flight-apt.dat")
             .lines()
@@ -450,14 +480,20 @@ pub(super) fn flight(e: &mut Engine) -> Result {
             apt,
         )?;
         e.restart()?;
-        println!("Flight with {variant} controller duties");
+        println!("Flight with {variant} controller duties on {radio:?}");
         let mut steps = Vec::new();
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(e, &mut steps, variant)))
                 .unwrap_or_else(|_| {
                     Err("Flight assertion failed; see finalState in report.json".into())
                 });
-        reports.push(json!({"variant":variant,"passed":result.is_ok(),"error":result.as_ref().err().map(ToString::to_string),"steps":steps,"finalState":e.state()?}));
+        reports.push(json!({"variant":variant,"radio":radio,"passed":result.is_ok(),"error":result.as_ref().err().map(ToString::to_string),"steps":steps,"finalState":e.state()?}));
+        if radio == openatc_core::state::Radio::Com2 {
+            require(
+                e.state()?["telemetry"]["com1Khz"] == 123450,
+                "COM2 flight unexpectedly retuned COM1",
+            )?;
+        }
         fs::write(
             output.join("report.json"),
             serde_json::to_vec_pretty(&reports)?,

@@ -18,7 +18,7 @@ pub struct Match {
 }
 
 /// All object parts belong to one model and must be loaded together.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Model {
     /// Package-qualified model identity.
     pub id: String,

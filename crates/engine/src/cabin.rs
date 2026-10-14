@@ -4,11 +4,60 @@ use openatc_core::{
     dialogue::{phrases, say},
     state::PhaseCode,
 };
-use serde::Serialize;
-use std::time::Instant;
+use serde::{Deserialize, Serialize};
+use std::{io::Read, path::Path, time::Instant};
 
-#[derive(Default, Serialize)]
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Policy {
+    version: u32,
+    turbulence_preparation_seconds: f64,
+    service_cycle_seconds: f64,
+    lavatory_start_seconds: f64,
+    lavatory_duration_seconds: f64,
+    lavatory_occupants: u32,
+    resting_brightness_percent: f64,
+    crew_observation_max_age_seconds: f64,
+    fallback_tick_limit_seconds: f64,
+    simulation_tick_limit_seconds: f64,
+}
+impl Policy {
+    fn parse(text: &str) -> Result<Self, String> {
+        if text.len() > 8192 {
+            return Err("Cabin policy exceeds 8 KiB".into());
+        }
+        let policy: Self = toml::from_str(text).map_err(|error| error.to_string())?;
+        let bounded =
+            |value: f64, low: f64, high: f64| value.is_finite() && (low..=high).contains(&value);
+        if policy.version != 1
+            || !bounded(policy.turbulence_preparation_seconds, 10.0, 600.0)
+            || !bounded(policy.service_cycle_seconds, 60.0, 7200.0)
+            || !bounded(
+                policy.lavatory_start_seconds,
+                0.0,
+                policy.service_cycle_seconds,
+            )
+            || !bounded(
+                policy.lavatory_duration_seconds,
+                1.0,
+                policy.service_cycle_seconds - policy.lavatory_start_seconds,
+            )
+            || !bounded(policy.resting_brightness_percent, 0.0, 100.0)
+            || policy.lavatory_occupants > 20
+            || !bounded(policy.crew_observation_max_age_seconds, 0.5, 10.0)
+            || !bounded(policy.fallback_tick_limit_seconds, 0.1, 5.0)
+            || !bounded(policy.simulation_tick_limit_seconds, 1.0, 30.0)
+        {
+            return Err("Cabin policy has invalid timing or state limits".into());
+        }
+        Ok(policy)
+    }
+}
+
+#[derive(Serialize)]
 pub struct Cabin {
+    #[serde(skip)]
+    policy: Policy,
     /// Planned passenger count; zero means no manifest is available.
     passengers: i32,
     /// Simulated occupants, not a reading from an aircraft lavatory sensor.
@@ -16,6 +65,8 @@ pub struct Cabin {
     pub preparing_for_turbulence: bool,
     #[serde(skip)]
     last_update: Option<Instant>,
+    #[serde(skip)]
+    last_simulation_seconds: Option<f64>,
     cruise_seconds: f64,
     preparation_seconds: f64,
     #[serde(skip)]
@@ -23,13 +74,86 @@ pub struct Cabin {
     preparation_reported: bool,
 }
 
+impl Default for Cabin {
+    fn default() -> Self {
+        Self {
+            policy: Policy::parse(include_str!("../../../cabin/behaviour.toml"))
+                .expect("bundled cabin policy"),
+            passengers: 0,
+            lavatory: 0,
+            preparing_for_turbulence: false,
+            last_update: None,
+            last_simulation_seconds: None,
+            cruise_seconds: 0.0,
+            preparation_seconds: 0.0,
+            report_due: false,
+            preparation_reported: false,
+        }
+    }
+}
+
 impl Cabin {
-    pub fn tick(&mut self, phase: PhaseCode, passengers: i32, paused: bool, belts: Option<bool>) {
+    pub fn load(config: &Path, executable: &Path) -> Result<Self, String> {
+        for directory in [Some(config), Some(executable), executable.parent()]
+            .into_iter()
+            .flatten()
+        {
+            let path = directory.join("cabin/behaviour.toml");
+            let file = match std::fs::File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(format!("{}: {error}", path.display())),
+            };
+            let mut text = String::new();
+            file.take(8193)
+                .read_to_string(&mut text)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            return Ok(Self {
+                policy: Policy::parse(&text)
+                    .map_err(|error| format!("{}: {error}", path.display()))?,
+                ..Default::default()
+            });
+        }
+        Ok(Self::default())
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self {
+            policy: self.policy.clone(),
+            ..Default::default()
+        };
+    }
+
+    pub fn tick(
+        &mut self,
+        phase: PhaseCode,
+        passengers: i32,
+        paused: bool,
+        belts: Option<bool>,
+        simulation_seconds: Option<f64>,
+    ) {
         let now = Instant::now();
-        let elapsed = self
-            .last_update
-            .replace(now)
-            .map_or(0.0, |last| now.duration_since(last).as_secs_f64().min(2.0));
+        let fallback = self.last_update.replace(now).map_or(0.0, |last| {
+            now.duration_since(last)
+                .as_secs_f64()
+                .min(self.policy.fallback_tick_limit_seconds)
+        });
+        let elapsed =
+            if let Some(seconds) = simulation_seconds.filter(|seconds| seconds.is_finite()) {
+                self.last_simulation_seconds
+                    .replace(seconds)
+                    .map_or(0.0, |previous| {
+                        let elapsed = seconds - previous;
+                        if (0.0..=self.policy.simulation_tick_limit_seconds).contains(&elapsed) {
+                            elapsed
+                        } else {
+                            0.0
+                        }
+                    })
+            } else {
+                self.last_simulation_seconds = None;
+                fallback
+            };
         self.advance(phase, passengers, if paused { 0.0 } else { elapsed }, belts);
     }
 
@@ -45,7 +169,7 @@ impl Cabin {
         }
         if self.preparing_for_turbulence {
             self.preparation_seconds += seconds;
-            if self.preparation_seconds >= 45.0 {
+            if self.preparation_seconds >= self.policy.turbulence_preparation_seconds {
                 self.lavatory = 0;
                 if belts == Some(true) && !self.preparation_reported {
                     self.report_due = true;
@@ -53,10 +177,14 @@ impl Cabin {
             }
         } else if phase == PhaseCode::Cruise && belts == Some(false) {
             self.cruise_seconds += seconds;
-            // One passenger uses the lavatory during the middle of each service cycle.
+            // Keep the activity stable between reports in the same service cycle.
             self.lavatory = u32::from(
-                self.cruise_seconds % 600.0 >= 120.0 && self.cruise_seconds % 600.0 < 210.0,
-            );
+                self.cruise_seconds % self.policy.service_cycle_seconds
+                    >= self.policy.lavatory_start_seconds
+                    && self.cruise_seconds % self.policy.service_cycle_seconds
+                        < self.policy.lavatory_start_seconds
+                            + self.policy.lavatory_duration_seconds,
+            ) * self.policy.lavatory_occupants.min(self.passengers as u32);
         } else {
             self.lavatory = 0;
         }
@@ -64,10 +192,9 @@ impl Cabin {
 }
 
 fn belts(state: &EngineState) -> Option<bool> {
-    state
-        .crew
-        .observed_at
-        .filter(|at| at.elapsed().as_secs() < 3)?;
+    state.crew.observed_at.filter(|at| {
+        at.elapsed().as_secs_f64() < state.cabin.policy.crew_observation_max_age_seconds
+    })?;
     state.crew.values.get("seatbelts").map(|v| *v > 0.0)
 }
 
@@ -78,6 +205,7 @@ pub fn tick(state: &mut EngineState) {
         state.session.plan.passengers,
         state.session.telemetry.paused,
         belts,
+        state.session.telemetry.simulation_seconds,
     );
 }
 
@@ -135,11 +263,12 @@ pub fn report(state: &mut EngineState, text: &str) -> Option<String> {
                     PhaseCode::Parked | PhaseCode::Clearance => "boarding",
                     PhaseCode::Pushback | PhaseCode::Taxi | PhaseCode::Departure => "departure",
                     PhaseCode::Cruise
-                        if state
-                            .crew
-                            .values
-                            .get("cabin_brightness")
-                            .is_some_and(|v| *v <= 30.0) =>
+                        if state.crew.observed_at.is_some_and(|at| {
+                            at.elapsed().as_secs_f64()
+                                < state.cabin.policy.crew_observation_max_age_seconds
+                        }) && state.crew.values.get("cabin_brightness").is_some_and(|v| {
+                            *v <= state.cabin.policy.resting_brightness_percent
+                        }) =>
                     {
                         "resting"
                     }
@@ -155,7 +284,14 @@ pub fn report(state: &mut EngineState, text: &str) -> Option<String> {
             ));
             if state.cabin.lavatory > 0 {
                 reply.push(' ');
-                reply.push_str(&say("cabin_passenger_lavatory", &[]));
+                reply.push_str(&if state.cabin.lavatory == 1 {
+                    say("cabin_passenger_lavatory", &[])
+                } else {
+                    say(
+                        "cabin_passengers_lavatory",
+                        &[("count", state.cabin.lavatory.to_string())],
+                    )
+                });
             }
         }
     }
@@ -178,6 +314,60 @@ pub fn follow_up(state: &mut EngineState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn editable_policy_survives_reset_and_uses_simulator_time() {
+        let root =
+            std::env::temp_dir().join(format!("openatc-cabin-policy-{}", std::process::id()));
+        let folder = root.join("cabin");
+        std::fs::create_dir_all(&folder).unwrap();
+        let text = include_str!("../../../cabin/behaviour.toml")
+            .replace(
+                "service_cycle_seconds = 600.0",
+                "service_cycle_seconds = 60.0",
+            )
+            .replace(
+                "lavatory_start_seconds = 120.0",
+                "lavatory_start_seconds = 10.0",
+            )
+            .replace(
+                "lavatory_duration_seconds = 90.0",
+                "lavatory_duration_seconds = 5.0",
+            )
+            .replace(
+                "turbulence_preparation_seconds = 45.0",
+                "turbulence_preparation_seconds = 15.0",
+            );
+        let path = folder.join("behaviour.toml");
+        std::fs::write(&path, &text).unwrap();
+        let mut cabin = Cabin::load(&root, &root.join("bin")).unwrap();
+        cabin.tick(PhaseCode::Cruise, 150, false, Some(false), Some(0.0));
+        cabin.tick(PhaseCode::Cruise, 150, false, Some(false), Some(12.0));
+        assert_eq!(cabin.lavatory, 1);
+        cabin.tick(PhaseCode::Cruise, 150, true, Some(false), Some(24.0));
+        cabin.tick(PhaseCode::Cruise, 150, false, Some(false), Some(26.0));
+        assert_eq!(cabin.cruise_seconds, 14.0);
+        cabin.tick(PhaseCode::Cruise, 150, false, Some(false), Some(1000.0));
+        assert_eq!(cabin.cruise_seconds, 14.0);
+        cabin.reset();
+        assert_eq!(cabin.policy.turbulence_preparation_seconds, 15.0);
+        assert_eq!(cabin.lavatory, 0);
+        cabin.preparing_for_turbulence = true;
+        cabin.advance(PhaseCode::Cruise, 150, 14.0, Some(true));
+        assert!(!cabin.report_due);
+        cabin.advance(PhaseCode::Cruise, 150, 1.0, Some(true));
+        assert!(cabin.report_due);
+        std::fs::write(
+            &path,
+            text.replace(
+                "lavatory_duration_seconds = 5.0",
+                "lavatory_duration_seconds = 100.0",
+            ),
+        )
+        .unwrap();
+        assert!(Cabin::load(&root, &root.join("bin")).is_err());
+        assert!(Policy::parse(&format!("{text}\nunknown_rule = true")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn lavatory_report_persists_until_preparation_finishes_and_sign_is_on() {
         let mut cabin = Cabin::default();

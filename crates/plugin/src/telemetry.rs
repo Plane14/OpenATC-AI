@@ -44,6 +44,8 @@ pub struct Refs {
     pub agl: Option<Box<dyn Fn() -> f64>>,
     /// COM1 frequency in kHz, if present.
     pub com1: Option<Box<dyn Fn() -> i32>>,
+    /// COM2 frequency in kHz, if present.
+    pub com2: Option<Box<dyn Fn() -> i32>>,
     pub transponder_code: Option<Box<dyn Fn() -> i32>>,
     pub transponder_mode: Option<Box<dyn Fn() -> i32>>,
 }
@@ -148,6 +150,7 @@ pub fn find_refs(data: &mut xplane::data::DataApi, log: &mut Vec<String>) -> Ref
         vertical_speed: find_number(data, "sim/flightmodel/position/vh_ind_fpm"),
         agl: find_number(data, "sim/flightmodel/position/y_agl"),
         com1: find_integer(data, "sim/cockpit2/radios/actuators/com1_frequency_hz_833"),
+        com2: find_integer(data, "sim/cockpit2/radios/actuators/com2_frequency_hz_833"),
     }
 }
 
@@ -185,6 +188,7 @@ pub fn gather(refs: &Refs) -> openatc_core::state::Telemetry {
         height_agl_feet: refs.agl.as_ref().map_or(0.0, |read| read()) * 3.280_839_895,
         radio_power: true,
         com1_khz: flag(&refs.com1),
+        com2_khz: refs.com2.as_ref().map(|read| read()),
         transponder_code: refs.transponder_code.as_ref().map(|read| read()),
         transponder_mode: refs.transponder_mode.as_ref().map(|read| read()),
         position_valid: refs.latitude.is_some()
@@ -236,6 +240,8 @@ mod tests {
             latitude: Some(Box::new(|| 33.938318)),
             longitude: Some(Box::new(|| -118.383084)),
             ground: Some(Box::new(|| 1)),
+            com1: Some(Box::new(|| 121705)),
+            com2: Some(Box::new(|| 118700)),
             indicated_speed: Some(Box::new(|| -0.1)),
             simulation_seconds: Some(Box::new(|| -1.0)),
             track: Some(Box::new(|| f64::NAN)),
@@ -245,6 +251,8 @@ mod tests {
         };
         let sample = gather(&refs);
         assert!(sample.position_valid);
+        assert_eq!(sample.com1_khz, 121705);
+        assert_eq!(sample.com2_khz, Some(118700));
         assert_eq!(sample.indicated_speed_knots, None);
         assert_eq!(sample.simulation_seconds, None);
         assert_eq!(sample.ground_track_degrees, None);
@@ -261,6 +269,8 @@ mod tests {
         let error = openatc_core::ops::update_flight_phase(&mut state, &invalid).unwrap_err();
         assert!(error.contains("latitude = 95"));
         assert_eq!(state.telemetry.latitude, sample.latitude);
+        refs.com2 = None;
+        assert_eq!(gather(&refs).com2_khz, None);
     }
 }
 
@@ -347,6 +357,7 @@ fn traffic_reader(
                 altitude_feet: f64::from(ele_values[i]) * 3.280_839_895,
                 track_degrees: f64::from(track_values[i]),
                 on_ground: wheel_values[i] != 0,
+                ..Default::default()
             })
             .collect()
     }))

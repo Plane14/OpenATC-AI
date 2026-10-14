@@ -35,6 +35,35 @@ pub struct Intercept {
     pub altitude_feet: f64,
 }
 impl ArrivalAirport {
+    /// Load approach entry data using the simulator's custom/default navdata priority.
+    pub fn load(root: &str, airport: Airport) -> Result<Self, String> {
+        use std::io::Read;
+        let custom = std::path::Path::new(root)
+            .join("Custom Data/CIFP")
+            .join(format!("{}.dat", airport.icao));
+        let path = if custom.is_file() {
+            custom
+        } else {
+            std::path::Path::new(root)
+                .join("Resources/default data/CIFP")
+                .join(format!("{}.dat", airport.icao))
+        };
+        let mut text = String::new();
+        std::fs::File::open(path)
+            .map_err(|error| error.to_string())?
+            .take(1024 * 1024 + 1)
+            .read_to_string(&mut text)
+            .map_err(|error| error.to_string())?;
+        if text.len() > 1024 * 1024 {
+            return Err("Arrival procedure file exceeds 1 MiB".into());
+        }
+        let mut data = Self {
+            airport,
+            ..Default::default()
+        };
+        data.read_cifp(&text);
+        Ok(data)
+    }
     /// Read the narrowly used CIFP runway and initial-final-segment fields.
     pub fn read_cifp(&mut self, text: &str) {
         for line in text.lines() {

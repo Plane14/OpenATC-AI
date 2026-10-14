@@ -8,14 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub fn aircraft(code: &str) -> Option<&'static Aircraft> {
     static DATA: std::sync::OnceLock<Option<Profiles>> = std::sync::OnceLock::new();
     let code = code.trim().to_ascii_uppercase();
-    let code = match code.as_str() {
-        "P28A" | "P28B" | "P28R" | "P28T" => "PA28",
-        other => other,
-    };
     DATA.get_or_init(|| Profiles::builtin().ok())
         .as_ref()?
-        .aircraft
-        .get(code)
+        .aircraft_for(&code)
 }
 
 /// Activity mix. These categories do not determine wake or approach category.
@@ -36,6 +31,18 @@ pub enum Category {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Aircraft {
+    /// Optional managed speed range outside final approach; absent means no speed offer.
+    #[serde(default)]
+    pub spacing_speed: Option<SpacingSpeed>,
+    /// Equivalent advertised model types using this same equipment and movement envelope.
+    #[serde(default)]
+    pub model_aliases: Vec<String>,
+    /// Movement/animation envelope, separate from wake and approach categories.
+    #[serde(default)]
+    pub handling: Option<super::animation::Kind>,
+    /// Fixed undercarriage remains extended in every phase.
+    #[serde(default)]
+    pub fixed_gear: bool,
     /// Human-readable type.
     pub name: String,
     /// Metres.
@@ -69,6 +76,46 @@ pub struct Aircraft {
     pub rnav: bool,
 }
 
+/// Nominal configured range for ATC spacing, not a stall-speed calculation.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpacingSpeed {
+    /// Lowest offered indicated speed in knots.
+    pub minimum_knots: f64,
+    /// Highest offered indicated speed in knots.
+    pub maximum_knots: f64,
+}
+
+/// Geometry and timing of the limited automatic approach-speed workflow.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpacingPolicy {
+    /// Outer approach distance where speed offers begin.
+    pub start_nm: f64,
+    /// Maximum distance for this workflow.
+    pub end_nm: f64,
+    /// Resume published speeds before the final segment.
+    pub release_nm: f64,
+    /// Altitude ceiling of this terminal speed-offer workflow.
+    pub maximum_altitude_feet: f64,
+    /// Maximum lateral distance from the runway centreline.
+    pub lateral_meters: f64,
+    /// Maximum track error on an established approach.
+    pub alignment_degrees: f64,
+    /// Maximum altitude difference for a possible same-final encounter.
+    pub vertical_feet: f64,
+    /// Lower distance of the speed-adjustment window, not a separation minimum.
+    pub gap_min_nm: f64,
+    /// Upper distance of the speed-adjustment window.
+    pub gap_max_nm: f64,
+    /// Closing-speed threshold for an offer.
+    pub closing_knots: f64,
+    /// Offered speed increment and rounding step.
+    pub speed_step_knots: f64,
+    /// Ignore smaller changes.
+    pub minimum_change_knots: f64,
+}
+
 impl Aircraft {
     /// Parking size derived from wingspan, never from wake or approach category.
     #[must_use]
@@ -84,6 +131,12 @@ impl Aircraft {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Airline {
+    /// Simulated registration patterns by origin ICAO prefix; ? is a letter and # a digit.
+    #[serde(default)]
+    pub registrations: BTreeMap<String, Vec<String>>,
+    /// Optional regional letter alphabets for registration placeholders.
+    #[serde(default)]
+    pub registration_alphabets: BTreeMap<String, String>,
     /// Display name.
     pub name: String,
     /// ICAO operating code, empty for private registrations.
@@ -102,6 +155,43 @@ pub struct Airline {
     #[serde(default)]
     pub liveries: Vec<String>,
 }
+impl Airline {
+    /// Generate a fictional registration using the most specific editable regional pattern.
+    pub fn registration(&self, airport: &str, seed: u64) -> Option<String> {
+        let patterns = self
+            .registrations
+            .iter()
+            .filter(|(prefix, _)| airport.starts_with(prefix.as_str()))
+            .max_by_key(|(prefix, _)| prefix.len())?
+            .1;
+        let mut value = mix(seed);
+        let alphabet = self
+            .registration_alphabets
+            .iter()
+            .filter(|(prefix, _)| airport.starts_with(prefix.as_str()))
+            .max_by_key(|(prefix, _)| prefix.len())
+            .map(|(_, alphabet)| alphabet.as_bytes());
+        let pattern = &patterns[(value % patterns.len() as u64) as usize];
+        Some(
+            pattern
+                .chars()
+                .map(|character| {
+                    value = mix(value);
+                    match character {
+                        '?' => alphabet.map_or_else(
+                            || char::from(b'A' + (value % 26) as u8),
+                            |alphabet| {
+                                char::from(alphabet[(value % alphabet.len() as u64) as usize])
+                            },
+                        ),
+                        '#' => char::from(b'0' + (value % 10) as u8),
+                        literal => literal,
+                    }
+                })
+                .collect(),
+        )
+    }
+}
 
 /// Airport-specific operator preferences, not market-share percentages.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -117,6 +207,7 @@ pub struct Hub {
 #[serde(deny_unknown_fields)]
 struct AircraftFile {
     version: u32,
+    spacing: Option<SpacingPolicy>,
     aircraft: BTreeMap<String, Aircraft>,
 }
 #[derive(Deserialize)]
@@ -135,6 +226,8 @@ struct HubFile {
 /// Validated profile set, shared between traffic generation and diagnostics.
 #[derive(Clone, Debug, Serialize)]
 pub struct Profiles {
+    /// Shared, editable approach-spacing thresholds.
+    pub spacing: SpacingPolicy,
     /// ICAO type to movement envelope.
     pub aircraft: BTreeMap<String, Aircraft>,
     /// Stable profile ID to operating fleet.
@@ -175,6 +268,14 @@ pub struct Selection {
 }
 
 impl Profiles {
+    /// Resolve only explicit model aliases; different variants need their own envelope.
+    pub fn aircraft_for(&self, code: &str) -> Option<&Aircraft> {
+        self.aircraft.get(code).or_else(|| {
+            self.aircraft
+                .values()
+                .find(|aircraft| aircraft.model_aliases.iter().any(|alias| alias == code))
+        })
+    }
     /// Parse all three files together so unresolved fleet and hub references fail visibly.
     pub fn parse(aircraft: &str, airlines: &str, hubs: &str) -> Result<Self, String> {
         if [aircraft, airlines, hubs]
@@ -191,6 +292,18 @@ impl Profiles {
             return Err("Traffic profiles require version = 1".into());
         }
         let result = Self {
+            spacing: match a.spacing {
+                Some(policy) => policy,
+                None => {
+                    let defaults: toml::Value =
+                        toml::from_str(include_str!("../../../../traffic/aircraft.toml"))
+                            .map_err(|error| error.to_string())?;
+                    defaults["spacing"]
+                        .clone()
+                        .try_into()
+                        .map_err(|error: toml::de::Error| error.to_string())?
+                }
+            },
             aircraft: a.aircraft,
             airlines: l.airline,
             hubs: h.airport,
@@ -209,6 +322,23 @@ impl Profiles {
     }
 
     fn validate(&self) -> Result<(), String> {
+        let policy = &self.spacing;
+        if !bounded(policy.release_nm, 3.0, 6.0)
+            || !bounded(policy.start_nm, policy.release_nm + 1.0, 15.0)
+            || !bounded(policy.end_nm, policy.start_nm + 1.0, 20.0)
+            || !bounded(policy.maximum_altitude_feet, 1000.0, 10000.0)
+            || !bounded(policy.lateral_meters, 100.0, 1000.0)
+            || !bounded(policy.alignment_degrees, 5.0, 30.0)
+            || !bounded(policy.vertical_feet, 500.0, 2000.0)
+            || !bounded(policy.gap_min_nm, 2.0, 6.0)
+            || !bounded(policy.gap_max_nm, policy.gap_min_nm + 1.0, 12.0)
+            || !bounded(policy.closing_knots, 5.0, 50.0)
+            || !bounded(policy.speed_step_knots, 5.0, 20.0)
+            || policy.speed_step_knots % 5.0 != 0.0
+            || !bounded(policy.minimum_change_knots, 1.0, policy.speed_step_knots)
+        {
+            return Err("Invalid approach-spacing policy".into());
+        }
         if self.aircraft.is_empty()
             || self.airlines.is_empty()
             || self.aircraft.len() > 512
@@ -219,6 +349,10 @@ impl Profiles {
         }
         for (id, a) in &self.aircraft {
             if !code(id, 2, 4)
+                || a.model_aliases.len() > 8
+                || a.model_aliases.iter().any(|alias| {
+                    !code(alias, 2, 4) || alias == id || self.aircraft.contains_key(alias)
+                })
                 || a.name.trim().is_empty()
                 || !"LMHJ".contains(a.wake)
                 || a.cwt.is_some_and(|c| !(('A'..='I').contains(&c)))
@@ -233,9 +367,26 @@ impl Profiles {
                 || a.approach_knots >= a.cruise_knots
                 || !bounded(a.climb_fpm, 200.0, 5000.0)
                 || !bounded(a.descent_fpm, 200.0, 4000.0)
+                || a.spacing_speed.as_ref().is_some_and(|speed| {
+                    !bounded(speed.minimum_knots, a.approach_knots, a.cruise_knots)
+                        || !bounded(
+                            speed.maximum_knots,
+                            speed.minimum_knots + 5.0,
+                            a.cruise_knots.min(250.0),
+                        )
+                })
             {
                 return Err(format!("Invalid aircraft envelope: {id}"));
             }
+        }
+        let mut aliases = BTreeSet::new();
+        if self
+            .aircraft
+            .values()
+            .flat_map(|aircraft| &aircraft.model_aliases)
+            .any(|alias| !aliases.insert(alias))
+        {
+            return Err("Aircraft model aliases must be unique".into());
         }
         for (id, a) in &self.airlines {
             if id.is_empty()
@@ -251,6 +402,28 @@ impl Profiles {
                     .any(|s| !code(s, 1, 4))
                 || a.liveries.iter().any(|s| !code(s, 3, 3))
                 || a.liveries.len() > 16
+                || a.registrations.len() > 64
+                || a.registration_alphabets.len() > 64
+                || a.registration_alphabets.iter().any(|(prefix, alphabet)| {
+                    (!prefix.is_empty() && !code(prefix, 1, 4))
+                        || alphabet.is_empty()
+                        || alphabet.len() > 26
+                        || !alphabet.bytes().all(|byte| byte.is_ascii_uppercase())
+                        || alphabet.bytes().collect::<BTreeSet<_>>().len() != alphabet.len()
+                })
+                || a.registrations.iter().any(|(prefix, patterns)| {
+                    (!prefix.is_empty() && !code(prefix, 1, 4))
+                        || patterns.is_empty()
+                        || patterns.len() > 16
+                        || patterns.iter().any(|pattern| {
+                            !(3..=12).contains(&pattern.len())
+                                || !pattern.bytes().all(|byte| {
+                                    byte.is_ascii_uppercase()
+                                        || byte.is_ascii_digit()
+                                        || b"-?#".contains(&byte)
+                                })
+                        })
+                })
                 || a.fleet.is_empty()
                 || a.fleet
                     .iter()
@@ -337,28 +510,32 @@ impl Profiles {
                     .iter()
                     .filter_map(|m| {
                         let paint = m.matches.iter().find(|v| {
-                            v.aircraft == *kind
+                            (v.aircraft == *kind || aircraft.model_aliases.contains(&v.aircraft))
                                 && paints.contains(v.operator.as_str())
                                 && !v.operator.is_empty()
                         })?;
-                        Some((m, paint.operator.as_str()))
+                        Some((m, paint.operator.as_str(), paint.aircraft.as_str()))
                     })
                     .collect();
                 let choice = if models.is_empty() {
-                    catalogue
-                        .choose(kind, &airline.operator, "", mix(seed ^ stable_hash(kind)))
-                        .map(|m| (m, ""))
+                    std::iter::once(kind)
+                        .chain(aircraft.model_aliases.iter())
+                        .find_map(|code| {
+                            catalogue
+                                .choose(code, &airline.operator, "", mix(seed ^ stable_hash(kind)))
+                                .map(|m| (m, "", code.as_str()))
+                        })
                 } else {
                     Some(models[(mix(seed ^ stable_hash(kind)) % models.len() as u64) as usize])
                 };
-                if let Some((model, paint)) = choice {
+                if let Some((model, paint, actual_type)) = choice {
                     fleet.push((
                         *weight as u64,
                         Selection {
                             airline: id.clone(),
                             operator: airline.operator.clone(),
                             spoken_operator: airline.callsign.clone(),
-                            aircraft: kind.clone(),
+                            aircraft: actual_type.into(),
                             model: model.id.clone(),
                             model_operator: paint.into(),
                             category,
@@ -427,7 +604,75 @@ pub fn stable_hash(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn managed_spacing_requires_valid_profile_speeds_and_standard_increments() {
+        let mut profiles = Profiles::builtin().unwrap();
+        assert!(
+            profiles
+                .aircraft
+                .values()
+                .all(|aircraft| aircraft.spacing_speed.is_some())
+        );
+        profiles.spacing.speed_step_knots = 7.0;
+        assert!(profiles.validate().is_err());
+        profiles.spacing.speed_step_knots = 5.0;
+        profiles
+            .aircraft
+            .get_mut("C172")
+            .unwrap()
+            .spacing_speed
+            .as_mut()
+            .unwrap()
+            .minimum_knots = 40.0;
+        assert!(profiles.validate().is_err());
+        profiles.aircraft.get_mut("C172").unwrap().spacing_speed = None;
+        assert!(profiles.validate().is_ok());
+    }
     use crate::traffic::csl::{Match, Model};
+    #[test]
+    fn private_registrations_and_piper_models_use_editable_profiles() {
+        let profiles = Profiles::builtin().unwrap();
+        let ga = &profiles.airlines["GA"];
+        let french = ga.registration("LFMD", 123).unwrap();
+        assert!(french.starts_with("F-"));
+        assert_eq!(french.len(), 6);
+        assert_eq!(french, ga.registration("LFMD", 123).unwrap());
+        assert!(ga.registration("YSSY", 123).unwrap().starts_with("VH-"));
+        let catalogue = Catalogue {
+            models: vec![Model {
+                id: "PIPER".into(),
+                objects: vec![],
+                vertical_offset: None,
+                matches: vec![Match {
+                    aircraft: "P28A".into(),
+                    operator: String::new(),
+                    livery: String::new(),
+                }],
+            }],
+            warnings: vec![],
+        };
+        let port = Port {
+            icao: "LFMD".into(),
+            runway: 1500.0,
+            parking_size: 'B',
+        };
+        let destination = Port {
+            icao: "LFMN".into(),
+            ..port.clone()
+        };
+        let choice = profiles
+            .select(
+                &port,
+                &destination,
+                20.0,
+                Category::GeneralAviation,
+                &catalogue,
+                123,
+            )
+            .unwrap();
+        assert_eq!(choice.aircraft, "P28A");
+        assert!(profiles.aircraft_for(&choice.aircraft).unwrap().fixed_gear);
+    }
     fn models(profiles: &Profiles) -> Catalogue {
         Catalogue {
             models: profiles

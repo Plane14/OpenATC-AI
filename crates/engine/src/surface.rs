@@ -18,19 +18,37 @@ pub async fn post_telemetry(
     Json(telemetry): Json<Telemetry>,
 ) -> Response {
     let shared = state;
-    let (settings, pilot_report, automatic_intent, generation, route_sequence, channel, before) = {
+    let (
+        settings,
+        pilot_report,
+        automatic_intent,
+        generation,
+        route_sequence,
+        channel,
+        before,
+        radio,
+    ) = {
         let mut state = shared.write().await;
         if let Err(error) = update_flight_phase(&mut state.session, &telemetry) {
             return bad_request(&error);
         }
+        let channel = state.session.control_frequency().unwrap_or(0);
         if state
             .pending_copilot_reply
             .as_ref()
-            .is_some_and(|p| p.frequency != telemetry.com1_khz)
+            .is_some_and(|p| Some(p.frequency) != telemetry.frequency(p.request.radio))
         {
             state.pending_copilot_reply = None;
         }
         state.session.demo = false;
+        super::generated::step(&mut state);
+        if state.settings.generated_traffic {
+            let worker_state = shared.clone();
+            tokio::spawn(async move {
+                super::generated::prepare(worker_state.clone()).await;
+                super::generated::simulate(worker_state).await;
+            });
+        }
         super::cabin::tick(&mut state);
         super::missions::clock(&mut state);
         super::traffic::observe(&mut state);
@@ -62,6 +80,10 @@ pub async fn post_telemetry(
         }
         super::traffic::tick(&mut state);
         if state.session.next_sequence != sequence || state.session.taxi_clearance.traffic_hold {
+            return Json(json!({"accepted":true})).into_response();
+        }
+        super::generated::radio_tick(&mut state);
+        if state.session.next_sequence != sequence {
             return Json(json!({"accepted":true})).into_response();
         }
         super::initiative::tick(&mut state);
@@ -112,7 +134,7 @@ pub async fn post_telemetry(
             && let Some(airport) = state.airport.as_ref()
         {
             let nearby = openatc_core::stations::nearby(&state.stations, &telemetry);
-            if let Some(station) = openatc_core::stations::tuned(&nearby, telemetry.com1_khz)
+            if let Some(station) = openatc_core::stations::tuned(&nearby, channel)
                 && station.airport == crossing.airport
                 && openatc_core::stations::station_serves(station, "cross_runway")
                 && let Ok(mut route) = openatc_core::airport::calculate_taxi_route(
@@ -161,7 +183,7 @@ pub async fn post_telemetry(
             return Json(json!({"accepted":true})).into_response();
         }
         let nearby = openatc_core::stations::nearby(&state.stations, &telemetry);
-        let Some(station) = openatc_core::stations::tuned(&nearby, telemetry.com1_khz) else {
+        let Some(station) = openatc_core::stations::tuned(&nearby, channel) else {
             return Json(json!({"accepted":true})).into_response();
         };
         if station.airport != route.airport
@@ -181,7 +203,7 @@ pub async fn post_telemetry(
                 )
                 .is_none()
             });
-        if route.holding_channel == telemetry.com1_khz && !retry {
+        if route.holding_channel == channel && !retry {
             return Json(json!({"accepted":true})).into_response();
         }
         let needs_further = route.to_parking
@@ -217,7 +239,7 @@ pub async fn post_telemetry(
                     entry.pilot_reply =
                         openatc_core::dialogue::say("pilot_frequency_readback", &slots);
                 }
-                state.session.taxi_clearance.holding_channel = telemetry.com1_khz;
+                state.session.taxi_clearance.holding_channel = channel;
             }
             return Json(json!({"accepted":true})).into_response();
         }
@@ -231,7 +253,7 @@ pub async fn post_telemetry(
             "standard",
         );
         tag.position = station_name;
-        state.session.taxi_clearance.holding_channel = telemetry.com1_khz;
+        state.session.taxi_clearance.holding_channel = channel;
         if tower && !needs_further && !retry {
             return Json(json!({"accepted":true})).into_response();
         }
@@ -259,8 +281,9 @@ pub async fn post_telemetry(
             },
             state.session_generation,
             state.session.taxi_clearance.sequence,
-            telemetry.com1_khz,
+            channel,
             state.session.next_sequence,
+            state.session.control_radio,
         )
     };
     // Normal station-role and runway checks still govern this automatic request.
@@ -268,6 +291,7 @@ pub async fn post_telemetry(
         &shared,
         &settings,
         Request {
+            radio,
             controller_initiated: true,
             intent: automatic_intent.into(),
             text: if automatic_intent == "cross_runway" {
@@ -281,6 +305,7 @@ pub async fn post_telemetry(
     .await;
     let mut state = shared.write().await;
     if state.session_generation == generation
+        && state.session.control_radio == radio
         && state.session.taxi_clearance.sequence == route_sequence
         && state.session.taxi_clearance.holding_channel == channel
         && (response.status().is_client_error()

@@ -343,6 +343,25 @@ fn batch_reply(s: &mut crate::EngineState, batch: Batch) -> String {
     let mut requests = Vec::new();
     let mut coffee_count = 0;
     for service in batch.services {
+        if service == openatc_core::crew::request::Service::PassengerStatus {
+            if let Some(request) =
+                openatc_core::dialogue::phrases("cabin_request_passengers").first()
+                && let Some(report) = crate::cabin::report(s, request)
+            {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(&report);
+            }
+            continue;
+        }
+        if service == openatc_core::crew::request::Service::DeparturePreparation {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(&say(service.response(), &[]));
+            continue;
+        }
         let count = s
             .crew
             .service_requests
@@ -727,7 +746,7 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         return Some(
             (
                 axum::http::StatusCode::CONFLICT,
-                Json(json!({"error":"Flight was reset; previous request discarded."})),
+                Json(json!({"error":say("notice_flight_was_reset_previous_request_discarded_c0a5c48d", &[])})),
             )
                 .into_response(),
         );

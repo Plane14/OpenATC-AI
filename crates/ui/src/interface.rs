@@ -19,7 +19,7 @@ pub struct LocalNotice {
 }
 
 /// Stable page indices used by saved navigation and the desktop preview.
-pub const PAGES: [&str; 10] = [
+pub const PAGES: [&str; 11] = [
     "ATC",
     "Flight Plan",
     "Taxi",
@@ -30,6 +30,7 @@ pub const PAGES: [&str; 10] = [
     "Map",
     "Traffic",
     "Missions",
+    "ATC COM2",
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -67,6 +68,12 @@ pub struct WindowActions {
 /// State shared by the interface pages and frame updates.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Interface {
+    /// Radio selected for ATC requests, retained while browsing other pages.
+    pub active_radio: openatc_core::state::Radio,
+    /// Radio captured when push-to-talk starts.
+    pub ptt_radio: openatc_core::state::Radio,
+    /// Cached COM2 display snapshot, rebuilt only when engine telemetry changes.
+    com2_view: Option<(std::sync::Arc<State>, std::sync::Arc<State>)>,
     pub(crate) settings_section: usize,
     pub(crate) setup_server_url: String,
     pub(crate) traffic_profiles: serde_json::Value,
@@ -74,6 +81,7 @@ pub struct Interface {
     pub native_traffic_status: String,
     pub(crate) traffic_selected: u32,
     pub(crate) traffic_notice: String,
+    pub(crate) traffic_message: String,
     pub(crate) model_install_status: serde_json::Value,
     pub(crate) model_install_checked: f64,
     pub(crate) model_install_pending: bool,
@@ -105,6 +113,10 @@ pub struct Interface {
     pub map_all_altitudes: bool,
     /// Show airport markers and their hover details.
     pub map_airports_visible: bool,
+    /// Traffic visibility is independent on the airport and sector maps.
+    pub taxi_traffic_visible: bool,
+    /// Show observed traffic on the developer sector map.
+    pub map_traffic_visible: bool,
     /// Include heliports among the airport markers.
     pub map_heliports: bool,
     /// Map catalogue status.
@@ -124,6 +136,7 @@ pub struct Interface {
     stations_checked: f64,
     atis_checked: f64,
     atis_frequency: i32,
+    atis_radio: openatc_core::state::Radio,
     atis_airport: String,
     atis_pending: bool,
     /// Audio capture and playback.
@@ -283,6 +296,8 @@ pub struct Interface {
     pub transcript_fraction: f32,
     /// Frequency picked on the radio page, if any.
     pub requested_frequency_khz: Option<i32>,
+    /// Radio receiving a manual frequency selection.
+    pub requested_frequency_radio: openatc_core::state::Radio,
     /// Debug-only simulator reposition request.
     pub requested_debug_jump: Option<String>,
     /// True when the plugin (not desktop) hosts the panel.
@@ -298,7 +313,7 @@ pub struct Interface {
     #[cfg(test)]
     pub(crate) reset_button_bounds: [[f32; 4]; 2],
     #[cfg(test)]
-    pub(crate) toolbar_bounds: [[f32; 4]; 11],
+    pub(crate) toolbar_bounds: [[f32; 4]; 12],
     #[cfg(test)]
     pub(crate) collapse_bounds: [f32; 4],
     #[cfg(test)]
@@ -321,7 +336,15 @@ impl Interface {
     }
     /// Refresh controller choices after an aircraft-confirmed manual tune.
     pub fn radio_tuned(&mut self, frequency: i32) {
-        self.last_action = format!("COM1 tuned to {:.3} MHz", f64::from(frequency) / 1000.0);
+        self.last_action = format!(
+            "{} tuned to {:.3} MHz",
+            if self.requested_frequency_radio == openatc_core::state::Radio::Com2 {
+                "COM2"
+            } else {
+                "COM1"
+            },
+            f64::from(frequency) / 1000.0
+        );
         self.search.clear();
         self.stations_checked = 0.0;
     }
@@ -335,6 +358,7 @@ impl Interface {
             native_traffic_status: String::new(),
             traffic_selected: 0,
             traffic_notice: String::new(),
+            traffic_message: String::new(),
             model_install_status: serde_json::Value::Null,
             model_install_checked: 0.0,
             model_install_pending: false,
@@ -353,6 +377,8 @@ impl Interface {
             map_airports: Vec::new(),
             map_all_altitudes: false,
             map_airports_visible: true,
+            taxi_traffic_visible: true,
+            map_traffic_visible: true,
             map_heliports: false,
             map_notice: String::new(),
             map_checked: 0.0,
@@ -365,10 +391,14 @@ impl Interface {
             stations_checked: 0.0,
             atis_checked: 0.0,
             atis_frequency: 0,
+            atis_radio: openatc_core::state::Radio::Com1,
             atis_airport: String::new(),
             atis_pending: false,
             speech: Speech::default(),
             page: 0,
+            active_radio: openatc_core::state::Radio::Com1,
+            ptt_radio: openatc_core::state::Radio::Com1,
+            com2_view: None,
             settings_loaded: false,
             plan_loaded: false,
             settings: Settings::default(),
@@ -447,6 +477,7 @@ impl Interface {
             compact: false,
             transcript_fraction: 0.57,
             requested_frequency_khz: None,
+            requested_frequency_radio: openatc_core::state::Radio::Com1,
             requested_debug_jump: None,
             simulator_host: false,
             background_opacity: 0.96,
@@ -456,7 +487,7 @@ impl Interface {
             #[cfg(test)]
             reset_button_bounds: [[0.0; 4]; 2],
             #[cfg(test)]
-            toolbar_bounds: [[0.0; 4]; 11],
+            toolbar_bounds: [[0.0; 4]; 12],
             #[cfg(test)]
             collapse_bounds: [0.0; 4],
             #[cfg(test)]
@@ -479,6 +510,17 @@ impl Interface {
 
     /// Send a request with power gating, logging one SYSTEM line per outage.
     pub fn send(&mut self, request: &openatc_core::state::Request) {
+        self.send_on_radio(request, self.active_radio);
+    }
+
+    fn send_on_radio(
+        &mut self,
+        request: &openatc_core::state::Request,
+        radio: openatc_core::state::Radio,
+    ) {
+        let mut request = request.clone();
+        request.radio = radio;
+        let request = &request;
         if self.reset_pending {
             return;
         }
@@ -545,7 +587,10 @@ impl Interface {
         {
             let state = self.engine.state();
             let nearby = openatc_core::stations::nearby(&self.nearby_stations, &state.telemetry);
-            if let Some(station) = openatc_core::stations::tuned(&nearby, state.telemetry.com1_khz)
+            if let Some(station) = state
+                .telemetry
+                .frequency(request.radio)
+                .and_then(|frequency| openatc_core::stations::tuned(&nearby, frequency))
             {
                 request.text =
                     format_typed_transmission(&station.name, &state.plan.callsign, &request.text);
@@ -577,7 +622,10 @@ impl Interface {
         if full.role == "atc" {
             let state = self.engine.state();
             let nearby = openatc_core::stations::nearby(&self.nearby_stations, &state.telemetry);
-            if let Some(station) = openatc_core::stations::tuned(&nearby, state.telemetry.com1_khz)
+            if let Some(station) = state
+                .telemetry
+                .frequency(self.active_radio)
+                .and_then(|frequency| openatc_core::stations::tuned(&nearby, frequency))
             {
                 full.text = format_typed_transmission(
                     &station.name,
@@ -672,10 +720,11 @@ impl Interface {
                 return;
             }
             self.ptt_armed = true;
+            self.ptt_radio = self.active_radio;
             self.ptt_role = if copilot {
                 "copilot".to_owned()
             } else {
-                "auto".to_owned()
+                self.crew_role()
             };
             self.record_start = now_seconds();
             self.record_peak = 0.0;
@@ -690,6 +739,23 @@ impl Interface {
             self.speech.transcribe(&endpoint);
         } else {
             self.ptt_armed = false;
+        }
+    }
+
+    /// Radio bindings bypass the crew interphone selection.
+    pub fn radio_push_to_talk(&mut self, down: bool, radio: openatc_core::state::Radio) {
+        if down {
+            if self.speech.busy() || self.speech.recording() || self.speech.monitoring() {
+                self.talk_push_to_talk(true, false);
+                return;
+            }
+            self.talk_push_to_talk(true, false);
+            if self.ptt_armed {
+                self.ptt_radio = radio;
+                self.ptt_role = "atc".into();
+            }
+        } else if self.ptt_armed && self.ptt_role == "atc" && self.ptt_radio == radio {
+            self.talk_push_to_talk(false, false);
         }
     }
 
@@ -932,11 +998,7 @@ impl Interface {
         let transcription = self.speech.take_transcript();
         if !transcription.is_empty() && self.ptt_armed {
             self.ptt_armed = false;
-            let role = if self.ptt_role == "copilot" {
-                "copilot".to_owned()
-            } else {
-                self.crew_role()
-            };
+            let role = self.ptt_role.clone();
             if speech_worth_sending(
                 now_seconds() - self.record_start,
                 f64::from(self.record_peak),
@@ -952,7 +1014,7 @@ impl Interface {
                     ..Default::default()
                 };
                 self.notice.clear();
-                self.send(&request);
+                self.send_on_radio(&request, self.ptt_radio);
                 self.last_action = format!("PTT sent ({role})");
             } else {
                 "Nothing heard — nothing sent.".clone_into(&mut self.notice);
@@ -1112,6 +1174,7 @@ impl Interface {
                 serde_json::json!({"sequence": self.copilot_prepared_sequence}),
             );
         }
+        let handoff_radio = state.handoff_radio();
         if self.settings.copilot_replies
             && (self.settings.copilot_tunes || self.settings.auto_tune_handoff)
             && !self.auto_reply_pending
@@ -1119,7 +1182,7 @@ impl Interface {
             && !self.speech.recording()
             && self.speech_queue.is_empty()
             && state.frequency_sequence > self.last_checkin_sequence
-            && state.telemetry.com1_khz == state.recommended_frequency_khz
+            && state.telemetry.frequency(handoff_radio) == Some(state.recommended_frequency_khz)
             && state
                 .transcript
                 .iter()
@@ -1129,12 +1192,14 @@ impl Interface {
             && let Some(_station) = self
                 .nearby_stations
                 .iter()
-                .find(|s| s.khz == state.telemetry.com1_khz && s.receivable)
+                .find(|s| Some(s.khz) == state.telemetry.frequency(handoff_radio) && s.receivable)
         {
             self.last_checkin_sequence = state.frequency_sequence;
             self.auto_reply_pending = true;
-            self.engine
-                .post("/request/copilot-checkin", serde_json::json!({}));
+            self.engine.post(
+                "/request/copilot-checkin",
+                serde_json::json!({"radio":handoff_radio}),
+            );
         }
         if self.settings_loaded && self.engine.connected() {
             let settings_json = serde_json::to_string(&self.settings).unwrap_or_default();
@@ -1226,14 +1291,33 @@ impl Interface {
             self.engine.post("/stations/nearby", serde_json::json!({}));
         }
         let receivable = openatc_core::stations::nearby(&self.nearby_stations, &state.telemetry);
-        let station = openatc_core::stations::tuned(&receivable, state.telemetry.com1_khz);
+        let primary = openatc_core::stations::tuned(&receivable, state.telemetry.com1_khz);
+        let secondary = state
+            .telemetry
+            .frequency(openatc_core::state::Radio::Com2)
+            .and_then(|frequency| openatc_core::stations::tuned(&receivable, frequency));
+        let (radio, station) = if self.settings.show_com2
+            && secondary.is_some_and(|station| station.service == "ATIS")
+            && (self.active_radio == openatc_core::state::Radio::Com2
+                || !primary.is_some_and(|station| station.service == "ATIS"))
+        {
+            (openatc_core::state::Radio::Com2, secondary)
+        } else {
+            (openatc_core::state::Radio::Com1, primary)
+        };
+        let frequency = state.telemetry.frequency(radio).unwrap_or(0);
+        let instruction_waiting = state.transcript.iter().any(|entry| {
+            entry.sequence > self.last_speech_sequence && entry.is_controller_instruction()
+        });
         let active = self.engine.connected()
             && self.radio_power
             && self.requested_frequency_khz.is_none()
+            && !instruction_waiting
             && station.is_some_and(|s| s.service == "ATIS");
         if self.atis_frequency != 0
             && (!active
-                || self.atis_frequency != state.telemetry.com1_khz
+                || self.atis_frequency != frequency
+                || self.atis_radio != radio
                 || station.is_none_or(|s| s.airport != self.atis_airport))
         {
             self.speech.stop_speech();
@@ -1246,7 +1330,10 @@ impl Interface {
             self.atis_pending = false;
             if active
                 && reply.success
-                && reply.data["frequency"].as_i64() == Some(i64::from(state.telemetry.com1_khz))
+                && reply.data["frequency"].as_i64() == Some(i64::from(frequency))
+                && serde_json::from_value::<openatc_core::state::Radio>(reply.data["radio"].clone())
+                    .unwrap_or_default()
+                    == radio
                 && station
                     .is_some_and(|s| reply.data["airport"].as_str() == Some(s.airport.as_str()))
             {
@@ -1255,17 +1342,28 @@ impl Interface {
                     && !self.speech.recording()
                     && self.speech_queue.is_empty()
                 {
-                    self.atis_frequency = state.telemetry.com1_khz;
+                    self.atis_frequency = frequency;
+                    self.atis_radio = radio;
                     self.atis_airport = reply.data["airport"].as_str().unwrap_or("").to_owned();
                     self.speak_entry(&Transmission {
+                        radio: Some(radio),
                         information_only: false,
                         pilot_reply: String::new(),
                         background: false,
                         speaker: "ATC".to_owned(),
                         text: text.to_owned(),
-                        delivery: "atis".to_owned(),
+                        delivery: if self.settings.atis_electronic {
+                            "atis"
+                        } else {
+                            "atis-natural"
+                        }
+                        .to_owned(),
                         speed: 1.0,
-                        voice: self.settings.voice.clone(),
+                        voice: if self.settings.atis_voice.is_empty() {
+                            self.settings.voice.clone()
+                        } else {
+                            self.settings.atis_voice.clone()
+                        },
                         sequence: 0,
                         position: "ATIS".to_owned(),
                         urgent: false,
@@ -1288,7 +1386,8 @@ impl Interface {
         {
             self.atis_checked = now;
             self.atis_pending = true;
-            self.engine.post("/atis", serde_json::json!({}));
+            self.engine
+                .post("/atis", serde_json::json!({"radio":radio}));
         }
     }
 
@@ -1359,6 +1458,11 @@ impl Interface {
             self.modal_intent.clear();
         }
         self.page = page;
+        if page == 0 {
+            self.active_radio = openatc_core::state::Radio::Com1;
+        } else if page == 10 {
+            self.active_radio = openatc_core::state::Radio::Com2;
+        }
         self.expand();
     }
 
@@ -1398,7 +1502,7 @@ impl Interface {
     }
 
     fn collapse(&mut self, manual: bool) {
-        if self.page != 0 || self.compact || !self.modal_intent.is_empty() {
+        if !matches!(self.page, 0 | 10) || self.compact || !self.modal_intent.is_empty() {
             return;
         }
         self.expanded_height = self.window_size[1];
@@ -1420,7 +1524,7 @@ impl Interface {
             && mouse[1] < self.window_offset[1] + self.window_size[1];
         // An explicit collapse stays put until the pilot opens the controls again.
         if self.manual_compact
-            && self.page == 0
+            && matches!(self.page, 0 | 10)
             && !self.speech.recording()
             && !self.ptt_armed
             && self.modal_intent.is_empty()
@@ -1431,7 +1535,12 @@ impl Interface {
             || !self.modal_intent.is_empty()
             || self.show_voice_popup
             || ui.is_any_item_active();
-        if self.page != 0 || self.speech.recording() || self.ptt_armed || editing || hovered {
+        if !matches!(self.page, 0 | 10)
+            || self.speech.recording()
+            || self.ptt_armed
+            || editing
+            || hovered
+        {
             self.expand();
         } else if self.last_interaction == 0.0 {
             self.last_interaction = now;
@@ -1464,7 +1573,26 @@ impl Interface {
     pub fn draw(&mut self, ui: &imgui::Ui) -> WindowActions {
         let _theme = crate::theme::apply(ui, self.settings.light_theme);
         self.update_visibility(ui);
-        let state = self.engine.state();
+        let mut state = self.engine.state();
+        if self.page == 10 && !self.settings.show_com2 {
+            self.set_page(0);
+        }
+        if self.page == 10 {
+            if self
+                .com2_view
+                .as_ref()
+                .is_none_or(|(source, _)| !std::sync::Arc::ptr_eq(source, &state))
+            {
+                let mut view = (*state).clone();
+                // The page reads a snapshot; the aircraft's COM1 remains untouched.
+                view.telemetry.com1_khz = view
+                    .telemetry
+                    .frequency(openatc_core::state::Radio::Com2)
+                    .unwrap_or(0);
+                self.com2_view = Some((state.clone(), std::sync::Arc::new(view)));
+            }
+            state = self.com2_view.as_ref().unwrap().1.clone();
+        }
         let opacity = if self.compact {
             self.settings.faded_opacity.clamp(0.1, 0.85)
         } else {
@@ -1493,7 +1621,7 @@ impl Interface {
                 let _page_background = ui.push_style_color(imgui::StyleColor::ChildBg, [0.0; 4]);
                 ui.child_window("##page")
                     .size([0.0, (ui.content_region_avail()[1] - 24.0).max(1.0)])
-                    .scroll_bar(self.page != 0)
+                    .scroll_bar(!matches!(self.page, 0 | 10))
                     .build(|| {
                         if self.confirm_reset || self.reset_pending {
                             self.draw_reset_confirmation(ui);
@@ -1610,7 +1738,8 @@ impl Interface {
 
     fn draw_toolbar(&mut self, ui: &imgui::Ui) {
         let scale = ui.current_font_size() / 18.0;
-        let page_count = if self.settings.dev_mode { 10 } else { 9 };
+        let page_count =
+            (if self.settings.dev_mode { 10 } else { 9 }) + usize::from(self.settings.show_com2);
         let action_count = 3 + usize::from(self.can_pop_out) + usize::from(self.settings.dev_mode);
         let wrap = ui.content_region_avail()[0]
             < ((1 + page_count + action_count) as f32 * 39.0 + 140.0) * scale;
@@ -1638,8 +1767,9 @@ impl Interface {
 
     fn toolbar_pages(&mut self, ui: &imgui::Ui, inline: bool) {
         use widgets::ToolbarIcon;
-        const PAGES: [(usize, &str, ToolbarIcon); 10] = [
+        const PAGES: [(usize, &str, ToolbarIcon); 11] = [
             (0, "ATC and crew", ToolbarIcon::Messages),
+            (10, "ATC COM2", ToolbarIcon::Messages),
             (6, "Radios", ToolbarIcon::Headset),
             (1, "Flight plan", ToolbarIcon::FlightPlan),
             (2, "Taxi", ToolbarIcon::Taxi),
@@ -1654,16 +1784,28 @@ impl Interface {
             if page == 7 && !self.settings.dev_mode {
                 continue;
             }
+            if page == 10 && !self.settings.show_com2 {
+                continue;
+            }
             if inline || index > 0 {
                 ui.same_line();
             }
             if widgets::icon_button(ui, label, icon, self.page == page) {
                 self.set_page(page);
             }
+            if page == 10 {
+                let corner = ui.item_rect_max();
+                let size = ui.current_font_size();
+                ui.get_window_draw_list().add_text(
+                    [corner[0] - size * 0.55, corner[1] - size],
+                    widgets::accent(ui),
+                    "2",
+                );
+            }
             #[cfg(test)]
             {
                 let (a, b) = (ui.item_rect_min(), ui.item_rect_max());
-                self.toolbar_bounds[page] = [a[0], a[1], b[0], b[1]];
+                self.toolbar_bounds[if page == 10 { 11 } else { page }] = [a[0], a[1], b[0], b[1]];
             }
         }
     }
@@ -1736,7 +1878,7 @@ impl Interface {
             self.save_settings();
         }
         ui.same_line();
-        let _disabled = ui.begin_disabled(self.page != 0);
+        let _disabled = ui.begin_disabled(!matches!(self.page, 0 | 10));
         if icon_button(
             ui,
             if self.compact {
@@ -1789,7 +1931,7 @@ impl Interface {
         if self.page == 7 && !self.settings.dev_mode {
             self.set_page(0);
         }
-        if self.compact && self.page == 0 {
+        if self.compact && matches!(self.page, 0 | 10) {
             crate::pages::atc_page(ui, self, state);
             return;
         }
@@ -1804,6 +1946,7 @@ impl Interface {
             "Controller boundaries used by flight handoffs. Debug view.",
             "Nearby aircraft, traffic settings and radio conversations.",
             "Choose a flight story, create your own and follow the flight journal.",
+            "Talk with air traffic control on the second radio.",
         ];
         crate::widgets::page_heading(ui, PAGES[self.page], descriptions[self.page]);
         match self.page {

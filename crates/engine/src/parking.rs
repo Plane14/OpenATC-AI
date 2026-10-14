@@ -34,9 +34,14 @@ pub fn tick(state: &mut EngineState) {
         return;
     }
     let nearby = stations::nearby(&state.stations, &state.session.telemetry);
-    let Some(station) = stations::tuned(&nearby, state.session.telemetry.com1_khz).filter(|s| {
-        s.airport == route.airport && ["Ground", "Tower"].contains(&s.service.as_str())
-    }) else {
+    let Some(station) = state
+        .session
+        .control_frequency()
+        .and_then(|frequency| stations::tuned(&nearby, frequency))
+        .filter(|s| {
+            s.airport == route.airport && ["Ground", "Tower"].contains(&s.service.as_str())
+        })
+    else {
         return;
     };
     let Some(airport) = state.airport.as_ref().filter(|a| a.icao == route.airport) else {

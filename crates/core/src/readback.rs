@@ -272,11 +272,25 @@ pub fn prepare(state: &State, request: &mut Request) {
         if !spoken.contains(&compact(&state.plan.destination)) {
             missing.push(crate::dialogue::say("readback_field_destination", &[]));
         }
-        if !c
+        let required_route = if c.as_filed {
+            &c.departure_readback
+        } else {
+            &c.route
+        };
+        let full_route = c
             .route
             .split_whitespace()
             .filter(|s| *s != "DCT")
             .all(|s| spoken.contains(&compact(s)))
+            && spoken.contains("route");
+        if !(full_route
+            || required_route
+                .split_whitespace()
+                .filter(|s| *s != "DCT")
+                .all(|s| spoken.contains(&compact(s)))
+                && (!c.as_filed
+                    || spoken.contains("asfiled")
+                    || spoken.contains("flightplannedroute")))
         {
             missing.push(crate::dialogue::say("readback_field_route", &[]));
         }
@@ -425,7 +439,21 @@ pub fn auto_reply(state: &State) -> Option<Request> {
                 "pilot_ifr_readback",
                 &[
                     ("destination", state.plan.destination.clone()),
-                    ("route", clearance.route.clone()),
+                    (
+                        "route",
+                        if clearance.as_filed {
+                            if clearance.departure_readback.is_empty() {
+                                crate::dialogue::say("filed_routing", &[])
+                            } else {
+                                crate::dialogue::say(
+                                    "departure_then_filed",
+                                    &[("sid", clearance.departure_readback.clone())],
+                                )
+                            }
+                        } else {
+                            clearance.route.clone()
+                        },
+                    ),
                     ("altitude", clearance.altitude_feet.to_string()),
                     ("squawk", clearance.squawk.clone()),
                     ("runway", clearance.runway.clone()),
@@ -542,6 +570,46 @@ mod tests {
         };
         prepare(&s, &mut wrong);
         assert!(wrong.waypoint.contains("altitude"));
+    }
+    #[test]
+    fn abbreviated_clearance_reads_back_departure_not_entire_filed_route() {
+        let mut state = State::default();
+        state.plan.destination = "LIMC".into();
+        state.plan.callsign = "C-GTLT".into();
+        state.clearance = Some(crate::state::Clearance {
+            altitude_feet: 5000,
+            route: "BASI8A BASIP Y15 EGHIN DCT ANAKI DCT DEVOX DEVO3E".into(),
+            departure_readback: "BASI8A BASIP".into(),
+            as_filed: true,
+            runway: "04R".into(),
+            squawk: "4517".into(),
+            sequence: 2,
+            ..Default::default()
+        });
+        let text = "Cleared to LIMC BASI8A BASIP then as filed initial altitude 5000 feet squawk 4517 runway 04R C-GTLT";
+        let mut request = Request {
+            text: text.into(),
+            ..Default::default()
+        };
+        prepare(&state, &mut request);
+        assert!(
+            !request.waypoint.starts_with("READBACK ERROR"),
+            "{}",
+            request.waypoint
+        );
+        assert_eq!(request.waypoint, state.clearance.as_ref().unwrap().route);
+        for bad in [
+            text.replace("4517", "4516"),
+            text.replace("BASI8A", "WRONG1"),
+            text.replace("as filed", ""),
+        ] {
+            let mut request = Request {
+                text: bad,
+                ..Default::default()
+            };
+            prepare(&state, &mut request);
+            assert!(request.waypoint.starts_with("READBACK ERROR"));
+        }
     }
     #[test]
     fn typed_clearance_and_garbled_readback_override_generic_parser() {

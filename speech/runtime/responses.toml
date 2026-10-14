@@ -1,5 +1,64 @@
 # Operational speech. Every phrase must keep all declared placeholders.
 
+[crew_social_ground_farewell]
+slots = []
+match_any = ["have a good day", "have a nice day", "have a good night", "goodbye", "see you", "take care"]
+match_priority = 30
+when = { role = "ground" }
+say = ["Thanks, Captain. You too—have a good flight!", "You too, Captain. Safe flight, and we'll see you next time.", "Cheers, Captain. Have a good flight!", "Thanks, Captain. Take care up there."]
+
+[crew_social_cabin_farewell]
+slots = []
+match_any = ["have a good day", "have a nice day", "have a good night", "goodbye", "see you", "take care"]
+match_priority = 30
+when = { role = "cabin" }
+say = ["Thank you, Captain. You too!", "You too, Captain. Give us a call if you need anything.", "Thanks, Captain. Take care."]
+
+[crew_social_copilot_farewell]
+slots = []
+match_any = ["have a good day", "have a nice day", "have a good night", "goodbye", "see you", "take care"]
+match_priority = 30
+when = { role = "copilot" }
+say = ["Thanks, Captain. You too.", "You too, Captain!", "Cheers, Captain. Take care."]
+
+[crew_social_greeting]
+slots = []
+match_any = ["hello", "hi", "good morning", "good evening", "how are you", "how is it going", "how's it going"]
+match_priority = 10
+when = { role = ["ground", "cabin", "copilot"] }
+say = ["Hello, Captain. Good to hear from you.", "All good here, Captain. How are you?", "Hello, Captain. How can I help?", "Doing well, thanks, Captain. How about you?"]
+
+[crew_social_thanks]
+slots = []
+match_any = ["thanks", "thank you", "cheers", "much appreciated", "well done", "nice work"]
+match_priority = 20
+when = { role = ["ground", "cabin", "copilot"] }
+say = ["You're welcome, Captain.", "No worries, Captain. Happy to help.", "My pleasure, Captain.", "Thanks, Captain. Glad to help."]
+
+[mission_stopped_by_pilot]
+slots = []
+say = ["Mission stopped by the pilot."]
+
+[mission_aircraft_changed]
+slots = []
+say = ["Stopped: loaded aircraft no longer matches the mission."]
+
+[mission_reached_parking]
+slots = []
+say = ["Flight reached parking. Review the recorded event outcomes."]
+
+[notice_ai_endpoint_unavailable]
+slots = []
+say = ["AI endpoint unavailable. Use request buttons or supported text commands."]
+
+[filed_routing]
+slots = []
+say = ["the flight planned route, as filed"]
+
+[departure_then_filed]
+slots = ["sid"]
+say = ["{sid}, then as filed", "{sid}, then the flight planned route as filed"]
+
 [then]
 slots = ["sid", "route"]
 say = [
@@ -13,6 +72,8 @@ say = [
   "{prefix}Cleared to {destination}, via {via}. Initial altitude {altitude}, squawk {squawk}. Departure runway {runway}.",
   "{prefix}Cleared to {destination} via {via}. Departure runway {runway}, initial altitude {altitude}, squawk {squawk}.",
   "{prefix}Your clearance is to {destination} via {via}, initial altitude {altitude}. Squawk {squawk}; departure runway {runway}.",
+  "{prefix}Cleared to {destination}, routing {via}. Your initial altitude is {altitude}. Squawk {squawk}, departure runway {runway}.",
+  "{prefix}Cleared to {destination} via {via}. Squawk {squawk}. Initial altitude {altitude}; runway {runway} for departure.",
 ]
 
 [climb_to]
@@ -552,7 +613,7 @@ say = [
 [automatic_terminal_information_information_simulator_observation_wind]
 slots = ["airport", "code", "wind_direction", "wind_speed", "visibility", "clouds", "temperature", "dewpoint", "pressure", "runway_text"]
 say = [
-  "{airport} automatic terminal information. Information {code}. Simulator observation. Wind {wind_direction} degrees, {wind_speed} knots. Visibility {visibility} metres. {clouds}. Temperature {temperature}, dew point {dewpoint}. QNH {pressure}. {runway_text} Advise information {code} on initial contact.",
+  "{airport} automatic terminal information. Information {code}. Simulator observation. Wind {wind_direction} degrees, {wind_speed} knots. Visibility {visibility} metres. {clouds}. Temperature {temperature}, dew point {dewpoint}. {pressure}. {runway_text} Advise information {code} on initial contact.",
 ]
 
 [runway_information_unavailable]
@@ -1326,6 +1387,40 @@ say = ["QNH {pressure}"]
 [flight_qnh_units]
 slots = ["pressure"]
 say = ["QNH {pressure} hectopascals"]
+
+[traffic_chat_reply_beer]
+match_any = ["beer", "cold one", "drink after landing"]
+match_priority = 30
+humour = true
+slots = []
+say = ["Ha, thanks. I'll save that for after the flight!", "Thanks! First the parking checklist, then perhaps a cold one."]
+
+[traffic_chat_reply_thanks]
+match_any = ["thanks", "thank you", "nice", "well done", "good landing"]
+match_priority = 20
+slots = []
+say = ["Thanks, appreciate that. Have a good flight.", "Cheers, that's kind of you."]
+
+[traffic_chat_reply_weather_unknown]
+match_any = ["weather", "cloud", "clouds", "cloud tops", "turbulence", "ride"]
+match_priority = 10
+slots = []
+say = ["I don't have a reliable report for that. Best check with the controller.", "Nothing current I can confirm from here, sorry."]
+
+[traffic_chat_reply_general]
+fallback = true
+slots = []
+say = ["Good to hear from you. I'm keeping it brief while we share the frequency.", "Hello there. Happy to chat briefly; we'll leave room for the operational calls."]
+
+[traffic_chat_initiate_airborne]
+when = { on_ground = false, phase = ["cruise"] }
+slots = ["callsign", "traffic"]
+say = ["{callsign}, {traffic}, when you have a moment, how's the ride at your level?", "{callsign}, {traffic}, do you have a recent weather report along your route?", "{callsign}, {traffic}, a quick hello. Hope your flight is going well."]
+
+[traffic_chat_initiate_ground]
+when = { on_ground = true, phase = ["parked", "taxi_in"] }
+slots = ["callsign", "traffic"]
+say = ["{callsign}, {traffic}, when you're free, how were the conditions on arrival?", "{callsign}, {traffic}, hello from the apron. Hope you've had a good flight."]
 
 [flight_altimeter]
 slots = ["pressure"]
@@ -16266,6 +16361,14 @@ say = ["bring you some juice", "get your juice ready", "bring your juice to the 
 slots = []
 say = ["how are the passengers", "how are our passengers", "how are the passenges", "how is everyone in the cabin", "how's everyone in the back", "passenger update", "how are things in the cabin", "how is the cabin", "how's the cabin"]
 
+[cabin_request_departure]
+slots = []
+say = ["get ready for departure", "get ready for depature", "prepare for departure", "prepare the cabin for departure", "get the cabin ready for departure"]
+
+[cabin_departure_preparing]
+slots = []
+say = ["Yes, Captain. We'll prepare the cabin for departure and check the passenger seating.", "Of course, Captain. We'll continue the cabin departure checks.", "Understood, Captain. We'll get the cabin ready for departure."]
+
 [cabin_request_turbulence]
 slots = []
 say = ["turbulence coming", "turbulence ahead", "turbulence soon", "turbulence coming up", "turblance coming", "turbulance coming", "rough air ahead", "expecting turbulence", "expect some turbulence", "there will be some turbulence", "there will be some turblance", "prepare for turbulence"]
@@ -16330,6 +16433,10 @@ say = ["We're checking on our {passengers} passengers and asking them to remain 
 slots = []
 say = ["One passenger is still in the lavatory. We'll check on them.", "We have one passenger in the lavatory, Captain. We'll follow up with them.", "One passenger is in the lavatory at the moment. We'll make sure they're aware."]
 
+[cabin_passengers_lavatory]
+slots = ["count"]
+say = ["We have {count} passengers using the lavatories, Captain. We'll check on them.", "{count} passengers are in the lavatories at the moment. We'll let them know and help everyone get settled."]
+
 [cabin_passengers_seated]
 slots = []
 say = ["Captain, the passengers are back in their seats and the lavatory is clear. The seat belt sign is on.", "Captain, passenger check complete. Everyone is seated, the lavatory is clear and the seat belt sign is on.", "The passengers are seated now, Captain. Lavatory clear, and the seat belt sign is on."]
@@ -16375,6 +16482,10 @@ say = ["{station}, {callsign}, request pushback.", "{station}, {callsign}, ready
 [pilot_request_start_pushback]
 slots = ["station", "callsign"]
 say = ["{station}, {callsign}, request start-up and pushback.", "{station}, {callsign}, ready for start-up and pushback.", "{station}, {callsign}, request approval for engine start and pushback.", "{station}, {callsign}, request pushback and engine start."]
+
+[generated_start_pushback_approved]
+slots = ["callsign"]
+say = ["{callsign}, start-up and pushback approved. Report ready to taxi.", "{callsign}, pushback and start-up approved. Call when ready to taxi."]
 
 [pilot_request_ready]
 slots = ["station", "callsign"]
@@ -16803,6 +16914,30 @@ say = ["{callsign}, reduce speed to {speed} knots for spacing. Advise if unable.
 slots = ["callsign"]
 say = ["{callsign}, resume published speed.", "{callsign}, speed adjustment no longer required, resume published speed.", "{callsign}, comply with published speed restrictions."]
 
+[traffic_resume_normal_speed]
+slots = ["callsign"]
+say = ["{callsign}, resume normal speed.", "{callsign}, speed adjustment no longer required. Resume normal speed.", "{callsign}, resume normal speed for the approach."]
+
+[arrival_resume_normal_speed]
+slots = []
+say = ["Resume normal speed.", "Speed adjustment no longer required. Resume normal speed."]
+
+[arrival_resume_published_speed]
+slots = []
+say = ["Resume published speed.", "Comply with published speed restrictions."]
+
+[pilot_resume_normal_speed_instruction]
+slots = []
+say = ["Resuming normal speed.", "Normal speed."]
+
+[pilot_resume_published_speed_instruction]
+slots = []
+say = ["Resuming published speed.", "We'll comply with the published speeds."]
+
+[pilot_resume_normal_speed]
+slots = ["callsign"]
+say = ["Resume normal speed, {callsign}.", "Resuming normal speed, {callsign}.", "Normal speed, {callsign}."]
+
 [pilot_resume_published_speed]
 slots = ["callsign"]
 say = ["Resume published speed, {callsign}.", "Comply with published speed restrictions, {callsign}."]
@@ -17005,3 +17140,346 @@ say = [
   "{callsign}, say intentions and advise if unable to comply.",
   "{callsign}, are you able to comply? Advise the nature of any difficulty."
 ]
+
+# User-facing request notices; these do not authorize aircraft actions.
+
+[notice_ai_generation_is_off_587c5e7e]
+slots = []
+say = ["AI generation is off"]
+
+[notice_airport_request_must_be_an_object_a290c7e5]
+slots = []
+say = ["Airport request must be an object"]
+
+[notice_airport_required_af12598c]
+slots = []
+say = ["Airport required"]
+
+[notice_an_operational_exchange_or_changed_traffic_interrupted_t_c0859e89]
+slots = []
+say = ["An operational exchange or changed traffic interrupted the conversation."]
+
+[notice_cannot_restore_over_a_connected_simulator_flight_1bcb59f1]
+slots = []
+say = ["Cannot restore over a connected simulator flight"]
+
+[notice_cannot_save_configuration_bc3aa171]
+slots = []
+say = ["Cannot save configuration"]
+
+[notice_check_icao_codes_callsign_and_initial_cruise_altitudes_dce87a98]
+slots = []
+say = ["Check ICAO codes, callsign and initial/cruise altitudes."]
+
+[notice_controller_unavailable_842f8e10]
+slots = []
+say = ["Controller unavailable."]
+
+[notice_copilot_communication_is_unavailable_6fd03909]
+slots = []
+say = ["Copilot communication is unavailable."]
+
+[notice_copilot_readbacks_are_disabled_38d1a964]
+slots = []
+say = ["Copilot readbacks are disabled."]
+
+[notice_could_not_index_airport_markers_bb8fa639]
+slots = []
+say = ["Could not index airport markers."]
+
+[notice_could_not_load_flight_navigation_data_b01baf21]
+slots = []
+say = ["Could not load flight navigation data"]
+
+[notice_could_not_read_mission_catalogue_53196b63]
+slots = []
+say = ["Could not read mission catalogue."]
+
+[notice_could_not_save_mission_file_2d41c78c]
+slots = []
+say = ["Could not save mission file."]
+
+[notice_debug_mode_required_259698ff]
+slots = []
+say = ["Debug mode required"]
+
+[notice_demo_controls_are_unavailable_while_connected_to_x_plane_816ca12f]
+slots = []
+say = ["Demo controls are unavailable while connected to X-Plane."]
+
+[notice_enable_pilot_conversations_and_informal_chat_first_8125fcb7]
+slots = []
+say = ["Enable pilot conversations and informal chat first."]
+
+[notice_enter_a_four_character_icao_384e3e19]
+slots = []
+say = ["Enter a four-character ICAO."]
+
+[notice_enter_station_icaos_separated_by_commas_615c3757]
+slots = []
+say = ["Enter station ICAOs separated by commas."]
+
+[notice_enter_station_icaos_separated_by_commas_7c3c1240]
+slots = []
+say = ["Enter station ICAOs separated by commas"]
+
+[notice_enter_your_numeric_simbrief_pilot_id_in_settings_c61590ed]
+slots = []
+say = ["Enter your numeric SimBrief Pilot ID in Settings."]
+
+[notice_finish_or_reset_this_flight_before_replacing_its_plan_06cba76b]
+slots = []
+say = ["Finish or reset this flight before replacing its plan."]
+
+[notice_flight_changed_while_navigation_data_was_loading_dbd22f76]
+slots = []
+say = ["Flight changed while navigation data was loading."]
+
+[notice_flight_was_reset_previous_request_discarded_c0a5c48d]
+slots = []
+say = ["Flight was reset; previous request discarded."]
+
+[notice_flightrules_must_be_ifr_or_vfr_014fc7fc]
+slots = []
+say = ["flightRules must be ifr or vfr"]
+
+[notice_incomplete_simulator_weather_a96360ec]
+slots = []
+say = ["Incomplete simulator weather"]
+
+[notice_invalid_audio_body_3bfa74cf]
+slots = []
+say = ["Invalid audio body"]
+
+[notice_invalid_map_position_5a458578]
+slots = []
+say = ["Invalid map position."]
+
+[notice_invalid_multipart_body_fd6146b9]
+slots = []
+say = ["Invalid multipart body"]
+
+[notice_invalid_phase_34dd4dac]
+slots = []
+say = ["Invalid phase"]
+
+[notice_invalid_request_330509ca]
+slots = []
+say = ["Invalid request"]
+
+[notice_invalid_simulator_pressure_eb56730f]
+slots = []
+say = ["Invalid simulator pressure"]
+
+[notice_invalid_stand_fc950a75]
+slots = []
+say = ["Invalid stand"]
+
+[notice_invalid_telemetry_116192a2]
+slots = []
+say = ["Invalid telemetry"]
+
+[notice_invalid_x_plane_folder_80d5409f]
+slots = []
+say = ["Invalid X-Plane folder"]
+
+[notice_load_the_arrival_airport_and_aircraft_size_before_select_ccd7c916]
+slots = []
+say = ["Load the arrival airport and aircraft size before selecting a stand."]
+
+[notice_map_is_available_in_developer_mode_282def75]
+slots = []
+say = ["Map is available in developer mode."]
+
+[notice_message_too_long_dee7bc40]
+slots = []
+say = ["Message too long"]
+
+[notice_mission_not_found_7e10c47e]
+slots = []
+say = ["Mission not found."]
+
+[notice_no_active_mission_event_b6db1eb1]
+slots = []
+say = ["No active mission event."]
+
+[notice_no_atc_instruction_is_awaiting_your_reply_5eab90d4]
+slots = []
+say = ["No ATC instruction is awaiting your reply."]
+
+[notice_no_examples_for_that_role_and_situation_7bdff3c5]
+slots = []
+say = ["No examples for that role and situation"]
+
+[notice_no_prepared_copilot_reply_for_this_flight_9605a9ad]
+slots = []
+say = ["No prepared copilot reply for this flight."]
+
+[notice_no_receiving_controller_for_check_in_e227b0ef]
+slots = []
+say = ["No receiving controller for check-in."]
+
+[notice_no_saved_session_18c2ddcf]
+slots = []
+say = ["No saved session"]
+
+[notice_no_station_receiving_42659d5f]
+slots = []
+say = ["No station receiving"]
+
+[notice_no_voices_match_the_language_setting_b249173f]
+slots = []
+say = ["No voices match the language setting."]
+
+[notice_not_tuned_to_atis_f8ae1999]
+slots = []
+say = ["Not tuned to ATIS"]
+
+[notice_radio_power_off_c2267a7a]
+slots = []
+say = ["Radio power off"]
+
+[notice_receiving_airport_operational_data_unavailable_eb037b27]
+slots = []
+say = ["Receiving airport operational data unavailable"]
+
+[notice_request_response_could_not_be_read_85e2a2a9]
+slots = []
+say = ["Request response could not be read"]
+
+[notice_set_a_destination_icao_in_flight_plan_ed0c4fad]
+slots = []
+say = ["Set a destination ICAO in Flight Plan."]
+
+[notice_set_the_x_plane_folder_to_load_the_map_c68b9a0c]
+slots = []
+say = ["Set the X-Plane folder to load the map."]
+
+[notice_simbrief_download_failed_check_pilot_id_and_generate_a_f_9cc00b82]
+slots = []
+say = ["SimBrief download failed. Check Pilot ID and generate a flight first."]
+
+[notice_simulator_airport_weather_unavailable_8fc27abd]
+slots = []
+say = ["Simulator airport weather unavailable"]
+
+[notice_simulator_folder_changed_refresh_the_map_d952617e]
+slots = []
+say = ["Simulator folder changed; refresh the map."]
+
+[notice_speech_text_too_long_b4830210]
+slots = []
+say = ["Speech text too long"]
+
+[notice_stand_occupancy_could_not_be_cleared_select_another_stan_dfab9d7d]
+slots = []
+say = ["Stand occupancy could not be cleared. Select another stand."]
+
+[notice_start_a_mission_before_taxi_with_no_other_mission_runnin_01a2d004]
+slots = []
+say = ["Start a mission before taxi, with no other mission running."]
+
+[notice_station_catalogue_not_ready_213e537d]
+slots = []
+say = ["Station catalogue not ready"]
+
+[notice_stt_request_failed_check_endpoint_model_and_openatc_stt_1016f227]
+slots = []
+say = ["STT request failed. Check endpoint, model and OPENATC_STT_KEY on the engine."]
+
+[notice_that_controller_offer_is_no_longer_available_119a06cd]
+slots = []
+say = ["That controller offer is no longer available."]
+
+[notice_that_copilot_transmission_is_no_longer_pending_66a00d56]
+slots = []
+say = ["That copilot transmission is no longer pending."]
+
+[notice_that_pilot_is_unavailable_or_busy_flying_a_critical_phas_0180cb09]
+slots = []
+say = ["That pilot is unavailable or busy flying a critical phase."]
+
+[notice_the_flight_changed_before_that_pilot_could_reply_14af1ae9]
+slots = []
+say = ["The flight changed before that pilot could reply."]
+
+[notice_the_route_has_changed_e54a6e49]
+slots = []
+say = ["The route has changed."]
+
+[notice_the_shortcut_no_longer_meets_route_or_descent_limits_a371d2d4]
+slots = []
+say = ["The shortcut no longer meets route or descent limits."]
+
+[notice_this_mission_choice_is_no_longer_available_b5a3eeae]
+slots = []
+say = ["This mission choice is no longer available."]
+
+[notice_this_mission_is_not_suitable_for_the_loaded_aircraft_typ_8187f302]
+slots = []
+say = ["This mission is not suitable for the loaded aircraft type."]
+
+[notice_this_stand_is_too_small_or_has_no_published_size_1b3f0c4e]
+slots = []
+say = ["This stand is too small or has no published size."]
+
+[notice_tts_connection_failed_see_engine_log_for_the_failed_text_fa6fab84]
+slots = []
+say = ["TTS connection failed; see engine.log for the failed text and error."]
+
+[notice_tts_request_failed_check_endpoint_model_and_openatc_tts_0db775d1]
+slots = []
+say = ["TTS request failed. Check endpoint, model and OPENATC_TTS_KEY on the engine."]
+
+[notice_unknown_arrival_stand_8d191566]
+slots = []
+say = ["Unknown arrival stand."]
+
+[notice_unknown_role_1db2d66a]
+slots = []
+say = ["Unknown role"]
+
+[notice_unknown_speaker_8cd85329]
+slots = []
+say = ["Unknown speaker"]
+
+[notice_unknown_weather_airport_53c2de2b]
+slots = []
+say = ["Unknown weather airport"]
+
+[notice_wait_for_a_clear_radio_and_a_current_offer_from_this_con_5d31a8c7]
+slots = []
+say = ["Wait for a clear radio and a current offer from this controller."]
+
+[notice_wait_for_a_quiet_period_outside_critical_flight_phases_c286eca0]
+slots = []
+say = ["Wait for a quiet period outside critical flight phases."]
+
+[notice_wait_for_the_current_transmission_to_finish_44e12dd6]
+slots = []
+say = ["Wait for the current transmission to finish."]
+
+[notice_weather_must_be_a_valid_airport_surface_sample_786d4f09]
+slots = []
+say = ["Weather must be a valid airport surface sample"]
+[generated_surface_instruction]
+slots = ["callsign", "instructions"]
+say = ["{callsign}, {instructions}"]
+[generated_crossing_cancelled]
+slots = ["callsign", "runway"]
+say = ["{callsign}, hold position. Runway {runway} crossing clearance cancelled.", "{callsign}, cancel crossing runway {runway}. Hold position."]
+[generated_taxi_hold]
+slots = ["callsign"]
+say = ["{callsign}, hold position.", "{callsign}, hold position, stand by for taxi instructions."]
+
+[generated_taxi_hold_traffic]
+slots = ["callsign", "traffic"]
+say = ["{callsign}, hold position for {traffic}.", "{callsign}, hold position, traffic {traffic}."]
+
+[generated_departure_standby]
+slots = ["callsign", "runway"]
+say = ["{callsign}, hold short of runway {runway}, stand by.", "{callsign}, hold short runway {runway}. Stand by for departure."]
+
+[generated_hold_short_readback]
+slots = ["callsign", "runway"]
+say = ["Holding short of runway {runway}, {callsign}.", "Hold short runway {runway}, {callsign}."]

@@ -38,7 +38,7 @@ pub fn leg(fixes: &[RouteFix], next: usize, t: &Telemetry) -> Option<Leg> {
         return None;
     }
     let along = -(p[0] * d[0] + p[1] * d[1]) / len;
-    let cross = (p[0] + along.clamp(0.0, 1.0) * d[0]).hypot(p[1] + along.clamp(0.0, 1.0) * d[1]);
+    let cross = (p[0] + along * d[0]).hypot(p[1] + along * d[1]);
     Some(Leg {
         next,
         cross_track_nm: cross,
@@ -46,6 +46,29 @@ pub fn leg(fixes: &[RouteFix], next: usize, t: &Telemetry) -> Option<Leg> {
         bearing: crate::arrival::bearing([t.latitude, t.longitude], [b.latitude, b.longitude]),
         distance_nm: crate::ops::distance_nm(t.latitude, t.longitude, b.latitude, b.longitude),
     })
+}
+
+/// Observe completion of a non-straight fix leg from its known outbound track, without inventing the incoming course.
+pub fn fix_passed_on_outbound(fixes: &[RouteFix], next: usize, t: &Telemetry) -> bool {
+    let Some(fix) = fixes.get(next).filter(|fix| {
+        ["IF", "CF", "AF", "RF"].contains(&fix.path_terminator.as_str()) && !fix.fly_over
+    }) else {
+        return false;
+    };
+    let Some(following) = leg(fixes, next + 1, t) else {
+        return false;
+    };
+    let Some(target) = fixes.get(next + 1) else {
+        return false;
+    };
+    let course = crate::arrival::bearing(
+        [fix.latitude, fix.longitude],
+        [target.latitude, target.longitude],
+    );
+    following.along > 0.0
+        && following.along < 1.0
+        && following.cross_track_nm < 0.5
+        && turn(t.ground_track_degrees.unwrap_or(t.heading_degrees), course).abs() < 45.0
 }
 /// Parse a published altitude in feet or a coded flight level.
 fn altitude(value: &str) -> Option<i32> {
@@ -107,12 +130,21 @@ pub fn load_constraints(plan: &mut FlightPlan, kind: &str, text: &str) {
         if let Some(index) = index {
             let fix = &mut plan.fixes[index];
             fix.path_terminator = f[11].into();
+            fix.fly_over = f[8].as_bytes().get(1) == Some(&b'Y');
 
             if let Some(min) = min {
+                if fix.minimum_altitude_feet.is_none_or(|old| min >= old) {
+                    fix.minimum_altitude_is_flight_level =
+                        Some(if first == Some(min) { f[23] } else { f[24] }.starts_with("FL"));
+                }
                 fix.minimum_altitude_feet =
                     Some(fix.minimum_altitude_feet.map_or(min, |old| old.max(min)));
             }
             if let Some(max) = max {
+                if fix.maximum_altitude_feet.is_none_or(|old| max <= old) {
+                    fix.maximum_altitude_is_flight_level =
+                        Some(if first == Some(max) { f[23] } else { f[24] }.starts_with("FL"));
+                }
                 fix.maximum_altitude_feet =
                     Some(fix.maximum_altitude_feet.map_or(max, |old| old.min(max)));
             }
@@ -121,21 +153,23 @@ pub fn load_constraints(plan: &mut FlightPlan, kind: &str, text: &str) {
             {
                 fix.maximum_speed_knots = Some(speed);
             }
-            if min.is_some() || max.is_some() || fix.maximum_speed_knots.is_some() {
-                fix.constraint_source = format!("{kind} {name} / installed CIFP");
-            }
+            fix.constraint_source = format!("{kind} {name} / installed CIFP");
         }
     }
 }
 /// Load terminal constraints from the same custom/default navdata priority as X-Plane.
 pub fn enrich(plan: &mut FlightPlan, root: &str) {
+    plan.fixes.retain(|fix| !fix.procedure_generated);
     plan.sid_has_vectors = false;
     for fix in &mut plan.fixes {
         if fix.constraint_source.ends_with("/ installed CIFP") {
             fix.minimum_altitude_feet = None;
+            fix.minimum_altitude_is_flight_level = None;
             fix.maximum_altitude_feet = None;
+            fix.maximum_altitude_is_flight_level = None;
             fix.maximum_speed_knots = None;
             fix.path_terminator.clear();
+            fix.fly_over = false;
             fix.constraint_source.clear();
         }
     }
@@ -151,8 +185,132 @@ pub fn enrich(plan: &mut FlightPlan, root: &str) {
             format!("{root}/Resources/default data/CIFP/{id}.dat")
         };
         if let Ok(text) = std::fs::read_to_string(path) {
+            if ["SID", "STAR"].contains(&kind) {
+                let fix_path = [
+                    format!("{root}/Custom Data/earth_fix.dat"),
+                    format!("{root}/Resources/default data/earth_fix.dat"),
+                ]
+                .into_iter()
+                .find(|path| std::path::Path::new(path).is_file());
+                if let Some(fix_path) = fix_path
+                    && let Ok(fixes) = std::fs::read_to_string(fix_path)
+                {
+                    expand_terminal(plan, kind, &text, &fixes);
+                }
+            }
             load_constraints(plan, kind, &text);
         }
+    }
+}
+
+/// Insert named terminal fixes before applying their restrictions. Unsupported
+/// leg types remain labelled; this is not permission to fly a straight shortcut.
+fn expand_terminal(plan: &mut FlightPlan, kind: &str, procedure: &str, fixes: &str) {
+    let (name, runway, transition) = if kind == "SID" {
+        (&plan.sid, &plan.runway, &plan.sid_transition)
+    } else {
+        (&plan.star, &plan.arrival_runway, &plan.star_transition)
+    };
+    if name.is_empty() || plan.fixes.is_empty() {
+        return;
+    }
+    let shared = format!("RW{}B", runway.trim_end_matches(['L', 'R', 'C']));
+    let records: Vec<_> = procedure
+        .lines()
+        .filter_map(|line| {
+            let (record, data) = line.split_once(':')?;
+            let fields: Vec<_> = data.split(',').map(str::trim).collect();
+            (record == kind
+                && fields.len() >= 28
+                && fields[2] == name
+                && !fields[4].is_empty()
+                && !fields[4].starts_with("RW")
+                && (fields[3].is_empty()
+                    || fields[3] == transition
+                    || fields[3] == format!("RW{runway}")
+                    || fields[3] == shared))
+                .then_some(fields)
+        })
+        .take(256)
+        .collect();
+    let wanted: std::collections::BTreeSet<_> = records.iter().map(|f| (f[4], f[5])).collect();
+    let airport = if kind == "SID" {
+        &plan.departure
+    } else {
+        &plan.destination
+    };
+    let mut coordinates = std::collections::BTreeMap::new();
+    let mut ambiguous = std::collections::BTreeSet::new();
+    for line in fixes.lines() {
+        let fields: Vec<_> = line.split_whitespace().take(5).collect();
+        if fields.len() < 5 || !wanted.contains(&(fields[2], fields[4])) {
+            continue;
+        }
+        if fields[3] != airport && fields[3] != "ENRT" {
+            continue;
+        }
+        let (Ok(latitude), Ok(longitude)) = (fields[0].parse::<f64>(), fields[1].parse::<f64>())
+        else {
+            continue;
+        };
+        if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
+            continue;
+        }
+        let key = (fields[2], fields[4]);
+        let value = (latitude, longitude);
+        if coordinates.get(&key).is_some_and(|old| *old != value) {
+            ambiguous.insert(key);
+        }
+        coordinates.insert(key, value);
+    }
+    let mut cursor = if kind == "SID" {
+        plan.fixes
+            .iter()
+            .position(|fix| fix.identifier == plan.departure)
+            .map_or(1, |index| index + 1)
+    } else {
+        let Some(anchor) = records.first().and_then(|record| {
+            plan.fixes
+                .iter()
+                .rposition(|fix| fix.identifier == record[4])
+        }) else {
+            return;
+        };
+        anchor
+    };
+    for fields in records {
+        if plan.fixes.len() >= 512 {
+            break;
+        }
+        if let Some(index) = plan
+            .fixes
+            .iter()
+            .enumerate()
+            .skip(cursor)
+            .find_map(|(index, fix)| (fix.identifier == fields[4]).then_some(index))
+        {
+            cursor = index + 1;
+            continue;
+        }
+        let key = (fields[4], fields[5]);
+        if ambiguous.contains(&key) {
+            continue;
+        }
+        let Some(&(latitude, longitude)) = coordinates.get(&key) else {
+            continue;
+        };
+        plan.fixes.insert(
+            cursor.min(plan.fixes.len()),
+            crate::state::RouteFix {
+                procedure_generated: true,
+                identifier: fields[4].into(),
+                latitude,
+                longitude,
+                path_terminator: fields[11].into(),
+                ..Default::default()
+            },
+        );
+        cursor += 1;
     }
 }
 /// Smallest signed turn from one heading to another.
@@ -163,6 +321,91 @@ pub fn turn(from: f64, to: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn internal_star_fixes_receive_constraints_without_duplicate_insertion() {
+        let mut plan = FlightPlan {
+            destination: "TEST".into(),
+            star: "TEST1".into(),
+            arrival_runway: "35R".into(),
+            fixes: vec![
+                RouteFix {
+                    identifier: "ENTRY".into(),
+                    latitude: 44.9,
+                    longitude: 8.6,
+                    ..Default::default()
+                },
+                RouteFix {
+                    identifier: "TEST".into(),
+                    latitude: 45.6,
+                    longitude: 8.7,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut entry = vec![""; 28];
+        entry[0] = "010";
+        entry[2] = "TEST1";
+        entry[3] = "RW35B";
+        entry[4] = "ENTRY";
+        entry[5] = "LI";
+        entry[11] = "IF";
+        let mut crossing = entry.clone();
+        crossing[0] = "020";
+        crossing[4] = "INTERNAL";
+        crossing[11] = "TF";
+        crossing[22] = "-";
+        crossing[23] = "FL120";
+        let text = format!("STAR:{}\nSTAR:{}", entry.join(","), crossing.join(","));
+        let fixes = "45.0 8.6 INTERNAL TEST LI\n40.0 4.0 INTERNAL OTHER LI";
+        expand_terminal(&mut plan, "STAR", &text, fixes);
+        load_constraints(&mut plan, "STAR", &text);
+        let fix = &plan.fixes[1];
+        assert_eq!(fix.identifier, "INTERNAL");
+        assert!(fix.procedure_generated);
+        assert_eq!(fix.maximum_altitude_feet, Some(12000));
+        assert_eq!(fix.latitude, 45.0);
+        expand_terminal(&mut plan, "STAR", &text, fixes);
+        assert_eq!(plan.fixes.len(), 3);
+    }
+    #[test]
+    #[ignore = "requires installed licensed navigation data via OPENATC_TEST_SIMULATOR_ROOT"]
+    fn installed_devo3e_inserts_the_reported_descent_restriction() {
+        let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
+        let mut plan = FlightPlan {
+            departure: "LFMN".into(),
+            destination: "LIMC".into(),
+            star: "DEVO3E".into(),
+            arrival_runway: "35R".into(),
+            fixes: vec![
+                RouteFix {
+                    identifier: "DEVOX".into(),
+                    latitude: 44.9,
+                    longitude: 8.6,
+                    ..Default::default()
+                },
+                RouteFix {
+                    identifier: "LIMC".into(),
+                    latitude: 45.6,
+                    longitude: 8.7,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        enrich(&mut plan, &root);
+        assert_eq!(
+            plan.fixes
+                .iter()
+                .find(|fix| fix.identifier == "MC588")
+                .unwrap()
+                .maximum_altitude_feet,
+            Some(12000)
+        );
+        let count = plan.fixes.len();
+        enrich(&mut plan, &root);
+        assert_eq!(plan.fixes.len(), count);
+    }
     #[test]
     fn projection_and_turn_wrap() {
         let fixes = vec![
@@ -186,6 +429,79 @@ mod tests {
         assert!((l.cross_track_nm - 6.0).abs() < 0.1);
         assert!((l.along - 0.5).abs() < 0.01);
         assert_eq!(turn(350.0, 10.0), 20.0);
+        let passed = leg(
+            &fixes,
+            1,
+            &Telemetry {
+                latitude: 0.0,
+                longitude: 1.1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(passed.along > 1.0);
+        assert!(passed.cross_track_nm < 0.001);
+    }
+    #[test]
+    fn initial_fix_sequences_from_observed_outbound_track_without_an_incoming_course() {
+        let fixes = vec![
+            RouteFix {
+                longitude: 0.0,
+                ..Default::default()
+            },
+            RouteFix {
+                longitude: 1.0,
+                path_terminator: "IF".into(),
+                ..Default::default()
+            },
+            RouteFix {
+                longitude: 2.0,
+                path_terminator: "TF".into(),
+                ..Default::default()
+            },
+        ];
+        let telemetry = Telemetry {
+            latitude: 0.005,
+            longitude: 1.1,
+            heading_degrees: 90.0,
+            ..Default::default()
+        };
+        assert!(leg(&fixes, 1, &telemetry).is_none());
+        assert!(fix_passed_on_outbound(&fixes, 1, &telemetry));
+        for terminator in ["CF", "AF", "RF"] {
+            let mut endpoint = fixes.clone();
+            endpoint[1].path_terminator = terminator.into();
+            assert!(fix_passed_on_outbound(&endpoint, 1, &telemetry));
+            endpoint[1].fly_over = true;
+            assert!(!fix_passed_on_outbound(&endpoint, 1, &telemetry));
+        }
+        assert!(!fix_passed_on_outbound(
+            &fixes,
+            1,
+            &Telemetry {
+                heading_degrees: 270.0,
+                ..telemetry.clone()
+            }
+        ));
+        assert!(!fix_passed_on_outbound(
+            &fixes,
+            1,
+            &Telemetry {
+                latitude: 0.1,
+                ..telemetry
+            }
+        ));
+        let mut vector = fixes;
+        vector[2].path_terminator = "VI".into();
+        assert!(!fix_passed_on_outbound(
+            &vector,
+            1,
+            &Telemetry {
+                longitude: 1.1,
+                heading_degrees: 90.0,
+                ..Default::default()
+            }
+        ));
     }
     #[test]
     fn planned_altitude_is_not_a_restriction_and_other_runways_are_excluded() {

@@ -65,6 +65,31 @@ pub struct Installer {
     catalogue: Arc<tokio::sync::Mutex<Option<CachedCatalogue>>>,
 }
 impl Installer {
+    pub async fn models(
+        &self,
+        root: &str,
+        workers: &crate::workers::Workers,
+    ) -> Result<Arc<openatc_core::traffic::csl::Catalogue>, String> {
+        if self.running.load(Ordering::Acquire) {
+            return Err("Model installation is running".into());
+        }
+        let path = location(root)?;
+        let mut cache = self.catalogue.lock().await;
+        if cache.as_ref().is_none_or(|cached| cached.root != path) {
+            let source = path.clone();
+            let data = workers
+                .run(move || openatc_core::traffic::csl::Catalogue::scan(&source))
+                .await??;
+            if self.running.load(Ordering::Acquire) {
+                return Err("Model installation changed the catalogue".into());
+            }
+            *cache = Some(CachedCatalogue {
+                root: path,
+                data: Arc::new(data),
+            });
+        }
+        Ok(cache.as_ref().unwrap().data.clone())
+    }
     fn update(&self, f: impl FnOnce(&mut Progress)) {
         f(&mut self
             .progress

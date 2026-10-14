@@ -13,16 +13,38 @@ use std::{
     sync::Arc,
 };
 
-#[derive(Default, Clone)]
-pub struct Store(Arc<tokio::sync::Mutex<Option<Loaded>>>);
+#[derive(Clone)]
+pub struct Store(
+    Arc<tokio::sync::Mutex<Option<Loaded>>>,
+    Arc<std::sync::RwLock<Option<Arc<Profiles>>>>,
+);
 
 struct Loaded {
+    disk_loaded: bool,
     profile: Arc<Profiles>,
     sources: Vec<String>,
     errors: Vec<String>,
 }
 
-fn directories(config: &Path) -> Vec<PathBuf> {
+impl Default for Store {
+    fn default() -> Self {
+        static BUILTIN: std::sync::OnceLock<Arc<Profiles>> = std::sync::OnceLock::new();
+        let profile = BUILTIN
+            .get_or_init(|| Arc::new(Profiles::builtin().expect("bundled traffic profiles")))
+            .clone();
+        Self(
+            Arc::new(tokio::sync::Mutex::new(Some(Loaded {
+                disk_loaded: false,
+                profile: profile.clone(),
+                sources: vec!["Bundled profiles".into()],
+                errors: vec![],
+            }))),
+            Arc::new(std::sync::RwLock::new(Some(profile))),
+        )
+    }
+}
+
+pub(crate) fn directories(config: &Path) -> Vec<PathBuf> {
     let installed = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.join("../traffic")));
@@ -63,6 +85,7 @@ fn load(dirs: &[PathBuf]) -> Result<Loaded, String> {
         }
     }
     Ok(Loaded {
+        disk_loaded: true,
         profile: Arc::new(Profiles::parse(&texts[0], &texts[1], &texts[2])?),
         sources,
         errors: vec![],
@@ -70,6 +93,13 @@ fn load(dirs: &[PathBuf]) -> Result<Loaded, String> {
 }
 
 impl Store {
+    /// Read the latest complete profile set without waiting for a reload worker.
+    pub fn current(&self) -> Option<Arc<Profiles>> {
+        self.1
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
     pub async fn get(
         &self,
         config: &Path,
@@ -77,10 +107,23 @@ impl Store {
         refresh: bool,
     ) -> Result<Arc<Profiles>, String> {
         let mut cached = self.0.lock().await;
-        if refresh || cached.is_none() {
+        if refresh || cached.as_ref().is_none_or(|loaded| !loaded.disk_loaded) {
+            if cached.as_ref().is_none_or(|loaded| !loaded.disk_loaded) {
+                *self
+                    .1
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
             let dirs = directories(config);
             match workers.run(move || load(&dirs)).await? {
-                Ok(loaded) => *cached = Some(loaded),
+                Ok(loaded) => {
+                    *self
+                        .1
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(loaded.profile.clone());
+                    *cached = Some(loaded);
+                }
                 Err(error) => {
                     if let Some(current) = cached.as_mut() {
                         current.errors = vec![error.clone()];
@@ -113,6 +156,7 @@ pub async fn inspect(AxumState(shared): AxumState<Shared>, Json(body): Json<Valu
     };
     Json(
         json!({"accepted":result.is_ok(), "aircraft":loaded.profile.aircraft,
+        "spacing": loaded.profile.spacing,
         "airlines":loaded.profile.airlines,"hubs":loaded.profile.hubs,
         "sources":loaded.sources,"errors":loaded.errors}),
     )
@@ -130,15 +174,45 @@ mod tests {
         std::fs::create_dir_all(&data).unwrap();
         let source = include_str!("../../../traffic/hubs.toml").replace("QFA = 55", "QFA = 75");
         std::fs::write(data.join("hubs.toml"), source).unwrap();
+        std::fs::write(
+            data.join("aircraft.toml"),
+            include_str!("../../../traffic/aircraft.toml").replacen(
+                "minimum_knots = 80.0",
+                "minimum_knots = 90.0",
+                1,
+            ),
+        )
+        .unwrap();
         let store = Store::default();
         let workers = Workers::new(1);
         let first = store.get(&dir, &workers, false).await.unwrap();
         assert_eq!(first.hubs["YSSY"].airlines["QFA"], 75);
+        assert_eq!(
+            store.current().unwrap().aircraft["C172"]
+                .spacing_speed
+                .as_ref()
+                .unwrap()
+                .minimum_knots,
+            90.0
+        );
+        {
+            let _loading = store.0.lock().await;
+            assert!(
+                Arc::ptr_eq(&store.current().unwrap(), &first),
+                "controller ticks retain the validated snapshot during reload"
+            );
+        }
         std::fs::write(data.join("hubs.toml"), "version = 99").unwrap();
         assert!(store.get(&dir, &workers, true).await.is_err());
         let next = store.get(&dir, &workers, false).await.unwrap();
         assert!(Arc::ptr_eq(&first, &next));
         assert_eq!(store.0.lock().await.as_ref().unwrap().errors.len(), 1);
+        let invalid_initial = Store::default();
+        assert!(invalid_initial.get(&dir, &workers, false).await.is_err());
+        assert!(
+            invalid_initial.current().is_none(),
+            "rejected initial overrides must not silently enable speed offers"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

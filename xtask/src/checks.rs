@@ -181,6 +181,7 @@ fn serve(
     Ok(())
 }
 struct Engine {
+    radio: openatc_core::state::Radio,
     child: Child,
     client: Client,
     url: String,
@@ -221,7 +222,29 @@ impl Engine {
             fs::write(atc, include_str!("../fixtures/flight-atc.dat"))?;
             let cifp = sim.join("Custom Data/CIFP");
             fs::create_dir_all(&cifp)?;
-            fs::write(cifp.join("DEST.dat"), "APPCH:010,A,I09R,,FINAL,\n")?;
+            let mut procedure = "APPCH:010,A,I09R,,FINAL,\n".to_owned();
+            for (sequence, fix, leg, altitude) in
+                [("010", "ENTRY", "IF", ""), ("020", "RESTR", "TF", "02500")]
+            {
+                let mut fields = vec![""; 28];
+                fields[0] = sequence;
+                fields[1] = "4";
+                fields[2] = "TEST1";
+                fields[3] = "RW09R";
+                fields[4] = fix;
+                fields[5] = "ZZ";
+                fields[11] = leg;
+                if !altitude.is_empty() {
+                    fields[22] = "-";
+                    fields[23] = altitude;
+                }
+                procedure.push_str(&format!("STAR:{}\n", fields.join(",")));
+            }
+            fs::write(cifp.join("DEST.dat"), procedure)?;
+            fs::write(
+                sim.join("Custom Data/earth_fix.dat"),
+                "0.0 3.0 ENTRY DEST ZZ\n0.0 3.5 RESTR DEST ZZ\n",
+            )?;
         }
         let unrelated = sim.join("Custom Scenery/Unrelated/Earth nav data");
         fs::create_dir_all(&unrelated)?;
@@ -273,6 +296,7 @@ impl Engine {
             folder.path(),
         )?;
         let mut engine = Self {
+            radio: openatc_core::state::Radio::Com1,
             child,
             client: Client::builder().timeout(Duration::from_secs(35)).build()?,
             url: format!("http://127.0.0.1:{port}"),
@@ -325,7 +349,13 @@ impl Engine {
         }
         Ok(v)
     }
-    fn post(&self, path: &str, body: Value) -> Result<Value> {
+    fn post(&self, path: &str, mut body: Value) -> Result<Value> {
+        if matches!(path, "request" | "request/copilot-checkin")
+            && body.is_object()
+            && body.get("radio").is_none()
+        {
+            body["radio"] = serde_json::to_value(self.radio)?;
+        }
         self.ok(path, Some(body))
     }
     fn state(&self) -> Result<Value> {
@@ -338,10 +368,23 @@ impl Engine {
         )
     }
     fn tune(&mut self, freq: u32, changes: Value) -> Result {
-        self.telemetry["com1Khz"] = json!(freq);
+        self.telemetry[if self.radio == openatc_core::state::Radio::Com2 {
+            "com2Khz"
+        } else {
+            "com1Khz"
+        }] = json!(freq);
         merge(&mut self.telemetry, changes);
         self.post("telemetry", self.telemetry.clone())?;
         Ok(())
+    }
+    fn frequency(&self) -> u32 {
+        self.telemetry[if self.radio == openatc_core::state::Radio::Com2 {
+            "com2Khz"
+        } else {
+            "com1Khz"
+        }]
+        .as_u64()
+        .unwrap() as u32
     }
     fn settings(&self, changes: Value) -> Result {
         let mut value = self.state()?["settings"].clone();

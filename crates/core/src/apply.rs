@@ -22,6 +22,7 @@ pub struct RequestOutcome {
 /// Record a transmission and retain the latest 500 entries.
 pub fn add_transmission(state: &mut State, speaker: &str, text: &str, tag: &SpeechTag) {
     let entry = Transmission {
+        radio: tag.radio,
         information_only: false,
         pilot_reply: String::new(),
         background: false,
@@ -484,9 +485,16 @@ fn apply_clearance(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcom
             crate::dialogue::say("clearance_is_available_only_while_parked", &[]),
         );
     }
+    let departure_readback = [state.plan.sid.as_str(), state.plan.sid_transition.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     state.clearance = Some(Clearance {
         altitude_feet: state.plan.initial_altitude_feet,
         route: state.plan.route.clone(),
+        departure_readback: departure_readback.clone(),
+        as_filed: true,
         runway: state.plan.runway.clone(),
         squawk: ctx.squawk.to_owned(),
         acknowledged: false,
@@ -496,18 +504,10 @@ fn apply_clearance(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcom
     state.phase = PhaseCode::Clearance;
     let prefix = if state.demo { "DEMO: " } else { "" };
     let altitude = altitude_text(f64::from(state.plan.initial_altitude_feet), ctx.units, true);
-    let via = if state.plan.sid.is_empty()
-        || state.plan.route.split_whitespace().next() == Some(state.plan.sid.as_str())
-    {
-        state.plan.route.clone()
+    let via = if departure_readback.is_empty() {
+        crate::dialogue::say("filed_routing", &[])
     } else {
-        crate::dialogue::say(
-            "then",
-            &[
-                ("sid", (state.plan.sid).clone()),
-                ("route", (state.plan.route).clone()),
-            ],
-        )
+        crate::dialogue::say("departure_then_filed", &[("sid", departure_readback)])
     };
     if ctx.region.clearance == "initial" {
         return reply(

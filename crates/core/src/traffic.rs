@@ -1,8 +1,14 @@
 //! Bounded traffic geometry shared by surface and approach monitoring.
 pub mod advisory;
+pub mod animation;
+pub mod coordinates;
+pub mod curves;
 pub mod csl;
+pub mod holding;
 pub mod motion;
+pub mod procedures;
 pub mod profiles;
+pub mod surface;
 pub mod wake;
 use crate::{
     airport::{Airport, airport_point},
@@ -101,7 +107,7 @@ pub fn landing_blocked(
         return Some("holding_standby");
     };
     if wake::applies(&airport.icao) && own.0 < 0.0 {
-        for target in targets.iter().take(63).filter(|t| !t.on_ground) {
+        for target in targets.iter().take(126).filter(|t| !t.on_ground) {
             let Some(lead_runway) = wake::approach_runway(airport, runway, target) else {
                 continue;
             };
@@ -158,7 +164,7 @@ pub fn landing_blocked(
     crate::holding::blocked_targets(
         airport,
         runway,
-        targets.iter().take(63).filter(|target| {
+        targets.iter().take(126).filter(|target| {
             let Some(position) =
                 approach_position(airport, runway, target.latitude, target.longitude)
             else {
@@ -190,7 +196,7 @@ pub fn taxi_conflict<'a>(airport: &Airport, telemetry: &'a Telemetry) -> Option<
         .traffic
         .as_ref()?
         .iter()
-        .take(63)
+        .take(126)
         .filter(|t| t.on_ground)
         .find(|target| {
             let p = airport_point(airport, target.latitude, target.longitude);
@@ -310,7 +316,17 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(landing_blocked(&a, "09", &t), None);
+        let follower = t.traffic.as_ref().unwrap()[0].clone();
+        t.traffic = Some(
+            (0..63)
+                .map(|id| TrafficTarget {
+                    id: id + 1,
+                    ..follower.clone()
+                })
+                .collect(),
+        );
         t.traffic.as_mut().unwrap().push(TrafficTarget {
+            id: 0xf00001,
             longitude: 0.01,
             on_ground: true,
             ..Default::default()

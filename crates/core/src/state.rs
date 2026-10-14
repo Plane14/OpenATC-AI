@@ -37,6 +37,12 @@ pub enum PhaseCode {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TrafficTarget {
+    /// Optional display name supplied by the traffic provider.
+    pub name: String,
+    /// Known tuned COM1 channel in kHz; absent for providers without radio state.
+    pub com1_khz: Option<i32>,
+    /// Known tuned COM2 channel in kHz; never inferred from proximity.
+    pub com2_khz: Option<i32>,
     /// Stable simulator Mode S identity; zero means the provider did not identify it.
     pub id: u32,
     /// Flight ID supplied by the simulator traffic provider.
@@ -57,6 +63,24 @@ pub struct TrafficTarget {
     pub track_degrees: f64,
     /// Simulator weight-on-wheels flag.
     pub on_ground: bool,
+}
+
+/// Worker-produced position and model for lightweight simulator instances.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedTraffic {
+    /// Actual vertical movement, used by TCAS independently of visual pitch.
+    #[serde(default)]
+    pub vertical_speed_fpm: f64,
+    /// Body orientation can differ from ground track during pushback.
+    #[serde(default)]
+    pub body_heading_degrees: Option<f64>,
+    /// Operational identity and geographic position.
+    pub target: TrafficTarget,
+    /// All locally indexed parts of the selected CSL model.
+    pub model: std::sync::Arc<crate::traffic::csl::Model>,
+    /// Continuous visual state from the simulation worker.
+    pub animation: crate::traffic::animation::Animation,
 }
 
 /// The traffic currently pointed out by the tuned controller.
@@ -120,6 +144,9 @@ pub struct Telemetry {
     pub height_agl_feet: f64,
     /// COM1 frequency in kHz.
     pub com1_khz: i32,
+    /// COM2 channel in kHz; unavailable radios remain unknown.
+    #[serde(default)]
+    pub com2_khz: Option<i32>,
     /// Four octal digits as shown on the transponder; absent if unavailable.
     pub transponder_code: Option<i32>,
     /// X-Plane mode: 0 off, 1 standby, 2 A, 3 C, 4 test, 5 ground, 6 TA, 7 TA/RA.
@@ -158,6 +185,7 @@ impl Default for Telemetry {
             vertical_speed_fpm: 0.0,
             height_agl_feet: 0.0,
             com1_khz: 0,
+            com2_khz: None,
             transponder_code: None,
             transponder_mode: None,
             radio_power: true,
@@ -190,6 +218,8 @@ impl Telemetry {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RouteFix {
+    /// Inserted from the selected procedure; rebuild it after a runway/procedure change.
+    pub procedure_generated: bool,
     /// Fix identifier.
     pub identifier: String,
     /// Degrees north.
@@ -200,13 +230,19 @@ pub struct RouteFix {
     pub altitude_feet: f64,
     /// Published lower crossing limit, feet MSL.
     pub minimum_altitude_feet: Option<i32>,
+    /// Preserve a published flight-level reference separately from feet on QNH.
+    pub minimum_altitude_is_flight_level: Option<bool>,
     /// Published upper crossing limit, feet MSL.
     pub maximum_altitude_feet: Option<i32>,
+    /// Preserve the reference for an upper limit or exact crossing altitude.
+    pub maximum_altitude_is_flight_level: Option<bool>,
     /// Published maximum indicated airspeed at the fix.
     pub maximum_speed_knots: Option<f64>,
     /// Published leg type; curved and vector legs need their own geometry.
     pub path_terminator: String,
-    /// Navdata origin of the restriction.
+    /// Published fly-over indication; do not treat it as an ordinary fly-by fix.
+    pub fly_over: bool,
+    /// Navdata origin of this leg or restriction.
     pub constraint_source: String,
     /// Requested step-climb altitude at this fix; it still needs ATC clearance.
     pub step_altitude_feet: Option<i32>,
@@ -429,6 +465,12 @@ pub struct Clearance {
     pub altitude_feet: i32,
     /// Assigned route.
     pub route: String,
+    /// Initial departure routing; an empty value preserves legacy full-route readback.
+    #[serde(default)]
+    pub departure_readback: String,
+    /// The initial clearance accepts the filed en-route routing.
+    #[serde(default)]
+    pub as_filed: bool,
     /// Assigned runway.
     pub runway: String,
     /// Squawk code.
@@ -451,6 +493,9 @@ pub struct Clearance {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transmission {
+    /// Receiving radio; absent on interphone and legacy entries.
+    #[serde(default)]
+    pub radio: Option<Radio>,
     /// An advisory may interrupt speech without replacing a pending instruction.
     #[serde(default)]
     pub information_only: bool,
@@ -494,10 +539,34 @@ impl Transmission {
     }
 }
 
+/// Aircraft radio selected for an exchange; older clients use COM1.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Radio {
+    /// First VHF radio.
+    #[default]
+    Com1,
+    /// Second VHF radio.
+    Com2,
+}
+
+impl Telemetry {
+    /// Return the selected channel without substituting another radio.
+    #[must_use]
+    pub fn frequency(&self, radio: Radio) -> Option<i32> {
+        match radio {
+            Radio::Com1 => Some(self.com1_khz).filter(|frequency| *frequency > 0),
+            Radio::Com2 => self.com2_khz.filter(|frequency| *frequency > 0),
+        }
+    }
+}
+
 /// Pilot request submitted to the controller.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Request {
+    /// Radio carrying this request; interphone roles do not use it.
+    pub radio: Radio,
     /// Internal controller initiative; never accepted from an HTTP request.
     #[serde(skip)]
     pub controller_initiated: bool,
@@ -521,6 +590,8 @@ pub struct Request {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct SpeechTag {
+    /// Radio carrying the exchange, or no radio for crew interphone.
+    pub radio: Option<Radio>,
     /// ATC position, empty when none.
     pub position: String,
     /// Voice id.
@@ -536,6 +607,7 @@ pub struct SpeechTag {
 impl Default for SpeechTag {
     fn default() -> Self {
         Self {
+            radio: None,
             position: String::new(),
             voice: String::new(),
             delivery: "standard".to_owned(),
@@ -688,6 +760,19 @@ impl TaxiClearance {
 #[serde(rename_all = "camelCase")]
 #[allow(clippy::struct_excessive_bools)] // Independent saved permissions and flight flags.
 pub struct State {
+    /// Radio carrying the flight's current controller clearances and handoffs.
+    #[serde(default)]
+    pub control_radio: Radio,
+    /// Generated models ready for simulator rendering; observations remain in telemetry.
+    #[serde(default)]
+    pub generated_traffic: Vec<GeneratedTraffic>,
+    /// Validated per-instance animation channel mapping supplied by the engine.
+    #[serde(default)]
+    pub generated_animation_channels:
+        std::collections::BTreeMap<String, crate::traffic::animation::Channel>,
+    /// Bounded model and route diagnostics for the generated fleet.
+    #[serde(default)]
+    pub generated_traffic_diagnostics: Vec<String>,
     /// Remaining observed departure wake delay; zero does not override runway occupancy.
     #[serde(default)]
     pub departure_wake_seconds: f64,
@@ -776,6 +861,10 @@ fn default_sequence() -> u32 {
 impl Default for State {
     fn default() -> Self {
         Self {
+            control_radio: Radio::Com1,
+            generated_traffic: Vec::new(),
+            generated_animation_channels: Default::default(),
+            generated_traffic_diagnostics: Vec::new(),
             traffic_call: None,
             departure_wake_seconds: 0.0,
             arrival_wake_conflict: false,
@@ -803,6 +892,36 @@ impl Default for State {
             frequency_sequence: 0,
             weather_advisories: Vec::new(),
         }
+    }
+}
+
+impl State {
+    /// Actual channel of the controlling radio, without substituting another receiver.
+    #[must_use]
+    pub fn control_frequency(&self) -> Option<i32> {
+        self.telemetry.frequency(self.control_radio)
+    }
+
+    /// Choose one receiver for a shared broadcast, even when both radios are tuned to it.
+    #[must_use]
+    pub fn receiving_radio(&self, frequency: i32) -> Option<Radio> {
+        [self.control_radio, Radio::Com1, Radio::Com2]
+            .into_iter()
+            .find(|radio| self.telemetry.frequency(*radio) == Some(frequency))
+    }
+
+    /// Keep an assigned frequency change on the radio that received it.
+    #[must_use]
+    pub fn handoff_radio(&self) -> Radio {
+        if self.frequency_sequence == 0 {
+            return self.control_radio;
+        }
+        self.transcript
+            .iter()
+            .rev()
+            .find(|entry| entry.sequence == self.frequency_sequence)
+            .and_then(|entry| entry.radio)
+            .unwrap_or(self.control_radio)
     }
 }
 

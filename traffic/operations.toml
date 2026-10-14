@@ -1,0 +1,16 @@
+# Bounded generated-traffic preparation and surface movement.
+version = 1
+holding_turn_rate_degrees_sec = 3.0
+pushback_knots = 3.0
+pushback_radius_scale = 0.6
+pushback_max_meters = 250.0
+preparation_seconds_min = 30.0
+preparation_seconds_max = 90.0
+surface_sample_meters = 5.0
+surface_segment_meters = 25.0
+conflict_cell_meters = 50.0
+stand_clearance_meters = 60.0
+maximum_surface_segments = 512
+radio_characters_per_second = 14.0
+radio_gap_seconds = 1.0
+runway_clearance_buffer_seconds = 20.0

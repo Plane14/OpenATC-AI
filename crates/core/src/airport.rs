@@ -1621,7 +1621,9 @@ pub fn contains_aircraft(airport: &Airport, telemetry: &Telemetry) -> bool {
         )
 }
 
-fn on_pavement(airport: &Airport, p: Point) -> bool {
+/// Whether installed runway or pavement faces cover this point.
+#[must_use]
+pub fn on_pavement(airport: &Airport, p: Point) -> bool {
     if airport.runways.iter().any(|r| {
         let delta = difference(r.second, r.first);
         let offset = difference(p, r.first);

@@ -109,6 +109,25 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         "cabin_brightness",
         50.,
     )?;
+    let combined = c.action(
+        "cabin",
+        "how are the passengers and get you turn off cabin lights and get ready for depature?",
+        "cabin_brightness",
+        0.,
+    )?;
+    let response = latest(&combined["state"]).to_lowercase();
+    assert!(
+        response.contains("cabin") && response.contains("departure"),
+        "{response}"
+    );
+    assert_eq!(
+        combined["state"]["transcript"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["speaker"],
+        "ATTENDANT"
+    );
     let armed = c.action("cabin", "arm slides and crosscheck", "slides", 1.)?;
     assert!(
         latest(&armed["state"])
@@ -146,6 +165,25 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         ("cabin", "set heading 270"),
     ] {
         c.denied(role, text)?;
+    }
+    for (role, speaker) in [
+        ("ground", "GROUND"),
+        ("cabin", "ATTENDANT"),
+        ("copilot", "COPILOT"),
+    ] {
+        let farewell = c.request(role, "have a good day done there sir")?;
+        accepted(&farewell);
+        let state = &farewell["state"];
+        assert!(state["crewActions"].as_array().unwrap().is_empty());
+        let text = latest(state).to_lowercase();
+        assert!(
+            !text.contains("confirm") && !text.contains("approval"),
+            "{text}"
+        );
+        assert_eq!(
+            state["transcript"].as_array().unwrap().last().unwrap()["speaker"],
+            speaker
+        );
     }
     let started = c.request("copilot", "read before start checklist")?;
     contains(&started, "Seat belt");

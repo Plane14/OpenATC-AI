@@ -36,3 +36,22 @@ At the approved taxi endpoint, stopped within 25 m, the engine checks the actual
 Live sessions no longer generate fictional callsigns or canned background clearances; that TOML chatter is demo-only. Actual simulator traffic still gates runway entry and departure. Copilot readbacks are controlled by the readback setting, use complete structured Auto Reply facts, and carry the Copilot label without a controller-station name. Routine auto-response does not parrot taxi prompts. Taxi prompts do not request nonexistent taxiway names, and controller acknowledgments use short ATC wording. Duplicate plugin holding-light objects were removed. The installed simulator exposes global airport-light controls and a read-only wigwag brightness value, not an established per-holding-point native control; existing scenery lights are preserved.
 
 Crew control requests use `crew_request_*` entries. Checklist challenges, expected answers and control confirmations also live here; aircraft TOML files refer to their keys and contain only control mappings and checklist order. Keep request alternatives specific enough to distinguish similar controls.
+## Optional matching conditions
+
+Live spoken replies, crew fallbacks, request notices and mission summaries use this catalogue. `notice_*` entries are user-facing API notices, not controller clearances; changing them does not change authorization. Model-generated free conversation is guided by editable role prompts in `prompts/prompts.toml` and these phrasebooks. Technical logs, protocol identifiers and UI control labels are separate from spoken dialogue.
+
+Conversation entries can include `match_any` phrases, `match_priority`, `humour`, `fallback` and `when` conditions. Conditions compare caller-supplied observed facts: a scalar means equality, an array lists permitted values, and `{ min = ..., max = ... }` describes a numeric range. Missing facts do not match. Triggers match whole normalized words/phrases rather than substrings of unrelated words. Required operational placeholders remain validated.
+
+For example:
+
+```toml
+[traffic_chat_example]
+slots = []
+say = ["Cheers, have a good flight."]
+match_any = ["thanks", "thank you"]
+match_priority = 20
+humour = false
+when = { phase = ["cruise"] }
+```
+
+Only facts supplied by the calling conversation path are available to that rule. Editing a response condition does not bypass clearance, radio or aircraft safety checks.

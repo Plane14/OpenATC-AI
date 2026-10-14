@@ -15,7 +15,23 @@ impl Sampler {
         if self.last_query.is_some_and(|t| t.elapsed().as_secs() < 2) {
             return;
         }
-        let tuned = interface.engine.state().telemetry.com1_khz;
+        let state = interface.engine.state();
+        let tuned = [
+            state
+                .telemetry
+                .frequency(interface.active_radio)
+                .unwrap_or(0),
+            state
+                .telemetry
+                .frequency(
+                    if interface.active_radio == openatc_core::state::Radio::Com1 {
+                        openatc_core::state::Radio::Com2
+                    } else {
+                        openatc_core::state::Radio::Com1
+                    },
+                )
+                .unwrap_or(0),
+        ];
         let nearest = interface
             .nearby_stations
             .iter()
@@ -24,10 +40,15 @@ impl Sampler {
         let mut candidates: Vec<Station> = interface
             .nearby_stations
             .iter()
-            .filter(|s| s.service != "Center" && (s.khz == tuned || s.airport == nearest))
+            .filter(|s| s.service != "Center" && (tuned.contains(&s.khz) || s.airport == nearest))
             .cloned()
             .collect();
-        candidates.sort_by_key(|s| s.khz != tuned);
+        candidates.sort_by_key(|s| {
+            tuned
+                .iter()
+                .position(|frequency| *frequency == s.khz)
+                .unwrap_or(2)
+        });
         let Some(station) = candidates.into_iter().find(|s| {
             self.sampled
                 .get(&s.airport)

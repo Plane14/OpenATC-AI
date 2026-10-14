@@ -15,6 +15,9 @@ pub fn aircraft_size(state: &State) -> Option<char> {
     } else {
         &state.telemetry.aircraft_icao
     };
+    if let Some(aircraft) = crate::traffic::profiles::aircraft(icao) {
+        return size_for_span(aircraft.wingspan);
+    }
     // Conservative class for common fixed-wing types when the simulator omits wingspan.
     match icao.trim().to_uppercase().as_str() {
         "C152" | "C172" | "C182" | "C208" | "PA28" | "BE58" | "SR20" | "SR22" => Some('A'),
@@ -68,6 +71,31 @@ pub fn stand_size(stand: &Parking) -> Option<char> {
 #[must_use]
 pub fn fits(stand: &Parking, size: char) -> bool {
     stand_size(stand).is_some_and(|capacity| capacity >= size)
+}
+
+/// Fixed-wing traffic must not occupy scenery positions reserved for helicopters.
+#[must_use]
+pub fn fixed_wing_stand(stand: &Parking) -> bool {
+    stand
+        .equipment
+        .split('|')
+        .any(|equipment| matches!(equipment, "jets" | "heavy" | "turboprops" | "props"))
+}
+
+/// Equipment eligibility is separate from the stand's wingspan limit.
+#[must_use]
+pub fn supports_aircraft(stand: &Parking, aircraft: &crate::traffic::profiles::Aircraft) -> bool {
+    let equipment = if aircraft.handling == Some(crate::traffic::animation::Kind::Piston) {
+        "props"
+    } else if aircraft.propeller {
+        "turboprops"
+    } else {
+        "jets"
+    };
+    fits(stand, aircraft.parking_size())
+        && stand.equipment.split('|').any(|value| {
+            value == equipment || value == "heavy" && matches!(aircraft.wake, 'H' | 'J')
+        })
 }
 
 fn span_limit(size: char) -> f64 {

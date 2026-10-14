@@ -321,7 +321,7 @@
       "region": "initial",
       "expected": {
         "accepted": true,
-        "message": "DEMO: Cleared to YMML via DCT, initial altitude 5000 feet, squawk 2105. Departure runway 32.",
+        "message": "DEMO: Cleared to YMML via the flight planned route, as filed, initial altitude 5000 feet, squawk 2105. Departure runway 32.",
         "phaseAfter": 1
       }
     },
@@ -341,7 +341,7 @@
       "region": "sid",
       "expected": {
         "accepted": true,
-        "message": "DEMO: Cleared to YMML via WOL1 then DCT, climb via WOL1 to 5000 feet, squawk 2105. Departure runway 32.",
+        "message": "DEMO: Cleared to YMML via WOL1, then as filed, climb via WOL1 to 5000 feet, squawk 2105. Departure runway 32.",
         "phaseAfter": 1
       }
     },

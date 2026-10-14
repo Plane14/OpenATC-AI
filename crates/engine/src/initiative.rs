@@ -101,7 +101,7 @@ pub fn tick(state: &mut EngineState) {
         .session
         .atc_offer
         .as_ref()
-        .is_some_and(|o| o.frequency_khz != state.session.telemetry.com1_khz)
+        .is_some_and(|o| Some(o.frequency_khz) != state.session.control_frequency())
         || state
             .initiative
             .offered
@@ -130,7 +130,10 @@ pub fn tick(state: &mut EngineState) {
     }
     state.initiative.quiet_seconds = 0.0;
     let stations = stations::nearby(&state.stations, &state.session.telemetry);
-    let Some(station) = stations::tuned(&stations, state.session.telemetry.com1_khz)
+    let Some(station) = state
+        .session
+        .control_frequency()
+        .and_then(|frequency| stations::tuned(&stations, frequency))
         .filter(|s| ["Center", "Departure", "Approach"].contains(&s.service.as_str()))
     else {
         return;
@@ -171,25 +174,32 @@ pub async fn answer(AxumState(shared): AxumState<Shared>, Json(body): Json<Value
         .clone()
         .filter(|o| body["sequence"].as_u64() == Some(u64::from(o.sequence)))
     else {
-        return crate::routes::bad_request("That controller offer is no longer available.");
+        return crate::routes::bad_request(openatc_core::dialogue::say(
+            "notice_that_controller_offer_is_no_longer_available_119a06cd",
+            &[],
+        ));
     };
     let accept = body["accept"].as_bool();
     if accept.is_none()
         || !crate::traffic::ready(&s)
         || !s.settings.atc_shortcut_offers
-        || s.session.telemetry.com1_khz != offer.frequency_khz
+        || s.session.control_frequency() != Some(offer.frequency_khz)
         || s.session.phase != PhaseCode::Cruise
         || s.initiative
             .offered
             .is_none_or(|t| t.elapsed().as_secs() > 90)
     {
-        return crate::routes::bad_request(
-            "Wait for a clear radio and a current offer from this controller.",
-        );
+        return crate::routes::bad_request(openatc_core::dialogue::say(
+            "notice_wait_for_a_clear_radio_and_a_current_offer_from_this_con_5d31a8c7",
+            &[],
+        ));
     }
     let stations = stations::nearby(&s.stations, &s.session.telemetry);
     let Some(station) = stations::tuned(&stations, offer.frequency_khz) else {
-        return crate::routes::bad_request("Controller unavailable.");
+        return crate::routes::bad_request(openatc_core::dialogue::say(
+            "notice_controller_unavailable_842f8e10",
+            &[],
+        ));
     };
     let call = s.session.plan.callsign.clone();
     if accept == Some(false) {
@@ -212,11 +222,17 @@ pub async fn answer(AxumState(shared): AxumState<Shared>, Json(body): Json<Value
         .iter()
         .position(|f| f.identifier == offer.waypoint)
     else {
-        return crate::routes::bad_request("The route has changed.");
+        return crate::routes::bad_request(openatc_core::dialogue::say(
+            "notice_the_route_has_changed_e54a6e49",
+            &[],
+        ));
     };
     if !candidate(&s, index) {
         s.session.atc_offer = None;
-        return crate::routes::bad_request("The shortcut no longer meets route or descent limits.");
+        return crate::routes::bad_request(openatc_core::dialogue::say(
+            "notice_the_shortcut_no_longer_meets_route_or_descent_limits_a371d2d4",
+            &[],
+        ));
     }
     let text = say(
         "pilot_accept_shortcut",

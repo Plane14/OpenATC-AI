@@ -188,3 +188,14 @@ airlines = { DLH = 90, UAL = 10 }
 [airport.EHAM]
 name = "Amsterdam"
 airlines = { KLM = 90, KLC = 90, DAL = 15 }
+[airport.LFMN]
+name = "Nice"
+airlines = { EZY = 45, AFR = 25, HOP = 10, CCM = 10, GA = 10 }
+
+[airport.LIMC]
+name = "Milan Malpensa"
+airlines = { EZY = 45, DLH = 10, AFR = 10, GA = 10 }
+
+[airport.LFPG]
+name = "Paris Charles de Gaulle"
+airlines = { AFR = 65, HOP = 20, EZY = 5, GA = 2 }

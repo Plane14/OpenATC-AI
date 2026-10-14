@@ -22,6 +22,47 @@ pub struct Prompts {
     pub source: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromptFile {
+    atc_reply: String,
+    crew_actions: String,
+    cabin: String,
+    ground: String,
+    copilot_readback: String,
+    intent_classify: String,
+    copilot_chat: String,
+}
+
+impl PromptFile {
+    fn into_prompts(self, source: String) -> Result<Prompts, String> {
+        if [
+            &self.atc_reply,
+            &self.crew_actions,
+            &self.cabin,
+            &self.ground,
+            &self.copilot_readback,
+            &self.intent_classify,
+            &self.copilot_chat,
+        ]
+        .iter()
+        .any(|text| text.trim().is_empty() || text.len() > 65536)
+        {
+            return Err("Role prompts must be nonempty and at most 64 KiB each".into());
+        }
+        Ok(Prompts {
+            atc: self.atc_reply,
+            crew_actions: self.crew_actions,
+            cabin: self.cabin,
+            ground: self.ground,
+            copilot: self.copilot_readback,
+            classify: self.intent_classify,
+            copilot_chat: self.copilot_chat,
+            source,
+        })
+    }
+}
+
 /// Read a prompt file and trim trailing newlines.
 fn read_prompt_file(dir: &Path, name: &str) -> String {
     let mut text = std::fs::read_to_string(dir.join(name)).unwrap_or_default();
@@ -41,16 +82,10 @@ pub fn fill_prompt(text: &str, callsign: &str) -> String {
 /// shipped texts compiled in. A directory only wins when it holds cabin.txt.
 #[must_use]
 pub fn load_prompts(config_dir: &Path, exe_dir: &Path) -> Prompts {
-    let mut prompts = Prompts {
-        atc: include_str!("../../../prompts/atc_reply.txt").to_owned(),
-        crew_actions: include_str!("../../../prompts/crew_actions.txt").to_owned(),
-        cabin: include_str!("../../../prompts/cabin.txt").to_owned(),
-        ground: include_str!("../../../prompts/ground.txt").to_owned(),
-        copilot: include_str!("../../../prompts/copilot_readback.txt").to_owned(),
-        classify: include_str!("../../../prompts/intent_classify.txt").to_owned(),
-        copilot_chat: include_str!("../../../prompts/copilot_chat.txt").to_owned(),
-        source: "built-in".to_owned(),
-    };
+    let mut prompts = toml::from_str::<PromptFile>(include_str!("../../../prompts/prompts.toml"))
+        .expect("bundled role prompts")
+        .into_prompts("built-in".into())
+        .expect("valid bundled prompts");
     let mut candidates = Vec::new();
     if let Some(dir) = std::env::var_os("OPENATC_PROMPTS_DIR") {
         candidates.push(PathBuf::from(dir));
@@ -58,6 +93,19 @@ pub fn load_prompts(config_dir: &Path, exe_dir: &Path) -> Prompts {
     candidates.push(config_dir.join("prompts"));
     candidates.push(exe_dir.join("../prompts"));
     for candidate in candidates {
+        if let Ok(text) = std::fs::read_to_string(candidate.join("prompts.toml")) {
+            match toml::from_str::<PromptFile>(&text)
+                .map_err(|error| error.to_string())
+                .and_then(|file| file.into_prompts(candidate.to_string_lossy().into_owned()))
+            {
+                Ok(loaded) => return loaded,
+                Err(error) => eprintln!(
+                    "Invalid role prompt catalogue {}: {error}",
+                    candidate.display()
+                ),
+            }
+            continue;
+        }
         if read_prompt_file(&candidate, "cabin.txt").is_empty() {
             continue;
         }
@@ -205,4 +253,39 @@ pub async fn service_ok(client: &reqwest::Client, url: &str) -> bool {
         .send()
         .await
         .is_ok_and(|reply| reply.status().is_success())
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn toml_prompts_preserve_role_instructions_and_reject_empty_overrides() {
+        let text = include_str!("../../../prompts/prompts.toml");
+        let file: PromptFile = toml::from_str(text).unwrap();
+        let prompts = file.into_prompts("test".into()).unwrap();
+        assert_eq!(prompts.atc, include_str!("../../../prompts/atc_reply.txt"));
+        assert_eq!(
+            prompts.crew_actions,
+            include_str!("../../../prompts/crew_actions.txt")
+        );
+        assert_eq!(prompts.cabin, include_str!("../../../prompts/cabin.txt"));
+        assert_eq!(prompts.ground, include_str!("../../../prompts/ground.txt"));
+        assert_eq!(
+            prompts.copilot,
+            include_str!("../../../prompts/copilot_readback.txt")
+        );
+        assert_eq!(
+            prompts.classify,
+            include_str!("../../../prompts/intent_classify.txt")
+        );
+        assert_eq!(
+            prompts.copilot_chat,
+            include_str!("../../../prompts/copilot_chat.txt")
+        );
+        let mut file: PromptFile = toml::from_str(text).unwrap();
+        file.cabin.clear();
+        assert!(file.into_prompts("bad".into()).is_err());
+        assert!(toml::from_str::<PromptFile>(&format!("{text}\nunknown = true")).is_err());
+    }
 }

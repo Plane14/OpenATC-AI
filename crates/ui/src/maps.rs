@@ -15,7 +15,12 @@ fn rgba(red: u8, green: u8, blue: u8, alpha: u8) -> [f32; 4] {
 }
 
 /// Aircraft triangle with its 19-pixel ring, rotated by heading.
-fn aircraft_symbol(draw: &imgui::DrawListMut<'_>, center: [f32; 2], heading: f64, color: [f32; 4]) {
+pub(crate) fn aircraft_symbol(
+    draw: &imgui::DrawListMut<'_>,
+    center: [f32; 2],
+    heading: f64,
+    color: [f32; 4],
+) {
     // Headings are small whole degrees; pixels cannot tell the difference.
     #[allow(clippy::cast_possible_truncation)]
     let angle = (heading as f32) * std::f32::consts::PI / 180.0;
@@ -418,6 +423,30 @@ fn draw_map(
             ],
             ui.calc_text_size(&beam.label)[0],
         );
+    }
+    if interface.taxi_traffic_visible {
+        for target in state.telemetry.traffic.iter().flatten().take(126) {
+            if !target.latitude.is_finite()
+                || !target.longitude.is_finite()
+                || !target.track_degrees.is_finite()
+                || target.callsign == state.plan.callsign
+            {
+                continue;
+            }
+            let point = airport_point(airport, target.latitude, target.longitude);
+            if point.east.hypot(point.north) > 100_000.0 {
+                continue;
+            }
+            let screen = project(&point);
+            if screen[0] < canvas.cursor[0]
+                || screen[1] < canvas.cursor[1]
+                || screen[0] > canvas.cursor[0] + canvas.size[0]
+                || screen[1] > canvas.cursor[1] + canvas.size[1]
+            {
+                continue;
+            }
+            draw_traffic(ui, draw, screen, target);
+        }
     }
     draw_ownship(ui, draw, interface, state, airport, canvas.cursor, &project);
     draw.add_text(
@@ -885,6 +914,59 @@ fn draw_approach_beam(
 }
 
 /// Ownship triangle or the outside-area/unavailable notes.
+pub(crate) fn draw_traffic(
+    ui: &imgui::Ui,
+    draw: &imgui::DrawListMut<'_>,
+    screen: [f32; 2],
+    target: &openatc_core::state::TrafficTarget,
+) {
+    let color = if target.on_ground {
+        [0.4, 0.9, 0.65, 1.0]
+    } else {
+        [1.0, 0.65, 0.3, 1.0]
+    };
+    aircraft_symbol(draw, screen, target.track_degrees, color);
+    let label = if target.callsign.is_empty() {
+        format!("Traffic {}", target.id)
+    } else {
+        target.callsign.clone()
+    };
+    draw.add_text([screen[0] + 12.0, screen[1] - 8.0], color, &label);
+    let mouse = ui.io().mouse_pos;
+    if (mouse[0] - screen[0]).hypot(mouse[1] - screen[1]) < 14.0 {
+        ui.tooltip_text(format!(
+            "{label} / {}\n{} / {:.0} ft MSL\n{}\nName: {}\nCOM1: {}\nCOM2: {}",
+            target.aircraft,
+            if target.on_ground {
+                "On ground"
+            } else {
+                "Airborne"
+            },
+            target.altitude_feet,
+            target.ground_speed_knots.map_or_else(
+                || "Speed unavailable".into(),
+                |speed| format!("{speed:.0} kt")
+            ),
+            if target.name.is_empty() {
+                &label
+            } else {
+                &target.name
+            },
+            traffic_frequency(target.com1_khz),
+            traffic_frequency(target.com2_khz),
+        ));
+    }
+}
+
+fn traffic_frequency(channel: Option<i32>) -> String {
+    channel
+        .filter(|channel| (118_000..=136_990).contains(channel))
+        .map_or_else(
+            || "Unavailable".into(),
+            |channel| format!("{:.3} MHz", f64::from(channel) / 1000.0),
+        )
+}
+
 fn draw_ownship(
     ui: &imgui::Ui,
     draw: &imgui::DrawListMut<'_>,
@@ -928,6 +1010,13 @@ fn draw_ownship(
 mod beam_tests {
     use super::*;
     use openatc_core::airport::{Navaid, Runway};
+    #[test]
+    fn traffic_radio_details_preserve_channel_and_unknown_state() {
+        assert_eq!(traffic_frequency(Some(121705)), "121.705 MHz");
+        assert_eq!(traffic_frequency(Some(118025)), "118.025 MHz");
+        assert_eq!(traffic_frequency(None), "Unavailable");
+        assert_eq!(traffic_frequency(Some(0)), "Unavailable");
+    }
     #[test]
     fn reloading_the_same_airport_replaces_cached_geometry() {
         let mut panel = Interface::new("http://127.0.0.1:9");

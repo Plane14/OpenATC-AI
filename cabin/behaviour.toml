@@ -1,0 +1,11 @@
+# Passenger activity is simulated; aircraft controls still need live confirmation.
+version = 1
+turbulence_preparation_seconds = 45.0
+service_cycle_seconds = 600.0
+lavatory_start_seconds = 120.0
+lavatory_duration_seconds = 90.0
+lavatory_occupants = 1
+resting_brightness_percent = 30.0
+crew_observation_max_age_seconds = 3.0
+fallback_tick_limit_seconds = 2.0
+simulation_tick_limit_seconds = 30.0

@@ -213,6 +213,25 @@ pub fn tab(ui: &imgui::Ui, interface: &mut crate::interface::Interface, state: &
                 );
             }
         }
+        widgets::muted_wrapped(ui, "Message this pilot");
+        ui.set_next_item_width(-1.0);
+        widgets::edit_text(
+            ui,
+            "##traffic-message",
+            &mut interface.traffic_message,
+            1000,
+        );
+        let _chat_disabled = ui.begin_disabled(
+            !interface.settings.informal_pilot_chat || interface.traffic_message.trim().is_empty(),
+        );
+        if ui.button("Send to pilot") {
+            interface.engine.post(
+                "/traffic/talk",
+                serde_json::json!({"id":target.id,"message":interface.traffic_message}),
+            );
+            interface.traffic_message.clear();
+        }
+        ui.text_wrapped("Enable informal conversation under Realism for free text. This talks to a simulated pilot, not a multiplayer user.");
     }
 }
 

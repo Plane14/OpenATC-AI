@@ -133,10 +133,26 @@ pub struct Settings {
     pub manage_native_traffic: bool,
     /// Native AI aircraft excluding ownship, limited to nineteen SDK slots.
     pub native_traffic_count: u8,
+    /// Enable OpenATC's lightweight generated model instances.
+    pub generated_traffic: bool,
+    /// Active mainline-airline budget.
+    pub airline_traffic: u8,
+    /// Active regional/turboprop budget.
+    pub regional_traffic: u8,
+    /// Active freight budget.
+    pub cargo_traffic: u8,
+    /// Active private/GA budget.
+    pub ga_traffic: u8,
     /// Speak simulated pilot reports based on observed local traffic movements.
     pub hear_traffic_radio: bool,
     /// Allow conversations with simulated pilots for identified traffic.
     pub talk_to_traffic: bool,
+    /// Allow brief informal exchanges with identified simulated pilots.
+    pub informal_pilot_chat: bool,
+    /// Allow restrained humour in informal pilot replies.
+    pub pilot_chat_humour: bool,
+    /// Let nearby simulated pilots initiate a quiet-flight conversation.
+    pub pilots_call_me: bool,
     /// Numeric `SimBrief` pilot ID for OFP import.
     pub simbrief_id: String,
     /// X-Plane installation folder override; empty means auto-detect.
@@ -177,6 +193,12 @@ pub struct Settings {
     #[serde(default = "am_adam")]
     /// Voice reading back your own transmissions when enabled.
     pub pilot_voice: String,
+    /// ATIS voice; empty uses the default controller voice.
+    pub atis_voice: String,
+    /// Steady ATIS reading speed, independent of random controller speeds.
+    pub atis_speed: f32,
+    /// Add the electronic ATIS timbre to synthesized speech.
+    pub atis_electronic: bool,
     /// Custom copilot persona for AI readbacks; empty uses the fixed template.
     pub copilot_personality: String,
     /// Attendant-call dataref; empty means the panel never routes to cabin.
@@ -200,6 +222,9 @@ pub struct Settings {
     #[serde(default = "yes")]
     /// Show the copilot talk button beside Transmit.
     pub copilot_button: bool,
+    #[serde(default)]
+    /// Show the second radio panel when COM2 is available.
+    pub show_com2: bool,
     /// Developer mode: verbose errors and error copying.
     pub dev_mode: bool,
     #[serde(default = "quiet")]
@@ -357,8 +382,16 @@ impl Default for Settings {
             atc_offer_interval_minutes: 10,
             manage_native_traffic: false,
             native_traffic_count: 4,
+            generated_traffic: false,
+            airline_traffic: 8,
+            regional_traffic: 4,
+            cargo_traffic: 2,
+            ga_traffic: 5,
             hear_traffic_radio: false,
             talk_to_traffic: false,
+            informal_pilot_chat: false,
+            pilot_chat_humour: false,
+            pilots_call_me: false,
             // Services.
             simbrief_id: String::new(),
             simulator_root: String::new(),
@@ -376,6 +409,9 @@ impl Default for Settings {
             controller_delivery: Delivery::Brisk,
             copilot_delivery: Delivery::Brisk,
             pilot_voice: am_adam(),
+            atis_voice: String::new(),
+            atis_speed: 1.0,
+            atis_electronic: true,
             copilot_personality: String::new(),
             attendant_ref: String::new(),
             ground_ref: String::new(),
@@ -386,6 +422,7 @@ impl Default for Settings {
             attendant_volume: 0.8,
             ground_volume: 0.8,
             copilot_button: true,
+            show_com2: false,
             dev_mode: false,
             // Speeds (multiplied by the master tts_speed, clamped 0.5..2).
             controller_speed_min: 0.9,
@@ -498,6 +535,21 @@ impl Settings {
                 f32::from(self.native_traffic_count),
             ));
         }
+        let generated_count = [
+            self.airline_traffic,
+            self.regional_traffic,
+            self.cargo_traffic,
+            self.ga_traffic,
+        ]
+        .into_iter()
+        .map(u16::from)
+        .sum::<u16>();
+        if generated_count > 63 {
+            return Err(ValidationError::OutOfRange(
+                "generated traffic count",
+                f32::from(generated_count),
+            ));
+        }
         if !(2..=60).contains(&self.atc_offer_interval_minutes) {
             return Err(ValidationError::OutOfRange(
                 "ATC offer interval",
@@ -533,6 +585,7 @@ impl Settings {
             ("controller maximum speed", self.controller_speed_max),
             ("copilot speed", self.copilot_speed),
             ("pilot speed", self.pilot_speed),
+            ("ATIS speed", self.atis_speed),
         ] {
             if !(0.5..=2.0).contains(&value) {
                 return Err(ValidationError::OutOfRange(name, value));
@@ -652,6 +705,13 @@ mod tests {
         assert!(settings.attendant_ref.is_empty());
         assert!(settings.ground_ref.is_empty());
         assert!(settings.copilot_button);
+        assert!(!settings.show_com2);
+        assert!(settings.atis_voice.is_empty());
+        assert_eq!(settings.atis_speed, 1.0);
+        assert!(settings.atis_electronic);
+        let com2: Settings = serde_json::from_str(r#"{"showCom2":true}"#).unwrap();
+        assert!(com2.show_com2);
+        assert_eq!(serde_json::to_value(&com2).unwrap()["showCom2"], true);
         assert!(settings.show_taxi_arrows);
         assert!(!settings.show_ground_taxi_arrows);
         assert!(!settings.show_holding_point);

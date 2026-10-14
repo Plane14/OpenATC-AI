@@ -56,6 +56,13 @@ pub fn page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
             + ui.clone_style().item_inner_spacing[0],
     );
     ui.checkbox("Heliports", &mut interface.map_heliports);
+    widgets::same_line_if_fits(
+        ui,
+        ui.calc_text_size("Show traffic")[0]
+            + ui.frame_height()
+            + ui.clone_style().item_inner_spacing[0],
+    );
+    ui.checkbox("Show traffic", &mut interface.map_traffic_visible);
     ui.text_wrapped("Airports and controller coverage from installed scenery. Wheel to zoom; drag to pan; hover for controller names and limits. Follow aircraft restores the moving map.");
     widgets::muted_wrapped(ui, &interface.map_notice);
     if state.recommended_frequency_khz > 0 {
@@ -240,6 +247,26 @@ pub fn page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
             .build();
             draw.add_text(label, color, title);
             draw.add_text([label[0], label[1] + ui.text_line_height()], color, limits);
+        }
+        if interface.map_traffic_visible {
+            for target in t.traffic.iter().flatten().take(126) {
+                if !target.latitude.is_finite()
+                    || !target.longitude.is_finite()
+                    || !target.track_degrees.is_finite()
+                    || target.callsign == state.plan.callsign
+                {
+                    continue;
+                }
+                let screen = project([target.latitude, target.longitude]);
+                if screen[0] < start[0]
+                    || screen[1] < start[1]
+                    || screen[0] > start[0] + size[0]
+                    || screen[1] > start[1] + size[1]
+                {
+                    continue;
+                }
+                crate::maps::draw_traffic(ui, &draw, screen, target);
+            }
         }
         let aircraft = project([t.latitude, t.longitude]);
         let angle = t.heading_degrees.to_radians();

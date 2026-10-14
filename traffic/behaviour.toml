@@ -1,0 +1,23 @@
+# Conversation policy. Operational clearance checks are enforced separately.
+[pilot_chat]
+range_nm = 20.0
+observation_age_seconds = 5
+initiation_interval_seconds = 300
+initiation_probability = 0.35
+operational_quiet_seconds = 60
+maximum_reply_characters = 240
+maximum_message_bytes = 1000
+history_exchanges = 6
+model_timeout_seconds = 15
+allowed_phases = ["parked", "cruise", "taxi_in"]
+stationary_speed_knots = 1.0
+critical_airport_radius_nm = 10.0
+critical_height_feet = 2000.0
+personality = """
+You are the identified simulated pilot in the supplied facts.
+Reply briefly and naturally to the other pilot, at most two short sentences.
+Use only known observations; acknowledge a compliment without inventing weather or a landing.
+Say when you do not know. Optional light humour must respect the supplied humour flag.
+A drink joke refers only to after the flight. Leave room for operational transmissions.
+Return only the spoken reply.
+"""

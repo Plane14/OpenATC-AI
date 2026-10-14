@@ -1,13 +1,13 @@
 # OpenATC intent catalogue: every pilot request the system recognises.
 #
-# Policy (audit later):
+# Request catalogue:
 # - `atc` + `copilot` work the radio, so every ATC intent lists both roles.
 #   `emergency` and `conversation` are open to all four roles: anyone aboard
 #   can declare, and anyone can talk when nothing ATC-specific matches.
-# - `catalogue = true` mirrors the C++ `requestDefinitions` UI buttons
-#   exactly (title, group, parameter). `altimeter`/`weather` are parser-only:
-#   reachable by exact phrase, like C++ `interpretText`, with no button.
-# - `pattern` documents how the intent is recognised, mirroring C++ order:
+# - `catalogue = true` makes a request available to the button list.
+#   Titles and order are editable; the controller still checks eligibility.
+#   `altimeter`/`weather` are parser-only requests without buttons.
+# - `pattern` documents how the intent is recognised:
 #   "exact" (exact phrases plus the lowercased title), "substring"
 #   (emergency scan), "altitude"/"direct" (slot regexes), "none".
 # - Examples come in three kinds. `request` examples are pilot utterances that
@@ -420,7 +420,7 @@ catalogue = true
 parameter = false
 roles = ["atc", "copilot", "ground", "attendant"]
 exact = ["emergency", "declare emergency"]
-substring = ["mayday", "pan pan"]
+substring = ["mayday", "pan pan", "pan-pan"]
 pattern = "substring"
 slots = []
 examples = [
@@ -553,7 +553,7 @@ group = "Ground"
 catalogue = true
 parameter = false
 roles = ["atc", "copilot"]
-exact = ["request runway crossing"]
+exact = ["request runway crossing", "request crossing"]
 pattern = "exact"
 slots = []
 examples = [{text = "request runway crossing", kind = "request"}]
@@ -570,3 +570,100 @@ pattern = "exact"
 slots = []
 examples = [{text = "check in", kind = "request"}]
 fallback = "Checking in."
+
+[intent.vacated]
+title = "Report runway vacated"
+group = "Ground"
+catalogue = false
+roles = ["atc", "copilot"]
+exact = ["vacated", "vacted", "runway clear", "clear of runway"]
+pattern = "exact"
+
+[intent.traffic_sighted]
+title = "Traffic in sight"
+group = "Communication"
+catalogue = true
+roles = ["atc", "copilot"]
+exact = ["traffic in sight", "traffic sighted"]
+pattern = "exact"
+
+[intent.traffic_not_sighted]
+title = "Negative contact"
+group = "Communication"
+catalogue = true
+roles = ["atc", "copilot"]
+exact = ["traffic not in sight", "traffic not sighted", "negative contact"]
+pattern = "exact"
+
+[intent.change_approach]
+title = "Request approach change..."
+group = "Arrival"
+catalogue = true
+parameter = true
+roles = ["atc", "copilot"]
+pattern = "none"
+
+[intent.departure_runway]
+title = "Request departure runway change..."
+group = "Ground"
+catalogue = true
+parameter = true
+roles = ["atc", "copilot"]
+pattern = "none"
+
+[intent.arrival_runway]
+title = "Request arrival runway change..."
+group = "Arrival"
+catalogue = true
+parameter = true
+roles = ["atc", "copilot"]
+pattern = "none"
+
+[intent.speed]
+title = "Request speed change..."
+group = "Enroute"
+catalogue = true
+parameter = true
+roles = ["atc", "copilot"]
+pattern = "none"
+
+[intent.deviation]
+title = "Request deviation..."
+group = "Enroute"
+catalogue = true
+parameter = true
+roles = ["atc", "copilot"]
+pattern = "none"
+
+[intent.resume_course]
+title = "Report clear / resume route"
+group = "Enroute"
+catalogue = true
+roles = ["atc", "copilot"]
+exact = ["clear of weather", "resume planned route", "back on course"]
+pattern = "exact"
+
+[buttons]
+order = ["clearance", "start", "pushback", "start_pushback", "taxi", "backtrack", "ready", "gate", "progressive", "radio_check", "repeat", "standby", "unable", "frequency", "checkin", "traffic_sighted", "traffic_not_sighted", "cross_runway", "landing", "position", "altitude", "direct", "descent", "cancel_ifr", "approach", "change_approach", "departure_runway", "arrival_runway", "speed", "deviation", "resume_course", "go_around", "emergency"]
+
+[parser]
+altitude = '(?:request )?(?:altitude |climb |descend |descent )(?:to )?(fl\s*)?([0-9]{2,5})(?: feet| meters)?'
+direct = '(?:request )?direct(?: to)? ([a-z0-9]{2,10})'
+descent_markers = ["descend", "descent"]
+metric_markers = ["meter", "metre"]
+
+[[parser.amendments]]
+intent = "departure_runway"
+expression = '(?:change|request|use)(?: the)? (?:departure|departing) runway ([0-9]{1,2}[lrc]?)'
+[[parser.amendments]]
+intent = "arrival_runway"
+expression = '(?:change|request|use)(?: the)? (?:arrival|landing) runway ([0-9]{1,2}[lrc]?)'
+[[parser.amendments]]
+intent = "change_approach"
+expression = '(?:change|request)(?: the)? approach(?: to)? ([a-z0-9]+)'
+[[parser.amendments]]
+intent = "speed"
+expression = '(?:request |maintain )?(?:speed |airspeed )([0-9]{2,3})(?: knots)?'
+[[parser.amendments]]
+intent = "deviation"
+expression = '(?:request |can we |may we )?(?:deviate|deviation)(?: up to)? ([0-9]{1,2})(?: degrees)? (left|right)'

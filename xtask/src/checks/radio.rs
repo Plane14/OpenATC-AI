@@ -26,11 +26,21 @@ pub(super) fn radio(e: &mut Engine, m: &Model) -> Result {
     contains(&refused, "Your flight departs DEST");
     e.post("plan", plan())?;
     let v = e.req("clearance")?;
+    let spoken = v["result"]["message"].as_str().unwrap().to_lowercase();
+    assert!(
+        spoken.contains("as filed"),
+        "Initial clearance expanded filed route: {spoken}"
+    );
+    assert!(
+        !spoken.contains("dct dest"),
+        "Initial clearance recited en-route routing: {spoken}"
+    );
     accepted(&v);
     let squawk = v["state"]["clearance"]["squawk"].as_str().unwrap();
     assert_eq!(squawk.len(), 4);
     assert!(squawk.bytes().all(|digit| (b'0'..=b'7').contains(&digit)));
-    for item in ["VH-BIL", "DEST", "5000", squawk, "09", "DCT DEST"] {
+    assert_eq!(v["state"]["clearance"]["route"], "DCT DEST");
+    for item in ["VH-BIL", "5000", squawk, "09"] {
         contains(&v, item);
     }
     let destination_name = stations.iter().find(|s| s["airport"] == "DEST").unwrap()["airportName"]

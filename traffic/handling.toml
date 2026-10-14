@@ -1,0 +1,127 @@
+# Nominal visual/movement envelopes, not certified aircraft performance.
+version = 1
+
+[handling.piston]
+rotation_pitch_degrees = 7.0
+climb_pitch_bias_degrees = 2.0
+approach_pitch_bias_degrees = 2.0
+taxi_turn_knots = 5.0
+taxi_turn_radius_meters = 6.0
+wheelbase_meters = 2.0
+maximum_steering_degrees = 30.0
+takeoff_flaps = 0.2
+landing_flaps = 1.0
+engine_spool_seconds = 2.0
+touchdown_seconds = 0.5
+rollout_spoilers = false
+taxi_knots = 12.0
+rotation_knots = 58.0
+acceleration_knots_sec = 3.0
+braking_knots_sec = 3.5
+maximum_bank_degrees = 25.0
+bank_rate_degrees_sec = 12.0
+pitch_rate_degrees_sec = 5.0
+gear_seconds = 4.0
+flap_seconds = 5.0
+wheel_radius_meters = 0.25
+propeller_rpm = 2200.0
+
+[handling.turboprop]
+rotation_pitch_degrees = 8.0
+climb_pitch_bias_degrees = 2.0
+approach_pitch_bias_degrees = 3.0
+taxi_turn_knots = 7.0
+taxi_turn_radius_meters = 20.0
+wheelbase_meters = 8.0
+maximum_steering_degrees = 60.0
+takeoff_flaps = 0.3
+landing_flaps = 1.0
+engine_spool_seconds = 5.0
+touchdown_seconds = 0.5
+rollout_spoilers = true
+taxi_knots = 15.0
+rotation_knots = 105.0
+acceleration_knots_sec = 3.0
+braking_knots_sec = 3.5
+maximum_bank_degrees = 25.0
+bank_rate_degrees_sec = 8.0
+pitch_rate_degrees_sec = 3.0
+gear_seconds = 7.0
+flap_seconds = 8.0
+wheel_radius_meters = 0.4
+propeller_rpm = 1100.0
+
+[handling.regional_jet]
+rotation_pitch_degrees = 10.0
+climb_pitch_bias_degrees = 2.0
+approach_pitch_bias_degrees = 3.0
+taxi_turn_knots = 7.0
+taxi_turn_radius_meters = 30.0
+wheelbase_meters = 11.0
+maximum_steering_degrees = 70.0
+takeoff_flaps = 0.3
+landing_flaps = 1.0
+engine_spool_seconds = 6.0
+touchdown_seconds = 0.5
+rollout_spoilers = true
+taxi_knots = 15.0
+rotation_knots = 125.0
+acceleration_knots_sec = 3.0
+braking_knots_sec = 3.0
+maximum_bank_degrees = 25.0
+bank_rate_degrees_sec = 6.0
+pitch_rate_degrees_sec = 2.5
+gear_seconds = 8.0
+flap_seconds = 10.0
+wheel_radius_meters = 0.45
+propeller_rpm = 0.0
+
+[handling.jet]
+rotation_pitch_degrees = 12.0
+climb_pitch_bias_degrees = 2.0
+approach_pitch_bias_degrees = 3.5
+taxi_turn_knots = 8.0
+taxi_turn_radius_meters = 35.0
+wheelbase_meters = 13.0
+maximum_steering_degrees = 75.0
+takeoff_flaps = 0.3
+landing_flaps = 1.0
+engine_spool_seconds = 8.0
+touchdown_seconds = 0.5
+rollout_spoilers = true
+taxi_knots = 15.0
+rotation_knots = 140.0
+acceleration_knots_sec = 2.5
+braking_knots_sec = 2.8
+maximum_bank_degrees = 25.0
+bank_rate_degrees_sec = 5.0
+pitch_rate_degrees_sec = 2.0
+gear_seconds = 10.0
+flap_seconds = 12.0
+wheel_radius_meters = 0.55
+propeller_rpm = 0.0
+
+[handling.heavy_jet]
+rotation_pitch_degrees = 10.0
+climb_pitch_bias_degrees = 2.0
+approach_pitch_bias_degrees = 3.5
+taxi_turn_knots = 6.0
+taxi_turn_radius_meters = 55.0
+wheelbase_meters = 25.0
+maximum_steering_degrees = 70.0
+takeoff_flaps = 0.25
+landing_flaps = 1.0
+engine_spool_seconds = 10.0
+touchdown_seconds = 0.5
+rollout_spoilers = true
+taxi_knots = 12.0
+rotation_knots = 155.0
+acceleration_knots_sec = 2.0
+braking_knots_sec = 2.5
+maximum_bank_degrees = 25.0
+bank_rate_degrees_sec = 4.0
+pitch_rate_degrees_sec = 1.5
+gear_seconds = 12.0
+flap_seconds = 15.0
+wheel_radius_meters = 0.7
+propeller_rpm = 0.0

@@ -29,7 +29,7 @@ pub fn request_available(state: &State, intent: &str) -> bool {
     if ["traffic_sighted", "traffic_not_sighted"].contains(&intent) {
         return !state.telemetry.on_ground
             && state.traffic_call.as_ref().is_some_and(|call| {
-                call.frequency_khz == state.telemetry.com1_khz && !call.sighted
+                Some(call.frequency_khz) == state.control_frequency() && !call.sighted
             });
     }
     if intent == "resume_course" {

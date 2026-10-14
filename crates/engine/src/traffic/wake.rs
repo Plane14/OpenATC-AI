@@ -73,7 +73,7 @@ impl Monitor {
         }) {
             self.arrival = None;
         }
-        for target in t.traffic.as_ref().into_iter().flatten().take(63) {
+        for target in t.traffic.as_ref().into_iter().flatten().take(126) {
             let Some(previous) = self
                 .previous
                 .get(&target.id)
@@ -183,7 +183,7 @@ pub(super) fn observe(state: &mut EngineState) {
     );
 
     if let Some(targets) = &t.traffic {
-        for target in targets.iter().take(63).filter(|p| p.id != 0) {
+        for target in targets.iter().take(126).filter(|p| p.id != 0) {
             let lifted = !target.on_ground
                 && monitor
                     .previous
@@ -231,7 +231,7 @@ pub(super) fn observe(state: &mut EngineState) {
         }
         monitor.previous = targets
             .iter()
-            .take(63)
+            .take(126)
             .filter(|p| p.id != 0)
             .map(|p| (p.id, p.clone()))
             .collect();

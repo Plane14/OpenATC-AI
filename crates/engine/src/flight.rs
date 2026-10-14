@@ -31,7 +31,10 @@ pub struct FlightFlow {
 }
 
 pub fn station_key(station: &Station) -> String {
-    format!("{}:{}:{}", station.service, station.name, station.khz)
+    format!(
+        "{}:{}:{}:{}",
+        station.service, station.name, station.khz, station.airport
+    )
 }
 
 pub(crate) fn tag(state: &mut EngineState, station: &Station) -> SpeechTag {
@@ -43,6 +46,7 @@ pub(crate) fn tag(state: &mut EngineState, station: &Station) -> SpeechTag {
         "standard",
     );
     tag.position.clone_from(&station.name);
+    tag.radio = Some(state.session.control_radio);
     tag
 }
 
@@ -193,7 +197,12 @@ pub fn urgent(state: &mut EngineState) -> bool {
         return false;
     }
     let stations = nearby(&state.stations, t);
-    let Some(current) = tuned(&stations, t.com1_khz).cloned() else {
+    let Some(current) = state
+        .session
+        .control_frequency()
+        .and_then(|frequency| tuned(&stations, frequency))
+        .cloned()
+    else {
         return false;
     };
     protect_final(state, &current)
@@ -219,7 +228,10 @@ pub fn tick(state: &mut EngineState) {
         return;
     }
     let stations = nearby(&state.stations, t);
-    let Some(current) = tuned(&stations, t.com1_khz)
+    let Some(current) = state
+        .session
+        .control_frequency()
+        .and_then(|frequency| tuned(&stations, frequency))
         .cloned()
         .filter(|s| !["ATIS", "Unicom"].contains(&s.service.as_str()))
     else {
@@ -385,6 +397,7 @@ pub fn request(
         return Some(respond(state, request, tag, accepted, text));
     }
     if request.intent == "checkin" {
+        state.session.control_radio = request.radio;
         state.flow.checked_in_station = station_key(station);
         state.flow.pending_station.clear();
         state.flow.evidence = 0;
@@ -1113,15 +1126,20 @@ fn arrival_tick(state: &mut EngineState, current: &Station) -> bool {
         ];
         state.flow.approach_cleared = true;
         state.session.phase = PhaseCode::Approach;
+        let speed_release = crate::traffic::clear_approach_speed(state);
+        let mut text = say("arrival_approach_clearance", &slots);
+        if let Some((controller, _)) = &speed_release {
+            text.push(' ');
+            text.push_str(controller);
+        }
         let voice = tag(state, current);
-        add_transmission(
-            &mut state.session,
-            "ATC",
-            &say("arrival_approach_clearance", &slots),
-            &voice,
-        );
+        add_transmission(&mut state.session, "ATC", &text, &voice);
         if let Some(last) = state.session.transcript.last_mut() {
             last.pilot_reply = say("pilot_approach_clearance", &slots);
+            if let Some((_, pilot)) = speed_release {
+                last.pilot_reply.push(' ');
+                last.pilot_reply.push_str(&pilot);
+            }
         }
         return true;
     }
@@ -1456,7 +1474,27 @@ mod ownership_tests {
     #[test]
     fn approach_tower_checkin_and_landing_are_separate_permissions() {
         let (mut state, approach, tower) = arrival_state();
+        state.flow.monitor.speed = Some(190.0);
         assert!(arrival_tick(&mut state, &approach));
+        assert!(state.flow.monitor.speed.is_none());
+        assert!(
+            state
+                .session
+                .transcript
+                .last()
+                .unwrap()
+                .text
+                .contains("normal speed")
+        );
+        assert!(
+            state
+                .session
+                .transcript
+                .last()
+                .unwrap()
+                .pilot_reply
+                .contains("normal speed")
+        );
         assert!(state.flow.approach_cleared);
         assert!(!state.flow.landing_cleared);
         assert!(

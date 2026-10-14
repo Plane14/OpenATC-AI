@@ -76,10 +76,85 @@ pub fn blocked_targets<'a>(
     }
     None
 }
+
+/// Protect the time needed for a particular runway movement, not just a fixed radius.
+pub fn blocked_during<'a>(
+    airport: &Airport,
+    runway: &str,
+    targets: impl Iterator<Item = &'a crate::state::TrafficTarget> + Clone,
+    seconds: f64,
+) -> Option<&'static str> {
+    if !seconds.is_finite() || !(0.0..=600.0).contains(&seconds) {
+        return Some("holding_standby");
+    }
+    if let Some(reason) = blocked_targets(airport, runway, targets.clone()) {
+        return Some(reason);
+    }
+    for target in targets.filter(|target| !target.on_ground) {
+        let Some((along, across, length, heading)) =
+            crate::traffic::runway_position(airport, runway, target.latitude, target.longitude)
+        else {
+            return Some("holding_standby");
+        };
+        let turn = crate::navigation::turn(heading, target.track_degrees).abs();
+        let inbound = along < 0.0 && turn < 35.0 || along > length && turn > 145.0;
+        let distance = if along < 0.0 { -along } else { along - length };
+        if !inbound
+            || across.abs() > 150.0 + distance * 0.08
+            || !(-100.0..=5000.0).contains(&(target.altitude_feet - airport.elevation_feet))
+        {
+            continue;
+        }
+        let Some(speed) = target
+            .ground_speed_knots
+            .filter(|speed| (20.0..=600.0).contains(speed))
+        else {
+            if distance <= seconds * 600.0 * 0.514444 {
+                return Some("holding_standby");
+            }
+            continue;
+        };
+        if distance / (speed * 0.514444) <= seconds {
+            return Some("holding_traffic_final");
+        }
+    }
+    None
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::{Point, TrafficTarget};
+    #[test]
+    fn a_long_crossing_protects_an_arrival_outside_the_fixed_final_radius() {
+        let airport = crate::airport::demo_airport();
+        let mut traffic = TrafficTarget {
+            latitude: 0.0,
+            longitude: -0.18,
+            altitude_feet: 1200.0,
+            track_degrees: 90.0,
+            ground_speed_knots: Some(200.0),
+            on_ground: false,
+            ..Default::default()
+        };
+        assert!(blocked_targets(&airport, "09", std::iter::once(&traffic)).is_none());
+        assert_eq!(
+            blocked_during(&airport, "09", std::iter::once(&traffic), 240.0),
+            Some("holding_traffic_final")
+        );
+        assert!(blocked_during(&airport, "09", std::iter::once(&traffic), 60.0).is_none());
+        traffic.ground_speed_knots = None;
+        assert_eq!(
+            blocked_during(&airport, "09", std::iter::once(&traffic), 240.0),
+            Some("holding_standby")
+        );
+        traffic.longitude = 0.18;
+        traffic.track_degrees = 270.0;
+        traffic.ground_speed_knots = Some(200.0);
+        assert_eq!(
+            blocked_during(&airport, "09", std::iter::once(&traffic), 240.0),
+            Some("holding_traffic_final")
+        );
+    }
     #[test]
     fn crossing_tail_and_arrival_exit_stay_protected_beyond_the_painted_line() {
         let airport = Airport {

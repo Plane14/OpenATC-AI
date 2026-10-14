@@ -2,11 +2,110 @@
 //!
 //! The catalogue describes Rust request buttons and parser/AI examples. The
 //! deterministic parser and controller validate operational requests; metadata
-//! or an example alone does not implement a clearance. Button order lives in UI.
+//! or an example alone does not implement a clearance. Button order is editable.
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::{OnceLock, RwLock};
+
+static ACTIVE: OnceLock<RwLock<IntentCatalogue>> = OnceLock::new();
+fn active() -> &'static RwLock<IntentCatalogue> {
+    ACTIVE.get_or_init(|| {
+        let file = toml::from_str::<CatalogueFile>(include_str!("../../../intents.toml"))
+            .expect("bundled intents");
+        RwLock::new(IntentCatalogue {
+            entries: file.intent,
+            order: file.buttons.order,
+            parser: file.parser,
+        })
+    })
+}
+
+/// Editable request-button order and labels; eligibility remains controller checked.
+#[must_use]
+pub fn buttons() -> Vec<(String, String)> {
+    let Ok(catalogue) = active().read() else {
+        return Vec::new();
+    };
+    catalogue
+        .order
+        .iter()
+        .filter_map(|id| {
+            catalogue
+                .entries
+                .get(id)
+                .filter(|entry| entry.catalogue)
+                .map(|entry| (id.clone(), entry.title.clone()))
+        })
+        .collect()
+}
+
+/// Load an editable catalogue without changing controller authorization.
+pub fn activate(path: &Path) -> Result<(), String> {
+    let overrides = load_intents(path)?;
+    let defaults = toml::from_str::<CatalogueFile>(include_str!("../../../intents.toml"))
+        .map_err(|error| error.to_string())?;
+    let mut catalogue = IntentCatalogue {
+        entries: defaults.intent,
+        order: defaults.buttons.order,
+        parser: defaults.parser,
+    };
+    catalogue.entries.extend(overrides.entries);
+    if !overrides.order.is_empty() {
+        catalogue.order = overrides.order;
+    }
+    if !overrides.parser.altitude.is_empty() {
+        catalogue.parser = overrides.parser;
+    }
+    if catalogue.len() > 128
+        || catalogue.iter().any(|(id, entry)| {
+            id.len() > 64 || entry.exact.len() > 64 || entry.substring.len() > 64
+        })
+    {
+        return Err("Intent catalogue exceeds supported limits".into());
+    }
+    catalogue.parser.validate()?;
+    if catalogue
+        .parser
+        .amendments
+        .iter()
+        .any(|entry| !catalogue.entries.contains_key(&entry.intent))
+    {
+        return Err("Parsing grammar refers to an unknown intent".into());
+    }
+    if catalogue.order.len() > 128
+        || catalogue
+            .order
+            .iter()
+            .any(|id| !catalogue.entries.contains_key(id))
+    {
+        return Err("Button order contains an unknown intent or exceeds supported limits".into());
+    }
+    *active()
+        .write()
+        .map_err(|_| "Intent catalogue unavailable")? = catalogue;
+    Ok(())
+}
+
+/// Longest matching alias wins; configured emergency triggers take precedence.
+#[must_use]
+pub fn matching_intent(text: &str) -> Option<String> {
+    let catalogue = active().read().ok()?;
+    catalogue
+        .iter()
+        .flat_map(|(id, entry)| {
+            entry
+                .exact
+                .iter()
+                .chain(entry.substring.iter())
+                .chain(std::iter::once(&entry.title))
+                .filter(move |phrase| !phrase.is_empty() && text.contains(&phrase.to_lowercase()))
+                .map(move |phrase| (id == "emergency", phrase.len(), id))
+        })
+        .max_by_key(|(emergency, length, _)| (*emergency, *length))
+        .map(|(_, _, id)| id.clone())
+}
 
 /// One worked example: template text plus optional expected slots.
 /// `kind` is request (pilot, must stay exactly parseable), say (controller
@@ -60,12 +159,92 @@ pub struct IntentEntry {
 #[derive(Clone, Debug, Default)]
 pub struct IntentCatalogue {
     entries: BTreeMap<String, IntentEntry>,
+    order: Vec<String>,
+    parser: Parser,
+}
+
+#[derive(Default, Debug, Deserialize)]
+struct Buttons {
+    order: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CatalogueFile {
     #[serde(default)]
     intent: BTreeMap<String, IntentEntry>,
+    #[serde(default)]
+    buttons: Buttons,
+    #[serde(default)]
+    parser: Parser,
+}
+
+#[derive(Clone, Default, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+/// Editable slot-recognition grammar, separate from controller authorization.
+pub struct Parser {
+    /// Flight-level marker and numeric altitude captures.
+    pub altitude: String,
+    /// Requested waypoint capture.
+    pub direct: String,
+    /// Words marking a descent request.
+    pub descent_markers: Vec<String>,
+    /// Words marking metric altitude units.
+    pub metric_markers: Vec<String>,
+    /// Additional slot patterns, applied in file order.
+    pub amendments: Vec<Amendment>,
+}
+#[derive(Clone, Default, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+/// One bounded slot pattern associated with a controller intent.
+pub struct Amendment {
+    /// Supported intent identifier.
+    pub intent: String,
+    /// Value capture, plus a direction capture for deviations.
+    pub expression: String,
+}
+
+impl Parser {
+    fn validate(&self) -> Result<(), String> {
+        if self.amendments.len() > 32
+            || self.descent_markers.len() > 32
+            || self.metric_markers.len() > 32
+        {
+            return Err("Parsing grammar exceeds supported limits".into());
+        }
+        for (pattern, captures) in std::iter::once((&self.altitude, 3))
+            .chain(std::iter::once((&self.direct, 2)))
+            .chain(self.amendments.iter().map(|entry| {
+                (
+                    &entry.expression,
+                    if entry.intent == "deviation" { 3 } else { 2 },
+                )
+            }))
+        {
+            if pattern.len() > 4096 {
+                return Err("Parsing expression exceeds 4096 bytes".into());
+            }
+            let expression = regex::RegexBuilder::new(pattern)
+                .size_limit(1024 * 1024)
+                .build()
+                .map_err(|error| error.to_string())?;
+            if expression.captures_len() < captures || expression.is_match("") {
+                return Err(
+                    "Parsing expression needs its value captures and cannot match empty input"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Current parsing patterns; older files retain bundled patterns.
+#[must_use]
+pub fn parser() -> Parser {
+    active()
+        .read()
+        .map(|catalogue| catalogue.parser.clone())
+        .unwrap_or_default()
 }
 
 /// Load `intents.toml` from disk.
@@ -76,6 +255,8 @@ pub fn load_intents(path: &Path) -> Result<IntentCatalogue, String> {
         toml::from_str(&text).map_err(|error| format!("cannot parse catalogue: {error}"))?;
     Ok(IntentCatalogue {
         entries: file.intent,
+        order: file.buttons.order,
+        parser: file.parser,
     })
 }
 
@@ -214,6 +395,17 @@ fn render_placeholder(expression: &str, slots: &Slots) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn editable_slot_grammar_is_bounded_and_required_captures_are_validated() {
+        let file = toml::from_str::<CatalogueFile>(include_str!("../../../intents.toml")).unwrap();
+        file.parser.validate().unwrap();
+        let mut broken = file.parser.clone();
+        broken.direct = "(.*)".into();
+        assert!(broken.validate().is_err());
+        broken.direct = "[".into();
+        assert!(broken.validate().is_err());
+        assert_eq!(buttons().len(), 33);
+    }
 
     #[test]
     fn renderer_fills_placeholders() {

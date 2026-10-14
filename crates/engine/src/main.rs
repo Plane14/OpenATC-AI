@@ -5,6 +5,7 @@ mod context;
 mod crew;
 mod discipline;
 mod flight;
+mod generated;
 mod initiative;
 mod instructions;
 mod intent;
@@ -37,6 +38,8 @@ pub const VERSION: &str = "0.2.1";
 
 /// Everything the engine owns: session state plus configuration.
 pub struct EngineState {
+    /// Generated scene preparation and future movement state.
+    pub generated: generated::Runtime,
     /// Shared CPU budget for work that must not occupy the HTTP executor.
     pub workers: Arc<workers::Workers>,
     /// Model downloads run separately from flight and radio work.
@@ -96,6 +99,10 @@ pub struct EngineState {
     pub airport: Option<Airport>,
     /// Destination geometry retained while departure surface data is in use.
     pub arrival_airport: Option<Airport>,
+    /// Published approach entry levels used to plan descent before final approach.
+    pub arrival_profile: Option<openatc_core::arrival::ArrivalAirport>,
+    /// Reviewed nominal descent margins loaded when a flight plan is submitted.
+    pub vertical_policy: instructions::VerticalPolicy,
     /// Installed minimum off-route grid for vectoring checks.
     pub mora: openatc_core::navigation::Mora,
     /// Remembered controller voices.
@@ -261,6 +268,16 @@ async fn main() {
         .and_then(|path| path.parent().map(PathBuf::from))
         .unwrap_or_default();
     let config_dir = config_dir();
+    for path in [
+        exe_dir.join("../intents.toml"),
+        config_dir.join("intents.toml"),
+    ] {
+        if path.is_file()
+            && let Err(error) = openatc_core::catalog::activate(&path)
+        {
+            eprintln!("Intent catalogue rejected: {error}");
+        }
+    }
     let mut settings = load_settings(&config_dir);
     if settings.validate().is_err() {
         eprintln!("Settings invalid, starting from defaults");
@@ -311,18 +328,31 @@ async fn main() {
             }
         }
     };
+    let cabin = match cabin::Cabin::load(&config_dir, &exe_dir) {
+        Ok(cabin) => cabin,
+        Err(error) => {
+            eprintln!("Cabin policy rejected: {error}");
+            std::process::exit(1);
+        }
+    };
+    let workers = Arc::new(workers::Workers::new(settings.cpu_workers));
+    let traffic_profiles = traffic_profiles::Store::default();
+    if let Err(error) = traffic_profiles.get(&config_dir, &workers, false).await {
+        eprintln!("Traffic profiles rejected: {error}");
+    }
     let shared: Shared = Arc::new(RwLock::new(EngineState {
-        workers: Arc::new(workers::Workers::new(settings.cpu_workers)),
+        workers,
         model_installer: Default::default(),
         station_index_lock: Default::default(),
-        cabin: Default::default(),
+        cabin,
         request_memory: Default::default(),
         squawks: Default::default(),
         mission: Default::default(),
         parking: Default::default(),
         initiative: Default::default(),
         traffic: Default::default(),
-        traffic_profiles: Default::default(),
+        traffic_profiles,
+        generated: Default::default(),
         session_generation: 0,
         pending_copilot_reply: None,
         phrase_history: radio::PhraseHistory::load(&config_dir),
@@ -341,6 +371,8 @@ async fn main() {
         atis_information: BTreeMap::new(),
         airport: None,
         arrival_airport: None,
+        arrival_profile: None,
+        vertical_policy: Default::default(),
         mora: Default::default(),
         controllers,
         prompts,
@@ -438,6 +470,7 @@ fn test_state() -> EngineState {
         initiative: Default::default(),
         traffic: Default::default(),
         traffic_profiles: Default::default(),
+        generated: Default::default(),
         session_generation: 0,
         pending_copilot_reply: None,
         phrase_history: radio::PhraseHistory::load(&config_dir),
@@ -456,6 +489,8 @@ fn test_state() -> EngineState {
         atis_information: BTreeMap::new(),
         airport: None,
         arrival_airport: None,
+        arrival_profile: None,
+        vertical_policy: Default::default(),
         mora: Default::default(),
         controllers: Controllers::default(),
         prompts: support::load_prompts(&config_dir, &config_dir),

@@ -7,43 +7,6 @@ use openatc_core::state::{Request, State};
 use openatc_core::{altitude_text, feet_to_meters, meters_to_feet, resolve_units};
 use std::fmt::Write as _;
 
-/// Request button identifiers and display titles.
-const REQUEST_BUTTONS: [(&str, &str); 33] = [
-    ("clearance", "Request IFR clearance"),
-    ("start", "Request start-up"),
-    ("pushback", "Request pushback"),
-    ("start_pushback", "Request start-up and pushback"),
-    ("taxi", "Request taxi"),
-    ("backtrack", "Request runway backtrack"),
-    ("ready", "Ready for departure"),
-    ("gate", "Taxi to parking"),
-    ("progressive", "Repeat taxi instructions"),
-    ("radio_check", "Radio check"),
-    ("repeat", "Say again"),
-    ("standby", "Stand by"),
-    ("unable", "Unable"),
-    ("frequency", "Request frequency change"),
-    ("checkin", "Check in with controller"),
-    ("traffic_sighted", "Traffic in sight"),
-    ("traffic_not_sighted", "Negative contact"),
-    ("cross_runway", "Request runway crossing"),
-    ("landing", "Request landing clearance"),
-    ("position", "Confirm position"),
-    ("altitude", "Request altitude..."),
-    ("direct", "Request direct-to..."),
-    ("descent", "Request descent..."),
-    ("cancel_ifr", "Cancel IFR"),
-    ("approach", "Request arrival instructions"),
-    ("change_approach", "Request approach change..."),
-    ("departure_runway", "Request departure runway change..."),
-    ("arrival_runway", "Request arrival runway change..."),
-    ("speed", "Request speed change..."),
-    ("deviation", "Request deviation..."),
-    ("resume_course", "Report clear / resume route"),
-    ("go_around", "Going around"),
-    ("emergency", "Declare emergency"),
-];
-
 /// Definition titles needing the altitude/waypoint modal.
 fn needs_modal(intent: &str) -> bool {
     matches!(
@@ -247,14 +210,29 @@ fn radio_header(
             stations.len()
         ),
     );
-    ui.text_disabled(format!(
-        "COM1  {:.3} MHz",
-        f64::from(state.telemetry.com1_khz) / 1000.0
-    ));
-    ui.text_wrapped(if interface.simulator_host {
-        "Select a station to tune COM1. The current station is highlighted."
+    if interface.settings.show_com2 {
+        let mut selected = usize::from(interface.active_radio == openatc_core::state::Radio::Com2);
+        widgets::section_tabs(ui, &["COM1", "COM2"], &mut selected);
+        interface.active_radio = if selected == 1 {
+            openatc_core::state::Radio::Com2
+        } else {
+            openatc_core::state::Radio::Com1
+        };
+    }
+    let radio = if interface.active_radio == openatc_core::state::Radio::Com2 {
+        "COM2"
     } else {
-        "Nearby airport services. COM1 tuning is available inside X-Plane."
+        "COM1"
+    };
+    if let Some(frequency) = state.telemetry.frequency(interface.active_radio) {
+        ui.text_disabled(format!("{radio}  {:.3} MHz", f64::from(frequency) / 1000.0));
+    } else {
+        ui.text_disabled(format!("{radio} unavailable"));
+    }
+    ui.text_wrapped(if interface.simulator_host {
+        "Select a station to tune the selected radio. Its current station is highlighted."
+    } else {
+        "Nearby airport services. Radio tuning is available inside X-Plane."
     });
     ui.text_disabled(if at_airport {
         "Showing this airport's published services."
@@ -304,7 +282,7 @@ fn radio_list(
                         let height =
                             ui.calc_text_size_with_opts(&label, false, width - 16.0 * scale)[1]
                                 + 34.0 * scale;
-                        let tuned = state.telemetry.com1_khz == frequency.khz;
+                        let tuned = state.telemetry.frequency(interface.active_radio) == Some(frequency.khz);
                         {
                             let _disabled = ui.begin_disabled(
                                 !interface.simulator_host || !interface.radio_power,
@@ -316,6 +294,7 @@ fn radio_list(
                                 .build()
                             {
                                 interface.requested_frequency_khz = Some(frequency.khz);
+                                interface.requested_frequency_radio = interface.active_radio;
                             }
                         }
                         let next = ui.cursor_screen_pos();
@@ -380,7 +359,7 @@ fn radio_list(
                             frequency.khz, frequency.service, frequency.name
                         ));
                         let recommended = state.recommended_frequency_khz == frequency.khz;
-                        let tuned = state.telemetry.com1_khz == frequency.khz;
+                        let tuned = state.telemetry.frequency(interface.active_radio) == Some(frequency.khz);
                         ui.table_next_row();
                         ui.table_next_column();
                         let label = format!(
@@ -398,6 +377,7 @@ fn radio_list(
                             .build()
                         {
                             interface.requested_frequency_khz = Some(frequency.khz);
+                            interface.requested_frequency_radio = interface.active_radio;
                         }
                         ui.table_next_column();
                         ui.text(if frequency.service == "Clearance" {
@@ -454,7 +434,7 @@ fn radio_assistance(ui: &imgui::Ui, settings: &mut openatc_settings::Settings) -
         &mut settings.copilot_replies,
     );
     let mut tunes = settings.copilot_tunes || settings.auto_tune_handoff;
-    if ui.checkbox("Tune COM1 when ATC assigns a frequency", &mut tunes) {
+    if ui.checkbox("Tune the assigned radio on handoff", &mut tunes) {
         settings.copilot_tunes = tunes;
         settings.auto_tune_handoff = tunes;
         changed = true;
@@ -468,7 +448,8 @@ fn header_card(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
     if state.telemetry.com1_khz > 0 {
         ui.same_line();
         ui.text_disabled(format!(
-            "COM1 {:.3}",
+            "{} {:.3}",
+            if interface.page == 10 { "COM2" } else { "COM1" },
             f64::from(state.telemetry.com1_khz) / 1000.0
         ));
     }
@@ -536,6 +517,7 @@ fn transcript_view(ui: &imgui::Ui, interface: &mut Interface, state: &State, hei
             });
             if let Some(frequency) = transcript_line(ui, &badge, &entry.text, color, scale, entry.speaker == "ATC", interface.radio_power) {
                 interface.requested_frequency_khz = Some(frequency);
+                interface.requested_frequency_radio = interface.active_radio;
             }
         }
         for notice in &interface.local_notices {
@@ -716,9 +698,9 @@ fn linked_transcript_text(
             if hovered {
                 ui.set_mouse_cursor(Some(imgui::MouseCursor::Hand));
                 ui.tooltip_text(if powered {
-                    format!("Tune COM1 to {:.3} MHz", f64::from(frequency) / 1000.0)
+                    format!("Tune to {:.3} MHz", f64::from(frequency) / 1000.0)
                 } else {
-                    "Turn on the radio to tune COM1".to_owned()
+                    "Turn on the radio to tune".to_owned()
                 });
             }
             if powered && ui.is_item_clicked() {
@@ -786,10 +768,17 @@ fn talk_row(ui: &imgui::Ui, interface: &mut Interface, crew: &str) {
     let power_ok =
         openatc_core::intents::can_transmit(crew, interface.radio_power, interface.bus_power);
     if interface.settings.copilot_button {
-        let enabled = interface.engine.connected();
+        let enabled = interface.engine.connected() && (crew == "atc" || power_ok);
         let _talk_disabled = ui.begin_disabled(!enabled);
-        if ui.button_with_size("Talk", [102.0 * scale, 0.0]) {
-            interface.transmit_box_to_copilot();
+        if ui.button_with_size(
+            if crew == "atc" { "Copilot" } else { "Talk" },
+            [102.0 * scale, 0.0],
+        ) {
+            if crew == "atc" {
+                interface.transmit_box_to_copilot();
+            } else {
+                interface.transmit_box();
+            }
         }
         ui.same_line();
     }
@@ -805,7 +794,7 @@ fn talk_row(ui: &imgui::Ui, interface: &mut Interface, crew: &str) {
             if crew == "atc" {
                 "Transmit needs radio power — Talk to the copilot still works."
             } else {
-                "Transmit needs electrical power — Talk to the copilot still works."
+                "Talking to the selected crew member needs electrical power."
             },
         );
     }
@@ -874,7 +863,7 @@ fn record_row(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
     if interface.settings.dev_mode {
         ui.new_line();
         if ui.button("Copy ATC conversation") {
-            let mut text = crate::debug::conversation(state);
+            let mut text = crate::debug::conversation(&interface.engine.state());
             let _ = writeln!(
                 text,
                 "\nDispatch draft: {} -> {} | runway {} | imported {}",
@@ -1046,16 +1035,20 @@ fn request_grid(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
             f64::from(station.khz) / 1000.0
         ));
     } else {
-        ui.text_wrapped(
-            "No controller is available on the current COM1 frequency. Choose a station in Radios.",
-        );
+        ui.text_wrapped(if interface.page == 10 {
+            "No controller is available on COM2. Tune COM2 to a nearby station."
+        } else {
+            "No controller is available on COM1. Choose a station in Radios."
+        });
     }
     if !interface.engine.connected() {
         ui.text_wrapped(interface.engine.status());
     }
     ui.child_window("Requests").size([0.0, 0.0]).build(|| {
         let _alignment = ui.push_style_var(imgui::StyleVar::ButtonTextAlign([0.0, 0.5]));
-        for (intent, title) in REQUEST_BUTTONS {
+        for (intent_id, button_title) in openatc_core::catalog::buttons() {
+            let intent = intent_id.as_str();
+            let title = button_title.as_str();
             if !quick_request_available(state, station, intent)
                 || (!filter.is_empty() && !title.to_lowercase().contains(&filter))
             {
@@ -1405,6 +1398,7 @@ fn taxi_layers(ui: &imgui::Ui, interface: &mut Interface) {
         ("Parking", &mut interface.settings.show_parking),
         ("Taxi route", &mut interface.settings.show_taxi_route),
         ("Aircraft", &mut interface.settings.show_ownship),
+        ("Show traffic", &mut interface.taxi_traffic_visible),
         ("Labels", &mut interface.settings.show_labels),
     ]
     .into_iter()
@@ -1783,6 +1777,10 @@ pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
             widgets::section_title(ui, "RADIO ASSISTANCE");
             radio_assistance(ui, &mut interface.settings);
             ui.checkbox(
+                "Show COM2 communications",
+                &mut interface.settings.show_com2,
+            );
+            ui.checkbox(
                 "Show copilot talk button",
                 &mut interface.settings.copilot_button,
             );
@@ -1797,7 +1795,7 @@ pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
         }
         if interface.settings_section == 3 {
             widgets::section_title(ui, "CREW CONTROL MAPPINGS");
-            ui.text_wrapped("Stock controls use built-in X-Plane mappings. Third-party controls and checklist order come from the aircraft TOML. Spoken requests and replies come from speech TOMLs. ATTN/CAB selects cabin crew; MECH/INT selects ground; VHF selects radio ATC. Pressing the same call button again clears the selection.");
+            ui.text_wrapped("Stock controls use built-in X-Plane mappings. Third-party controls and checklist order come from the aircraft TOML. Spoken requests and replies come from speech TOMLs. ATTN/CAB selects cabin crew; MECH/INT selects ground services; VHF selects radio ATC. Calling the same crew member again keeps that recipient selected.");
             intercom_overrides(ui, interface);
             ui.input_text("Find control", &mut interface.crew_control_filter)
                 .build();
@@ -2304,6 +2302,26 @@ fn crew_voices(ui: &imgui::Ui, interface: &mut Interface) {
         2.0,
         "%.2fx",
     );
+    widgets::section_title(ui, "AUTOMATED ATIS");
+    setting_input(
+        ui,
+        "ATIS voice (blank uses controller)",
+        &mut interface.settings.atis_voice,
+        128,
+    );
+    labeled_slider(
+        ui,
+        "ATIS reading speed",
+        &mut interface.settings.atis_speed,
+        0.5,
+        2.0,
+        "%.2fx",
+    );
+    ui.checkbox(
+        "Electronic ATIS voice effect",
+        &mut interface.settings.atis_electronic,
+    );
+    ui.text_wrapped("Use a voice from the provider's voice list. The electronic effect approximates an older automated broadcast; it does not flatten the voice's pitch.");
     widgets::section_title(ui, "CABIN & GROUND CREW");
     ui.text_wrapped("Cabin intercom and the wired ground interphone are clean audio: radio effects stay off unless you enable them here.");
     ui.checkbox(
@@ -2400,6 +2418,7 @@ fn voice_popup(ui: &imgui::Ui, interface: &mut Interface) {
                     ui.table_next_column();
                     if ui.button("Listen") {
                         interface.speak_entry(&openatc_core::state::Transmission {
+                            radio: None,
                             information_only: false,
                             speaker: "ATC".into(),
                             text: interface.voice_preview_text.clone(),
@@ -2526,6 +2545,7 @@ fn audio_levels_row(ui: &imgui::Ui, interface: &mut Interface) {
     let _test_disabled = ui.begin_disabled(interface.speech.monitoring());
     if ui.button("Test controller voice") {
         interface.speak_entry(&openatc_core::state::Transmission {
+            radio: None,
             information_only: false,
             pilot_reply: String::new(),
             background: false,
@@ -2616,6 +2636,20 @@ fn realism_tab(ui: &imgui::Ui, interface: &mut Interface) {
     phraseology_row(ui, interface);
     congestion_row(ui, interface);
     emergencies_row(ui, interface);
+    widgets::section_title(ui, "PILOT CONVERSATION");
+    ui.checkbox(
+        "Allow informal pilot conversations",
+        &mut interface.settings.informal_pilot_chat,
+    );
+    ui.checkbox(
+        "Allow light humour in pilot replies",
+        &mut interface.settings.pilot_chat_humour,
+    );
+    ui.checkbox(
+        "Allow other pilots to call me",
+        &mut interface.settings.pilots_call_me,
+    );
+    ui.text_wrapped("Optional simulated exchanges during quiet periods. Operational calls, emergencies and critical flight phases take priority. Traffic radio and pilot conversations can also be enabled in Traffic settings.");
     widgets::section_title(ui, "TAXI GUIDANCE");
     ui.checkbox(
         "Show taxi arrows in plugin map",
@@ -3347,6 +3381,7 @@ mod tests {
         });
         let transcript = vec![
             Transmission {
+                radio: Some(openatc_core::state::Radio::Com1),
                 information_only: false,
                 pilot_reply: String::new(),
                 background: false,
@@ -3360,6 +3395,7 @@ mod tests {
                 urgent: false,
             },
             Transmission {
+                radio: Some(openatc_core::state::Radio::Com1),
                 information_only: false,
                 pilot_reply: String::new(),
                 background: false,
@@ -3395,54 +3431,58 @@ mod tests {
     fn manual_collapse_stays_small_under_the_mouse_until_explicitly_expanded() {
         let _guard = CONTEXT_LOCK.lock().unwrap();
         let mut ctx = headless();
-        let mut interface = interface_with_airport();
-        let mut size = [960.0, 780.0];
-        let mut frame = |ctx: &mut imgui::Context, interface: &mut Interface| {
-            interface.set_window_frame(crate::interface::WindowFrame {
-                position: [0.0, 0.0],
-                size,
-                can_pop_out: true,
-                popped_out: false,
-            });
-            let actions = interface.draw(ctx.frame());
-            ctx.render();
-            if let Some(height) = actions.height {
-                size[1] = height;
+        for page in [0, 10] {
+            let mut interface = interface_with_airport();
+            interface.settings.show_com2 = true;
+            interface.set_page(page);
+            let mut size = [960.0, 780.0];
+            let mut frame = |ctx: &mut imgui::Context, interface: &mut Interface| {
+                interface.set_window_frame(crate::interface::WindowFrame {
+                    position: [0.0, 0.0],
+                    size,
+                    can_pop_out: true,
+                    popped_out: false,
+                });
+                let actions = interface.draw(ctx.frame());
+                ctx.render();
+                if let Some(height) = actions.height {
+                    size[1] = height;
+                }
+            };
+            for _ in 0..3 {
+                frame(&mut ctx, &mut interface);
             }
-        };
-        for _ in 0..3 {
+            let b = interface.collapse_bounds;
+            let target = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
+            ctx.io_mut().add_mouse_pos_event(target);
             frame(&mut ctx, &mut interface);
-        }
-        let b = interface.collapse_bounds;
-        let target = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
-        ctx.io_mut().add_mouse_pos_event(target);
-        frame(&mut ctx, &mut interface);
-        ctx.io_mut()
-            .add_mouse_button_event(imgui::MouseButton::Left, true);
-        frame(&mut ctx, &mut interface);
-        ctx.io_mut()
-            .add_mouse_button_event(imgui::MouseButton::Left, false);
-        frame(&mut ctx, &mut interface);
-        assert!(interface.compact);
-        for _ in 0..10 {
+            ctx.io_mut()
+                .add_mouse_button_event(imgui::MouseButton::Left, true);
             frame(&mut ctx, &mut interface);
-            assert!(
-                interface.compact,
-                "hover or the released button expanded the window"
-            );
-        }
-        for position in [[1100.0, 840.0], target] {
-            ctx.io_mut().add_mouse_pos_event(position);
+            ctx.io_mut()
+                .add_mouse_button_event(imgui::MouseButton::Left, false);
             frame(&mut ctx, &mut interface);
             assert!(interface.compact);
+            for _ in 0..10 {
+                frame(&mut ctx, &mut interface);
+                assert!(
+                    interface.compact,
+                    "hover or the released button expanded the window"
+                );
+            }
+            for position in [[1100.0, 840.0], target] {
+                ctx.io_mut().add_mouse_pos_event(position);
+                frame(&mut ctx, &mut interface);
+                assert!(interface.compact);
+            }
+            ctx.io_mut()
+                .add_mouse_button_event(imgui::MouseButton::Left, true);
+            frame(&mut ctx, &mut interface);
+            ctx.io_mut()
+                .add_mouse_button_event(imgui::MouseButton::Left, false);
+            frame(&mut ctx, &mut interface);
+            assert!(!interface.compact);
         }
-        ctx.io_mut()
-            .add_mouse_button_event(imgui::MouseButton::Left, true);
-        frame(&mut ctx, &mut interface);
-        ctx.io_mut()
-            .add_mouse_button_event(imgui::MouseButton::Left, false);
-        frame(&mut ctx, &mut interface);
-        assert!(!interface.compact);
     }
 
     #[test]
@@ -3508,6 +3548,7 @@ mod tests {
         let mut interface = interface_with_airport();
         interface.settings.pin_open = true;
         interface.settings.dev_mode = true;
+        interface.settings.show_com2 = true;
         ctx.io_mut().display_size = [1920.0, 1440.0];
         for scale in [0.85, 1.0, 1.5] {
             widgets::configure_scale(&mut ctx, scale);
@@ -3525,7 +3566,7 @@ mod tests {
                     interface.draw(ctx.frame());
                     ctx.render();
                 }
-                for index in 0..11 {
+                for index in 0..12 {
                     let bounds = interface.toolbar_bounds[index];
                     assert!(
                         bounds[0] >= position[0] && bounds[2] <= position[0] + size[0],
@@ -3544,7 +3585,10 @@ mod tests {
                         .add_mouse_button_event(imgui::MouseButton::Left, false);
                     let actions = interface.draw(ctx.frame());
                     ctx.render();
-                    if index < 10 {
+                    if index == 11 {
+                        assert_eq!(interface.page, 10);
+                        assert_eq!(interface.active_radio, openatc_core::state::Radio::Com2);
+                    } else if index < 10 {
                         assert_eq!(
                             interface.page, index,
                             "navigation icon at width {width}, scale {scale}"

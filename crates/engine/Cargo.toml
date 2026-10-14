@@ -9,6 +9,7 @@ name = "open-atc-engine"
 path = "src/main.rs"
 
 [dependencies]
+toml = "0.8"
 axum = { version = "0.8", features = ["multipart"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
