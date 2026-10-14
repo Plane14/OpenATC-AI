@@ -169,6 +169,7 @@ impl Catalogue {
                 (None, None) => ("", None, None),
             };
             let leg = Leg {
+                recommended: None,
                 sequence: 0,
                 identifier: key.identifier.clone(),
                 region: key.region.clone(),

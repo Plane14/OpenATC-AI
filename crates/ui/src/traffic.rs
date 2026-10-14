@@ -30,7 +30,10 @@ pub fn settings(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
     }
     {
         let _disabled = ui.begin_disabled(!interface.simulator_host);
-        ui.checkbox("Suppress X-Plane AI traffic", &mut interface.settings.suppress_native_traffic);
+        ui.checkbox(
+            "Suppress X-Plane AI traffic",
+            &mut interface.settings.suppress_native_traffic,
+        );
         ui.text_wrapped("Keeps native AI out of OpenATC's traffic flow. Other traffic plugins retain ownership. X-Plane's Draw Parked Aircraft option is separate.");
         let _native_disabled = ui.begin_disabled(interface.settings.suppress_native_traffic);
         ui.checkbox(

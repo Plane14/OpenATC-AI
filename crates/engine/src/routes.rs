@@ -186,7 +186,25 @@ async fn refresh_voices(shared: &Shared, force: bool) -> Result<(), String> {
 
 pub async fn full_state(AxumState(state): AxumState<Shared>) -> Json<Value> {
     let state = state.read().await;
-    Json(snapshot(&state.session, &state.settings))
+    let mut result = snapshot(&state.session, &state.settings);
+    let mut airports = Vec::new();
+    if state.station_root == state.settings.simulator_root {
+        for id in [
+            &state.session.plan.departure,
+            &state.session.plan.destination,
+        ] {
+            if !id.is_empty()
+                && !airports
+                    .iter()
+                    .any(|airport: &openatc_core::state::WeatherAirport| airport.airport == *id)
+                && let Some(location) = crate::radio::weather_location(&state, id)
+            {
+                airports.push(location);
+            }
+        }
+    }
+    result["weatherAirports"] = serde_json::to_value(airports).unwrap_or(Value::Null);
+    Json(result)
 }
 
 pub async fn post_settings(
@@ -2805,6 +2823,49 @@ fn clearance_rejection(
 #[cfg(test)]
 mod chatter_tests {
     use super::*;
+    #[tokio::test]
+    async fn planned_airports_get_weather_before_a_radio_handoff() {
+        let mut state = crate::test_state();
+        state
+            .station_root
+            .clone_from(&state.settings.simulator_root);
+        state.session.plan.departure = "ORIG".into();
+        state.session.plan.destination = "DEST".into();
+        state.airport = Some(openatc_core::airport::Airport {
+            icao: "ORIG".into(),
+            reference_latitude: 1.0,
+            reference_longitude: 2.0,
+            elevation_feet: 50.0,
+            ..Default::default()
+        });
+        state.arrival_airport = Some(openatc_core::airport::Airport {
+            icao: "DEST".into(),
+            reference_latitude: 3.0,
+            reference_longitude: 4.0,
+            elevation_feet: 300.0,
+            ..Default::default()
+        });
+        state.stations.clear();
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+        let snapshot = super::full_state(AxumState(shared.clone())).await.0;
+        let airports: Vec<openatc_core::state::WeatherAirport> =
+            serde_json::from_value(snapshot["weatherAirports"].clone()).unwrap();
+        assert_eq!(airports.len(), 2);
+        assert_eq!(airports[1].airport, "DEST");
+        assert_eq!(airports[1].elevation_feet, 300.0);
+        let response = crate::radio::weather(AxumState(shared.clone()), Json(json!({
+            "airport":"DEST", "latitude":3.0,"longitude":4.0,"sampleAltitudeFeet":300.0,
+            "source":"simulator-airport", "temperatureC":20.0,"dewpointC":10.0,"pressureHpa":1020.0,
+            "windDegrees":180.0,"windKnots":10.0,"visibilityMeters":10000.0,"clouds":"Clear",
+            "magneticVariationDegrees":2.5
+        }))).await;
+        assert!(response.status().is_success());
+        assert_eq!(
+            shared.read().await.sim_weather["DEST"].0["magneticVariationDegrees"],
+            2.5
+        );
+    }
+
     #[test]
     fn rejected_request_keeps_the_receiving_radio_and_station_voice() {
         let mut state = crate::test_state();

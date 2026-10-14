@@ -43,11 +43,35 @@ impl Sampler {
             .filter(|s| s.service != "Center" && (tuned.contains(&s.khz) || s.airport == nearest))
             .cloned()
             .collect();
+        for airport in state.weather_airports.iter().take(16) {
+            if !(-90.0..=90.0).contains(&airport.latitude)
+                || !(-180.0..=180.0).contains(&airport.longitude)
+                || !(-2000.0..=20000.0).contains(&airport.elevation_feet)
+            {
+                continue;
+            }
+            for station in candidates
+                .iter_mut()
+                .filter(|station| station.airport == airport.airport)
+            {
+                station.latitude = airport.latitude;
+                station.longitude = airport.longitude;
+                station.elevation_feet = airport.elevation_feet;
+            }
+            candidates.push(Station {
+                airport: airport.airport.clone(),
+                latitude: airport.latitude,
+                longitude: airport.longitude,
+                elevation_feet: airport.elevation_feet,
+                service: "Weather".into(),
+                ..Default::default()
+            });
+        }
         candidates.sort_by_key(|s| {
             tuned
                 .iter()
-                .position(|frequency| *frequency == s.khz)
-                .unwrap_or(2)
+                .position(|frequency| *frequency != 0 && *frequency == s.khz)
+                .unwrap_or(if s.service == "Weather" { 2 } else { 3 })
         });
         let Some(station) = candidates.into_iter().find(|s| {
             self.sampled
@@ -113,6 +137,7 @@ impl Sampler {
             })
             .collect();
         interface.engine.post("/weather/simulator",serde_json::json!({"airport":station.airport,
+            "magneticVariationDegrees": unsafe { xplane_sys::XPLMGetMagneticVariation(station.latitude, station.longitude) },
             "latitude":station.latitude,"longitude":station.longitude,"sampleAltitudeFeet":station.elevation_feet,
             "source":if airport_metar{"simulator-airport"}else{"simulator-region"},
             "temperatureC":info.temperature_alt,"dewpointC":info.dewpoint_alt,

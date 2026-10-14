@@ -143,6 +143,7 @@ pub struct Interface {
     pub receives_atis: bool,
     /// Audio capture and playback.
     pub speech: Speech,
+    pub(crate) speech_com2: Speech,
     /// Open page index.
     pub page: usize,
     /// Settings snapshot loaded from the engine.
@@ -398,6 +399,7 @@ impl Interface {
             atis_pending: false,
             receives_atis: false,
             speech: Speech::default(),
+            speech_com2: Speech::default(),
             page: 0,
             active_radio: openatc_core::state::Radio::Com1,
             ptt_radio: openatc_core::state::Radio::Com1,
@@ -991,6 +993,13 @@ impl Interface {
             self.settings.input_gain,
             self.settings.master_volume,
         );
+        self.speech_com2.configure(
+            "",
+            &self.settings.output_device,
+            self.settings.input_gain,
+            self.settings.master_volume,
+        );
+        self.speech_com2.poll();
         self.speech.poll();
         if self.ptt_armed && now_seconds() - self.record_start > 45.0 {
             self.ptt_armed = false;
@@ -1036,8 +1045,14 @@ impl Interface {
                     continue;
                 }
                 if entry.urgent && entry.speaker == "ATC" {
-                    self.speech.stop_speech();
-                    self.speech_queue.clear();
+                    if entry.radio == Some(openatc_core::state::Radio::Com2) {
+                        self.speech_com2.stop_speech();
+                    } else {
+                        self.speech.stop_speech();
+                    }
+                    self.speech_queue.retain(|queued| {
+                        queued.radio.unwrap_or_default() != entry.radio.unwrap_or_default()
+                    });
                     if self.copilot_prepared_sequence <= entry.sequence {
                         self.copilot_reply_prepared = false;
                         self.auto_reply_pending = false;
@@ -1069,10 +1084,25 @@ impl Interface {
         while self.speech_queue.len() > 20 {
             self.speech_queue.pop_front();
         }
-        let ready =
-            !self.speech_queue.is_empty() && !self.speech.busy() && !self.speech.recording();
-        if ready && let Some(entry) = self.speech_queue.pop_front() {
-            self.speak_entry(&entry);
+        for radio in [
+            openatc_core::state::Radio::Com1,
+            openatc_core::state::Radio::Com2,
+        ] {
+            let busy = if radio == openatc_core::state::Radio::Com2 {
+                self.speech_com2.busy()
+            } else {
+                self.speech.busy()
+            };
+            if !busy
+                && !self.speech.recording()
+                && let Some(index) = self
+                    .speech_queue
+                    .iter()
+                    .position(|entry| entry.radio.unwrap_or_default() == radio)
+                && let Some(entry) = self.speech_queue.remove(index)
+            {
+                self.speak_entry(&entry);
+            }
         }
     }
 
@@ -1101,7 +1131,12 @@ impl Interface {
             self.settings.controller_volume
         };
         let endpoint = self.engine.endpoint();
-        self.speech.speak(&openatc_audio::SpeakRequest {
+        let output = if entry.radio == Some(openatc_core::state::Radio::Com2) {
+            &mut self.speech_com2
+        } else {
+            &mut self.speech
+        };
+        output.speak(&openatc_audio::SpeakRequest {
             text: &entry.text,
             engine_endpoint: &endpoint,
             role,
@@ -1314,7 +1349,9 @@ impl Interface {
         };
         let frequency = state.telemetry.frequency(radio).unwrap_or(0);
         let instruction_waiting = state.transcript.iter().any(|entry| {
-            entry.sequence > self.last_speech_sequence && entry.is_controller_instruction()
+            entry.radio.unwrap_or_default() == radio
+                && entry.sequence > self.last_speech_sequence
+                && entry.is_controller_instruction()
         });
         let active = self.engine.connected()
             && self.radio_power
@@ -1330,10 +1367,18 @@ impl Interface {
                 || self.atis_radio != radio
                 || station.is_none_or(|s| s.airport != self.atis_airport))
         {
-            self.speech.stop_speech();
+            if self.atis_radio == openatc_core::state::Radio::Com2 {
+                self.speech_com2.stop_speech();
+            } else {
+                self.speech.stop_speech();
+            }
             self.atis_frequency = 0;
         }
-        if !self.speech.busy() {
+        if !(if radio == openatc_core::state::Radio::Com2 {
+            self.speech_com2.busy()
+        } else {
+            self.speech.busy()
+        }) {
             self.atis_frequency = 0;
         }
         if let Some(reply) = self.engine.take_reply("/atis") {
@@ -1348,9 +1393,16 @@ impl Interface {
                     .is_some_and(|s| reply.data["airport"].as_str() == Some(s.airport.as_str()))
             {
                 if let Some(text) = reply.data["text"].as_str()
-                    && !self.speech.busy()
+                    && !(if radio == openatc_core::state::Radio::Com2 {
+                        self.speech_com2.busy()
+                    } else {
+                        self.speech.busy()
+                    })
                     && !self.speech.recording()
-                    && self.speech_queue.is_empty()
+                    && !self
+                        .speech_queue
+                        .iter()
+                        .any(|entry| entry.radio.unwrap_or_default() == radio)
                 {
                     self.atis_frequency = frequency;
                     self.atis_radio = radio;
@@ -1378,10 +1430,8 @@ impl Interface {
                         position: "ATIS".to_owned(),
                         urgent: false,
                     });
-                    self.radio_notice = format!(
-                        "ATIS {}",
-                        reply.data["information"].as_str().unwrap_or("")
-                    );
+                    self.radio_notice =
+                        format!("ATIS {}", reply.data["information"].as_str().unwrap_or(""));
                 }
             } else if active {
                 self.radio_notice = reply.error;
@@ -1389,9 +1439,16 @@ impl Interface {
         }
         if active
             && !self.atis_pending
-            && !self.speech.busy()
+            && !(if radio == openatc_core::state::Radio::Com2 {
+                self.speech_com2.busy()
+            } else {
+                self.speech.busy()
+            })
             && !self.speech.recording()
-            && self.speech_queue.is_empty()
+            && !self
+                .speech_queue
+                .iter()
+                .any(|entry| entry.radio.unwrap_or_default() == radio)
             && now - self.atis_checked > 8.0
         {
             self.atis_checked = now;
@@ -1568,6 +1625,7 @@ impl Interface {
         }
         self.speech.stop_monitoring();
         self.speech.stop_speech();
+        self.speech_com2.stop_speech();
         self.speech_queue.clear();
         self.ptt_armed = false;
         self.pending_clearance = None;

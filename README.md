@@ -412,6 +412,10 @@ ATIS uses simulator weather sampled at the station's airport and repeats until r
 
 ## Settings and realism
 
+ATIS broadcasts also appear in the conversation log with an **ATIS** badge. Spoken communications stay in character; internal software notices are not voiced. Runway selection uses the airport's installed runway geometry and observed wind rather than accepting a tailwind runway from the flight plan. A planned runway only breaks ties between equally suitable directions. Runway changes advance the information letter. Scenery loading runs on a bounded worker and runway geometry is cached. ATIS remains informational, not a takeoff or landing clearance.
+
+New messages from every speaker follow the conversation only while you are at the bottom. Scroll up to read history without incoming pilot, controller, crew or ATIS entries moving your position; return to the bottom to resume following.
+
 Page navigation lives in the title bar: ATC, Radios, Flight plan, Taxi, Arrival, Airports, Settings, Traffic and Missions. The Map icon appears in developer mode. Hover an icon for its name; cyan marks the current page. At narrow widths the navigation icons move together onto a second header row, keeping the title and window controls accessible. The right side holds the debug flight jump (developer mode), New flight, Keep expanded, compact ATC view and pop-out controls.
 
 Clicking **Communications only** keeps the ATC window compact until you expand it, choose another page or start push-to-talk. Hover still expands a window that compacted automatically. The transcript keeps following the latest message across size changes; if you scroll up to read earlier traffic, it preserves that reading position instead.
@@ -578,3 +582,5 @@ See [Architecture](docs/ARCHITECTURE.md), [Rust workspace](docs/RUST_WORKSPACE.m
 `test-flight` runs four complete IFR flights through the real HTTP engine using simulated aircraft telemetry and synthetic scenery: separate Delivery/Ground/Tower, Ground plus Tower, combined Tower duties, and separate controllers using COM2 while COM1 remains unchanged. It checks sector handoffs, copilot exchanges, proactive descent before a crossing restriction becomes infeasible, arrival and departure runway crossings, traffic holds, landing, runway exit and taxi to the assigned gate. Reports and transcripts are written to `packages/flight-validation/report.json`. This suite also runs in platform build jobs. It does not prove live audio, third-party aircraft controls or simulator rendering.
 
 When reporting a flight issue, include the conversation export, aircraft/profile, installed scenery/navdata, phase, COM frequency, position and the action you expected. For audio issues also include the provider, voice, relevant server error and whether CPU or GPU was selected. Remove credentials and unrelated personal information before sharing logs.
+
+COM1 and COM2 use independent speech playback so a broadcast on one radio does not block the other. Each ATC log shows its own radio traffic; crew interphone messages remain in the primary conversation. ATIS repeats audibly without duplicating the same information bulletin in the log.

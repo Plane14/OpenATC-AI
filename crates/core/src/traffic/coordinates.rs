@@ -22,7 +22,22 @@ struct Key {
 }
 
 fn key(leg: &Leg, airport: &str) -> Option<Key> {
-    let (kind, owner) = match (leg.section.as_str(), leg.subsection.as_str()) {
+    reference_key(
+        &leg.identifier,
+        &leg.region,
+        &leg.section,
+        &leg.subsection,
+        airport,
+    )
+}
+fn reference_key(
+    identifier: &str,
+    region: &str,
+    section: &str,
+    subsection: &str,
+    airport: &str,
+) -> Option<Key> {
+    let (kind, owner) = match (section, subsection) {
         ("E", "A") => (Kind::Fix, "ENRT"),
         ("P", "C") => (Kind::Fix, airport),
         ("D", "") => (Kind::Vor, "ENRT"),
@@ -31,13 +46,13 @@ fn key(leg: &Leg, airport: &str) -> Option<Key> {
         ("P", "I") => (Kind::Localizer, airport),
         _ => return None,
     };
-    if leg.identifier.is_empty() {
+    if identifier.is_empty() {
         return None;
     }
     Some(Key {
         kind,
-        identifier: leg.identifier.clone(),
-        region: leg.region.clone(),
+        identifier: identifier.into(),
+        region: region.into(),
         owner: owner.into(),
     })
 }
@@ -102,11 +117,19 @@ impl Points {
         let wanted: BTreeSet<Key> = catalogues
             .iter()
             .flat_map(|(airport, catalogue)| {
-                catalogue
-                    .0
-                    .values()
-                    .flatten()
-                    .filter_map(|leg| key(leg, airport))
+                catalogue.0.values().flatten().flat_map(|leg| {
+                    key(leg, airport)
+                        .into_iter()
+                        .chain(leg.recommended.as_ref().and_then(|reference| {
+                            reference_key(
+                                &reference.identifier,
+                                &reference.region,
+                                &reference.section,
+                                &reference.subsection,
+                                airport,
+                            )
+                        }))
+                })
             })
             .collect();
         Self {
@@ -118,6 +141,26 @@ impl Points {
     /// A missing or ambiguous identifier cannot authorize a generated leg.
     pub fn resolve(&self, leg: &Leg, airport: &str) -> Option<Position> {
         self.found.get(&key(leg, airport)?).copied().flatten()
+    }
+    /// A recommended VOR can retain its published slaved variation instead of using today's field model.
+    pub fn course_variation(&self, leg: &Leg, airport: &str) -> Option<f64> {
+        let recommended = leg.recommended.as_ref().and_then(|reference| {
+            reference_key(
+                &reference.identifier,
+                &reference.region,
+                &reference.section,
+                &reference.subsection,
+                airport,
+            )
+        });
+        recommended
+            .as_ref()
+            .and_then(|key| self.found.get(key).copied().flatten())
+            .and_then(|position| position.magnetic_variation_degrees)
+            .or_else(|| {
+                self.resolve(leg, airport)
+                    .and_then(|position| position.magnetic_variation_degrees)
+            })
     }
     fn insert(&mut self, key: Key, position: Position) {
         if !self.wanted.contains(&key) {

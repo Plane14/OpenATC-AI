@@ -1,17 +1,19 @@
 //! Bounded traffic geometry shared by surface and approach monitoring.
 pub mod advisory;
+pub mod air;
 pub mod animation;
 pub mod coordinates;
-pub mod curves;
 pub mod csl;
+pub mod curves;
 pub mod holding;
 pub mod motion;
 pub mod procedures;
 pub mod profiles;
+pub mod resolved;
 pub mod surface;
-pub mod wake;
-pub mod vertical;
 pub mod trajectory;
+pub mod vertical;
+pub mod wake;
 use crate::{
     airport::{Airport, airport_point},
     state::{Telemetry, TrafficTarget},

@@ -615,12 +615,19 @@ pub fn tick(state: &mut EngineState) {
                 .find(|frame| frame.target.id == exchange.id)
         {
             frame.target.com1_khz = Some(frequency);
+            if state.generated.active_flights.contains(&exchange.id) {
+                state
+                    .generated
+                    .handoff_targets
+                    .insert(exchange.id, exchange.segment);
+            }
         }
         if exchange.grant {
             state
                 .generated
                 .approved_orders
                 .insert((exchange.id, exchange.segment));
+            super::flight::acknowledge(&mut state.generated, exchange.id, exchange.segment);
         }
         return;
     }

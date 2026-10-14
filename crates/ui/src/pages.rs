@@ -483,6 +483,13 @@ fn header_card(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
     }
 }
 
+fn transcript_on_radio(
+    entry: &openatc_core::state::Transmission,
+    radio: openatc_core::state::Radio,
+) -> bool {
+    entry.radio.unwrap_or_default() == radio
+}
+
 fn transcript_view(ui: &imgui::Ui, interface: &mut Interface, state: &State, height: f32) {
     let scale = ui.current_font_size() / 18.0;
     let background_alpha = interface.background_opacity * 0.72;
@@ -503,7 +510,7 @@ fn transcript_view(ui: &imgui::Ui, interface: &mut Interface, state: &State, hei
             ui.text_colored(widgets::accent(ui), "Ready when you are");
             ui.text_wrapped("Set up your flight plan, then request clearance. Available requests follow your flight stage.");
         }
-        for entry in &state.transcript {
+        for entry in state.transcript.iter().filter(|entry| transcript_on_radio(entry, interface.active_radio)) {
             let _identifier = ui.push_id(entry.sequence.to_string());
             let airport = if interface.local_airport.icao.is_empty() { &interface.airport } else { &interface.local_airport };
             let badge = transcript_badge(entry, airport, state.telemetry.com1_khz);
@@ -3111,6 +3118,30 @@ fn sort_table<T>(ui: &imgui::Ui, rows: &mut [T], key: impl Fn(&T, usize) -> Stri
 #[cfg(test)]
 mod tests {
     #[test]
+    fn transcripts_keep_radio_and_interphone_messages_separate() {
+        use openatc_core::state::{Radio, Transmission};
+        for (value, receiver) in [
+            (serde_json::json!("com1"), Radio::Com1),
+            (serde_json::json!("com2"), Radio::Com2),
+            (serde_json::Value::Null, Radio::Com1),
+        ] {
+            let entry: Transmission = serde_json::from_value(
+                serde_json::json!({"radio":value,"speaker":"ATIS","text":"Information Alpha"}),
+            )
+            .unwrap();
+            assert!(super::transcript_on_radio(&entry, receiver));
+            assert!(!super::transcript_on_radio(
+                &entry,
+                if receiver == Radio::Com1 {
+                    Radio::Com2
+                } else {
+                    Radio::Com1
+                }
+            ));
+        }
+    }
+
+    #[test]
     fn center_radio_keeps_departure_requests_available() {
         let mut state = State::default();
         state.phase = openatc_core::state::PhaseCode::Departure;
@@ -3549,44 +3580,81 @@ mod tests {
         let mut interface = interface_with_airport();
         let mut state = filled_state();
         let template = state.transcript[0].clone();
-        state.transcript = (1..=80).map(|sequence| Transmission {
-            sequence, text: format!("Conversation entry {sequence}."), ..template.clone()
-        }).collect();
+        state.transcript = (1..=80)
+            .map(|sequence| Transmission {
+                sequence,
+                text: format!("Conversation entry {sequence}."),
+                ..template.clone()
+            })
+            .collect();
         let draw = |ctx: &mut imgui::Context, interface: &mut Interface, state: &State| {
             let ui = ctx.frame();
-            ui.window("Log actors").position([0.0, 0.0], imgui::Condition::Always)
+            ui.window("Log actors")
+                .position([0.0, 0.0], imgui::Condition::Always)
                 .size([800.0, 600.0], imgui::Condition::Always)
                 .build(|| transcript_view(ui, interface, state, 300.0));
             ctx.render();
         };
-        for _ in 0..4 { draw(&mut ctx, &mut interface, &state); }
+        for _ in 0..4 {
+            draw(&mut ctx, &mut interface, &state);
+        }
         assert!(interface.transcript_follow_latest);
         ctx.io_mut().add_mouse_pos_event([150.0, 130.0]);
         draw(&mut ctx, &mut interface, &state);
         ctx.io_mut().add_mouse_wheel_event([0.0, 5.0]);
-        for _ in 0..3 { draw(&mut ctx, &mut interface, &state); }
+        for _ in 0..3 {
+            draw(&mut ctx, &mut interface, &state);
+        }
         assert!(!interface.transcript_follow_latest);
         let history = interface.transcript_scroll;
         let actors = ["ATC", "COPILOT", "ATTENDANT", "GROUND", "TEST1", "ATIS"];
         for actor in actors {
-            state.transcript.push(Transmission { speaker: actor.into(),
+            state.transcript.push(Transmission {
+                speaker: actor.into(),
                 sequence: state.transcript.last().unwrap().sequence + 1,
-                text: format!("New message from {actor}."), ..template.clone() });
-            for _ in 0..4 { draw(&mut ctx, &mut interface, &state); }
-            assert!(!interface.transcript_follow_latest, "{actor} interrupted history");
+                text: format!("New message from {actor}."),
+                ..template.clone()
+            });
+            for _ in 0..4 {
+                draw(&mut ctx, &mut interface, &state);
+            }
+            assert!(
+                !interface.transcript_follow_latest,
+                "{actor} interrupted history"
+            );
             assert!((interface.transcript_scroll - history).abs() < 2.0);
         }
         ctx.io_mut().add_mouse_wheel_event([0.0, -1000.0]);
-        for _ in 0..4 { draw(&mut ctx, &mut interface, &state); }
+        for _ in 0..4 {
+            draw(&mut ctx, &mut interface, &state);
+        }
         assert!(interface.transcript_follow_latest);
         for actor in actors {
-            state.transcript.push(Transmission { speaker: actor.into(),
+            state.transcript.push(Transmission {
+                speaker: actor.into(),
                 sequence: state.transcript.last().unwrap().sequence + 1,
-                text: format!("Following {actor}."), ..template.clone() });
-            for _ in 0..4 { draw(&mut ctx, &mut interface, &state); }
-            assert!(interface.transcript_follow_latest, "{actor} did not follow the bottom");
+                text: format!("Following {actor}."),
+                ..template.clone()
+            });
+            for _ in 0..4 {
+                draw(&mut ctx, &mut interface, &state);
+            }
+            assert!(
+                interface.transcript_follow_latest,
+                "{actor} did not follow the bottom"
+            );
         }
-        assert_eq!(transcript_badge(&Transmission { speaker: "ATIS".into(), ..template }, &interface.airport, 118700), "ATIS");
+        assert_eq!(
+            transcript_badge(
+                &Transmission {
+                    speaker: "ATIS".into(),
+                    ..template
+                },
+                &interface.airport,
+                118700
+            ),
+            "ATIS"
+        );
     }
 
     #[test]

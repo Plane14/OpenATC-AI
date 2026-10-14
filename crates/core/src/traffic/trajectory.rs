@@ -13,6 +13,8 @@ use crate::{
 pub struct Fix {
     /// Latitude and longitude in degrees.
     pub coordinate: [f64; 2],
+    /// Required true arrival course, including fly-over and course-to-fix legs.
+    pub arrival_heading: Option<f64>,
     /// Crossing floor converted to geometric feet MSL.
     pub minimum_feet: f64,
     /// Crossing ceiling converted to geometric feet MSL.
@@ -111,9 +113,14 @@ pub fn compile(
         let speed = fix.ground_knots * 0.514444;
         let radius = (speed.powi(2) / (9.80665 * envelope.bank_degrees.to_radians().tan()))
             .max(speed / envelope.turn_rate_degrees_sec.to_radians());
-        let heading = fixes.get(index + 1).map_or(final_heading_degrees, |next| {
-            bearing(fix.coordinate, next.coordinate)
+        let heading = fix.arrival_heading.unwrap_or_else(|| {
+            fixes.get(index + 1).map_or(final_heading_degrees, |next| {
+                bearing(fix.coordinate, next.coordinate)
+            })
         });
+        if !heading.is_finite() {
+            return Err(format!("Invalid arrival course at {index}"));
+        }
         let to = curves::Pose {
             point: projection(fix.coordinate),
             heading,
@@ -218,6 +225,7 @@ mod tests {
         let fixes = [
             Fix {
                 coordinate: [44.2, 8.0],
+                arrival_heading: None,
                 minimum_feet: 0.0,
                 maximum_feet: 18000.0,
                 preferred_feet: 18000.0,
@@ -226,6 +234,7 @@ mod tests {
             },
             Fix {
                 coordinate: [44.2, 8.1],
+                arrival_heading: None,
                 minimum_feet: 12000.0,
                 maximum_feet: 12000.0,
                 preferred_feet: 12000.0,

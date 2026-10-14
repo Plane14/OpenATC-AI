@@ -1,5 +1,6 @@
 # Bounded generated-traffic preparation and surface movement.
 version = 1
+flight_clearance_lead_seconds = 120.0
 holding_turn_rate_degrees_sec = 3.0
 pushback_knots = 3.0
 pushback_radius_scale = 0.6

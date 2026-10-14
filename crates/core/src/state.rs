@@ -755,11 +755,28 @@ impl TaxiClearance {
     }
 }
 
+/// Airport location requested by the flight planner for a surface observation.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WeatherAirport {
+    /// Airport whose surface weather is needed for flight planning.
+    pub airport: String,
+    /// Sampling latitude in degrees.
+    pub latitude: f64,
+    /// Sampling longitude in degrees.
+    pub longitude: f64,
+    /// Airport elevation in feet MSL.
+    pub elevation_feet: f64,
+}
+
 /// Flight session state shared by the engine and UI.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(clippy::struct_excessive_bools)] // Independent saved permissions and flight flags.
 pub struct State {
+    /// Bounded airport weather requests serviced by the simulator main thread.
+    #[serde(default)]
+    pub weather_airports: Vec<WeatherAirport>,
     /// Radio carrying the flight's current controller clearances and handoffs.
     #[serde(default)]
     pub control_radio: Radio,
@@ -861,6 +878,7 @@ fn default_sequence() -> u32 {
 impl Default for State {
     fn default() -> Self {
         Self {
+            weather_airports: Vec::new(),
             control_radio: Radio::Com1,
             generated_traffic: Vec::new(),
             generated_animation_channels: Default::default(),

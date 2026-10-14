@@ -14,9 +14,24 @@ pub struct Key {
     pub route_type: String,
 }
 
+/// Facility reference used to interpret published courses.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reference {
+    /// Recommended navaid identifier.
+    pub identifier: String,
+    /// ICAO region disambiguating the facility.
+    pub region: String,
+    /// Navaid record section.
+    pub section: String,
+    /// Navaid record subsection.
+    pub subsection: String,
+}
+
 /// Published leg fields retained before resolving coordinates and flight geometry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Leg {
+    /// Recommended facility used for a course or bearing, distinct from the terminating fix.
+    pub recommended: Option<Reference>,
     /// Ordering within this route type and transition.
     pub sequence: u16,
     /// May be empty on altitude-terminated legs.
@@ -139,37 +154,64 @@ fn number(text: &str, scale: f64, minimum: f64, maximum: f64) -> Result<Option<f
 
 impl Catalogue {
     /// Join runway, common and explicitly selected enroute parts without sorting their fixes together.
-    pub fn departure(&self, name: &str, runway: &str, transition: &str) -> Result<Vec<&[Leg]>, String> {
+    pub fn departure(
+        &self,
+        name: &str,
+        runway: &str,
+        transition: &str,
+    ) -> Result<Vec<&[Leg]>, String> {
         if name.is_empty() || runway.is_empty() {
             return Err("Departure needs a procedure and runway".into());
         }
         let exact = format!("RW{runway}");
         let shared = format!("RW{}B", runway.trim_end_matches(['L', 'R', 'C']));
-        let routes: Vec<_> = self.0.iter().filter(|(key, _)| key.kind == "SID" && key.name == name).collect();
-        let exact_routes: Vec<_> = routes.iter().filter(|(key, _)| key.transition == exact).collect();
+        let routes: Vec<_> = self
+            .0
+            .iter()
+            .filter(|(key, _)| key.kind == "SID" && key.name == name)
+            .collect();
+        let exact_routes: Vec<_> = routes
+            .iter()
+            .filter(|(key, _)| key.transition == exact)
+            .collect();
         let runway_routes: Vec<_> = if exact_routes.is_empty() {
-            routes.iter().filter(|(key, _)| key.transition == shared).collect()
-        } else { exact_routes };
+            routes
+                .iter()
+                .filter(|(key, _)| key.transition == shared)
+                .collect()
+        } else {
+            exact_routes
+        };
         if runway_routes.len() != 1 {
             return Err("Departure runway transition is missing or ambiguous".into());
         }
-        let common: Vec<_> = routes.iter().filter(|(key, _)| key.transition.is_empty()).collect();
+        let common: Vec<_> = routes
+            .iter()
+            .filter(|(key, _)| key.transition.is_empty())
+            .collect();
         if common.len() > 1 {
             return Err("Departure common segment is ambiguous".into());
         }
         let mut result = vec![runway_routes[0].1.as_slice()];
-        if let Some((_, legs)) = common.first() { result.push(legs.as_slice()); }
+        if let Some((_, legs)) = common.first() {
+            result.push(legs.as_slice());
+        }
         if !transition.is_empty() {
             if transition.starts_with("RW") {
                 return Err("Enroute departure transition cannot be a runway".into());
             }
-            let selected: Vec<_> = routes.iter().filter(|(key, _)| key.transition == transition).collect();
+            let selected: Vec<_> = routes
+                .iter()
+                .filter(|(key, _)| key.transition == transition)
+                .collect();
             if selected.len() != 1 {
                 return Err("Enroute departure transition is missing or ambiguous".into());
             }
             result.push(selected[0].1.as_slice());
         }
-        if result.iter().any(|legs| legs.is_empty()) || result.iter().map(|legs| legs.len()).sum::<usize>() > 512 {
+        if result.iter().any(|legs| legs.is_empty())
+            || result.iter().map(|legs| legs.len()).sum::<usize>() > 512
+        {
             return Err("Assembled departure exceeds its leg budget".into());
         }
         Ok(result)
@@ -297,6 +339,12 @@ impl Catalogue {
                 return Err("Terminal procedure catalogue exceeds its leg budget".into());
             }
             let leg = Leg {
+                recommended: (!fields[13].trim().is_empty()).then(|| Reference {
+                    identifier: fields[13].trim().into(),
+                    region: fields[14].trim().into(),
+                    section: fields[15].trim().into(),
+                    subsection: fields[16].trim().into(),
+                }),
                 sequence: fields[0]
                     .trim()
                     .parse()

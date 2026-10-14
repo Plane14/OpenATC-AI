@@ -27,8 +27,8 @@ pub struct Runtime {
     retry: Option<Instant>,
     frames: Vec<GeneratedTraffic>,
     world: openatc_core::traffic::motion::World,
-    airport: Option<Arc<Airport>>,
-    destination: Option<Arc<Airport>>,
+    pub(crate) airport: Option<Arc<Airport>>,
+    pub(crate) destination: Option<Arc<Airport>>,
     departure_procedures: Option<Arc<openatc_core::traffic::procedures::Catalogue>>,
     arrival_procedures: Option<Arc<openatc_core::traffic::procedures::Catalogue>>,
     terminal_points: Option<Arc<openatc_core::traffic::coordinates::Points>>,
@@ -51,6 +51,8 @@ pub struct Runtime {
     tower_notified: BTreeSet<u32>,
     tower_ready: BTreeSet<u32>,
     flights: BTreeMap<u32, Arc<flight::Prepared>>,
+    active_flights: BTreeSet<u32>,
+    handoff_targets: BTreeMap<u32, usize>,
 }
 
 fn next_job() -> u64 {
@@ -148,6 +150,7 @@ struct Operations {
     pushback_knots: f64,
     pushback_radius_scale: f64,
     pushback_max_meters: f64,
+    flight_clearance_lead_seconds: f64,
 }
 fn parse_operations(text: &str) -> Result<Operations, String> {
     if text.len() > 65536 {
@@ -166,6 +169,7 @@ fn parse_operations(text: &str) -> Result<Operations, String> {
         .try_into()
         .map_err(|error: toml::de::Error| error.to_string())?;
     if policy.version != 1
+        || !(30.0..=300.0).contains(&policy.flight_clearance_lead_seconds)
         || !(0.5..=3.0).contains(&policy.holding_turn_rate_degrees_sec)
         || !(0.5..=5.0).contains(&policy.pushback_knots)
         || !(0.25..=1.0).contains(&policy.pushback_radius_scale)
@@ -1034,7 +1038,9 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) {
             });
             let generation = runtime.world.generation();
             for pose in runtime.world.snapshot() {
-                if pose.recovering { continue; }
+                if pose.recovering {
+                    continue;
+                }
                 if pose.awaiting_clearance {
                     if !matches!(
                         pose.stage,
@@ -1093,9 +1099,17 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) {
                 runtime
                     .world
                     .reserve_next_taxi(generation, pose.id, &blocked);
-                if runtime.flights.contains_key(&pose.id)
-                    && runtime.approved_orders.contains(&(pose.id, pose.segment + 1)) {
-                    runtime.world.authorise_continuation(generation, pose.id, pose.segment + 1, &blocked);
+                if runtime.active_flights.contains(&pose.id)
+                    && runtime
+                        .approved_orders
+                        .contains(&(pose.id, pose.segment + 1))
+                {
+                    runtime.world.authorise_continuation(
+                        generation,
+                        pose.id,
+                        pose.segment + 1,
+                        &blocked,
+                    );
                 }
             }
         }
@@ -1161,9 +1175,13 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) {
                         knots: pose.knots,
                         turn_degrees_sec: if elapsed > 0.0 { turn / elapsed } else { 0.0 },
                         vertical_fpm: frame.vertical_speed_fpm,
-                        engines_running: pose.stage != openatc_core::traffic::motion::Stage::Parked
-                            && (pose.stage != openatc_core::traffic::motion::Stage::Pushback
-                                || runtime.approved_orders.contains(&(pose.id, pose.segment))),
+                        engines_running: !matches!(
+                            pose.stage,
+                            openatc_core::traffic::motion::Stage::Parked
+                                | openatc_core::traffic::motion::Stage::Turnaround
+                        ) && (pose.stage
+                            != openatc_core::traffic::motion::Stage::Pushback
+                            || runtime.approved_orders.contains(&(pose.id, pose.segment))),
                         fixed_gear: runtime.fixed_gear.contains(&pose.id),
                         landing_lights: false,
                     },

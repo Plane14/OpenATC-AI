@@ -231,6 +231,8 @@ pub struct Pose {
     pub complete: bool,
     /// The aircraft is following its separately checked recovery instead of the normal flight.
     pub recovering: bool,
+    /// Nominal time remaining to this clearance limit, before any slower speed adjustment.
+    pub seconds_to_limit: f64,
 }
 
 #[derive(Clone)]
@@ -336,6 +338,7 @@ impl Aircraft {
                 && !self.complete,
             complete: self.complete,
             recovering: self.recovering,
+            seconds_to_limit: (self.duration() - self.elapsed).max(0.0),
         }
     }
     fn duration(&self) -> f64 {

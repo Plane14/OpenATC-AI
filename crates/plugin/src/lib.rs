@@ -411,10 +411,15 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let debug_cancel_pending = locked.debug_cancel_pending;
-    let receives_atis = locked.interface.as_ref().is_some_and(|interface|
-        interface.engine.connected() && interface.receives_atis);
+    let receives_atis = locked
+        .interface
+        .as_ref()
+        .is_some_and(|interface| interface.engine.connected() && interface.receives_atis);
     locked.native_atis.update(receives_atis);
-    let connected = locked.interface.as_ref().is_some_and(|interface| interface.engine.connected());
+    let connected = locked
+        .interface
+        .as_ref()
+        .is_some_and(|interface| interface.engine.connected());
     locked.native_radio.update(connected);
     let requested_frequency = locked.interface.as_mut().and_then(|i| {
         i.requested_frequency_khz
@@ -540,7 +545,8 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
         .join("Resources/plugins/OpenATC/Resources/CSL");
     let follow_me_enabled = interface.settings.show_follow_me;
     let native_enabled = interface.settings.manage_native_traffic;
-    let suppress_native = interface.engine.connected() && interface.settings.suppress_native_traffic;
+    let suppress_native =
+        interface.engine.connected() && interface.settings.suppress_native_traffic;
     let native_count = interface.settings.native_traffic_count;
     let arrival_target = openatc_core::arrival::target(
         &interface.arrival,
