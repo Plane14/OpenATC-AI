@@ -201,6 +201,7 @@ pub fn load_aircraft_profile(path: &std::path::Path) -> Result<AircraftProfile, 
             profile.cabin_commands = custom.cabin_commands;
             profile.ground_commands = custom.ground_commands;
             profile.radio_commands = custom.radio_commands;
+            profile.toggle_commands = custom.toggle_commands;
             profile
         },
         name: get("name")?.to_owned(),

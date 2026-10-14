@@ -14,7 +14,7 @@ pub struct Pose {
     pub heading: f64,
 }
 /// Required first turn where a procedure specifies its direction.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Turn {
     /// Begin with a left turn.
     Left,

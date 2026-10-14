@@ -351,13 +351,22 @@ pub fn tick(state: &mut EngineState, station: &Station) {
         state.flow.monitor.direct_origin = (c.readback_scope == "direct").then_some(own);
     }
     let mut fixes = state.session.plan.fixes.clone();
-    let next = state.flow.monitor.next_fix.max(1);
+    let mut next = state.flow.monitor.next_fix.max(1);
     if let Some(origin) = state.flow.monitor.direct_origin
         && next > 0
         && let Some(f) = fixes.get_mut(next - 1)
     {
         f.latitude = origin[0];
         f.longitude = origin[1];
+    }
+    if c.readback_scope != "direct"
+        && state.flow.monitor.heading.is_none()
+        && navigation::leg(&fixes, next, &t).is_none_or(|leg| leg.cross_track_nm > 2.0)
+        && let Some(established) = navigation::established_star_leg(&fixes, next, &t)
+    {
+        state.flow.monitor.next_fix = established;
+        state.flow.monitor.checked_fix = established - 1;
+        next = established;
     }
     let leg = navigation::leg(&fixes, next, &t);
     let call = state.session.plan.callsign.clone();
@@ -429,13 +438,22 @@ pub fn tick(state: &mut EngineState, station: &Station) {
                     altitude(v, fix.minimum_altitude_is_flight_level) < f64::from(v) - 200.0
                 }) || fix.maximum_altitude_feet.is_some_and(|v| {
                     altitude(v, fix.maximum_altitude_is_flight_level) > f64::from(v) + 200.0
-                }) || matches!((fix.maximum_speed_knots,speed),(Some(v),Some(speed)) if speed>v+10.0);
+                }) || matches!((fix.maximum_speed_knots,speed),(Some(v),Some(speed)) if speed>v+10.0)
+                    || matches!((fix.minimum_speed_knots,speed),(Some(v),Some(speed)) if speed<v-10.0);
                 if violation {
                     let text = say(
                         "crossing_restriction_missed",
                         &[("callsign", call.clone()), ("fix", fix.identifier.clone())],
                     );
-                    correct(state, station, text, None);
+                    correct(
+                        state,
+                        station,
+                        text,
+                        Some(say(
+                            "pilot_checking_restriction",
+                            &[("callsign", call.clone()), ("fix", fix.identifier.clone())],
+                        )),
+                    );
                     state.flow.monitor.next_fix = next + 1;
                     state.flow.monitor.direct_origin = None;
                     return;
@@ -530,8 +548,11 @@ pub fn tick(state: &mut EngineState, station: &Station) {
                 transmit(
                     state,
                     station,
-                    say("off_course_vector_unavailable", &[("callsign", call)]),
-                    None,
+                    say(
+                        "off_course_vector_unavailable",
+                        &[("callsign", call.clone())],
+                    ),
+                    Some(say("pilot_checking_navigation", &[("callsign", call)])),
                 );
                 return;
             }
@@ -584,10 +605,7 @@ fn correct(state: &mut EngineState, station: &Station, text: String, pilot: Opti
         && state.settings.terminate_after_warnings
         && !state.session.emergency_declared;
     if repeated {
-        let assistance = say(
-            "compliance_assistance",
-            &[("callsign", state.session.plan.callsign.clone())],
-        );
+        let assistance = say("compliance_assistance", &[]);
         transmit(state, station, format!("{text} {assistance}"), pilot);
     } else {
         transmit(state, station, text, pilot);
@@ -726,9 +744,9 @@ fn descend(state: &mut EngineState, station: &Station) -> bool {
     let mut text = say(phrase, &slots);
     let crossing = say(
         if fix.minimum_altitude_feet == fix.maximum_altitude_feet {
-            "crossing_at"
+            "crossing_at_continuation"
         } else {
-            "crossing_below"
+            "crossing_below_continuation"
         },
         &[
             ("callsign", state.session.plan.callsign.clone()),
@@ -1090,6 +1108,17 @@ mod tests {
         );
         let clearance = state.session.clearance.as_ref().unwrap();
         assert_eq!(clearance.altitude_feet, 12000);
+        assert_eq!(
+            state
+                .session
+                .transcript
+                .last()
+                .unwrap()
+                .text
+                .matches("C-GTLT")
+                .count(),
+            1
+        );
         assert!(!clearance.acknowledged);
         assert_eq!(state.session.phase, PhaseCode::Arrival);
         assert!(

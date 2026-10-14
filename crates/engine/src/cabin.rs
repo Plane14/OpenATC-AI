@@ -63,6 +63,8 @@ pub struct Cabin {
     /// Simulated occupants, not a reading from an aircraft lavatory sensor.
     lavatory: u32,
     pub preparing_for_turbulence: bool,
+    pub preparing_for_landing: bool,
+    pub watching_passengers: bool,
     #[serde(skip)]
     last_update: Option<Instant>,
     #[serde(skip)]
@@ -82,6 +84,8 @@ impl Default for Cabin {
             passengers: 0,
             lavatory: 0,
             preparing_for_turbulence: false,
+            preparing_for_landing: false,
+            watching_passengers: false,
             last_update: None,
             last_simulation_seconds: None,
             cruise_seconds: 0.0,
@@ -216,7 +220,9 @@ pub fn report(state: &mut EngineState, text: &str) -> Option<String> {
     let warning = matches("cabin_request_turbulence");
     let clear = matches("cabin_request_turbulence_clear");
     let report = matches("cabin_request_passengers");
-    if !warning && !clear && !report {
+    let landing = matches("cabin_request_landing");
+    let watch = matches("cabin_request_watch");
+    if !warning && !clear && !report && !landing && !watch {
         return None;
     }
     if !state.session.mission.incident.is_empty() {
@@ -231,6 +237,17 @@ pub fn report(state: &mut EngineState, text: &str) -> Option<String> {
         return Some(say("cabin_turbulence_clear", &[]));
     }
     let mut reply = String::new();
+    if landing {
+        state.cabin.preparing_for_landing = true;
+        reply.push_str(&say("cabin_landing_preparing", &[]));
+    }
+    if watch {
+        state.cabin.watching_passengers = true;
+        if !reply.is_empty() {
+            reply.push(' ');
+        }
+        reply.push_str(&say("cabin_passenger_watch", &[]));
+    }
     if warning {
         if !state.cabin.preparing_for_turbulence {
             state.cabin.preparation_seconds = 0.0;

@@ -676,12 +676,7 @@ say = [
 
 [crew_line_is_busy_try_again]
 slots = []
-say = [
-  "Crew line is busy. Try again.",
-  "Crew line busy. Please try again.",
-  "Unable to answer on the crew line. Try again.",
-  "The crew line is busy; call again.",
-]
+say = ["Sorry, Captain, I missed that. Could you repeat it?", "I didn’t catch that, Captain. One more time, please?", "Sorry, Captain. Could you say that again?"]
 
 [copilot_chat_needs_ai_intent_classification_on]
 slots = []
@@ -3692,7 +3687,7 @@ say = ["gear", "landing gear"]
 
 [crew_request_cabin_brightness]
 slots = []
-say = ["cabin brightness", "cabin lights", "cabin lighting", "dim cabin"]
+say = ["cabin brightness", "cabin lights", "cabin lighting", "dim cabin", "lights"]
 
 [crew_request_slides]
 slots = []
@@ -17137,12 +17132,12 @@ slots = []
 say = ["northwest bound"]
 
 [compliance_assistance]
-slots = ["callsign"]
+slots = []
 say = [
-  "{callsign}, advise if unable to comply. Do you require assistance?",
-  "{callsign}, confirm you can comply with the assigned instructions. Advise if you need assistance.",
-  "{callsign}, say intentions and advise if unable to comply.",
-  "{callsign}, are you able to comply? Advise the nature of any difficulty."
+  "advise if unable to comply. Do you require assistance?",
+  "confirm you can comply with the assigned instructions. Advise if you need assistance.",
+  "say intentions and advise if unable to comply.",
+  "are you able to comply? Advise the nature of any difficulty."
 ]
 
 # User-facing request notices; these do not authorize aircraft actions.
@@ -17491,3 +17486,35 @@ say = ["Holding short of runway {runway}, {callsign}.", "Hold short runway {runw
 [pilot_station_checkin]
 slots = ["station", "callsign"]
 say = ["{station}, {callsign}, with you.", "{station}, {callsign}, checking in."]
+
+[cabin_request_landing]
+slots = []
+say = ["prepare cabin for landing", "prepare the cabin for landing", "get ready for landing", "get the cabin ready for landing", "prepare for landing"]
+
+[cabin_request_watch]
+slots = []
+say = ["keep an eye on the passengers", "keep an eye on our passengers", "watch the passengers", "look after the passengers"]
+
+[cabin_landing_preparing]
+slots = []
+say = ["Yes, Captain. We'll secure the cabin for landing and check everyone's seated.", "Of course, Captain. We're getting the cabin ready for landing. I'll let you know when the checks are complete.", "Understood, Captain. We'll finish the cabin checks for landing."]
+
+[cabin_passenger_watch]
+slots = []
+say = ["Of course, Captain. We'll keep an eye on everyone and let you know if anything needs your attention.", "Will do, Captain. We'll look after the passengers and keep you informed.", "Understood, Captain. We'll keep watch back here."]
+
+[crossing_at_continuation]
+slots = ["altitude", "fix"]
+say = ["Cross {fix} at {altitude}.", "Cross {fix} at {altitude} as published."]
+
+[crossing_below_continuation]
+slots = ["altitude", "fix"]
+say = ["Cross {fix} at or below {altitude}.", "The crossing restriction at {fix} is at or below {altitude}."]
+
+[pilot_checking_restriction]
+slots = ["callsign", "fix"]
+say = ["Checking altitude and speed at {fix}, {callsign}.", "Checking the restriction at {fix}, {callsign}."]
+
+[pilot_checking_navigation]
+slots = ["callsign"]
+say = ["Checking navigation, {callsign}.", "Checking our routing, {callsign}."]

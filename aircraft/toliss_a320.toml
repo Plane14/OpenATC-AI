@@ -45,6 +45,7 @@ speed_ref = "sim/cockpit/autopilot/airspeed"
 # Crew requests resolve these aliases to these controls, never to an AI-supplied ref.
 # Commands are used for ToLiss system buttons. Values are checked after execution.
 [aircraft.crew]
+toggle_commands = ["AirbusFBW/purser/fwd", "AirbusFBW/purser/aft", "AirbusFBW/purser/mech", "AirbusFBW/ACP1/CABPress", "AirbusFBW/ACP1/INTPress"]
 cabin_commands = ["AirbusFBW/purser/fwd", "AirbusFBW/purser/aft", "AirbusFBW/ACP1/CABPress"]
 ground_commands = ["AirbusFBW/purser/mech", "AirbusFBW/ACP1/INTPress"]
 radio_commands = ["AirbusFBW/ACP1/VHF1Press", "AirbusFBW/ACP1/VHF2Press"]

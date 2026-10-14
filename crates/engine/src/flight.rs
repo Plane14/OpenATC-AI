@@ -790,10 +790,7 @@ fn compliance(state: &mut EngineState, station: &Station) {
     );
     if repeated && state.settings.terminate_after_warnings {
         text.push(' ');
-        text.push_str(&say(
-            "compliance_assistance",
-            &[("callsign", state.session.plan.callsign.clone())],
-        ));
+        text.push_str(&say("compliance_assistance", &[]));
     }
     let voice = tag(state, station);
     add_transmission(&mut state.session, "ATC", &text, &voice);

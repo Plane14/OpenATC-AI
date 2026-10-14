@@ -1571,7 +1571,21 @@ async fn crew_chat(
                 + &if social.is_some() {
                     reply_text.clone()
                 } else {
-                    few_shots(&state.speech, role, &[], &phase)
+                    let samples = sample_slots();
+                    state
+                        .speech
+                        .select(role, &[], &phase, "icao", 4)
+                        .into_iter()
+                        .flat_map(|example| {
+                            example
+                                .say
+                                .iter()
+                                .take(2)
+                                .map(|line| render_template(line, &samples))
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 }
         };
         let client = shared.read().await.client.clone();

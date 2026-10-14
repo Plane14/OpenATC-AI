@@ -3,6 +3,8 @@ split = '\s+(?:and|then)\s+|[,;]'
 cross_check = '^(?:(?:can|could|would) you\s+)?(?:please\s+)?(?:cross[ -]?check|xcheck)(?: the doors| the slides)?(?: please)?[.!?]?$'
 drink = '^(?:(?:(?:can|could|may) i (?:please )?(?:have|get)|(?:can|could|would) you (?:please )?(?:bring|get)(?: me)?|(?:please )?(?:bring|get)(?: me)?)\s+)?(?:a |some |my )?(?:quick )?(coffee|coffe|tea|water|meal|food|lunch|dinner|breakfast|snack|juice)(?: please)?(?: before (?:we )?push ?back)?[.!?]?$'
 
+statement = '^(?:i|we) (?:have |already )?(?:turned|switched|set|removed|disconnected|connected)\b'
+
 [replacements]
 corss = "cross"
 croos = "cross"

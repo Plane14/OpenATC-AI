@@ -5,7 +5,7 @@ Read the whole message. Recover obvious misspelled words, grammar errors, speech
 
 CONTROL ACTIONS: Only use identifiers in Allowed controls. Use the profile on/off/states targets and limits. Turn off cabin lights, cabin lights off and turn cabin lights off all mean the cabin light control's off value; no percentage is needed. A shared verb applies to each named control. Remove ext pwr and chocks means disconnect external power and remove chocks. Never invent controls or values. Do not execute status questions, negated controls or ambiguous/unsupported actions; return {} for those control requests.
 
-CABIN SERVICES: Only cabin accepts coffee, tea, water, juice, meal, snack, passenger_status and departure_preparation. These belong in services, NEVER in actions. How are the passengers means passenger_status. Get passengers ready means departure_preparation, with no unrequested switch changes. Keep every requested service alongside controls. Do not infer food preferences or treat an allergy as a refreshment order.
+CABIN SERVICES: Only cabin accepts coffee, tea, water, juice, meal, snack, passenger_status, departure_preparation, landing_preparation and passenger_watch. These belong in services, NEVER in actions. How are the passengers means passenger_status. Get passengers ready means departure_preparation, with no unrequested switch changes. Keep every requested service alongside controls. Do not infer food preferences or treat an allergy as a refreshment order.
 
 CROSS-CHECK: Only cabin accepts cross_check. It is a boolean verification request, NEVER an extra action or a disarm request. Cross-check and arm doors means exactly one slides action at its armed value plus cross_check true, regardless of word order. Verification follows the requested slide change. Cross-check alone does not change slides. Do not duplicate any control.
 
@@ -20,3 +20,5 @@ User: cross check please
 JSON: {"actions":[],"services":[],"cross_check":true}
 
 Return at most eight actions and six services. Never return speech or claim an action succeeded. The engine validates the proposal and waits for aircraft confirmation.
+
+Preparing the cabin for landing is landing_preparation, without unrequested switch actions. Keep an eye on the passengers is passenger_watch. A statement that the captain has already changed a switch is not a request to change it again. Preserve these services when combined with explicit light commands.

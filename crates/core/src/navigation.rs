@@ -48,6 +48,35 @@ pub fn leg(fixes: &[RouteFix], next: usize, t: &Telemetry) -> Option<Leg> {
     })
 }
 
+/// Recover missed telemetry sequencing only when established on a later straight STAR leg.
+/// This observes route progress; it does not authorise a shortcut or infer missed crossing levels.
+pub fn established_star_leg(fixes: &[RouteFix], next: usize, t: &Telemetry) -> Option<usize> {
+    let source = &fixes.get(next)?.constraint_source;
+    if !source.starts_with("STAR ") || !t.position_valid {
+        return None;
+    }
+    let track = t.ground_track_degrees?;
+    ((next + 1)..fixes.len().min(next + 17)).find(|index| {
+        if fixes[next..=*index].iter().any(|fix| {
+            fix.constraint_source != *source
+                || fix.fly_over
+                || !["IF", "TF", "DF", ""].contains(&fix.path_terminator.as_str())
+        }) {
+            return false;
+        }
+        let Some(projected) = leg(fixes, *index, t) else {
+            return false;
+        };
+        let course = crate::arrival::bearing(
+            [fixes[index - 1].latitude, fixes[index - 1].longitude],
+            [fixes[*index].latitude, fixes[*index].longitude],
+        );
+        projected.cross_track_nm < 0.25
+            && (0.05..0.95).contains(&projected.along)
+            && turn(course, track).abs() < 10.0
+    })
+}
+
 /// Observe completion of a non-straight fix leg from its known outbound track, without inventing the incoming course.
 pub fn fix_passed_on_outbound(fixes: &[RouteFix], next: usize, t: &Telemetry) -> bool {
     let Some(fix) = fixes.get(next).filter(|fix| {
@@ -80,6 +109,54 @@ fn altitude(value: &str) -> Option<i32> {
         .map(|v| v * multiplier)
         .filter(|v| (0..=60000).contains(v))
 }
+fn procedure_order(
+    kind: &str,
+    name: &str,
+    runway: &str,
+    transition: &str,
+    text: &str,
+) -> Option<std::collections::BTreeMap<(String, String, u16), usize>> {
+    if !["SID", "STAR"].contains(&kind) {
+        return None;
+    }
+    let catalogue = crate::traffic::procedures::Catalogue::parse(text).ok()?;
+    let parts = if kind == "SID" {
+        catalogue.departure(name, runway, transition)
+    } else {
+        catalogue.arrival(name, runway, transition)
+    };
+    let Ok(parts) = parts else {
+        return Some(Default::default());
+    };
+    let mut order = std::collections::BTreeMap::new();
+    let mut index = 0;
+    for part in parts {
+        let (key, _) = catalogue
+            .0
+            .iter()
+            .find(|(_, legs)| std::ptr::eq(legs.as_slice(), part))?;
+        for leg in part {
+            order.insert(
+                (key.route_type.clone(), key.transition.clone(), leg.sequence),
+                index,
+            );
+            index += 1;
+        }
+    }
+    Some(order)
+}
+fn record_order(
+    order: &std::collections::BTreeMap<(String, String, u16), usize>,
+    fields: &[&str],
+) -> Option<usize> {
+    order
+        .get(&(
+            fields.get(1)?.to_string(),
+            fields.get(3)?.to_string(),
+            fields.first()?.parse().ok()?,
+        ))
+        .copied()
+}
 /// Merge the selected runway and procedure transitions only.
 pub fn load_constraints(plan: &mut FlightPlan, kind: &str, text: &str) {
     let (name, runway, transition) = match kind {
@@ -91,6 +168,7 @@ pub fn load_constraints(plan: &mut FlightPlan, kind: &str, text: &str) {
     if name.is_empty() {
         return;
     }
+    let order = procedure_order(kind, name, runway, transition, text);
     for line in text.lines() {
         let Some((record, data)) = line.split_once(':') else {
             continue;
@@ -102,10 +180,20 @@ pub fn load_constraints(plan: &mut FlightPlan, kind: &str, text: &str) {
         if f.len() < 28 || f[2] != name {
             continue;
         }
-        let shared = format!("RW{}B", runway.trim_end_matches(['L', 'R', 'C']));
-        if !f[3].is_empty() && f[3] != transition && f[3] != format!("RW{runway}") && f[3] != shared
-        {
-            continue;
+        if let Some(order) = &order {
+            if record_order(order, &f).is_none() {
+                continue;
+            }
+        } else {
+            let shared = format!("RW{}B", runway.trim_end_matches(['L', 'R', 'C']));
+            if !f[3].is_empty()
+                && f[3] != transition
+                && f[3] != format!("RW{runway}")
+                && f[3] != shared
+                && f[3] != "ALL"
+            {
+                continue;
+            }
         }
         if kind == "SID" && ["VM", "VR", "VA", "VD", "VI", "FM"].contains(&f[11]) {
             plan.sid_has_vectors = true;
@@ -151,7 +239,13 @@ pub fn load_constraints(plan: &mut FlightPlan, kind: &str, text: &str) {
             if let Ok(speed) = f[27].parse::<f64>()
                 && speed > 0.0
             {
-                fix.maximum_speed_knots = Some(speed);
+                if f[26] == "+" {
+                    fix.minimum_speed_knots =
+                        Some(fix.minimum_speed_knots.map_or(speed, |old| old.max(speed)));
+                } else if ["", "-"].contains(&f[26]) {
+                    fix.maximum_speed_knots =
+                        Some(fix.maximum_speed_knots.map_or(speed, |old| old.min(speed)));
+                }
             }
             fix.constraint_source = format!("{kind} {name} / installed CIFP");
         }
@@ -168,6 +262,7 @@ pub fn enrich(plan: &mut FlightPlan, root: &str) {
             fix.maximum_altitude_feet = None;
             fix.maximum_altitude_is_flight_level = None;
             fix.maximum_speed_knots = None;
+            fix.minimum_speed_knots = None;
             fix.path_terminator.clear();
             fix.fly_over = false;
             fix.constraint_source.clear();
@@ -215,7 +310,8 @@ fn expand_terminal(plan: &mut FlightPlan, kind: &str, procedure: &str, fixes: &s
         return;
     }
     let shared = format!("RW{}B", runway.trim_end_matches(['L', 'R', 'C']));
-    let records: Vec<_> = procedure
+    let order = procedure_order(kind, name, runway, transition, procedure);
+    let mut records: Vec<_> = procedure
         .lines()
         .filter_map(|line| {
             let (record, data) = line.split_once(':')?;
@@ -225,14 +321,23 @@ fn expand_terminal(plan: &mut FlightPlan, kind: &str, procedure: &str, fixes: &s
                 && fields[2] == name
                 && !fields[4].is_empty()
                 && !fields[4].starts_with("RW")
-                && (fields[3].is_empty()
-                    || fields[3] == transition
-                    || fields[3] == format!("RW{runway}")
-                    || fields[3] == shared))
-                .then_some(fields)
+                && order.as_ref().map_or_else(
+                    || {
+                        fields[3].is_empty()
+                            || fields[3] == transition
+                            || fields[3] == format!("RW{runway}")
+                            || fields[3] == shared
+                            || fields[3] == "ALL"
+                    },
+                    |order| record_order(order, &fields).is_some(),
+                ))
+            .then_some(fields)
         })
         .take(256)
         .collect();
+    if let Some(order) = &order {
+        records.sort_by_key(|fields| record_order(order, fields));
+    }
     let wanted: std::collections::BTreeSet<_> = records.iter().map(|f| (f[4], f[5])).collect();
     let airport = if kind == "SID" {
         &plan.departure
@@ -321,6 +426,63 @@ pub fn turn(from: f64, to: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn established_star_progress_does_not_guess_arcs_or_shortcuts() {
+        let mut fixes = [(0.0, 0.0), (0.0, 0.2), (0.2, 0.2)]
+            .into_iter()
+            .map(|(latitude, longitude)| RouteFix {
+                latitude,
+                longitude,
+                constraint_source: "STAR TEST / installed CIFP".into(),
+                path_terminator: "TF".into(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let t = Telemetry {
+            latitude: 0.1,
+            longitude: 0.2,
+            position_valid: true,
+            ground_track_degrees: Some(0.0),
+            ..Default::default()
+        };
+        assert_eq!(established_star_leg(&fixes, 1, &t), Some(2));
+        fixes[2].path_terminator = "RF".into();
+        assert!(established_star_leg(&fixes, 1, &t).is_none());
+        fixes[2].path_terminator = "TF".into();
+        fixes[2].constraint_source = "STAR OTHER".into();
+        assert!(established_star_leg(&fixes, 1, &t).is_none());
+    }
+    #[test]
+    fn minimum_speed_does_not_become_a_maximum_speed() {
+        let mut plan = FlightPlan {
+            sid: "TEST1".into(),
+            runway: "04".into(),
+            fixes: vec![RouteFix {
+                identifier: "FIX".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let row = |sequence, condition, speed| {
+            let mut fields = vec![""; 38];
+            fields[0] = sequence;
+            fields[1] = "1";
+            fields[2] = "TEST1";
+            fields[3] = "RW04";
+            fields[4] = "FIX";
+            fields[11] = "TF";
+            fields[26] = condition;
+            fields[27] = speed;
+            format!("SID:{};", fields.join(","))
+        };
+        load_constraints(
+            &mut plan,
+            "SID",
+            &[row("010", "+", "150"), row("020", "-", "230")].join("\n"),
+        );
+        assert_eq!(plan.fixes[0].minimum_speed_knots, Some(150.0));
+        assert_eq!(plan.fixes[0].maximum_speed_knots, Some(230.0));
+    }
     #[test]
     fn internal_star_fixes_receive_constraints_without_duplicate_insertion() {
         let mut plan = FlightPlan {

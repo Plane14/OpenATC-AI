@@ -6,7 +6,7 @@ Settings → Aircraft controls provides a search and live availability list. Ava
 
 ## ToLiss communication selection
 
-The profile's `cabin_commands`, `ground_commands` and `radio_commands` list commands to observe. ATTN/purser and CAB select cabin crew; MECH and INT select ground services; VHF selects radio ATC. Pressing the same call button again clears the selection. Selection persists after the momentary command ends. These listeners allow the original ToLiss command to run. An aircraft change clears the selection. The old purser names were commands, not readable call-light datarefs.
+The profile's `cabin_commands`, `ground_commands` and `radio_commands` list commands to observe. ATTN/purser and CAB select cabin crew; MECH and INT select ground services; VHF selects radio ATC. Commands listed in `toggle_commands` clear the selection when pressed again; other call commands retain their recipient. The bundled ToLiss profile marks its latching buttons as toggles. Selection persists after the momentary command ends. These listeners allow the original ToLiss command to run. An aircraft change clears the selection. The old purser names were commands, not readable call-light datarefs.
 
 ## Wording and mappings
 

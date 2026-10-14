@@ -22,6 +22,10 @@ pub enum Service {
     PassengerStatus,
     /// Acknowledge preparation without claiming the checks are complete.
     DeparturePreparation,
+    /// Ask the cabin crew to prepare for arrival without changing controls.
+    LandingPreparation,
+    /// Ask the cabin crew to keep watch over the passengers.
+    PassengerWatch,
 }
 
 impl Service {
@@ -36,6 +40,8 @@ impl Service {
             Self::Juice => "crew_service_juice",
             Self::PassengerStatus => "cabin_request_passengers",
             Self::DeparturePreparation => "cabin_departure_preparing",
+            Self::LandingPreparation => "cabin_request_landing",
+            Self::PassengerWatch => "cabin_request_watch",
         }
     }
 }
@@ -94,6 +100,8 @@ pub struct Grammar {
     split: String,
     cross_check: String,
     drink: String,
+    #[serde(default)]
+    statement: Option<String>,
     replacements: std::collections::BTreeMap<String, String>,
     services: std::collections::BTreeMap<String, Service>,
 }
@@ -112,6 +120,9 @@ impl Grammar {
         }
         let result: Self = toml::from_str(&text).map_err(|error| error.to_string())?;
         for pattern in [&result.split, &result.cross_check, &result.drink] {
+            regex::Regex::new(pattern).map_err(|error| error.to_string())?;
+        }
+        if let Some(pattern) = &result.statement {
             regex::Regex::new(pattern).map_err(|error| error.to_string())?;
         }
         if result.replacements.len() > 128
@@ -161,12 +172,20 @@ pub fn parse_with(
         let split = regex::Regex::new(&grammar.split).ok()?;
         let check = regex::Regex::new(&grammar.cross_check).ok()?;
         let drink = regex::Regex::new(&grammar.drink).ok()?;
+        let statement = grammar
+            .statement
+            .as_ref()
+            .map(|pattern| regex::Regex::new(pattern))
+            .transpose()
+            .ok()?;
         for clause in split.split(&lower).map(str::trim).filter(|s| !s.is_empty()) {
             if check.is_match(clause) {
                 intent.cross_check = true;
             } else if let Some(service) = [
                 ("cabin_request_passengers", Service::PassengerStatus),
                 ("cabin_request_departure", Service::DeparturePreparation),
+                ("cabin_request_landing", Service::LandingPreparation),
+                ("cabin_request_watch", Service::PassengerWatch),
             ]
             .into_iter()
             .find_map(|(key, service)| {
@@ -183,6 +202,11 @@ pub fn parse_with(
                 if !intent.services.contains(&service) {
                     intent.services.push(service);
                 }
+            } else if statement
+                .as_ref()
+                .is_some_and(|pattern| pattern.is_match(clause))
+            {
+                continue;
             } else {
                 controls.push(clause);
             }
@@ -230,6 +254,23 @@ mod tests {
         assert_eq!(intent.actions.len(), 2);
         assert!(intent.actions.iter().all(|action| action.value == 0.0));
         assert!(parse(&profile(), "cabin", "do not arm dorrs and coffee please").is_none());
+    }
+    #[test]
+    fn cabin_preparation_and_watch_are_services_not_switch_changes() {
+        let watch = parse(&profile(), "cabin", "I have turned off the seat belt sign, it won't be for long so keep an eye on the passengers please.").unwrap();
+        assert!(watch.actions.is_empty());
+        assert_eq!(watch.services, vec![Service::PassengerWatch]);
+        let landing = parse(&profile(), "cabin", "prepare cabin for landing").unwrap();
+        assert!(landing.actions.is_empty());
+        assert_eq!(landing.services, vec![Service::LandingPreparation]);
+        let combined = parse(
+            &profile(),
+            "cabin",
+            "prepare cabin for landing and turn off cabin lights please",
+        )
+        .unwrap();
+        assert_eq!(combined.actions[0].value, 0.0);
+        assert_eq!(combined.services, vec![Service::LandingPreparation]);
     }
     #[test]
     fn light_switch_requests_preserve_stacked_services() {

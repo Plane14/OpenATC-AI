@@ -355,6 +355,21 @@ fn batch_reply(s: &mut crate::EngineState, batch: Batch) -> String {
             }
             continue;
         }
+        if matches!(
+            service,
+            openatc_core::crew::request::Service::LandingPreparation
+                | openatc_core::crew::request::Service::PassengerWatch
+        ) {
+            if let Some(request) = openatc_core::dialogue::phrases(service.response()).first()
+                && let Some(report) = crate::cabin::report(s, request)
+            {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(&report);
+            }
+            continue;
+        }
         if service == openatc_core::crew::request::Service::DeparturePreparation {
             if !text.is_empty() {
                 text.push(' ');
@@ -480,6 +495,23 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         .any(|prefix| text.starts_with(prefix));
     if !recognized && !ai_recovery {
         return None;
+    }
+    if let Some(intent) = parsed
+        .as_ref()
+        .filter(|intent| intent.actions.is_empty() && !intent.cross_check)
+    {
+        let pilot = s.session.plan.callsign.clone();
+        add_transmission(&mut s.session, &pilot, &request.text, &SpeechTag::default());
+        let message = batch_reply(
+            &mut s,
+            Batch {
+                outcomes: Vec::new(),
+                services: intent.services.clone(),
+                started: std::time::Instant::now(),
+            },
+        );
+        speak(&mut s, role, &message);
+        return Some(Json(json!({"result":{"accepted":true,"message":message},"state":snapshot(&s.session,&s.settings)})).into_response());
     }
     if s.crew
         .observed_at

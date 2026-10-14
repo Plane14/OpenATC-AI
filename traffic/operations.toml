@@ -20,3 +20,6 @@ runway_clearance_buffer_seconds = 20.0
 surface_monitor_radius_nm = 50.0
 gate_connector_meters = 350.0
 gate_connector_detour_meters = 250.0
+
+# Maximum retained terminal combinations for the airborne planner.
+terminal_candidate_limit = 16

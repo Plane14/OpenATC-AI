@@ -1853,7 +1853,7 @@ pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
         }
         if interface.settings_section == 3 {
             widgets::section_title(ui, "CREW CONTROL MAPPINGS");
-            ui.text_wrapped("Stock controls use built-in X-Plane mappings. Third-party controls and checklist order come from the aircraft TOML. Spoken requests and replies come from speech TOMLs. ATTN/CAB selects cabin crew; MECH/INT selects ground services; VHF selects radio ATC. Calling the same crew member again keeps that recipient selected.");
+            ui.text_wrapped("Stock controls use built-in X-Plane mappings. Third-party controls and checklist order come from the aircraft TOML. Spoken requests and replies come from speech TOMLs. ATTN/CAB selects cabin crew; MECH/INT selects ground services; VHF selects radio ATC. Mapped latching buttons return to ATC when deselected; momentary call commands can retain the selected recipient.");
             intercom_overrides(ui, interface);
             ui.input_text("Find control", &mut interface.crew_control_filter)
                 .build();

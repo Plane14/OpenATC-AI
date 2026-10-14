@@ -141,6 +141,43 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
             "{reply}"
         );
     }
+    for text in [
+        "prepare cabin for landing",
+        "I have turned off the seat belt sign, it won't be for long so keep an eye on the passengers please.",
+    ] {
+        let service = c.request("cabin", text)?;
+        accepted(&service);
+        assert!(
+            service["state"]["crewActions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            service["state"]["transcript"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["speaker"],
+            "ATTENDANT"
+        );
+    }
+    let landing = c.action(
+        "cabin",
+        "prepare cabin for landing and turn off lights please",
+        "cabin_brightness",
+        0.,
+    )?;
+    assert!(latest(&landing["state"]).to_lowercase().contains("landing"));
+    let pending = c.request("cabin", "turn on cabin lights")?;
+    let task = pending["state"]["crewActions"][0].clone();
+    let watch = c.request("cabin", "keep an eye on the passengers please")?;
+    accepted(&watch);
+    assert_eq!(
+        watch["state"]["crewActions"][0]["sequence"],
+        task["sequence"]
+    );
+    c.ack(&task, true)?;
     let armed = c.action("cabin", "arm slides and crosscheck", "slides", 1.)?;
     assert!(
         latest(&armed["state"])

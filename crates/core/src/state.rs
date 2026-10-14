@@ -236,6 +236,8 @@ pub struct RouteFix {
     pub maximum_altitude_feet: Option<i32>,
     /// Preserve the reference for an upper limit or exact crossing altitude.
     pub maximum_altitude_is_flight_level: Option<bool>,
+    /// Published minimum indicated airspeed at the fix.
+    pub minimum_speed_knots: Option<f64>,
     /// Published maximum indicated airspeed at the fix.
     pub maximum_speed_knots: Option<f64>,
     /// Published leg type; curved and vector legs need their own geometry.

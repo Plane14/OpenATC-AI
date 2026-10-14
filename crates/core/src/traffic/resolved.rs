@@ -124,7 +124,7 @@ pub fn crossings(start: Waypoint, legs: &[Leg], c: &Context<'_>) -> Result<Vec<F
     }
     let mut from = [start.latitude, start.longitude];
     let mut altitude = start.altitude_feet;
-    let mut result = Vec::with_capacity(legs.len());
+    let mut result: Vec<Fix> = Vec::with_capacity(legs.len());
     for (index, leg) in legs.iter().enumerate() {
         if !matches!(
             leg.terminator.as_str(),
@@ -194,12 +194,6 @@ pub fn crossings(start: Waypoint, legs: &[Leg], c: &Context<'_>) -> Result<Vec<F
                 .coordinate
         };
         let distance = distance_nm(from, coordinate);
-        if distance < 0.001 {
-            if altitude < minimum_feet || altitude > maximum_feet {
-                return Err("Initial fix restriction is not satisfied".into());
-            }
-            continue;
-        }
         let track = bearing(from, coordinate);
         let arrival_heading =
             if leg.terminator == "CF" || leg.terminator == "CA" || leg.terminator == "VI" {
@@ -217,6 +211,46 @@ pub fn crossings(start: Waypoint, legs: &[Leg], c: &Context<'_>) -> Result<Vec<F
             "R" => Some(Turn::Right),
             _ => return Err("Unknown published turn direction".into()),
         };
+        if distance < 0.001 {
+            if let Some(previous) = result.last_mut() {
+                // A STAR/approach join can repeat a fix with a tighter crossing restriction.
+                let low = previous.minimum_feet.max(minimum_feet);
+                let high = previous.maximum_feet.min(maximum_feet);
+                if low > high {
+                    return Err(
+                        "Coincident terminal crossings have conflicting altitude limits".into(),
+                    );
+                }
+                if previous
+                    .arrival_heading
+                    .zip(arrival_heading)
+                    .is_some_and(|(a, b)| crate::navigation::turn(a, b).abs() > 1.0)
+                    || previous
+                        .required_turn
+                        .zip(required_turn)
+                        .is_some_and(|(a, b)| a != b)
+                {
+                    return Err(
+                        "Coincident terminal crossings have conflicting courses or turns".into(),
+                    );
+                }
+                if leg.speed_description == "+" && ground_knots > previous.ground_knots {
+                    return Err(
+                        "Coincident minimum-speed crossing needs a joint speed solution".into(),
+                    );
+                }
+                previous.minimum_feet = low;
+                previous.maximum_feet = high;
+                previous.preferred_feet = preferred_feet.clamp(low, high);
+                previous.ground_knots = previous.ground_knots.min(ground_knots);
+                previous.arrival_heading = previous.arrival_heading.or(arrival_heading);
+                previous.required_turn = previous.required_turn.or(required_turn);
+                altitude = previous.preferred_feet;
+            } else if altitude < minimum_feet || altitude > maximum_feet {
+                return Err("Initial fix restriction is not satisfied".into());
+            }
+            continue;
+        }
         result.push(Fix {
             coordinate,
             arrival_heading,
@@ -255,6 +289,68 @@ mod tests {
             .next()
             .unwrap()
             .remove(0)
+    }
+    #[test]
+    fn repeated_join_fix_intersects_limits_instead_of_dropping_them() {
+        let airport = Airport {
+            reference_latitude: 43.0,
+            reference_longitude: 7.0,
+            runways: vec![crate::airport::Runway {
+                first_name: "04".into(),
+                second_name: "22".into(),
+                first: crate::state::Point {
+                    north: 10000.0,
+                    ..Default::default()
+                },
+                second: crate::state::Point {
+                    north: 12000.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let points = Points::default();
+        let atmosphere = Atmosphere::surface(1013.25, 15.0, 0.0).unwrap();
+        let context = Context {
+            airport: &airport,
+            points: &points,
+            atmosphere,
+            variation: 0.0,
+            wind_from: 0.0,
+            wind_knots: 0.0,
+            indicated_knots: 150.0,
+            maximum_intercept_nm: 40.0,
+            climb_fpm: 1000.0,
+            minimum_feet: 0.0,
+            maximum_feet: 20000.0,
+            preferred_feet: 10000.0,
+        };
+        let mut first = leg("TF", "+", "01000");
+        first.identifier = "RW04".into();
+        first.section = "P".into();
+        first.subsection = "G".into();
+        let mut second = first.clone();
+        second.altitude_description = "-".into();
+        second.altitude_one = Some(3000);
+        let start = Waypoint {
+            latitude: 43.0,
+            longitude: 7.0,
+            altitude_feet: 0.0,
+        };
+        let fixes = crossings(start, &[first.clone(), second.clone()], &context).unwrap();
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(
+            fixes[0].minimum_feet,
+            atmosphere.geometric(1000.0, false).unwrap()
+        );
+        assert_eq!(
+            fixes[0].maximum_feet,
+            atmosphere.geometric(3000.0, false).unwrap()
+        );
+        assert!(fixes[0].preferred_feet <= fixes[0].maximum_feet);
+        second.altitude_one = Some(500);
+        assert!(crossings(start, &[first, second], &context).is_err());
     }
     #[test]
     fn mixed_pressure_bands_keep_their_physical_limits() {

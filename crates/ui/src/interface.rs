@@ -121,6 +121,7 @@ pub struct Interface {
     pub taxi_traffic_visible: bool,
     /// Show observed traffic on the developer sector map.
     pub map_traffic_visible: bool,
+    pub map_plan_visible: bool,
     /// Include heliports among the airport markers.
     pub map_heliports: bool,
     /// Map catalogue status.
@@ -389,6 +390,7 @@ impl Interface {
             map_airports_visible: true,
             taxi_traffic_visible: true,
             map_traffic_visible: true,
+            map_plan_visible: false,
             map_heliports: false,
             map_notice: String::new(),
             map_checked: 0.0,

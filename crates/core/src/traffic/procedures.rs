@@ -216,6 +216,80 @@ impl Catalogue {
         }
         Ok(result)
     }
+    /// Join an arrival's enroute, common and runway parts in flight order.
+    pub fn arrival(
+        &self,
+        name: &str,
+        runway: &str,
+        transition: &str,
+    ) -> Result<Vec<&[Leg]>, String> {
+        if name.is_empty()
+            || runway.is_empty()
+            || transition.starts_with("RW")
+            || transition == "ALL"
+        {
+            return Err("Arrival needs a procedure, runway and optional enroute transition".into());
+        }
+        let routes: Vec<_> = self
+            .0
+            .iter()
+            .filter(|(key, _)| key.kind == "STAR" && key.name == name)
+            .collect();
+        if routes.is_empty() {
+            return Err("Arrival procedure is unavailable".into());
+        }
+        let exact = format!("RW{runway}");
+        let shared = format!("RW{}B", runway.trim_end_matches(['L', 'R', 'C']));
+        let mut runway_routes = Vec::new();
+        for selected in [&exact, &shared, "ALL"] {
+            runway_routes = routes
+                .iter()
+                .filter(|(key, _)| key.transition == *selected)
+                .collect::<Vec<_>>();
+            if !runway_routes.is_empty() {
+                break;
+            }
+        }
+        if runway_routes.len() > 1
+            || (runway_routes.is_empty()
+                && routes
+                    .iter()
+                    .any(|(key, _)| key.transition.starts_with("RW") || key.transition == "ALL"))
+        {
+            return Err("Arrival runway transition is missing or ambiguous".into());
+        }
+        let common: Vec<_> = routes
+            .iter()
+            .filter(|(key, _)| key.transition.is_empty())
+            .collect();
+        if common.len() > 1 {
+            return Err("Arrival common segment is ambiguous".into());
+        }
+        let mut result = Vec::new();
+        if !transition.is_empty() {
+            let selected: Vec<_> = routes
+                .iter()
+                .filter(|(key, _)| key.transition == transition)
+                .collect();
+            if selected.len() != 1 {
+                return Err("Enroute arrival transition is missing or ambiguous".into());
+            }
+            result.push(selected[0].1.as_slice());
+        }
+        if let Some((_, legs)) = common.first() {
+            result.push(legs.as_slice());
+        }
+        if let Some((_, legs)) = runway_routes.first() {
+            result.push(legs.as_slice());
+        }
+        if result.is_empty()
+            || result.iter().any(|legs| legs.is_empty())
+            || result.iter().map(|legs| legs.len()).sum::<usize>() > 512
+        {
+            return Err("Assembled arrival is empty or exceeds its leg budget".into());
+        }
+        Ok(result)
+    }
     /// Assemble one named approach with an explicit transition and unambiguous recovery.
     pub fn approach(&self, name: &str, transition: &str) -> Result<Approach<'_>, String> {
         let routes: Vec<_> = self
@@ -390,6 +464,47 @@ impl Catalogue {
 mod tests {
     use super::*;
     #[test]
+    fn arrival_uses_enroute_common_then_selected_runway() {
+        let row = |kind, route, transition, identifier| {
+            let mut fields = vec![""; 38];
+            fields[0] = "010";
+            fields[1] = route;
+            fields[2] = "TEST1";
+            fields[3] = transition;
+            fields[4] = identifier;
+            fields[5] = "LI";
+            fields[6] = "E";
+            fields[11] = "TF";
+            format!("{kind}:{};", fields.join(","))
+        };
+        let text = [
+            row("STAR", "1", "ENTRY", "FIRST"),
+            row("STAR", "2", "", "COMMON"),
+            row("STAR", "3", "RW35B", "SHARED"),
+            row("STAR", "3", "RW35R", "EXACT"),
+            row("SID", "3", "RW35R", "WRONG"),
+        ]
+        .join("\n");
+        let catalogue = Catalogue::parse(&text).unwrap();
+        let identifiers = |runway| {
+            catalogue
+                .arrival("TEST1", runway, "ENTRY")
+                .unwrap()
+                .iter()
+                .map(|legs| legs[0].identifier.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(identifiers("35R"), ["FIRST", "COMMON", "EXACT"]);
+        assert_eq!(identifiers("35L"), ["FIRST", "COMMON", "SHARED"]);
+        assert!(catalogue.arrival("TEST1", "17L", "ENTRY").is_err());
+        assert!(catalogue.arrival("TEST1", "35R", "UNKNOWN").is_err());
+        let all = Catalogue::parse(&row("STAR", "5", "ALL", "ANY")).unwrap();
+        assert_eq!(
+            all.arrival("TEST1", "04L", "").unwrap()[0][0].identifier,
+            "ANY"
+        );
+    }
+    #[test]
     fn repeated_missed_fixes_and_timed_holds_keep_their_sequence() {
         let row = |sequence, terminator, description, distance| {
             let mut fields = vec![""; 38];
@@ -453,6 +568,9 @@ mod tests {
                         .any(|leg| leg.terminator == "HM" && leg.identifier == "SRN")
                 );
                 assert!(legs.iter().any(|leg| leg.terminator == "CA"));
+                let arrival = catalogue.arrival("DEVO3E", "35R", "").unwrap();
+                assert_eq!(arrival[0][0].identifier, "DEVOX");
+                assert!(catalogue.arrival("DEVO3E", "17L", "").is_err());
                 let restriction = catalogue
                     .0
                     .iter()

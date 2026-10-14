@@ -8,6 +8,10 @@ use std::{
 };
 use xplane_sys as xp;
 
+fn issued_route(route: &openatc_core::state::TaxiClearance) -> bool {
+    route.sequence > 0 && route.points.len() >= 2
+}
+
 pub struct GroundGuidance {
     object: xp::XPLMObjectRef,
     probe: xp::XPLMProbeRef,
@@ -48,7 +52,7 @@ impl GroundGuidance {
         if !enabled
             || route.traffic_hold
             || route.parking_hold
-            || !route.approved
+            || !issued_route(route)
             || (!self.holding_marker && route.guidance_complete)
             || (self.holding_marker
                 && (!route.crossing_runway.is_empty()
@@ -405,6 +409,18 @@ mod tests {
             velocityZ: 0.0,
             is_wet: 0,
         }
+    }
+    #[test]
+    fn issued_taxi_aids_do_not_wait_for_readback() {
+        let mut route = openatc_core::state::TaxiClearance::default();
+        route.sequence = 1;
+        route.points = vec![p(0., 0.), p(0., 100.)];
+        assert!(!route.approved);
+        assert!(issued_route(&route));
+        route.approved = true;
+        assert!(issued_route(&route));
+        route.sequence = 0;
+        assert!(!issued_route(&route));
     }
     #[test]
     fn holding_marker_uses_the_route_limit_and_approach_heading() {

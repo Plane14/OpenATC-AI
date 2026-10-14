@@ -19,6 +19,7 @@ mod flight;
 mod landing;
 mod policy;
 mod radio;
+mod routing;
 pub use radio::tick as radio_tick;
 
 #[derive(Default, Clone)]
@@ -52,6 +53,7 @@ pub struct Runtime {
     tower_notified: BTreeSet<u32>,
     tower_ready: BTreeSet<u32>,
     flights: BTreeMap<u32, Arc<flight::Prepared>>,
+    terminal_routes: Vec<routing::Terminal>,
     active_flights: BTreeSet<u32>,
     handoff_targets: BTreeMap<u32, usize>,
     pending_checkins: BTreeSet<(u32, usize)>,
@@ -124,6 +126,7 @@ struct Preparation {
     observed: Vec<TrafficTarget>,
     epoch: u64,
     runway: String,
+    arrival_runway: String,
     config: std::path::PathBuf,
 }
 struct Scene {
@@ -137,6 +140,7 @@ struct Scene {
     terminal_points: Option<Arc<openatc_core::traffic::coordinates::Points>>,
     published_holds: Option<Arc<openatc_core::traffic::holding::published::Catalogue>>,
     nominal_departures: BTreeMap<u32, Arc<departure::Surface>>,
+    terminal_routes: Vec<routing::Terminal>,
     policy: Operations,
     fixed_gear: BTreeSet<u32>,
     channels: BTreeMap<String, animation::Channel>,
@@ -163,6 +167,7 @@ struct Operations {
     pushback_radius_scale: f64,
     pushback_max_meters: f64,
     flight_clearance_lead_seconds: f64,
+    terminal_candidate_limit: usize,
     surface_monitor_radius_nm: f64,
     gate_connector_meters: f64,
     gate_connector_detour_meters: f64,
@@ -183,7 +188,8 @@ fn parse_operations(text: &str) -> Result<Operations, String> {
     let policy: Operations = value
         .try_into()
         .map_err(|error: toml::de::Error| error.to_string())?;
-    if !(1.0..=50.0).contains(&policy.surface_monitor_radius_nm)
+    if !(1..=32).contains(&policy.terminal_candidate_limit)
+        || !(1.0..=50.0).contains(&policy.surface_monitor_radius_nm)
         || !(1.0..=350.0).contains(&policy.gate_connector_meters)
         || !(0.0..=500.0).contains(&policy.gate_connector_detour_meters)
         || policy.version != 1
@@ -738,6 +744,28 @@ fn prepare_scene(input: Preparation) -> Result<Scene, String> {
                 }
             }
         });
+    let terminal_routes = match (&departure_procedures, &arrival_procedures, &terminal_points) {
+        (Some(departures), Some(arrivals), Some(points)) => {
+            match routing::candidates(routing::Inputs {
+                origin: &input.origin,
+                destination: &input.destination,
+                departure_runway: &input.runway,
+                arrival_runway: &input.arrival_runway,
+                departures,
+                arrivals,
+                points,
+                mora: &openatc_core::navigation::Mora::load(&input.simulator_root),
+                budget: policy.terminal_candidate_limit,
+            }) {
+                Ok(routes) => routes,
+                Err(error) => {
+                    warnings.push(error);
+                    Vec::new()
+                }
+            }
+        }
+        _ => Vec::new(),
+    };
     let mut nominal_departures = BTreeMap::new();
     for (category, count) in classes.into_iter().zip(input.counts) {
         for _ in 0..count.min(63) {
@@ -946,6 +974,7 @@ fn prepare_scene(input: Preparation) -> Result<Scene, String> {
         terminal_points,
         published_holds,
         nominal_departures,
+        terminal_routes,
         policy,
         fixed_gear,
         channels,
@@ -956,11 +985,12 @@ fn prepare_scene(input: Preparation) -> Result<Scene, String> {
 
 fn scene_key(state: &EngineState) -> String {
     format!(
-        "{}|{}|{}|{}|{:?}|{}",
+        "{}|{}|{}|{}|{}|{:?}|{}",
         state.settings.simulator_root,
         state.session.plan.departure,
         state.session.plan.destination,
         state.session.plan.runway,
+        state.session.plan.arrival_runway,
         [
             state.settings.airline_traffic,
             state.settings.regional_traffic,
@@ -1045,6 +1075,7 @@ pub async fn prepare(shared: Shared) {
                     observed,
                     epoch,
                     runway: plan.runway.clone(),
+                    arrival_runway: plan.arrival_runway.clone(),
                     config,
                 })
             })
@@ -1064,9 +1095,11 @@ pub async fn prepare(shared: Shared) {
     match result {
         Ok(scene) => {
             state.generated.status = format!(
-                "{} generated surface aircraft prepared; airborne flights are still under development",
-                scene.frames.len()
+                "{} generated surface aircraft prepared; {} terminal candidates retained; full airborne planning is still under development",
+                scene.frames.len(),
+                scene.terminal_routes.len()
             );
+            state.generated.terminal_routes = scene.terminal_routes;
             state.generated.key = key;
             state.generated.frames = scene.frames;
             state.generated.world = scene.world;
@@ -1661,10 +1694,16 @@ mod tests {
             observed: vec![],
             epoch: 1,
             runway: "04R".into(),
+            arrival_runway: "35R".into(),
             config: std::path::PathBuf::new(),
         })
         .unwrap();
         assert!(!scene.frames.is_empty(), "No compatible installed aircraft");
+        assert!(
+            !scene.terminal_routes.is_empty(),
+            "No production terminal candidates: {:?}",
+            scene.warnings
+        );
         assert!(
             !scene.movement.is_empty(),
             "No verified ground routes: {:?}",
@@ -1893,6 +1932,7 @@ mod tests {
             observed: vec![],
             epoch: 1,
             runway: "09".into(),
+            arrival_runway: "09".into(),
             config: std::path::PathBuf::new(),
         })
         .unwrap();
@@ -1946,6 +1986,7 @@ mod tests {
             observed: vec![],
             epoch: 1,
             runway,
+            arrival_runway: "04R".into(),
             config: std::path::PathBuf::new(),
         })
         .unwrap();

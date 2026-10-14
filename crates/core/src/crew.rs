@@ -81,6 +81,8 @@ pub struct CrewProfile {
     pub ground_commands: Vec<String>,
     /// Communication-panel commands that restore radio transmission.
     pub radio_commands: Vec<String>,
+    /// Panel commands whose second press deselects the same recipient.
+    pub toggle_commands: Vec<String>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 /// One bounded control request awaiting simulator confirmation.

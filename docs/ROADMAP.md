@@ -40,3 +40,7 @@ The current sprint implements nearby station discovery, unconditional reception 
 - Add held-control semantics where the SDK requires more than a tap.
 
 New flight clears active flight state without unloading the plugin. Live header reset and disable/re-enable checks remain part of simulator acceptance; automated checks cover reset, pending actions and delayed responses. Native per-holding-point light control is not implemented.
+
+Generated traffic now retains bounded runway-compatible terminal candidates on the preparation worker, including connected STAR/approach entries, published recovery legs and known MORA enroute floors. Repeated join-fix constraints are intersected. These inputs do not complete the airborne flight factory or enable traffic; see `TRAFFIC_PLAN.md` for the remaining trajectory/controller/native acceptance work.
+
+The player route now uses ordered installed SID/STAR parts with selected runway transitions, preserves altitude/flight-level and minimum/maximum speed restrictions, and exposes the assumed route in the debug map. Later straight STAR-leg telemetry can recover a missed sequencing update under tight position/course checks. Anonymous vector/altitude legs and curved geometry still need complete native/FMS-route acceptance; dashed map connectors are diagnostic, not direct clearances. Cabin landing preparation/passenger-watch services and unfamiliar LLM paraphrases have focused coverage; native ToLiss panel deselection and taxi-aid timing remain user checks.

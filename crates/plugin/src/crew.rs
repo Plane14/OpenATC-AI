@@ -42,9 +42,14 @@ struct Listener {
     role: Arc<Mutex<String>>,
     selected: String,
     command: String,
+    toggle: bool,
 }
-fn select_recipient(role: &mut String, selected: &str) {
-    selected.clone_into(role);
+fn select_recipient(role: &mut String, selected: &str, toggle: bool) {
+    if toggle && role == selected {
+        role.clear();
+    } else {
+        selected.clone_into(role);
+    }
 }
 impl CommandHandler for Listener {
     fn command_begin(&mut self, _: &mut xplane::XPAPI) -> CommandHandlerResult {
@@ -64,7 +69,7 @@ impl CommandHandler for Listener {
             ));
         }
         // Calling the same crew member again keeps that recipient selected.
-        select_recipient(&mut role, &self.selected);
+        select_recipient(&mut role, &self.selected, self.toggle);
         CommandHandlerResult::AllowXPlaneProcessing
     }
     fn command_continue(&mut self, _: &mut xplane::XPAPI) -> CommandHandlerResult {
@@ -301,6 +306,7 @@ impl Runtime {
                             role: self.role.clone(),
                             selected: selected.into(),
                             command: name.clone(),
+                            toggle: profile.toggle_commands.contains(name),
                         },
                         false,
                     );
@@ -430,15 +436,25 @@ mod routing_tests {
     use super::select_recipient;
 
     #[test]
+    fn toggled_panel_buttons_restore_atc_when_deselected() {
+        let mut role = String::new();
+        for selected in ["cabin", "ground"] {
+            select_recipient(&mut role, selected, true);
+            assert_eq!(role, selected);
+            select_recipient(&mut role, selected, true);
+            assert!(role.is_empty());
+        }
+    }
+    #[test]
     fn repeated_mech_and_attendant_calls_keep_the_selected_recipient() {
         let mut role = String::new();
         for selected in [
             "ground", "ground", "ground", "cabin", "cabin", "ground", "ground",
         ] {
-            select_recipient(&mut role, selected);
+            select_recipient(&mut role, selected, false);
             assert_eq!(role, selected);
         }
-        select_recipient(&mut role, "");
+        select_recipient(&mut role, "", false);
         assert!(role.is_empty(), "Selecting a radio restores ATC");
     }
 }

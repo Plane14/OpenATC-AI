@@ -30,6 +30,60 @@ fn reserve_label(
     true
 }
 
+fn triangulate(points: &[[f32; 2]]) -> Vec<[[f32; 2]; 3]> {
+    let points = if points.len() > 3 && points.first() == points.last() {
+        &points[..points.len() - 1]
+    } else {
+        points
+    };
+    if points.len() < 3 || points.len() > 512 {
+        return Vec::new();
+    }
+    let cross = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
+        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    };
+    let area: f32 = points
+        .iter()
+        .zip(points.iter().cycle().skip(1))
+        .take(points.len())
+        .map(|(a, b)| a[0] * b[1] - b[0] * a[1])
+        .sum();
+    let sign = area.signum();
+    let mut indices = (0..points.len()).collect::<Vec<_>>();
+    let mut result = Vec::new();
+    while indices.len() > 3 {
+        let mut ear = None;
+        for i in 0..indices.len() {
+            let a = points[indices[(i + indices.len() - 1) % indices.len()]];
+            let b = points[indices[i]];
+            let c = points[indices[(i + 1) % indices.len()]];
+            if cross(a, b, c) * sign <= 0.01 {
+                continue;
+            }
+            if indices.iter().any(|j| {
+                let p = points[*j];
+                p != a
+                    && p != b
+                    && p != c
+                    && cross(a, b, p) * sign >= 0.0
+                    && cross(b, c, p) * sign >= 0.0
+                    && cross(c, a, p) * sign >= 0.0
+            }) {
+                continue;
+            }
+            ear = Some((i, [a, b, c]));
+            break;
+        }
+        let Some((i, triangle)) = ear else {
+            return Vec::new();
+        };
+        result.push(triangle);
+        indices.remove(i);
+    }
+    result.push([points[indices[0]], points[indices[1]], points[indices[2]]]);
+    result
+}
+
 pub fn page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
     if ui.button("Follow aircraft") {
         interface.radio_map_center = None;
@@ -63,6 +117,17 @@ pub fn page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
             + ui.clone_style().item_inner_spacing[0],
     );
     ui.checkbox("Show traffic", &mut interface.map_traffic_visible);
+    widgets::same_line_if_fits(
+        ui,
+        ui.calc_text_size("Assumed flight plan")[0] + ui.frame_height() + 12.0,
+    );
+    ui.checkbox("Assumed flight plan", &mut interface.map_plan_visible);
+    if interface.map_plan_visible {
+        widgets::muted_wrapped(
+            ui,
+            "Engine route and installed procedure fixes. Dashed connectors mark geometry that is not resolved; they are not direct clearances. Hover fixes for restrictions.",
+        );
+    }
     ui.text_wrapped("Airports and controller coverage from installed scenery. Wheel to zoom; drag to pan; hover for controller names and limits. Follow aircraft restores the moving map.");
     widgets::muted_wrapped(ui, &interface.map_notice);
     if state.recommended_frequency_khz > 0 {
@@ -162,6 +227,18 @@ pub fn page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
                 } else {
                     [0.35, 0.65, 0.85, 0.75]
                 };
+                if active {
+                    let polygon = volume
+                        .points
+                        .iter()
+                        .map(|point| project(*point))
+                        .collect::<Vec<_>>();
+                    for [a, b, c] in triangulate(&polygon) {
+                        draw.add_triangle(a, b, c, [0.25, 0.90, 0.72, 0.08])
+                            .filled(true)
+                            .build();
+                    }
+                }
                 let mut previous = project(volume.points[volume.points.len() - 1]);
                 for point in &volume.points {
                     let next = project(*point);
@@ -247,6 +324,60 @@ pub fn page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
             .build();
             draw.add_text(label, color, title);
             draw.add_text([label[0], label[1] + ui.text_line_height()], color, limits);
+        }
+        if interface.map_plan_visible {
+            for pair in state.plan.fixes.windows(2).take(511) {
+                let a = project([pair[0].latitude, pair[0].longitude]);
+                let b = project([pair[1].latitude, pair[1].longitude]);
+                if (a[0]<start[0] && b[0]<start[0]) || (a[1]<start[1] && b[1]<start[1]) || (a[0]>start[0]+size[0] && b[0]>start[0]+size[0]) || (a[1]>start[1]+size[1] && b[1]>start[1]+size[1]) { continue; }
+                let color = if pair[1].constraint_source.starts_with("SID ") {
+                    [0.4, 0.8, 1.0, 0.9]
+                } else if pair[1].constraint_source.starts_with("STAR ") {
+                    [0.95, 0.65, 0.35, 0.9]
+                } else {
+                    [0.85, 0.85, 0.95, 0.85]
+                };
+                if ["", "TF", "DF"].contains(&pair[1].path_terminator.as_str()) {
+                    draw.add_line(a, b, color).thickness(2.0).build();
+                } else {
+                    let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+                    let steps = (length / 10.0).ceil().clamp(1.0, 256.0) as usize;
+                    for i in (0..steps).step_by(2) {
+                        let point = |j: usize| {
+                            [
+                                a[0] + (b[0] - a[0]) * j as f32 / steps as f32,
+                                a[1] + (b[1] - a[1]) * j as f32 / steps as f32,
+                            ]
+                        };
+                        draw.add_line(point(i), point((i + 1).min(steps)), color)
+                            .build();
+                    }
+                }
+            }
+            for fix in state.plan.fixes.iter().take(512) {
+                let point = project([fix.latitude, fix.longitude]);
+                draw.add_circle(point, 3.0, [0.7, 0.9, 1.0, 1.0])
+                    .filled(true)
+                    .build();
+                let label = [point[0] + 5.0, point[1] + 3.0];
+                if reserve_label(
+                    &mut labels,
+                    label,
+                    ui.calc_text_size(&fix.identifier),
+                    start,
+                    size,
+                ) {
+                    draw.add_text(label, [0.7, 0.9, 1.0, 1.0], &fix.identifier);
+                }
+                if hovered
+                    && (ui.io().mouse_pos[0] - point[0]).hypot(ui.io().mouse_pos[1] - point[1])
+                        < 8.0
+                {
+                    let altitude = |value:Option<i32>,reference:Option<bool>| value.map_or_else(|| "—".to_owned(), |value| if reference == Some(true) { format!("FL{:03}",value/100) } else { format!("{value} ft") });
+                    let speed = |value:Option<f64>| value.map_or_else(|| "—".to_owned(), |value| format!("{value:.0} kt"));
+                    ui.tooltip_text(format!("{}\n{} / {}\nAt or above {} / at or below {}\nSpeed at least {} / at most {}",fix.identifier,fix.constraint_source,fix.path_terminator,altitude(fix.minimum_altitude_feet,fix.minimum_altitude_is_flight_level),altitude(fix.maximum_altitude_feet,fix.maximum_altitude_is_flight_level),speed(fix.minimum_speed_knots),speed(fix.maximum_speed_knots)));
+                }
+            }
         }
         if interface.map_traffic_visible {
             for target in t.traffic.iter().flatten().take(126) {
@@ -383,6 +514,33 @@ pub fn page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
                     );
                 }
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sector_fill_preserves_concave_boundaries_and_closed_rings() {
+        let points = [
+            [0., 0.],
+            [3., 0.],
+            [3., 1.],
+            [1., 1.],
+            [1., 3.],
+            [0., 3.],
+            [0., 0.],
+        ];
+        for polygon in [points.to_vec(), points.into_iter().rev().collect()] {
+            let triangles = super::triangulate(&polygon);
+            assert_eq!(triangles.len(), 4);
+            let area: f32 = triangles
+                .iter()
+                .map(|[a, b, c]| {
+                    ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() / 2.
+                })
+                .sum();
+            assert!((area - 5.0).abs() < 0.001);
         }
     }
 }
