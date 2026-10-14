@@ -1536,7 +1536,7 @@ say = ["I cannot set {item} in the current aircraft state.", "{item} is unavaila
 
 [crew_action_clarify]
 slots = []
-say = ["Please confirm the controls and settings you want.", "Which controls and settings would you like?", "Please say the requested controls and their settings again."]
+say = ["Sorry, Captain, I missed that. Could you say it again?", "I didn’t quite catch that, Captain. What would you like me to do?", "Could you repeat that for me, Captain?", "Sorry, Captain, I’m not sure what you meant. Could you rephrase it?", "I caught part of that, Captain. Could you repeat the request?", "One more time, Captain, please?"]
 
 [crew_completed_control]
 slots = ["item", "state"]
@@ -1548,7 +1548,7 @@ say = ["{first} and {last}"]
 
 [crew_batch_complete]
 slots = ["items"]
-say = ["{items}.", "Captain, {items}."]
+say = ["All right, Captain. {items}.", "Yes, Captain, {items}.", "Of course, Captain. {items}.", "There you go, Captain: {items}."]
 
 [crew_completed_unconfirmed]
 slots = ["item"]
@@ -1624,7 +1624,7 @@ say = ["Slides disarmed and cross-checked.", "Slides disarmed. Cross-check compl
 
 [crew_slides_not_confirmed]
 slots = []
-say = ["I cannot confirm all slides. Please check the door indications.", "Cross-check is not complete. Please check the door and slide indications."]
+say = ["Captain, I can’t confirm the doors are armed yet. Could you check the indications from your side?", "I haven’t been able to confirm all the slides, Captain. Please check the door indications.", "The cross-check isn’t complete yet, Captain. Could you check the door indications?"]
 
 [crew_pushback_parameters_unavailable]
 slots = []
@@ -1804,7 +1804,7 @@ say = ["Selected"]
 
 [crew_controls_wait]
 slots = []
-say = ["Aircraft controls are not available yet. Please wait for the aircraft connection.", "I do not have a current aircraft control reading. Please try again when the aircraft is connected."]
+say = ["Give me a moment, Captain. I need to check the indications first.", "One moment, Captain. I haven’t confirmed the indications yet."]
 
 [crew_button_pressed]
 slots = ["item", "state"]
@@ -3704,7 +3704,7 @@ say = ["chocks", "chock", "chalks", "shocks"]
 
 [crew_request_external_power]
 slots = []
-say = ["external power", "ground power", "gpu", "ext power"]
+say = ["external power", "ground power", "gpu", "ext power", "ext pwr"]
 
 [crew_request_beacon]
 slots = []
@@ -16367,7 +16367,7 @@ say = ["how are the passengers", "how are our passengers", "how are the passenge
 
 [cabin_request_departure]
 slots = []
-say = ["get ready for departure", "get ready for depature", "prepare for departure", "prepare the cabin for departure", "get the cabin ready for departure"]
+say = ["get passengers ready", "get the passengers ready", "prepare the passengers", "get ready for departure", "get ready for depature", "prepare for departure", "prepare the cabin for departure", "get the cabin ready for departure"]
 
 [cabin_departure_preparing]
 slots = []

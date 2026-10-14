@@ -2,6 +2,7 @@
 use super::*;
 use openatc_core::traffic::motion::{Segment, Stage, Waypoint};
 
+#[derive(Clone)]
 pub(super) struct Exit {
     pub rollout: Vec<Segment>,
     pub vacated: Waypoint,
@@ -236,6 +237,74 @@ mod tests {
     use super::*;
     #[test]
     #[ignore = "requires installed airport scenery"]
+    fn piston_arrival_uses_a_connected_propeller_stand() {
+        let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
+        let airport = super::super::airport(&root, "LFMD").unwrap();
+        let aircraft = openatc_core::traffic::profiles::aircraft("C172").unwrap();
+        let handling = &animation::builtin().unwrap()[&animation::Kind::Piston];
+        let policy = parse_operations(include_str!("../../../../traffic/operations.toml")).unwrap();
+        let runway = airport
+            .runways
+            .iter()
+            .max_by(|a, b| {
+                (a.second.east - a.first.east)
+                    .hypot(a.second.north - a.first.north)
+                    .total_cmp(
+                        &(b.second.east - b.first.east).hypot(b.second.north - b.first.north),
+                    )
+            })
+            .unwrap();
+        let length = (runway.second.east - runway.first.east)
+            .hypot(runway.second.north - runway.first.north);
+        let point = Point {
+            east: runway.first.east + (runway.second.east - runway.first.east) * 150.0 / length,
+            north: runway.first.north + (runway.second.north - runway.first.north) * 150.0 / length,
+            height: 0.0,
+        };
+        let position = position(&airport, point);
+        let touchdown = Waypoint {
+            latitude: position[0],
+            longitude: position[1],
+            altitude_feet: airport.elevation_feet,
+        };
+        let exit = plan(
+            &airport,
+            &runway.first_name,
+            touchdown,
+            65.0,
+            aircraft,
+            handling,
+            &policy,
+        )
+        .unwrap();
+        let arrival = parking(
+            &airport,
+            exit,
+            aircraft,
+            handling,
+            &policy,
+            &[],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        let stand = airport
+            .parking
+            .iter()
+            .find(|stand| stand.name == arrival.stand)
+            .unwrap();
+        assert!(openatc_core::parking::supports_aircraft(stand, aircraft));
+        assert_eq!(arrival.exit.rollout[1].knots, handling.taxi_turn_knots);
+        assert!(
+            arrival
+                .surface
+                .route
+                .segment(0)
+                .is_some_and(|segment| segment.stage == Stage::TaxiIn)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires installed airport scenery"]
     fn nice_exit_stays_on_pavement_and_slows_before_turning() {
         let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
         let airport = super::super::airport(&root, "LFMN").unwrap();
@@ -284,11 +353,172 @@ mod tests {
                 .iter()
                 .any(|resource| resource.starts_with("RUNWAY/LFMN/"))
         }));
+        let arrival = parking(
+            &airport,
+            exit,
+            aircraft,
+            handling,
+            &policy,
+            &[],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert!(!arrival.stand.is_empty());
+        assert!(
+            arrival
+                .surface
+                .route
+                .segment(0)
+                .is_some_and(|segment| segment.stage == Stage::TaxiIn)
+        );
+        assert!(!arrival.surface.orders.is_empty());
+        let stand = airport
+            .parking
+            .iter()
+            .find(|stand| stand.name == arrival.stand)
+            .unwrap();
+        let coordinate = position(&airport, stand.point);
+        let end = arrival.surface.route.end_position();
+        assert!(
+            openatc_core::arrival::distance_nm(coordinate, [end.latitude, end.longitude]) * 1852.0
+                < 1.0
+        );
+        assert!(
+            arrival
+                .surface
+                .orders
+                .iter()
+                .any(|(_, order)| !order.crossing_runway.is_empty())
+        );
+        let reserved = BTreeSet::from([arrival.stand.clone()]);
+        let alternative = parking(
+            &airport,
+            arrival.exit.clone(),
+            aircraft,
+            handling,
+            &policy,
+            &[],
+            &reserved,
+        )
+        .unwrap();
+        assert_ne!(alternative.stand, arrival.stand);
+        let occupied = TrafficTarget {
+            id: 123,
+            latitude: coordinate[0],
+            longitude: coordinate[1],
+            on_ground: true,
+            aircraft: "A320".into(),
+            ..Default::default()
+        };
+        let alternative = parking(
+            &airport,
+            arrival.exit.clone(),
+            aircraft,
+            handling,
+            &policy,
+            &[occupied],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_ne!(alternative.stand, arrival.stand);
+        let all_reserved = airport
+            .parking
+            .iter()
+            .map(|stand| stand.name.clone())
+            .collect();
+        assert!(
+            parking(
+                &airport,
+                arrival.exit.clone(),
+                aircraft,
+                handling,
+                &policy,
+                &[],
+                &all_reserved
+            )
+            .is_err()
+        );
         openatc_core::traffic::motion::Route::compile(
-            exit.rollout,
+            arrival.exit.rollout,
             aircraft.climb_fpm,
             aircraft.descent_fpm,
         )
         .unwrap();
     }
+}
+
+pub(super) struct Parking {
+    pub exit: Exit,
+    pub surface: GroundPlan,
+    pub stand: String,
+}
+
+/// Reserve only after the caller has committed the complete flight and its gate resource.
+pub(super) fn parking(
+    airport: &Airport,
+    exit: Exit,
+    aircraft: &openatc_core::traffic::profiles::Aircraft,
+    handling: &animation::Handling,
+    policy: &Operations,
+    observed: &[TrafficTarget],
+    reserved: &BTreeSet<String>,
+) -> Result<Parking, String> {
+    let from = openatc_core::airport::airport_point(
+        airport,
+        exit.vacated.latitude,
+        exit.vacated.longitude,
+    );
+    let last = exit
+        .rollout
+        .last()
+        .ok_or("Arrival has no protected runway exit")?;
+    let previous = last
+        .points
+        .iter()
+        .rev()
+        .nth(1)
+        .ok_or("Arrival exit has no heading")?;
+    let heading = openatc_core::arrival::bearing(
+        [previous.latitude, previous.longitude],
+        [exit.vacated.latitude, exit.vacated.longitude],
+    );
+    let mut candidates = airport
+        .parking
+        .iter()
+        .filter(|stand| {
+            !reserved.contains(&stand.name)
+                && openatc_core::parking::supports_aircraft(stand, aircraft)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        let distance = |stand: &openatc_core::airport::Parking| {
+            (stand.point.east - from.east).hypot(stand.point.north - from.north)
+        };
+        distance(left)
+            .total_cmp(&distance(right))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    for stand in candidates.into_iter().take(32) {
+        let result = super::ground_route(
+            airport,
+            from,
+            heading,
+            false,
+            aircraft,
+            handling,
+            &stand.name,
+            0,
+            policy,
+            true,
+            observed,
+        );
+        if let Ok(surface) = result {
+            return Ok(Parking {
+                exit,
+                surface,
+                stand: stand.name.clone(),
+            });
+        }
+    }
+    Err("No free aircraft-compatible stand with a verified taxi-in route".into())
 }

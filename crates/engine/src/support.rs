@@ -188,7 +188,31 @@ pub async fn chat_complete(
     system: &str,
     user: &str,
 ) -> Result<String, String> {
-    let body = serde_json::json!({
+    complete_request(client, url, model, temperature, system, user, false).await
+}
+
+/// Request a JSON object for validated operational intents.
+pub async fn chat_complete_structured(
+    client: &reqwest::Client,
+    url: &str,
+    model: &str,
+    temperature: f32,
+    system: &str,
+    user: &str,
+) -> Result<String, String> {
+    complete_request(client, url, model, temperature, system, user, true).await
+}
+
+async fn complete_request(
+    client: &reqwest::Client,
+    url: &str,
+    model: &str,
+    temperature: f32,
+    system: &str,
+    user: &str,
+    structured: bool,
+) -> Result<String, String> {
+    let mut body = serde_json::json!({
         "model": model,
         "temperature": temperature,
         "messages": [
@@ -196,6 +220,10 @@ pub async fn chat_complete(
             {"role": "user", "content": user},
         ],
     });
+    if structured {
+        body["response_format"] = serde_json::json!({"type":"json_object"});
+        body["max_tokens"] = serde_json::json!(384);
+    }
     let mut call = client
         .post(format!("{url}/v1/chat/completions"))
         .json(&body);

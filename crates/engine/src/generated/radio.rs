@@ -184,7 +184,7 @@ fn blocked(state: &EngineState, id: u32, order: &openatc_core::state::TaxiCleara
     if order.crossing_runway.is_empty() {
         return false;
     }
-    let Some(airport) = &state.generated.airport else {
+    let Some(airport) = state.generated.surface_airport(&order.airport) else {
         return true;
     };
     let mut targets = state.session.telemetry.traffic.clone().unwrap_or_default();
@@ -291,7 +291,7 @@ pub fn tick(state: &mut EngineState) {
             if order.crossing_runway.is_empty() || !blocked(state, pose.id, &order) {
                 continue;
             }
-            let Some(airport) = &state.generated.airport else {
+            let Some(airport) = state.generated.surface_airport(&order.airport) else {
                 continue;
             };
             let Some(station) = station(state, airport) else {
@@ -439,7 +439,7 @@ pub fn tick(state: &mut EngineState) {
             if blocked(state, pose.id, &order) {
                 continue;
             }
-            let Some(airport) = &state.generated.airport else {
+            let Some(airport) = state.generated.surface_airport(&order.airport) else {
                 continue;
             };
             let Some(station) = station(state, airport) else {

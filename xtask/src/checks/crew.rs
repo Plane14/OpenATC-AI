@@ -74,7 +74,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     ] {
         c.action(role, text, control, value)?;
     }
-    let v = c.request("ground", "remove chocks and external power")?;
+    let v = c.request("ground", "remove ext pwr and chocks")?;
     let tasks = v["state"]["crewActions"].as_array().unwrap();
     assert_eq!(tasks.len(), 2);
     assert!(tasks.iter().all(|t| t["value"].as_f64() == Some(0.)));
@@ -128,6 +128,19 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
             .unwrap()["speaker"],
         "ATTENDANT"
     );
+    for text in [
+        "turn off cabin lights, can i have a coffee",
+        "can i have a coffee and turn cabin lights off please",
+        "turn off cabin ligths and can i have a cofee",
+        "how are the passengers, turn off cabin lights, can i have a coffee",
+    ] {
+        let done = c.action("cabin", text, "cabin_brightness", 0.)?;
+        let reply = latest(&done["state"]).to_lowercase();
+        assert!(
+            reply.contains("coffee") && reply.contains("lights"),
+            "{reply}"
+        );
+    }
     let armed = c.action("cabin", "arm slides and crosscheck", "slides", 1.)?;
     assert!(
         latest(&armed["state"])
@@ -138,6 +151,8 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     accepted(&query);
     assert!(query["state"]["crewActions"].as_array().unwrap().is_empty());
     for text in [
+        "get passengers ready, can i have a coffee and can you cross check and arm doors please",
+        "corss chek and arm dorrs please and coffee please",
         "can i please have a coffe and can you cross check and arm doors",
         "arm and cross check, can you bring me a quick coffee before we push back?",
     ] {
@@ -262,7 +277,9 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         "heading",
         275.,
     )?;
-    assert!(m.prompt().contains("Pilot wording examples"));
+    assert!(m.prompt().contains("Allowed controls:"));
+    assert!(!m.prompt().contains("Pilot wording examples"));
+    assert!(m.prompt().contains("obvious misspelled"));
     m.set(
         json!({"actions":[{"control":"chocks","value":0},{"control":"external_power","value":0}]}),
     );

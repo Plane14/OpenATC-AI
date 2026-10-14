@@ -57,6 +57,16 @@ pub struct Runtime {
     pending_checkins: BTreeSet<(u32, usize)>,
 }
 
+impl Runtime {
+    fn surface_airport(&self, id: &str) -> Option<&Airport> {
+        self.airport
+            .iter()
+            .chain(self.destination.iter())
+            .map(Arc::as_ref)
+            .find(|airport| id.is_empty() || airport.icao == id)
+    }
+}
+
 fn next_job() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -153,6 +163,9 @@ struct Operations {
     pushback_radius_scale: f64,
     pushback_max_meters: f64,
     flight_clearance_lead_seconds: f64,
+    surface_monitor_radius_nm: f64,
+    gate_connector_meters: f64,
+    gate_connector_detour_meters: f64,
 }
 fn parse_operations(text: &str) -> Result<Operations, String> {
     if text.len() > 65536 {
@@ -170,7 +183,10 @@ fn parse_operations(text: &str) -> Result<Operations, String> {
     let policy: Operations = value
         .try_into()
         .map_err(|error: toml::de::Error| error.to_string())?;
-    if policy.version != 1
+    if !(1.0..=50.0).contains(&policy.surface_monitor_radius_nm)
+        || !(1.0..=350.0).contains(&policy.gate_connector_meters)
+        || !(0.0..=500.0).contains(&policy.gate_connector_detour_meters)
+        || policy.version != 1
         || !(30.0..=300.0).contains(&policy.flight_clearance_lead_seconds)
         || !(0.5..=3.0).contains(&policy.holding_turn_rate_degrees_sec)
         || !(0.5..=5.0).contains(&policy.pushback_knots)
@@ -218,6 +234,8 @@ fn ground_route(
     runway: &str,
     seed: u64,
     policy: &Operations,
+    to_parking: bool,
+    observed: &[TrafficTarget],
 ) -> Result<GroundPlan, String> {
     use openatc_core::traffic::motion::{Route, Segment, Stage, Waypoint};
     let start = position(airport, stand);
@@ -227,16 +245,17 @@ fn ground_route(
         position_valid: true,
         on_ground: true,
         heading_degrees: heading,
+        traffic: Some(observed.to_vec()),
         ..Default::default()
     };
     let mut path = openatc_core::airport::calculate_taxi_route(
         airport,
         &telemetry,
         runway,
-        false,
+        to_parking,
         aircraft.parking_size(),
     )?;
-    if path.points.len() < 2 {
+    if path.points.is_empty() {
         return Err("No surface route".into());
     }
     let waypoint = |point: Point| {
@@ -263,8 +282,16 @@ fn ground_route(
             + (seed % 1000) as f64 / 1000.0
                 * (policy.preparation_seconds_max - policy.preparation_seconds_min),
     }];
+    if to_parking {
+        segments.clear();
+    }
+    let taxi_stage = if to_parking {
+        Stage::TaxiIn
+    } else {
+        Stage::TaxiOut
+    };
     let mut from = stand;
-    if gate {
+    if gate && !to_parking {
         let first = path
             .points
             .iter()
@@ -347,27 +374,100 @@ fn ground_route(
             }
         }
     }
-    let mut stage = Stage::TaxiOut;
+    let mut stage = taxi_stage;
     let mut crossing_resource = None;
     let mut crossed = BTreeSet::new();
     let mut orders = Vec::new();
     for _ in 0..16 {
+        if to_parking && stage != Stage::Crossing && path.hold_short_runway.is_empty() {
+            let target = airport
+                .parking
+                .iter()
+                .find(|stand| stand.name == runway)
+                .ok_or("Arrival stand disappeared")?;
+            let last = *path
+                .points
+                .last()
+                .ok_or("Arrival has no mapped taxi endpoint")?;
+            if (last.east - target.point.east).hypot(last.north - target.point.north) > 0.01 {
+                let previous = path.points.iter().rev().nth(1).copied().unwrap_or(from);
+                let heading = (last.east - previous.east)
+                    .atan2(last.north - previous.north)
+                    .to_degrees()
+                    .rem_euclid(360.0);
+                let distance =
+                    (last.east - target.point.east).hypot(last.north - target.point.north);
+                if distance > policy.gate_connector_meters {
+                    return Err("Arrival stand is too far from its mapped taxi route".into());
+                }
+                let curve = openatc_core::traffic::curves::connect(
+                    openatc_core::traffic::curves::Pose {
+                        point: last,
+                        heading,
+                    },
+                    openatc_core::traffic::curves::Pose {
+                        point: target.point,
+                        heading: target.heading,
+                    },
+                    &openatc_core::traffic::curves::Limits {
+                        radius: handling.taxi_turn_radius_meters,
+                        spacing: policy.surface_sample_meters,
+                        length: distance + policy.gate_connector_detour_meters,
+                        initial_turn: None,
+                    },
+                    |a, b| {
+                        [a, b].iter().all(|sample| {
+                            openatc_core::airport::on_pavement(airport, sample.point)
+                                && !openatc_core::airport::within_runway(airport, &sample.point)
+                        })
+                    },
+                )?;
+                path.points
+                    .extend(curve.into_iter().skip(1).map(|sample| sample.point));
+            }
+        }
         let start_segment = segments.len();
         orders.push((start_segment, path.clone()));
         let raw: Vec<_> = std::iter::once(from)
             .chain(path.points.iter().copied())
             .collect();
-        let rounded = openatc_core::traffic::surface::rounded(
-            &raw,
-            handling.taxi_turn_radius_meters,
-            handling.wheelbase_meters / handling.maximum_steering_degrees.to_radians().tan(),
-            policy.surface_sample_meters,
-            |point| {
-                openatc_core::airport::on_pavement(airport, point)
-                    && (stage == Stage::Crossing
-                        || !openatc_core::airport::within_runway(airport, &point))
-            },
-        )?;
+        let stationary_hold = raw
+            .iter()
+            .all(|point| (point.east - from.east).hypot(point.north - from.north) < 0.01);
+        if stationary_hold {
+            if path.hold_short_runway.is_empty() || stage == Stage::Crossing {
+                return Err("Surface clearance has no verified onward movement".into());
+            }
+            segments.push(Segment {
+                stage,
+                points: vec![waypoint(from)],
+                knots: 0.0,
+                resources: cells(
+                    airport,
+                    from,
+                    aircraft.wingspan.max(aircraft.length) / 2.0,
+                    policy.conflict_cell_meters,
+                )
+                .into_iter()
+                .collect(),
+                dwell_seconds: 0.0,
+            });
+        }
+        let rounded = if stationary_hold {
+            Vec::new()
+        } else {
+            openatc_core::traffic::surface::rounded(
+                &raw,
+                handling.taxi_turn_radius_meters,
+                handling.wheelbase_meters / handling.maximum_steering_degrees.to_radians().tan(),
+                policy.surface_sample_meters,
+                |point| {
+                    openatc_core::airport::on_pavement(airport, point)
+                        && (stage == Stage::Crossing
+                            || !openatc_core::airport::within_runway(airport, &point))
+                },
+            )?
+        };
         let mut turning = false;
         for sample in &rounded {
             let to = &sample.point;
@@ -483,7 +583,26 @@ fn ground_route(
                 resources: resources.into_iter().collect(),
                 dwell_seconds: 0.0,
             });
-        } else if path.hold_short_runway == runway {
+        } else if to_parking && path.hold_short_runway.is_empty() {
+            segments.push(Segment {
+                stage: Stage::Turnaround,
+                points: vec![waypoint(from)],
+                knots: 0.0,
+                resources: cells(
+                    airport,
+                    from,
+                    aircraft.wingspan.max(aircraft.length) / 2.0,
+                    policy.conflict_cell_meters,
+                )
+                .into_iter()
+                .collect(),
+                dwell_seconds: policy.preparation_seconds_min,
+            });
+            return Ok(GroundPlan {
+                route: Route::compile(segments, aircraft.climb_fpm, aircraft.descent_fpm)?,
+                orders,
+            });
+        } else if !to_parking && path.hold_short_runway == runway {
             return Ok(GroundPlan {
                 route: Route::compile(segments, aircraft.climb_fpm, aircraft.descent_fpm)?,
                 orders,
@@ -493,12 +612,12 @@ fn ground_route(
         telemetry.latitude = coordinate[0];
         telemetry.longitude = coordinate[1];
         if stage == Stage::Crossing {
-            stage = Stage::TaxiOut;
+            stage = taxi_stage;
             path = openatc_core::airport::calculate_taxi_route(
                 airport,
                 &telemetry,
                 runway,
-                false,
+                to_parking,
                 aircraft.parking_size(),
             )?;
         } else {
@@ -737,6 +856,8 @@ fn prepare_scene(input: Preparation) -> Result<Scene, String> {
                     &input.runway,
                     seed,
                     &policy,
+                    false,
+                    &input.observed,
                 );
                 if let Ok(route) = planned {
                     let hold = route.route.end_position();
@@ -974,17 +1095,26 @@ fn external_surface_cells(
     runtime: &Runtime,
     telemetry: &openatc_core::state::Telemetry,
 ) -> BTreeSet<String> {
-    let (Some(airport), Some(policy)) = (&runtime.airport, &runtime.policy) else {
+    let Some(policy) = &runtime.policy else {
         return BTreeSet::new();
     };
     let mut blocked = BTreeSet::new();
     let mut add = |latitude, longitude, wingspan: Option<f64>| {
-        blocked.extend(cells(
-            airport,
-            openatc_core::airport::airport_point(airport, latitude, longitude),
-            wingspan.unwrap_or(80.0) / 2.0,
-            policy.conflict_cell_meters,
-        ));
+        for airport in runtime.airport.iter().chain(runtime.destination.iter()) {
+            if openatc_core::arrival::distance_nm(
+                [airport.reference_latitude, airport.reference_longitude],
+                [latitude, longitude],
+            ) > policy.surface_monitor_radius_nm
+            {
+                continue;
+            }
+            blocked.extend(cells(
+                airport,
+                openatc_core::airport::airport_point(airport, latitude, longitude),
+                wingspan.unwrap_or(80.0) / 2.0,
+                policy.conflict_cell_meters,
+            ));
+        }
     };
     if telemetry.on_ground {
         add(
@@ -1005,7 +1135,7 @@ fn external_surface_cells(
 }
 
 fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) {
-    if let (Some(airport), Some(seconds), Some(policy)) = (
+    if let (Some(_airport), Some(seconds), Some(policy)) = (
         &runtime.airport,
         telemetry.simulation_seconds,
         &runtime.policy,
@@ -1066,6 +1196,17 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) {
                             .world
                             .current_segment(pose.id)
                             .is_some_and(|segment| {
+                                let Some(airport) = runtime
+                                    .orders
+                                    .get(&pose.id)
+                                    .and_then(|orders| {
+                                        orders.iter().find(|(index, _)| *index == pose.segment)
+                                    })
+                                    .and_then(|(_, order)| runtime.surface_airport(&order.airport))
+                                else {
+                                    return segment.stage
+                                        == openatc_core::traffic::motion::Stage::Crossing;
+                                };
                                 segment.stage == openatc_core::traffic::motion::Stage::Crossing
                                     && airport.runways.iter().any(|runway| {
                                         segment.resources.contains(&format!(
@@ -1293,6 +1434,50 @@ pub async fn simulate(shared: Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn arrival_surface_monitoring_uses_both_airports() {
+        let mut runtime = Runtime::default();
+        runtime.airport = Some(Arc::new(Airport {
+            icao: "ORIG".into(),
+            reference_latitude: 40.0,
+            reference_longitude: 0.0,
+            ..Default::default()
+        }));
+        runtime.destination = Some(Arc::new(Airport {
+            icao: "DEST".into(),
+            reference_latitude: 45.0,
+            reference_longitude: 8.0,
+            ..Default::default()
+        }));
+        runtime.policy =
+            Some(parse_operations(include_str!("../../../traffic/operations.toml")).unwrap());
+        assert_eq!(runtime.surface_airport("DEST").unwrap().icao, "DEST");
+        assert_eq!(runtime.surface_airport("ORIG").unwrap().icao, "ORIG");
+        assert!(runtime.surface_airport("UNKNOWN").is_none());
+        let telemetry = openatc_core::state::Telemetry {
+            latitude: 45.0,
+            longitude: 8.0,
+            on_ground: true,
+            traffic: Some(vec![]),
+            ..Default::default()
+        };
+        let blocked = external_surface_cells(&runtime, &telemetry);
+        let expected = cells(
+            runtime.surface_airport("DEST").unwrap(),
+            Point::default(),
+            40.0,
+            50.0,
+        );
+        assert!(!expected.is_empty());
+        assert!(expected.is_subset(&blocked));
+        let origin = cells(
+            runtime.surface_airport("ORIG").unwrap(),
+            Point::default(),
+            40.0,
+            50.0,
+        );
+        assert!(origin.is_disjoint(&blocked));
+    }
     #[test]
     fn pushback_waits_for_the_completed_radio_exchange() {
         use openatc_core::traffic::motion::{Route, Segment, Stage, Waypoint};

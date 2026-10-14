@@ -15,3 +15,8 @@ maximum_surface_segments = 512
 radio_characters_per_second = 14.0
 radio_gap_seconds = 1.0
 runway_clearance_buffer_seconds = 20.0
+
+# Surface observations and verified apron connections for generated arrivals.
+surface_monitor_radius_nm = 50.0
+gate_connector_meters = 350.0
+gate_connector_detour_meters = 250.0

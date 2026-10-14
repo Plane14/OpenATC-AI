@@ -425,7 +425,11 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         return Some(Json(json!({"result":{"accepted":true,"message":text},"state":snapshot(&s.session,&s.settings)})).into_response());
     }
     let profile = s.crew.profile.clone();
-    let parsed = openatc_core::crew::request::parse(&profile, role, &text);
+    let grammar =
+        openatc_core::crew::request::Grammar::load(&s.config_dir.join("cabin/language.toml")).ok();
+    let parsed = grammar.as_ref().and_then(|grammar| {
+        openatc_core::crew::request::parse_with(&profile, role, &text, grammar)
+    });
     let recognized = parsed.is_some()
         || profile.controls.iter().any(|(id, c)| {
             c.role == role
@@ -699,33 +703,14 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                 .collect::<Vec<_>>();
             ranked.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
             let allowed=ranked.into_iter().take(32).map(|(_,id,c)|json!({"control":id,"label":c.label,"min":c.min,"max":c.max,"on":c.on,"off":c.off,"states":c.states,"button":c.momentary})).collect::<Vec<_>>();
-            let pilot_examples = {
-                let state = shared.read().await;
-                let phase = format!("{:?}", state.session.phase).to_lowercase();
-                state
-                    .speech
-                    .select("pilot", &["request"], &phase, "icao", usize::MAX)
-                    .iter()
-                    .flat_map(|entry| entry.say.iter().cloned())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            };
-            let live_context = {
-                let state = shared.read().await;
-                crate::context::prompt(&state, &request.role, &request.text)
-            };
             let instructions = shared
                 .read()
                 .await
                 .prompts
                 .crew_actions
                 .replace("{{role}}", role);
-            let prompt = format!(
-                "{instructions}\nAllowed controls: {}\nPilot wording examples:\n{}",
-                json!(allowed),
-                pilot_examples + &live_context
-            );
-            crate::support::chat_complete(
+            let prompt = format!("{instructions}\nAllowed controls: {}", json!(allowed));
+            crate::support::chat_complete_structured(
                 &client,
                 &settings.ai_url,
                 &settings.ai_model,

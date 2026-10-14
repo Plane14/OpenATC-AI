@@ -1,0 +1,37 @@
+# Common interphone wording; operational numbers are never corrected.
+split = '\s+(?:and|then)\s+|[,;]'
+cross_check = '^(?:(?:can|could|would) you\s+)?(?:please\s+)?(?:cross[ -]?check|xcheck)(?: the doors| the slides)?(?: please)?[.!?]?$'
+drink = '^(?:(?:(?:can|could|may) i (?:please )?(?:have|get)|(?:can|could|would) you (?:please )?(?:bring|get)(?: me)?|(?:please )?(?:bring|get)(?: me)?)\s+)?(?:a |some |my )?(?:quick )?(coffee|coffe|tea|water|meal|food|lunch|dinner|breakfast|snack|juice)(?: please)?(?: before (?:we )?push ?back)?[.!?]?$'
+
+[replacements]
+corss = "cross"
+croos = "cross"
+chek = "check"
+chec = "check"
+dorrs = "doors"
+dors = "doors"
+ligths = "lights"
+ligts = "lights"
+cofee = "coffee"
+remuve = "remove"
+choks = "chocks"
+exernal = "external"
+pwer = "power"
+pwr = "power"
+ext = "external"
+depature = "departure"
+passenges = "passengers"
+passangers = "passengers"
+
+[services]
+coffee = "coffee"
+coffe = "coffee"
+tea = "tea"
+water = "water"
+meal = "meal"
+food = "meal"
+lunch = "meal"
+dinner = "meal"
+breakfast = "meal"
+snack = "snack"
+juice = "juice"

@@ -87,15 +87,80 @@ impl Intent {
     }
 }
 
+/// Editable spelling corrections and clause recognisers for interphone requests.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Grammar {
+    split: String,
+    cross_check: String,
+    drink: String,
+    replacements: std::collections::BTreeMap<String, String>,
+    services: std::collections::BTreeMap<String, Service>,
+}
+impl Grammar {
+    /// Load the installed grammar, retaining bundled defaults for older installations.
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                include_str!("../../../cabin/language.toml").to_owned()
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        if text.len() > 16384 {
+            return Err("Crew language file exceeds 16 KiB".into());
+        }
+        let result: Self = toml::from_str(&text).map_err(|error| error.to_string())?;
+        for pattern in [&result.split, &result.cross_check, &result.drink] {
+            regex::Regex::new(pattern).map_err(|error| error.to_string())?;
+        }
+        if result.replacements.len() > 128
+            || result.replacements.iter().any(|(from, to)| {
+                from.is_empty()
+                    || to.is_empty()
+                    || !from.chars().all(char::is_alphabetic)
+                    || !to.chars().all(char::is_alphabetic)
+            })
+        {
+            return Err("Crew corrections must contain words only".into());
+        }
+        Ok(result)
+    }
+    /// Preserve punctuation and numbers while replacing only explicitly listed words.
+    pub fn normalize(&self, text: &str) -> String {
+        let lower = text.to_lowercase();
+        let token = regex::Regex::new(r"\p{L}+").unwrap();
+        token
+            .replace_all(&lower, |capture: &regex::Captures<'_>| {
+                self.replacements
+                    .get(&capture[0])
+                    .cloned()
+                    .unwrap_or_else(|| capture[0].to_owned())
+            })
+            .into_owned()
+    }
+}
+
 /// Parse common requests without relying on a language model.
 pub fn parse(profile: &CrewProfile, role: &str, text: &str) -> Option<Intent> {
-    let lower = text.to_lowercase();
+    let grammar: Grammar = toml::from_str(include_str!("../../../cabin/language.toml")).ok()?;
+    parse_with(profile, role, text, &grammar)
+}
+
+/// Interpret all clauses using the selected editable grammar.
+pub fn parse_with(
+    profile: &CrewProfile,
+    role: &str,
+    text: &str,
+    grammar: &Grammar,
+) -> Option<Intent> {
+    let lower = grammar.normalize(text);
     let mut intent = Intent::default();
     let mut controls = Vec::new();
     if role == "cabin" {
-        let split = regex::Regex::new(r"\s+(?:and|then)\s+|[,;]").ok()?;
-        let check = regex::Regex::new(r"^(?:(?:can|could|would) you\s+)?(?:please\s+)?(?:cross[ -]?check|xcheck)(?: the doors| the slides)?(?: please)?[.!?]?$").ok()?;
-        let drink = regex::Regex::new(r"^(?:(?:(?:can|could|may) i (?:please )?(?:have|get)|(?:can|could|would) you (?:please )?(?:bring|get)(?: me)?|(?:please )?(?:bring|get)(?: me)?)\s+)?(?:a |some |my )?(?:quick )?(coffee|coffe|tea|water|meal|food|lunch|dinner|breakfast|snack|juice)(?: please)?(?: before (?:we )?push ?back)?[.!?]?$").ok()?;
+        let split = regex::Regex::new(&grammar.split).ok()?;
+        let check = regex::Regex::new(&grammar.cross_check).ok()?;
+        let drink = regex::Regex::new(&grammar.drink).ok()?;
         for clause in split.split(&lower).map(str::trim).filter(|s| !s.is_empty()) {
             if check.is_match(clause) {
                 intent.cross_check = true;
@@ -114,15 +179,7 @@ pub fn parse(profile: &CrewProfile, role: &str, text: &str) -> Option<Intent> {
                     intent.services.push(service);
                 }
             } else if let Some(capture) = drink.captures(clause) {
-                let service = match &capture[1] {
-                    "coffee" | "coffe" => Service::Coffee,
-                    "tea" => Service::Tea,
-                    "water" => Service::Water,
-                    "meal" | "food" | "lunch" | "dinner" | "breakfast" => Service::Meal,
-                    "snack" => Service::Snack,
-                    "juice" => Service::Juice,
-                    _ => return None,
-                };
+                let service = *grammar.services.get(&capture[1])?;
                 if !intent.services.contains(&service) {
                     intent.services.push(service);
                 }
@@ -149,6 +206,65 @@ mod tests {
         let aircraft: toml::Value =
             toml::from_str(include_str!("../../../aircraft/toliss_a320.toml")).unwrap();
         aircraft["aircraft"]["crew"].clone().try_into().unwrap()
+    }
+    #[test]
+    fn exact_compound_requests_and_typos_keep_all_intents() {
+        let intent = parse(&profile(),"cabin","get passengers ready, can i have a coffee and can you cross check and arm doors please").unwrap();
+        assert_eq!(
+            intent.services,
+            vec![Service::DeparturePreparation, Service::Coffee]
+        );
+        assert!(intent.cross_check);
+        assert_eq!(intent.actions[0].control, "slides");
+        for text in [
+            "corss check and arm doors please",
+            "cross chek and arm dorrs please",
+            "arm dorrs and corss chek please",
+        ] {
+            let intent = parse(&profile(), "cabin", text).unwrap();
+            assert!(intent.cross_check);
+            assert_eq!(intent.actions[0].control, "slides");
+            assert_eq!(intent.actions[0].value, 1.0);
+        }
+        let intent = parse(&profile(), "ground", "remove ext pwr and chocks").unwrap();
+        assert_eq!(intent.actions.len(), 2);
+        assert!(intent.actions.iter().all(|action| action.value == 0.0));
+        assert!(parse(&profile(), "cabin", "do not arm dorrs and coffee please").is_none());
+    }
+    #[test]
+    fn light_switch_requests_preserve_stacked_services() {
+        for text in [
+            "turn off cabin lights, can i have a coffee",
+            "can i have a coffee and turn cabin lights off please",
+            "cabin lights off and coffee please",
+            "turn off cabin ligths and can i have a cofee",
+            "set cabin lights to 0% and coffee please",
+        ] {
+            let intent = parse(&profile(), "cabin", text).unwrap();
+            assert_eq!(intent.actions.len(), 1, "{text}");
+            assert_eq!(intent.actions[0].control, "cabin_brightness");
+            assert_eq!(intent.actions[0].value, 0.0);
+            assert_eq!(intent.services, vec![Service::Coffee]);
+        }
+        let intent = parse(
+            &profile(),
+            "cabin",
+            "how are the passengers, turn off cabin lights, can i have a coffee",
+        )
+        .unwrap();
+        assert_eq!(
+            intent.services,
+            vec![Service::PassengerStatus, Service::Coffee]
+        );
+        assert_eq!(intent.actions[0].value, 0.0);
+        assert!(
+            parse(
+                &profile(),
+                "cabin",
+                "do not turn off cabin lights and coffee please"
+            )
+            .is_none()
+        );
     }
     #[test]
     fn cabin_service_and_control_order_do_not_depend_on_a_comma() {
