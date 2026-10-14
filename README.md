@@ -588,3 +588,5 @@ COM1 and COM2 use independent speech playback so a broadcast on one radio does n
 Click an underlined squawk in the clearance summary or conversation to select that code. ToLiss AUTO/ON switches to ON while the transponder/TCAS mode selector stays unchanged. Bindings are editable in `aircraft/transponder.toml`. Nice requires an active transponder before pushback or taxi; selecting a code alone does not complete that procedure.
 
 Default aircraft use the standard X-Plane squawk dataref. Aircraft-specific digit bindings apply only when the complete custom control group is available; setting a code preserves the default aircraft’s transponder mode. Custom controls and the standard fallback are editable in `aircraft/transponder.toml`.
+
+The floating plugin window remembers its position, expanded size and ATC transcript divider in settings. Compact mode preserves the expanded layout, and restored windows stay within the current screen bounds.

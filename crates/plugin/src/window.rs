@@ -106,6 +106,29 @@ impl WindowState {
         actions: openatc_ui::interface::WindowActions,
     ) {
         unsafe {
+            if let Some([left, top, right, bottom]) = actions.restore_bounds
+                && [left, top, right, bottom]
+                    .iter()
+                    .all(|value| (-100000..=100000).contains(value))
+                && right - left >= 520
+                && top - bottom >= 180
+                && right - left <= 4800
+                && top - bottom <= 3200
+            {
+                let (mut screen_left, mut screen_top, mut screen_right, mut screen_bottom) =
+                    (0, 0, 0, 0);
+                xplane_sys::XPLMGetScreenBoundsGlobal(
+                    &mut screen_left,
+                    &mut screen_top,
+                    &mut screen_right,
+                    &mut screen_bottom,
+                );
+                let width = (right - left).min((screen_right - screen_left).max(520));
+                let height = (top - bottom).min((screen_top - screen_bottom).max(180));
+                let left = left.clamp(screen_left, (screen_right - width).max(screen_left));
+                let top = top.clamp((screen_bottom + height).min(screen_top), screen_top);
+                xplane_sys::XPLMSetWindowGeometry(window, left, top, left + width, top - height);
+            }
             if actions.close {
                 xplane_sys::XPLMTakeKeyboardFocus(std::ptr::null_mut());
                 xplane_sys::XPLMSetWindowIsVisible(window, 0);

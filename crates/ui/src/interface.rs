@@ -36,6 +36,8 @@ pub const PAGES: [&str; 11] = [
 #[derive(Clone, Copy, Debug)]
 /// In-sim window placement and pop-out state.
 pub struct WindowFrame {
+    /// Native floating-window bounds, when available.
+    pub native_bounds: Option<[i32; 4]>,
     /// Top-left corner in screen points.
     pub position: [f32; 2],
     /// Window size in screen points.
@@ -49,6 +51,8 @@ pub struct WindowFrame {
 #[derive(Clone, Copy, Debug, Default)]
 /// One-frame window requests collected while drawing.
 pub struct WindowActions {
+    /// Restore saved native bounds once settings arrive.
+    pub restore_bounds: Option<[i32; 4]>,
     /// Close button pressed.
     pub close: bool,
     /// Pop-out toggle pressed.
@@ -297,6 +301,7 @@ pub struct Interface {
     pub compact: bool,
     /// Transcript share of the ATC page.
     pub transcript_fraction: f32,
+    pending_window_bounds: Option<[i32; 4]>,
     /// Frequency picked on the radio page, if any.
     pub requested_frequency_khz: Option<i32>,
     /// Squawk selected from a clearance or transcript link.
@@ -483,6 +488,7 @@ impl Interface {
             window_size: [960.0, 760.0],
             compact: false,
             transcript_fraction: 0.57,
+            pending_window_bounds: None,
             requested_frequency_khz: None,
             requested_squawk: None,
             requested_frequency_radio: openatc_core::state::Radio::Com1,
@@ -1173,6 +1179,8 @@ impl Interface {
                 self.setup_server_url.clone_from(&self.settings.ai_url);
             }
             self.last_settings_json = serde_json::to_string(&self.settings).unwrap_or_default();
+            self.transcript_fraction = self.settings.transcript_fraction.clamp(0.2, 0.8);
+            self.pending_window_bounds = self.settings.window_bounds;
             self.settings_loaded = true;
             self.last_speech_sequence = state.transcript.last().map_or(0, |entry| entry.sequence);
         }
@@ -1555,6 +1563,16 @@ impl Interface {
 
     /// Apply host window placement for this frame.
     pub fn set_window_frame(&mut self, frame: WindowFrame) {
+        if self.settings_loaded
+            && self.pending_window_bounds.is_none()
+            && !self.compact
+            && !frame.popped_out
+        {
+            if let Some(bounds) = frame.native_bounds {
+                self.settings.window_bounds = Some(bounds);
+            }
+            self.settings.transcript_fraction = self.transcript_fraction;
+        }
         self.window_offset = frame.position;
         self.window_size = frame.size;
         self.can_pop_out = frame.can_pop_out;
@@ -1642,6 +1660,7 @@ impl Interface {
 
     /// Draw the panel, returning one-frame window requests for the host.
     pub fn draw(&mut self, ui: &imgui::Ui) -> WindowActions {
+        self.window_actions.restore_bounds = self.pending_window_bounds.take();
         let _theme = crate::theme::apply(ui, self.settings.light_theme);
         self.update_visibility(ui);
         let mut state = self.engine.state();
@@ -1703,6 +1722,9 @@ impl Interface {
                 self.resize_grip(ui);
             });
         let mut actions = std::mem::take(&mut self.window_actions);
+        if actions.close {
+            self.save_settings();
+        }
         actions.ui_scale = self.settings.ui_scale;
         actions.minimum_size = [
             520.0 * self.settings.ui_scale,
@@ -2097,5 +2119,37 @@ mod typed_transmission_tests {
             "Los Angeles Ground, request taxi",
         );
         assert_eq!(station.matches("Los Angeles Ground").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    #[test]
+    fn compact_frames_do_not_overwrite_expanded_layout() {
+        let mut interface = super::Interface::new("http://127.0.0.1:1");
+        interface.settings_loaded = true;
+        interface.transcript_fraction = 0.4;
+        let frame = super::WindowFrame {
+            native_bounds: Some([150, 1000, 1110, 240]),
+            position: [0.0, 0.0],
+            size: [960.0, 760.0],
+            can_pop_out: true,
+            popped_out: false,
+        };
+        interface.set_window_frame(frame);
+        assert_eq!(
+            interface.settings.window_bounds,
+            Some([150, 1000, 1110, 240])
+        );
+        assert_eq!(interface.settings.transcript_fraction, 0.4);
+        interface.compact = true;
+        interface.set_window_frame(super::WindowFrame {
+            native_bounds: Some([150, 1000, 1110, 800]),
+            ..frame
+        });
+        assert_eq!(
+            interface.settings.window_bounds,
+            Some([150, 1000, 1110, 240])
+        );
     }
 }

@@ -114,6 +114,7 @@ fn main() {
                     applied_ui_scale = ui_scale;
                 }
                 let frame = WindowFrame {
+                    native_bounds: None,
                     position: [0.0, 0.0],
                     size: imgui_context.io().display_size,
                     can_pop_out: cfg!(debug_assertions)

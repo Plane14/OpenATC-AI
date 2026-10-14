@@ -359,6 +359,10 @@ pub struct Settings {
     pub light_theme: bool,
     /// Expanded window background opacity. Text and controls remain opaque.
     pub window_opacity: f32,
+    /// Saved floating plugin bounds: left, top, right, bottom.
+    pub window_bounds: Option<[i32; 4]>,
+    /// ATC transcript share of the split panel.
+    pub transcript_fraction: f32,
     /// Interface text and layout scale.
     pub ui_scale: f32,
 }
@@ -494,6 +498,8 @@ impl Default for Settings {
             faded_opacity: 0.4,
             light_theme: false,
             window_opacity: 0.9,
+            window_bounds: None,
+            transcript_fraction: 0.57,
             ui_scale: 1.0,
         }
     }
@@ -526,6 +532,25 @@ impl Settings {
 
     /// Validate settings before saving or applying them.
     pub fn validate(&self) -> Result<(), ValidationError> {
+        if !(0.2..=0.8).contains(&self.transcript_fraction) {
+            return Err(ValidationError::OutOfRange(
+                "transcript fraction",
+                self.transcript_fraction,
+            ));
+        }
+        if let Some([left, top, right, bottom]) = self.window_bounds {
+            let width = i64::from(right) - i64::from(left);
+            let height = i64::from(top) - i64::from(bottom);
+            if ![left, top, right, bottom]
+                .iter()
+                .all(|value| (-100000..=100000).contains(value))
+                || !(520..=4800).contains(&width)
+                || !(180..=3200).contains(&height)
+            {
+                return Err(ValidationError::OutOfRange("window bounds", width as f32));
+            }
+        }
+
         if self.cpu_workers > 16 {
             return Err(ValidationError::OutOfRange(
                 "CPU workers",
@@ -792,5 +817,25 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(settings.voice_pool(), ["af_bella", "am_adam"]);
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    #[test]
+    fn layout_survives_settings_round_trip_and_old_settings_keep_defaults() {
+        let mut settings = super::Settings::default();
+        settings.window_bounds = Some([150, 1000, 1110, 240]);
+        settings.transcript_fraction = 0.4;
+        settings.validate().unwrap();
+        let restored: super::Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.window_bounds, settings.window_bounds);
+        assert_eq!(restored.transcript_fraction, 0.4);
+        let old: super::Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.window_bounds, None);
+        assert_eq!(old.transcript_fraction, 0.57);
+        settings.transcript_fraction = f32::NAN;
+        assert!(settings.validate().is_err());
     }
 }

@@ -1,9 +1,6 @@
 //! Runway exits use the installed taxi graph; an apron gap is never an exit.
 use super::*;
-use openatc_core::traffic::{
-    curves,
-    motion::{Segment, Stage, Waypoint},
-};
+use openatc_core::traffic::motion::{Segment, Stage, Waypoint};
 
 pub(super) struct Exit {
     pub rollout: Vec<Segment>,
@@ -40,7 +37,6 @@ pub(super) fn plan(
         (end.east - start.east) / length,
         (end.north - start.north) / length,
     ];
-    let heading = unit[0].atan2(unit[1]).to_degrees().rem_euclid(360.0);
     let local =
         openatc_core::airport::airport_point(airport, touchdown.latitude, touchdown.longitude);
     let along = (local.east - start.east) * unit[0] + (local.north - start.north) * unit[1];
@@ -89,8 +85,7 @@ pub(super) fn plan(
             }) {
                 continue;
             }
-            let mut queue =
-                std::collections::VecDeque::from([(second, BTreeSet::from([first, second]))]);
+            let mut queue = std::collections::VecDeque::from([(second, vec![first, second])]);
             let mut visits = 0;
             while let Some((node, visited)) = queue.pop_front() {
                 visits += 1;
@@ -108,7 +103,7 @@ pub(super) fn plan(
                     )
                     .is_some_and(|(_, across, _, _)| across.abs() > runway.width / 2.0 + envelope);
                 if clear {
-                    candidates.push((at, *entrance, point));
+                    candidates.push((at, visited.iter().map(|id| nodes[id]).collect::<Vec<_>>()));
                     break;
                 }
                 if visited.len() >= 8 {
@@ -131,7 +126,7 @@ pub(super) fn plan(
                         && !visited.contains(&next)
                     {
                         let mut path = visited.clone();
-                        path.insert(next);
+                        path.push(next);
                         queue.push_back((next, path));
                     }
                 }
@@ -139,16 +134,12 @@ pub(super) fn plan(
         }
     }
     candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
-    for (at, entrance, exit) in candidates.into_iter().take(32) {
+    for (at, path) in candidates.into_iter().take(32) {
         let turn_start = Point {
             east: start.east + (at - radius * 2.0) * unit[0],
             north: start.north + (at - radius * 2.0) * unit[1],
             height: 0.0,
         };
-        let exit_heading = (exit.east - entrance.east)
-            .atan2(exit.north - entrance.north)
-            .to_degrees()
-            .rem_euclid(360.0);
         let protected = |point: Point| {
             openatc_core::airport::on_pavement(airport, point)
                 && airport
@@ -173,23 +164,18 @@ pub(super) fn plan(
                         })
                     })
         };
-        let Ok(turn) = curves::connect(
-            curves::Pose {
-                point: turn_start,
-                heading,
-            },
-            curves::Pose {
-                point: exit,
-                heading: exit_heading,
-            },
-            &curves::Limits {
-                radius,
-                spacing: policy.surface_sample_meters,
-                length: 1000.0,
-                initial_turn: None,
-            },
-            |a, b| protected(a.point) && protected(b.point),
-        ) else {
+        let mut route = vec![turn_start];
+        route.extend(path);
+        let minimum_radius =
+            handling.wheelbase_meters / handling.maximum_steering_degrees.to_radians().tan();
+        let result = openatc_core::traffic::surface::rounded(
+            &route,
+            radius,
+            minimum_radius.max(0.5).min(radius),
+            policy.surface_sample_meters,
+            protected,
+        );
+        let Ok(turn) = result else {
             continue;
         };
         let waypoint = |point: Point| {
@@ -259,9 +245,9 @@ mod tests {
         let runway = airport
             .runways
             .iter()
-            .find(|runway| runway.first_name == "04R" || runway.second_name == "04R")
+            .find(|runway| runway.first_name == "04L" || runway.second_name == "04L")
             .unwrap();
-        let (first, second) = if runway.first_name == "04R" {
+        let (first, second) = if runway.first_name == "04L" {
             (runway.first, runway.second)
         } else {
             (runway.second, runway.first)
@@ -279,7 +265,7 @@ mod tests {
             altitude_feet: airport.elevation_feet,
         };
         let exit = plan(
-            &airport, "04R", touchdown, 140.0, aircraft, handling, &policy,
+            &airport, "04L", touchdown, 140.0, aircraft, handling, &policy,
         )
         .unwrap();
         assert_eq!(exit.rollout.len(), 2);

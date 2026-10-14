@@ -3553,6 +3553,7 @@ mod tests {
             let mut size = [960.0, 780.0];
             let mut frame = |ctx: &mut imgui::Context, interface: &mut Interface| {
                 interface.set_window_frame(crate::interface::WindowFrame {
+                    native_bounds: None,
                     position: [0.0, 0.0],
                     size,
                     can_pop_out: true,
@@ -3756,6 +3757,7 @@ mod tests {
                 let position = [25.0, 30.0];
                 let size = [width * scale, 780.0 * scale];
                 interface.set_window_frame(crate::interface::WindowFrame {
+                    native_bounds: None,
                     position,
                     size,
                     can_pop_out: true,
@@ -4122,6 +4124,7 @@ mod tests {
                 for size in [[960.0, 760.0], [780.0, 690.0], [780.0, 300.0]] {
                     interface.compact = compact;
                     interface.set_window_frame(crate::interface::WindowFrame {
+                        native_bounds: None,
                         position: [60.0, 40.0],
                         size,
                         can_pop_out: true,
@@ -4260,6 +4263,7 @@ mod tests {
         let offset = [60.0, 90.0];
         let size = [560.0, 650.0];
         interface.set_window_frame(crate::interface::WindowFrame {
+            native_bounds: None,
             position: offset,
             size,
             can_pop_out: false,

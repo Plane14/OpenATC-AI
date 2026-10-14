@@ -164,6 +164,7 @@ impl RenderState {
         unsafe { xplane_sys::XPLMGetMouseLocationGlobal(&raw mut global_x, &raw mut global_y) };
         self.mouse_position(window, global_x, global_y);
         let frame = WindowFrame {
+            native_bounds: Some([left, top, right, bottom]),
             position: layout.window_position,
             size: layout.window_size,
             can_pop_out: unsafe { xplane_sys::XPLMWindowIsInVR(window) == 0 },
