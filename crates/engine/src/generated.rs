@@ -53,6 +53,7 @@ pub struct Runtime {
     flights: BTreeMap<u32, Arc<flight::Prepared>>,
     active_flights: BTreeSet<u32>,
     handoff_targets: BTreeMap<u32, usize>,
+    pending_checkins: BTreeSet<(u32, usize)>,
 }
 
 fn next_job() -> u64 {

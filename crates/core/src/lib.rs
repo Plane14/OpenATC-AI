@@ -261,3 +261,5 @@ pub mod traffic;
 
 /// Offline named-place position references.
 pub mod places;
+
+pub mod transponder;

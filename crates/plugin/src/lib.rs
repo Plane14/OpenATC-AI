@@ -18,6 +18,7 @@ mod taxi;
 mod tcas;
 mod telemetry;
 mod traffic;
+mod transponder;
 mod weather;
 mod window;
 
@@ -421,6 +422,27 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
         .as_ref()
         .is_some_and(|interface| interface.engine.connected());
     locked.native_radio.update(connected);
+    if let Some(code) = locked
+        .interface
+        .as_mut()
+        .and_then(|interface| interface.requested_squawk.take())
+    {
+        let root = locked
+            .interface
+            .as_ref()
+            .map(|interface| interface.settings.simulator_root.as_str())
+            .unwrap_or("");
+        let path =
+            std::path::Path::new(root).join("Resources/plugins/OpenATC/aircraft/transponder.toml");
+        let result = openatc_core::transponder::Controls::load(&path)
+            .and_then(|controls| transponder::select(&mut xpapi.data, code, &controls));
+        if let Some(interface) = locked.interface.as_mut() {
+            interface.radio_notice = result.map_or_else(
+                |error| error,
+                |_| format!("Squawk {code:04} selected; mode selector unchanged."),
+            );
+        }
+    }
     let requested_frequency = locked.interface.as_mut().and_then(|i| {
         i.requested_frequency_khz
             .take()

@@ -143,6 +143,7 @@ impl Sampler {
             "temperatureC":info.temperature_alt,"dewpointC":info.dewpoint_alt,
             "pressureHpa":info.pressure_sl/100.0,"windDegrees":info.wind_dir_alt,
             "windKnots":info.wind_spd_alt*1.943_844_5,"visibilityMeters":info.visibility,
+            "cloudSignature":info.cloud_layers.iter().filter(|layer| layer.coverage.is_finite() && layer.coverage > 0.0 && layer.alt_base.is_finite()).map(|layer| [(f64::from(layer.coverage)*8.0).round() as i64, (f64::from(layer.alt_base)*3.280839895/100.0).round() as i64]).collect::<Vec<_>>(),
             "clouds":if layers.is_empty(){openatc_core::dialogue::say("weather_no_significant_cloud", &[])}else{layers.join(". ")}}));
     }
 }

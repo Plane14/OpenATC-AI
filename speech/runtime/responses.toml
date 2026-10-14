@@ -17487,3 +17487,7 @@ say = ["{callsign}, hold short of runway {runway}, stand by.", "{callsign}, hold
 [generated_hold_short_readback]
 slots = ["callsign", "runway"]
 say = ["Holding short of runway {runway}, {callsign}.", "Hold short runway {runway}, {callsign}."]
+
+[pilot_station_checkin]
+slots = ["station", "callsign"]
+say = ["{station}, {callsign}, with you.", "{station}, {callsign}, checking in."]

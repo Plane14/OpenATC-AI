@@ -1,0 +1,7 @@
+# Setting a code never changes the transponder/TCAS mode selector.
+code_dataref = "sim/cockpit2/radios/actuators/transponder_code"
+
+# ToLiss single-aisle AUTO/ON selector; leave XPDRPower untouched.
+[power]
+dataref = "AirbusFBW/XPDRTCASMode"
+on = 1

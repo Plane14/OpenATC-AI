@@ -299,6 +299,8 @@ pub struct Interface {
     pub transcript_fraction: f32,
     /// Frequency picked on the radio page, if any.
     pub requested_frequency_khz: Option<i32>,
+    /// Squawk selected from a clearance or transcript link.
+    pub requested_squawk: Option<i32>,
     /// Radio receiving a manual frequency selection.
     pub requested_frequency_radio: openatc_core::state::Radio,
     /// Debug-only simulator reposition request.
@@ -482,6 +484,7 @@ impl Interface {
             compact: false,
             transcript_fraction: 0.57,
             requested_frequency_khz: None,
+            requested_squawk: None,
             requested_frequency_radio: openatc_core::state::Radio::Com1,
             requested_debug_jump: None,
             simulator_host: false,

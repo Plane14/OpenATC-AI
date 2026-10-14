@@ -184,6 +184,9 @@ pub(super) fn install(runtime: &mut Runtime, id: u32, prepared: &Prepared) -> Re
     runtime
         .reported_holds
         .retain(|(aircraft, _)| *aircraft != id);
+    runtime
+        .pending_checkins
+        .retain(|(aircraft, _)| *aircraft != id);
     runtime.orders.remove(&id);
     runtime.active_flights.insert(id);
     runtime.handoff_targets.insert(id, 0);
@@ -195,7 +198,20 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
         return None;
     }
     let blocked = super::external_surface_cells(&state.generated, &state.session.telemetry);
-    for pose in state.generated.world.snapshot() {
+    let mut poses = state.generated.world.snapshot();
+    poses.sort_by(|left, right| {
+        let deadline = |pose: &openatc_core::traffic::motion::Pose| {
+            if pose.awaiting_clearance {
+                0.0
+            } else {
+                pose.seconds_to_limit
+            }
+        };
+        deadline(left)
+            .total_cmp(&deadline(right))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    for pose in poses {
         if pose.complete || pose.recovering || !state.generated.active_flights.contains(&pose.id) {
             continue;
         }
@@ -210,6 +226,38 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
         else {
             continue;
         };
+        if let Some(index) = state
+            .generated
+            .pending_checkins
+            .iter()
+            .find_map(|(id, index)| (*id == pose.id).then_some(*index))
+            && let Some(clearance) = prepared.clearances.get(&index)
+            && frame.target.com1_khz == Some(clearance.station.khz)
+        {
+            let slots = [
+                ("station", clearance.station.name.clone()),
+                ("callsign", frame.target.callsign.clone()),
+            ];
+            let exchange = radio::Exchange {
+                id: pose.id,
+                segment: index,
+                station: clearance.station.clone(),
+                callsign: frame.target.callsign.clone(),
+                messages: vec![
+                    (
+                        false,
+                        openatc_core::dialogue::say("pilot_station_checkin", &slots),
+                    ),
+                    (true, openatc_core::dialogue::say("flight_checkin", &slots)),
+                ],
+                next: 0,
+                due: Instant::now(),
+                grant: false,
+                tune_after: None,
+            };
+            state.generated.pending_checkins.remove(&(pose.id, index));
+            return Some(exchange);
+        }
         let current_handoff = state
             .generated
             .handoff_targets
@@ -515,11 +563,22 @@ mod tests {
         state.generated.flights.insert(1, Arc::new(prepared));
         let mut seen = BTreeSet::new();
         let mut frequencies = BTreeSet::new();
+        let mut checkins = BTreeSet::new();
         for second in 31..900 {
             if let Some(exchange) = &mut state.generated.exchange {
                 exchange.due = Instant::now();
             }
             super::super::radio_tick(&mut state);
+            if let Some(exchange) = &state.generated.exchange
+                && !exchange.grant
+                && exchange.tune_after.is_none()
+                && exchange
+                    .messages
+                    .first()
+                    .is_some_and(|(controller, _)| !controller)
+            {
+                checkins.insert(exchange.station.khz);
+            }
             state.session.telemetry.simulation_seconds = Some(f64::from(second));
             super::super::advance(&mut state.generated, &state.session.telemetry);
             let pose = &state.generated.world.snapshot()[0];
@@ -543,6 +602,12 @@ mod tests {
         assert!(frequencies.contains(&124500));
         assert!(frequencies.contains(&118675));
         assert!(frequencies.contains(&121705));
+        for station in [124500, 118675, 120950, 121705] {
+            assert!(
+                checkins.contains(&station),
+                "Missing generated check-in on {station}"
+            );
+        }
         for stage in [
             "Takeoff", "Climb", "Cruise", "Descent", "Approach", "Rollout", "TaxiIn",
         ] {

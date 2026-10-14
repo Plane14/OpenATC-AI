@@ -472,13 +472,22 @@ fn header_card(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
                         }
                     ),
                 );
-                ui.text_wrapped(format!(
+                let text = format!(
                     "{}  /  {}  /  Squawk {}  /  Runway {}",
                     altitude_text(f64::from(clearance.altitude_feet), units, false),
                     clearance.route,
                     clearance.squawk,
                     clearance.runway
-                ));
+                );
+                if let (Some(TranscriptAction::Squawk(code)), _) = linked_transcript_text(
+                    ui,
+                    &text,
+                    widgets::text_color(ui, [0.94, 0.95, 0.96, 1.0]),
+                    false,
+                    interface.radio_power,
+                ) {
+                    interface.requested_squawk = Some(code);
+                }
             });
     }
 }
@@ -523,8 +532,10 @@ fn transcript_view(ui: &imgui::Ui, interface: &mut Interface, state: &State, hei
                 _ => [0.94, 0.95, 0.96, 1.0],
             });
             if let Some(frequency) = transcript_line(ui, &badge, &entry.text, color, scale, entry.speaker == "ATC", interface.radio_power) {
-                interface.requested_frequency_khz = Some(frequency);
-                interface.requested_frequency_radio = interface.active_radio;
+                match frequency {
+                    TranscriptAction::Frequency(value) => { interface.requested_frequency_khz = Some(value); interface.requested_frequency_radio = interface.active_radio; }
+                    TranscriptAction::Squawk(value) => interface.requested_squawk = Some(value),
+                }
             }
         }
         for notice in &interface.local_notices {
@@ -584,6 +595,33 @@ fn transcript_badge(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TranscriptAction {
+    Frequency(i32),
+    Squawk(i32),
+}
+
+fn transcript_squawk(words: &[&str], index: usize) -> Option<i32> {
+    let code = words[index].trim_matches(|c: char| !c.is_ascii_digit());
+    if code.len() != 4 || !code.bytes().all(|value| (b'0'..=b'7').contains(&value)) {
+        return None;
+    }
+    let previous = words[..index]
+        .iter()
+        .rev()
+        .take(2)
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_ascii_alphabetic())
+                .to_ascii_lowercase()
+        })
+        .collect::<Vec<_>>();
+    previous
+        .iter()
+        .any(|word| matches!(word.as_str(), "squawk" | "squawking" | "code"))
+        .then(|| code.parse().ok())
+        .flatten()
+}
+
 fn transcript_line(
     ui: &imgui::Ui,
     badge: &str,
@@ -592,7 +630,7 @@ fn transcript_line(
     scale: f32,
     links: bool,
     powered: bool,
-) -> Option<i32> {
+) -> Option<TranscriptAction> {
     let position = ui.cursor_screen_pos();
     let label_size = ui.calc_text_size(badge);
     let size = [
@@ -669,12 +707,12 @@ fn linked_transcript_text(
     color: [f32; 4],
     links: bool,
     powered: bool,
-) -> (Option<i32>, bool) {
-    if !links
-        || !text
-            .split_whitespace()
-            .any(|word| transcript_frequency(word).is_some())
-    {
+) -> (Option<TranscriptAction>, bool) {
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    if !words.iter().enumerate().any(|(index, word)| {
+        (links && transcript_frequency(word).is_some())
+            || transcript_squawk(&words, index).is_some()
+    }) {
         ui.text_wrapped(text);
         return (None, false);
     }
@@ -691,7 +729,12 @@ fn linked_transcript_text(
         if cursor[0] > origin[0] && cursor[0] + size[0] > origin[0] + width {
             cursor = [origin[0], cursor[1] + line_height];
         }
-        let frequency = transcript_frequency(word);
+        let frequency = if links {
+            transcript_frequency(word).map(TranscriptAction::Frequency)
+        } else {
+            None
+        }
+        .or_else(|| transcript_squawk(&words, index).map(TranscriptAction::Squawk));
         let mut text_color = color;
         if let Some(frequency) = frequency {
             ui.set_cursor_screen_pos(cursor);
@@ -706,7 +749,14 @@ fn linked_transcript_text(
             if hovered {
                 ui.set_mouse_cursor(Some(imgui::MouseCursor::Hand));
                 ui.tooltip_text(if powered {
-                    format!("Tune to {:.3} MHz", f64::from(frequency) / 1000.0)
+                    match frequency {
+                        TranscriptAction::Frequency(value) => {
+                            format!("Tune to {:.3} MHz", f64::from(value) / 1000.0)
+                        }
+                        TranscriptAction::Squawk(value) => {
+                            format!("Set squawk {value:04}; preserve the mode selector")
+                        }
+                    }
                 } else {
                     "Turn on the radio to tune".to_owned()
                 });
@@ -3118,6 +3168,39 @@ fn sort_table<T>(ui: &imgui::Ui, rows: &mut [T], key: impl Fn(&T, usize) -> Stri
 #[cfg(test)]
 mod tests {
     #[test]
+    fn squawk_links_accept_reminders_and_reject_altitudes_and_invalid_digits() {
+        for text in [
+            "Squawk 6111.",
+            "verify squawking 6111.",
+            "assigned code is 6111.",
+            "check transponder code 6111",
+        ] {
+            let words = text.split_whitespace().collect::<Vec<_>>();
+            assert_eq!(
+                words
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, _)| super::transcript_squawk(&words, index)),
+                Some(6111)
+            );
+        }
+        for text in [
+            "maintain 5000 feet",
+            "squawk 8911",
+            "squawk 121.705",
+            "code 12345",
+        ] {
+            let words = text.split_whitespace().collect::<Vec<_>>();
+            assert!(
+                words
+                    .iter()
+                    .enumerate()
+                    .all(|(index, _)| super::transcript_squawk(&words, index).is_none())
+            );
+        }
+    }
+
+    #[test]
     fn transcripts_keep_radio_and_interphone_messages_separate() {
         use openatc_core::state::{Radio, Transmission};
         for (value, receiver) in [
@@ -3812,7 +3895,51 @@ mod tests {
                     });
                 ctx.render();
             }
-            assert_eq!(chosen, expected);
+            assert_eq!(chosen, expected.map(TranscriptAction::Frequency));
+        }
+    }
+
+    #[test]
+    fn clicking_a_squawk_preserves_the_requested_code() {
+        let _guard = CONTEXT_LOCK.lock().unwrap();
+        for (links, powered, expected) in [
+            (true, true, Some(6111)),
+            (true, false, None),
+            (false, true, Some(6111)),
+        ] {
+            let mut ctx = headless();
+            let mut target = [0.0, 0.0];
+            let mut chosen = None;
+            for frame in 0..3 {
+                if frame > 0 {
+                    ctx.io_mut().add_mouse_pos_event(target);
+                    ctx.io_mut()
+                        .add_mouse_button_event(imgui::MouseButton::Left, frame == 2);
+                }
+                let ui = ctx.frame();
+                ui.window("Link test")
+                    .position([20.0, 20.0], imgui::Condition::Always)
+                    .size([440.0, 180.0], imgui::Condition::Always)
+                    .build(|| {
+                        let origin = ui.cursor_screen_pos();
+                        target = [
+                            origin[0] + ui.calc_text_size("Squawk ")[0] + 10.0,
+                            origin[1] + 5.0,
+                        ];
+                        let (clicked, _) = linked_transcript_text(
+                            ui,
+                            "Squawk 6111.",
+                            widgets::accent(ui),
+                            links,
+                            powered,
+                        );
+                        if clicked.is_some() {
+                            chosen = clicked;
+                        }
+                    });
+                ctx.render();
+            }
+            assert_eq!(chosen, expected.map(TranscriptAction::Squawk));
         }
     }
 

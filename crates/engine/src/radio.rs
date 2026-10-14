@@ -103,6 +103,22 @@ pub async fn nearby(AxumState(shared): AxumState<Shared>, Json(_): Json<Value>) 
         "notice": if s.stations.is_empty() { "No radio stations found in the installed scenery" } else { "" }}))
         .into_response()
 }
+fn weather_signature(body: &Value) -> String {
+    format!(
+        "{:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{}",
+        body["windDegrees"].as_f64().unwrap_or(0.) / 10.,
+        body["windKnots"].as_f64().unwrap_or(0.) / 5.,
+        body["pressureHpa"].as_f64().unwrap_or(0.),
+        body["visibilityMeters"].as_f64().unwrap_or(0.) / 1000.,
+        body["temperatureC"].as_f64().unwrap_or(0.),
+        body["dewpointC"].as_f64().unwrap_or(0.),
+        body.get("cloudSignature").map_or_else(
+            || body["clouds"].as_str().unwrap_or("").to_owned(),
+            |value| value.to_string()
+        )
+    )
+}
+
 /// Store actual simulator samples, without accepting invented/stale observations.
 pub(crate) fn weather_location(
     state: &crate::EngineState,
@@ -215,16 +231,7 @@ pub async fn weather(AxumState(shared): AxumState<Shared>, Json(body): Json<Valu
             &[],
         ));
     }
-    let signature = format!(
-        "{:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{:.0}/{}",
-        body["windDegrees"].as_f64().unwrap_or(0.) / 10.,
-        body["windKnots"].as_f64().unwrap_or(0.) / 5.,
-        body["pressureHpa"].as_f64().unwrap_or(0.),
-        body["visibilityMeters"].as_f64().unwrap_or(0.) / 1000.,
-        body["temperatureC"].as_f64().unwrap_or(0.),
-        body["dewpointC"].as_f64().unwrap_or(0.),
-        body["clouds"].as_str().unwrap_or("")
-    );
+    let signature = weather_signature(&body);
     let information = s
         .atis_information
         .entry(airport.to_owned())
@@ -701,6 +708,18 @@ pub async fn debug_map(AxumState(shared): AxumState<Shared>, Json(body): Json<Va
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn weather_signature_ignores_cloud_wording_variety() {
+        let mut observation = serde_json::json!({"windDegrees":333,"windKnots":9,"pressureHpa":1026,"visibilityMeters":31157,"temperatureC":18,"dewpointC":11,"cloudSignature":[[2,24],[2,112]],"clouds":"Few clouds at 2400 feet"});
+        let original = super::weather_signature(&observation);
+        observation["clouds"] = serde_json::json!("Few clouds with a base of 2400 feet");
+        observation["windDegrees"] = serde_json::json!(334);
+        observation["visibilityMeters"] = serde_json::json!(31175);
+        assert_eq!(super::weather_signature(&observation), original);
+        observation["cloudSignature"] = serde_json::json!([[8, 24]]);
+        assert_ne!(super::weather_signature(&observation), original);
+    }
+
     use super::safe_variety;
     #[test]
     fn controller_identity_belongs_to_the_station_not_the_receiver() {

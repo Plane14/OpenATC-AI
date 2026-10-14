@@ -269,6 +269,9 @@ pub fn tick(state: &mut EngineState) {
         return;
     };
     if state.generated.exchange.is_none() {
+        state.generated.exchange = super::flight::exchange(state);
+    }
+    if state.generated.exchange.is_none() {
         for pose in state.generated.world.snapshot().into_iter().filter(|pose| {
             pose.awaiting_clearance
                 && state
@@ -620,6 +623,10 @@ pub fn tick(state: &mut EngineState) {
                     .generated
                     .handoff_targets
                     .insert(exchange.id, exchange.segment);
+                state
+                    .generated
+                    .pending_checkins
+                    .insert((exchange.id, exchange.segment));
             }
         }
         if exchange.grant {
