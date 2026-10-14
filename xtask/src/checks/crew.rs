@@ -337,8 +337,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         0.,
     )?;
     assert!(latest(&narrated["state"]).contains("coffee first"));
-    assert!(m.prompt().contains("confirmed result"));
-    assert!(m.prompt().contains("have a beer for me"));
+    assert!(m.requests.lock().unwrap().iter().any(|request|request.to_string().contains("have a beer for me")));
     m.set(json!({"reply":"External power disconnected and chocks removed, Captain. Ha, thanks! Enjoy your flight."}));
     m.propose(json!([{"control":"external_power","value":0},{"control":"chocks","value":0}]));
     let banter = c.request("ground", "disoconnect external power and chocks please kind sir, and have a beer for me after that! you deserve it haha")?;
@@ -346,8 +345,10 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     let tasks = banter["state"]["crewActions"].as_array().unwrap();
     assert_eq!(tasks.len(), 2);
     assert!(tasks.iter().all(|task| task["value"] == 0.0));
+    let requests_before_ack = m.requests.lock().unwrap().len();
     c.ack(&tasks[0], true)?;
     let done = c.ack(&tasks[1], true)?;
+    assert_eq!(m.requests.lock().unwrap().len(), requests_before_ack);
     assert!(latest(&done["state"]).contains("Ha, thanks"));
     assert!(
         m.requests
@@ -376,6 +377,18 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         let done = c.action(role, request, control, value)?;
         assert!(latest(&done["state"]).contains("Ha,"));
     }
+    m.set(json!({"answers":["I'll check for spare lobster and bring a coffee.","The passengers are settled and the crew is cheerful."]}));
+    *m.proposal.lock().unwrap() = Some(json!({"conversation_reply":"","actions":[{"control":"cabin_brightness","value":50}],"cross_check":false,"memory":"","conversation_points":["Can I have spare lobster and coffee?","How are the passengers and crew?"]}).to_string());
+    let mixed = c.request("cabin", "Can I have spare lobster and coffee? Dim the cabin lights to 50%. How are the passengers and crew?")?;
+    accepted(&mixed);
+    let task = mixed["state"]["crewActions"][0].clone();
+    assert_eq!(task["control"], "cabin_brightness");
+    assert_eq!(task["value"], 50.0);
+    let before_ack = m.count();
+    let done = c.ack(&task, true)?;
+    assert_eq!(m.count(), before_ack);
+    let spoken = latest(&done["state"]);
+    assert!(spoken.contains("50 percent") && spoken.contains("lobster") && spoken.contains("crew is cheerful"));
     m.set(json!({"reply":"I will bring you coffee and something to eat. Here is a quick joke for you.","actions":[],"cross_check":false,"memory":"Captain requested coffee and food."}));
     let refreshments = c.request("cabin", "do you have time to get me a coffee and sandwich? wehave alittle time before push back. also do you know a good joke?")?;
     accepted(&refreshments);
@@ -427,7 +440,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         })
         .unwrap();
     assert!(!classifier.contains("Pilot wording examples"));
-    assert!(classifier.contains("Understand misspellings"));
+    assert!(classifier.contains("misspellings") && classifier.contains("reordered words"));
     drop(requests);
     m.set(
         json!({"actions":[{"control":"chocks","value":0},{"control":"external_power","value":0}]}),
@@ -492,4 +505,70 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     e.post("telemetry", json!({"latitude":0.003,"longitude":-0.003,"altitudeFeet":0,"onGround":true,"positionValid":true,"radioPower":true,"com1Khz":121900,"groundSpeedKnots":2,"traffic":[]}))?;
     c.denied("ground", "disconnect external power and chocks please")?;
     Ok(())
+}
+
+/// Exercise the installed model through an isolated engine and acknowledged control fixtures.
+pub(super) fn live_actors(e: &mut Engine) -> Result {
+    let url = std::env::var("OPENATC_LIVE_AI_URL")?;
+    let model = std::env::var("OPENATC_LIVE_AI_MODEL").unwrap_or_else(|_| "qwen2.5-7b-instruct-q4_k_m".into());
+    let mut passenger_plan = plan();
+    passenger_plan["passengers"] = json!(170);
+    e.post("plan", passenger_plan)?;
+    e.settings(json!({"aiEnabled":true,"aiUrl":url,"aiModel":model,"llmPhraseVariety":true}))?;
+    e.tune(118100,json!({"onGround":true,"positionValid":true,"groundSpeedKnots":0}))?;
+    let catalogue: toml::Value = toml::from_str(&fs::read_to_string(repo().join("aircraft/toliss_a320.toml"))?)?;
+    let profile = serde_json::to_value(&catalogue["aircraft"]["crew"])?;
+    let available = profile["controls"].as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    let values = Arc::new(Mutex::new(json!({"external_power":1,"chocks":1,"slides":0,"cabin_brightness":100,"heading":0,"beacon":0})));
+    e.post("crew/observe",json!({"aircraft":"ToLiss neo","profile":profile,"values":values.lock().unwrap().clone(),"available":available}))?;
+    let stopped = Arc::new(AtomicBool::new(false));
+    let stop = stopped.clone();
+    let samples = values.clone();
+    let origin = e.url.clone();
+    let observer = thread::spawn(move || {
+        let client = Client::builder().timeout(Duration::from_secs(2)).build().unwrap();
+        while !stop.load(Ordering::SeqCst) {
+            let sample = samples.lock().unwrap().clone();
+            let _ = client.post(format!("{origin}/crew/observe")).json(&json!({"aircraft":"ToLiss neo","profile":null,"values":sample,"available":available})).send();
+            thread::sleep(Duration::from_millis(200));
+        }
+    });
+    let outcome = (|| -> Result {
+        let cases = [
+            ("ground", "Hey buddy, long time no see! How is your family? Your kids must be getting tall. Can you disoconnect external power and remove those chocks, please? I'll be back in town soon and we should catch up over coffee. And tell me a joke while we wait!", json!({"external_power":0.0,"chocks":0.0})),
+            ("ground", "Ha, thanks! Is your family still enjoying living here? I'll be back in town next week, perhaps we can all catch up then.", json!({})),
+            ("cabin", "How are you and your family? I really enjoyed catching up last time. I'll be back in town soon! While we chat, can you arm the dorrs and corss chek them, turn off the cabin lights, and see if there is a spare sandwich for me? Also, do you have a good joke?", json!({"slides":1.0,"cabin_brightness":0.0})),
+            ("cabin", "I will be back in town soon and would love to catch up with your family again. Can I have a sandwich, and is there any spare lobster from first class? Maybe a meat pie too, a coffee and a snack. How are the passengers? Somewhere between the food and chatter, could you dim the cabin lights to 50%, please? Is the rest of the crew happy? And give me a good joke while we wait!", json!({"cabin_brightness":50.0})),
+            ("cabin", "That sounds lovely! What about the joke I asked for? And how are the passengers settling in?", json!({})),
+            ("copilot", "Mate, how is your family? We should catch up when I'm back in town. Somewhere in all this chatter, could you set heading two seven five and switch the beacon on, please? And give me your best terrible joke!", json!({"heading":275.0,"beacon":1.0})),
+            ("copilot", "Ha, very good. Remind me what heading I asked you to set? And would you like me to ask the attendant for sandwiches for both of us?", json!({})),
+        ];
+        let mut report = Vec::new();
+        let mut failures = 0;
+        for (role, text, expected) in cases {
+            if std::env::var("OPENATC_LIVE_ACTOR_ROLE").is_ok_and(|selected| selected != role) { continue; }
+            let started = Instant::now();
+            let mut response = e.post("request",json!({"role":role,"intent":"conversation","text":text}))?;
+            let actions = response["state"]["crewActions"].as_array().unwrap().clone();
+            let actual = actions.iter().map(|action|(action["control"].as_str().unwrap().to_owned(),action["value"].clone())).collect::<serde_json::Map<_,_>>();
+            let passed = Value::Object(actual.clone()) == expected && response["result"]["accepted"] == true;
+            if !passed { failures += 1; }
+            for action in &actions {
+                values.lock().unwrap()[action["control"].as_str().unwrap()] = action["value"].clone();
+                response = e.post("crew/ack",json!({"sequence":action["sequence"],"aircraft":action["aircraft"],"success":true,"detail":"verified fixture control value"}))?;
+            }
+            let reply = latest(&response["state"]);
+            println!("{role}: actions={actual:?}; reply={reply}");
+            report.push(json!({"role":role,"request":text,"expected":expected,"actions":actual,"passed":passed,"reply":reply,"seconds":started.elapsed().as_secs_f64()}));
+        }
+        let folder = repo().join(".ai/actor-validation");
+        fs::create_dir_all(&folder)?;
+        fs::write(folder.join("report.json"),serde_json::to_string_pretty(&report)?)?;
+        fs::copy(e.folder.path().join("engine.log"),folder.join("engine.log"))?;
+        if failures > 0 { return Err(format!("{failures} live actor action cases failed; inspect .ai/actor-validation/report.json").into()); }
+        Ok(())
+    })();
+    stopped.store(true,Ordering::SeqCst);
+    observer.join().unwrap();
+    outcome
 }

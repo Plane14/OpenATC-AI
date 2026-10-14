@@ -666,11 +666,8 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     let Shared {
         crew, interface, ..
     } = &mut *locked;
-    if let Some(interface) = interface.as_ref()
-        && !interface.speech.busy()
-        && interface.speech_queue.is_empty()
-        && !interface.auto_reply_pending
-    {
+    if let Some(interface) = interface.as_ref() {
+        crew.observe(&profile, &interface.engine);
         crew.tick(xpapi, &profile, &interface.engine);
     }
 }

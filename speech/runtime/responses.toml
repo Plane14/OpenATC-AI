@@ -17518,3 +17518,11 @@ say = ["Checking altitude and speed at {fix}, {callsign}.", "Checking the restri
 [pilot_checking_navigation]
 slots = ["callsign"]
 say = ["Checking navigation, {callsign}.", "Checking our routing, {callsign}."]
+
+[crew_batch_with_conversation]
+slots = ["items", "reply"]
+say = ["{items}. {reply}"]
+
+[crew_completed_cabin_brightness_value]
+slots = ["value"]
+say = ["Cabin lighting set to {value} percent", "Cabin lights are at {value} percent"]

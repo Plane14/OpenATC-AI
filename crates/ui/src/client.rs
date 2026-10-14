@@ -40,6 +40,7 @@ struct Inner {
     telemetry_error: Option<String>,
     latest_telemetry: Option<Telemetry>,
     latest_crew_observation: Option<Json>,
+    latest_crew_ack: Option<Json>,
     observed_telemetry: Option<Telemetry>,
     telemetry_revision: u64,
     delivered_revision: u64,
@@ -71,6 +72,7 @@ impl EngineClient {
                 telemetry_error: None,
                 latest_telemetry: None,
                 latest_crew_observation: None,
+                latest_crew_ack: None,
                 observed_telemetry: None,
                 telemetry_revision: 0,
                 delivered_revision: 0,
@@ -103,7 +105,7 @@ impl EngineClient {
 
     fn poll_loop(inner: &Arc<(Mutex<Inner>, Condvar)>, endpoint: &str, cancelled: &AtomicBool) {
         loop {
-            let (telemetry, observation, generation, revision) = {
+            let (telemetry, observation, ack, generation, revision) = {
                 let mut guard = inner
                     .0
                     .lock()
@@ -111,12 +113,17 @@ impl EngineClient {
                 (
                     guard.latest_telemetry.take(),
                     guard.latest_crew_observation.take(),
+                    guard.latest_crew_ack.take(),
                     guard.generation,
                     guard.telemetry_revision,
                 )
             };
             if let Some(observation) = observation {
                 let _ = openatc_http::post_json_cancelled(endpoint, "/crew/observe", &observation,
+                    Duration::from_secs(2), cancelled);
+            }
+            if let Some(ack) = ack {
+                let _ = openatc_http::post_json_cancelled(endpoint, "/crew/ack", &ack,
                     Duration::from_secs(2), cancelled);
             }
             let sent_telemetry = telemetry.is_some();
@@ -375,8 +382,14 @@ impl EngineClient {
         if path == "/session/reset" {
             guard.pending.clear();
             guard.latest_crew_observation = None;
+            guard.latest_crew_ack = None;
             guard.replies.clear();
             guard.generation = guard.generation.wrapping_add(1);
+        }
+        if path == "/crew/ack" {
+            // The current action must finish even when a chat request is still awaiting a reply.
+            guard.latest_crew_ack = Some(body);
+            return;
         }
         if path == "/crew/observe" {
             // Observations must stay fresh while a conversational command awaits inference.
@@ -423,6 +436,8 @@ impl EngineClient {
             let mut guard = self.lock();
             guard.snapshot = Arc::new(snapshot);
             guard.latest_telemetry = None;
+            guard.latest_crew_observation = None;
+            guard.latest_crew_ack = None;
             guard.pending.clear();
             guard.replies.clear();
             guard.generation = guard.generation.wrapping_add(1);
@@ -573,6 +588,7 @@ mod tests {
         let (held_tx, held_rx) = mpsc::channel();
         let (seen_tx, seen_rx) = mpsc::channel();
         let (crew_tx, crew_rx) = mpsc::channel();
+        let (ack_tx, ack_rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let server_stop = stop.clone();
         let server = std::thread::spawn(move || {
@@ -618,6 +634,10 @@ mod tests {
                         serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
                     seen_tx.send(t.altitude_feet).unwrap();
                 }
+                if path == "/crew/ack" {
+                    let ack: Json = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+                    ack_tx.send(ack).unwrap();
+                }
                 if path == "/crew/observe" {
                     let observation: Json = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
                     crew_tx.send(observation).unwrap();
@@ -644,6 +664,8 @@ mod tests {
         assert!(observed["profile"].is_object());
         client.post("/crew/observe", serde_json::json!({"aircraft":"test","profile":null,"values":{"chocks":0}}));
         assert_eq!(crew_rx.recv_timeout(Duration::from_secs(3)).unwrap()["values"]["chocks"], 0);
+        client.post("/crew/ack", serde_json::json!({"sequence":42,"ok":true}));
+        assert_eq!(ack_rx.recv_timeout(Duration::from_secs(3)).unwrap()["sequence"], 42);
         let before = client.state();
         let mut reset = State::default();
         reset.plan.departure = "NEW".into();

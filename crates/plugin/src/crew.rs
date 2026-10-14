@@ -317,12 +317,8 @@ impl Runtime {
             }
         }
     }
-    pub fn tick(
-        &mut self,
-        x: &mut xplane::XPAPI,
-        profile: &CrewProfile,
-        client: &openatc_ui::client::EngineClient,
-    ) {
+    /// Sampling and control readbacks continue while speech is playing.
+    pub fn observe(&mut self, profile: &CrewProfile, client: &openatc_ui::client::EngineClient) {
         if self
             .last_observation
             .is_none_or(|t| t.elapsed() > Duration::from_millis(500))
@@ -350,6 +346,13 @@ impl Runtime {
                 self.last_profile = Some(Instant::now());
             }
         }
+    }
+    pub fn tick(
+        &mut self,
+        x: &mut xplane::XPAPI,
+        profile: &CrewProfile,
+        client: &openatc_ui::client::EngineClient,
+    ) {
         if let Some(ack) = self.ack.as_ref() {
             let active = client.state().crew_actions.first().is_some_and(|a| {
                 Some(u64::from(a.sequence))

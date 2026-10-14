@@ -237,14 +237,16 @@ pub fn page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
                 } else {
                     [0.35, 0.65, 0.85, 0.75]
                 };
-                if volume.contains(t) {
+                if active {
                     let polygon = volume
                         .points
                         .iter()
                         .map(|point| project(*point))
                         .collect::<Vec<_>>();
                     for [a, b, c] in triangulate(&polygon) {
-                        draw.add_triangle(a, b, c, [color[0]*0.06, color[1]*0.06, color[2]*0.06, 0.22])
+                        // Darken the active volume, then tint it with its boundary colour.
+                        draw.add_triangle(a, b, c, [0.0, 0.0, 0.0, 0.45]).filled(true).build();
+                        draw.add_triangle(a, b, c, [color[0], color[1], color[2], 0.10])
                             .filled(true)
                             .build();
                     }

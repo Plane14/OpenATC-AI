@@ -90,7 +90,7 @@ pub async fn prompt_fits(client: &reqwest::Client, url: &str, system: &str, user
     if let Ok(key) = std::env::var("OPENATC_AI_KEY") { request = request.bearer_auth(key); }
     let response = request
         .timeout(std::time::Duration::from_secs(5))
-        .json(&serde_json::json!({"messages":[{"role":"system","content":system},{"role":"user","content":user}],"max_tokens":384}))
+        .json(&serde_json::json!({"messages":[{"role":"system","content":system},{"role":"user","content":user}],"max_tokens":512}))
         .send().await.ok()?;
     if !response.status().is_success() { return None; }
     response.json::<serde_json::Value>().await.ok()?.get("fits")?.as_bool()
@@ -156,7 +156,7 @@ async fn complete_request(
             Some(schema) => serde_json::json!({"type":"json_schema","json_schema":{"name":"crew_reply","strict":true,"schema":schema}}),
             None => serde_json::json!({"type":"json_object"}),
         };
-        body["max_tokens"] = serde_json::json!(384);
+        body["max_tokens"] = serde_json::json!(512);
     }
     let mut call = client
         .post(format!("{}/v1/chat/completions", url.trim_end_matches('/')))
@@ -232,7 +232,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_decoder_preserves_multi_action_intents_and_rejects_extra_fields() {
-        let content = json!({"actions":[{"control":"chocks","value":0},{"control":"external_power","value":0}],"services":[],"cross_check":false}).to_string();
+        let content = json!({"actions":[{"control":"chocks","value":0},{"control":"external_power","value":0}],"cross_check":false}).to_string();
         let (origin, task) = model(json!({"choices":[{"message":{"content":content}}]})).await;
         let intent: openatc_core::crew::request::Intent = structured(
             &reqwest::Client::new(),
@@ -246,6 +246,15 @@ mod tests {
         .unwrap();
         assert_eq!(intent.actions.len(), 2);
         assert_eq!(intent.actions[1].control, "external_power");
+        task.abort();
+        let content = json!({"control_targets":{"chocks":0,"external_power":0,"beacon":null},"cross_check":false,"conversation_points":["How is your family?"]}).to_string();
+        let (origin, task) = model(json!({"choices":[{"message":{"content":content}}]})).await;
+        let intent: openatc_core::crew::request::Intent = structured(&reqwest::Client::new(), &origin, "test", 0.0, "classify", "request").await.unwrap();
+        assert_eq!(intent.control_targets["chocks"], Some(0.0));
+        assert_eq!(intent.control_targets["beacon"], None);
+        task.abort();
+        let (origin, task) = model(json!({"choices":[{"message":{"content":"{\"reply\":\"Hello\",\"services\":[\"coffee\"]}"}}]})).await;
+        assert!(structured::<openatc_core::crew::request::Intent>(&reqwest::Client::new(), &origin, "test", 0.0, "classify", "request").await.is_err());
         task.abort();
         let (origin, task) = model(
             json!({"choices":[{"message":{"content":"{\"reply\":\"Hello\",\"actions\":[{}]}"}}]}),

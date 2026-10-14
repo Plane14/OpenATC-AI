@@ -177,7 +177,10 @@ fn serve(
             json!({"intent":"taxi","altitudeFeet":0,"waypoint":""}).to_string()
         } else {
             let answer = answer.lock().unwrap().clone();
-            if request["messages"][0]["content"].as_str().unwrap_or("").contains("Allowed controls:") {
+            if let Some(properties)=request.pointer("/response_format/json_schema/schema/properties").and_then(Value::as_object)
+                && !properties.is_empty() && properties.values().all(|value|value["type"]=="boolean") {
+                Value::Object(properties.keys().map(|key|(key.clone(),json!(true))).collect()).to_string()
+            } else if request["messages"][0]["content"].as_str().unwrap_or("").contains("Allowed controls:") {
                 proposal.lock().unwrap().clone().unwrap_or(answer)
             } else if let Ok(value) = serde_json::from_str::<Value>(&answer) {
                 value.get("reply").map(|reply| json!({"reply":reply}).to_string()).unwrap_or(answer)
@@ -496,6 +499,7 @@ pub(crate) fn exercise(kind: &str, binary: &Path, speech: &Path) -> Result {
     match kind {
         "test-radio" => radio::radio(&mut engine, &model)?,
         "test-crew" => crew::crew(&mut engine, &model)?,
+        "test-actors-live" => crew::live_actors(&mut engine)?,
         "test-speech" => speech::speech_examples(&engine, &model)?,
         "test-flight" => flight::flight(&mut engine)?,
         _ => return Err("Unknown integration suite".into()),

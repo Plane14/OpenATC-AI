@@ -62,7 +62,7 @@ fn dispatch() -> Result {
             }
             Ok(())
         }
-        "test-radio" | "test-crew" | "test-speech" | "test-flight" => checks::exercise(
+        "test-radio" | "test-crew" | "test-speech" | "test-flight" | "test-actors-live" => checks::exercise(
             &args[0],
             Path::new(arg(1)?),
             Path::new(args.get(2).map(String::as_str).unwrap_or("speech")),
