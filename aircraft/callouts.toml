@@ -6,12 +6,12 @@ maximum_knots = 250.0
 reset_below_knots = 20.0
 maximum_agl_feet = 500.0
 maximum_delay_seconds = 1.0
-# ToLiss names are present in its installed systems module; unavailable values fall back to stock.
+# ToLiss performance refs contain speed values; legacy V1/VR refs are display-pointer offsets.
 # These documented stock bugs are V1, VR and V2. Custom profiles may override the sources.
 ias_refs = ["sim/flightmodel/position/indicated_airspeed", "sim/cockpit2/gauges/indicators/airspeed_kts_pilot"]
-v1_refs = ["AirbusFBW/V1Value", "AirbusFBW/V1", "sim/cockpit2/gauges/actuators/airspeed_bugs[0]"]
-vr_refs = ["AirbusFBW/VR", "sim/cockpit2/gauges/actuators/airspeed_bugs[1]"]
-v2_refs = ["sim/cockpit2/gauges/actuators/airspeed_bugs[2]"]
+v1_refs = ["toliss_airbus/performance/V1", "AirbusFBW/V1Value", "sim/cockpit2/gauges/actuators/airspeed_bugs[0]"]
+vr_refs = ["toliss_airbus/performance/VR", "toliss_airbus/pfdoutputs/general/VR_value", "sim/cockpit2/gauges/actuators/airspeed_bugs[1]"]
+v2_refs = ["toliss_airbus/performance/V2","sim/cockpit2/gauges/actuators/airspeed_bugs[2]"]
 v1_text = "V one"
 vr_text = "Rotate"
 v2_text = "V two"

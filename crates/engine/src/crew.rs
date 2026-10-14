@@ -550,6 +550,12 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         speak(&mut s, role, &text);
         return Some(Json(json!({"result":{"accepted":true,"message":text},"state":snapshot(&s.session,&s.settings)})).into_response());
     }
+    let pilot = s.session.plan.callsign.clone();
+    let mut pilot_sequence = s.session.next_sequence;
+    let using_ai = s.settings.ai_enabled && !s.settings.ai_model.is_empty();
+    if using_ai {
+        add_transmission(&mut s.session, &pilot, &request.text, &SpeechTag::default());
+    }
     let profile = s.crew.profile.clone();
     let parsed = if s.settings.ai_enabled && !s.settings.ai_model.is_empty() {
         let generation = s.session_generation;
@@ -637,8 +643,6 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         }
         if intent.actions.is_empty() && !intent.cross_check {
             if crate::llm::spoken(&intent.reply).is_ok() && intent.reply.len() <= 1500 {
-                let pilot = s.session.plan.callsign.clone();
-                add_transmission(&mut s.session, &pilot, &request.text, &SpeechTag::default());
                 speak(&mut s, role, &intent.reply);
                 return Some(Json(json!({"result":{"accepted":true,"message":intent.reply},"state":snapshot(&s.session,&s.settings)})).into_response());
             }
@@ -702,6 +706,10 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
     if !recognized && !ai_recovery {
         return None;
     }
+    if !using_ai {
+        pilot_sequence = s.session.next_sequence;
+        add_transmission(&mut s.session, &pilot, &request.text, &SpeechTag::default());
+    }
     if s.crew
         .observed_at
         .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3))
@@ -711,9 +719,6 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
     if !s.session.crew_actions.is_empty() {
         return Some(reply(&mut s, role, "crew_actions_busy", &[], false));
     }
-    let pilot = s.session.plan.callsign.clone();
-    let pilot_sequence = s.session.next_sequence;
-    add_transmission(&mut s.session, &pilot, &request.text, &SpeechTag::default());
     if role == "ground" && (text.contains("pushback") || text.contains("push back")) {
         s.crew.pushback = openatc_core::crew::parse_pushback(&text);
         let words = text.trim().trim_end_matches(['.', '!']);
@@ -1035,6 +1040,20 @@ mod narration_tests {
 mod conversation_routing_tests {
     use super::*;
     use axum::{Router, routing::post};
+
+    #[tokio::test]
+    async fn a_controls_wait_reply_keeps_the_captains_request_in_the_log() {
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(crate::test_state()));
+        let text = "disconnect external power and remove chocks please";
+        let response = request(&shared, &Request {role:"ground".into(),intent:"conversation".into(),text:text.into(),..Default::default()}).await.unwrap();
+        assert!(response.status().is_success());
+        let state = shared.read().await;
+        assert_eq!(state.session.transcript.len(),2);
+        assert_eq!(state.session.transcript[0].text,text);
+        assert_eq!(state.session.transcript[1].speaker,"GROUND");
+        assert!(state.session.crew_actions.is_empty());
+    }
+
 
     #[tokio::test]
     async fn polite_joke_request_is_conversation_without_pushback_or_control_actions() {

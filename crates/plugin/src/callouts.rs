@@ -188,8 +188,10 @@ impl Runtime {
                 })
                 .collect();
         let speeds: [Option<f64>; 3] = speeds.try_into().unwrap_or([None; 3]);
+        let valid = [(0, 1), (1, 2), (0, 2)].iter()
+            .all(|(a, b)| speeds[*a].zip(speeds[*b]).is_none_or(|(a, b)| a <= b));
         let status = format!(
-            "V-speeds {:?}; cached {:?}; phase {:?}; {}",
+            "V-speeds {:?}; cached {:?}; phase {:?}; ordered {valid}; fired {:?}; {}",
             speeds,
             [
                 self.audio.preloaded("0"),
@@ -197,6 +199,7 @@ impl Runtime {
                 self.audio.preloaded("2")
             ],
             state.phase,
+            self.fired,
             self.audio.status()
         );
         if self.status != status {
@@ -204,9 +207,6 @@ impl Runtime {
             self.status = status.clone();
         }
         interface.callout_status = status;
-        let valid = [(0, 1), (1, 2), (0, 2)]
-            .iter()
-            .all(|(a, b)| speeds[*a].zip(speeds[*b]).is_none_or(|(a, b)| a <= b));
         self.active = state.phase == PhaseCode::Departure
             && telemetry.height_agl_feet < p.maximum_agl_feet
             && valid
@@ -304,6 +304,19 @@ fn crossings(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn speed_policy_excludes_toliss_display_pointers_and_retains_stock_bugs() {
+        let policy: super::Policy = toml::from_str(include_str!("../../../aircraft/callouts.toml")).unwrap();
+        assert_eq!(policy.v1_refs[0],"toliss_airbus/performance/V1");
+        assert_eq!(policy.vr_refs[0],"toliss_airbus/performance/VR");
+        assert_eq!(policy.v2_refs[0],"toliss_airbus/performance/V2");
+        assert!(!policy.v1_refs.iter().any(|name| name == "AirbusFBW/V1"));
+        assert!(!policy.vr_refs.iter().any(|name| name == "AirbusFBW/VR"));
+        for (index, refs) in [&policy.v1_refs,&policy.vr_refs,&policy.v2_refs].into_iter().enumerate() {
+            assert!(refs.contains(&format!("sim/cockpit2/gauges/actuators/airspeed_bugs[{index}]")));
+        }
+        assert_eq!(super::crossings(Some(123.0),125.0,[Some(124.0),None,None],[false;3]),vec![0]);
+    }
     #[test]
     fn reported_speeds_and_equal_rotation_keep_their_calls() {
         let speeds = [Some(127.0), Some(146.0), Some(148.0)];
