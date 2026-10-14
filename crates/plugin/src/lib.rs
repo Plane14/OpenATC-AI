@@ -4,6 +4,7 @@
 #![allow(unsafe_code)]
 
 mod arrival;
+mod atis;
 mod crew;
 mod debug_jump;
 mod follow_me;
@@ -32,6 +33,7 @@ use xplane::{
 
 /// Shared plugin state behind the command handlers.
 struct Shared {
+    native_atis: atis::NativeAtis,
     generated_traffic: generated_traffic::Renderer,
     tcas: tcas::Tcas,
     native_traffic: traffic::NativeTraffic,
@@ -408,6 +410,9 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let debug_cancel_pending = locked.debug_cancel_pending;
+    let receives_atis = locked.interface.as_ref().is_some_and(|interface|
+        interface.engine.connected() && interface.receives_atis);
+    locked.native_atis.update(receives_atis);
     let requested_frequency = locked.interface.as_mut().and_then(|i| {
         i.requested_frequency_khz
             .take()
@@ -663,6 +668,7 @@ impl Plugin for OpenAtc {
             native_traffic: traffic::NativeTraffic::default(),
             crew: crew::Runtime::default(),
             interface: None,
+            native_atis: atis::NativeAtis::default(),
             window: None,
             window_state: None,
             refs: None,
@@ -702,6 +708,7 @@ impl Plugin for OpenAtc {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut lines = Vec::new();
             shared.refs = Some(telemetry::find_refs(&mut xpapi.data, &mut lines));
+            shared.native_atis.bind(&mut xpapi.data);
             for line in lines {
                 debug_log(&line);
             }
@@ -842,6 +849,7 @@ impl Plugin for OpenAtc {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         shared.enabled = false;
+        shared.native_atis.update(false);
         shared.generated_traffic = generated_traffic::Renderer::default();
         shared.tcas = tcas::Tcas::default();
         shared.native_traffic = traffic::NativeTraffic::default();

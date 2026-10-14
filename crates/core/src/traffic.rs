@@ -10,6 +10,8 @@ pub mod procedures;
 pub mod profiles;
 pub mod surface;
 pub mod wake;
+pub mod vertical;
+pub mod trajectory;
 use crate::{
     airport::{Airport, airport_point},
     state::{Telemetry, TrafficTarget},

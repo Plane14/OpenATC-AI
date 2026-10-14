@@ -1,5 +1,7 @@
 # Traffic preferences
 
+Airborne planning is still being integrated. The worker geometry builder now checks bank and turn-rate limits, crossing floors/ceilings and climb/descent performance across the whole proposed path. It begins descent early enough for later ceilings, and rejects paths whose sampled corridor is not protected. These checks do not yet supply complete generated departures, arrivals or controller clearances.
+
 These three versioned files describe plausible generated traffic. They are not a real-world timetable, a current fleet census or a source of dispatch performance. There are no per-flight schedule files to maintain. The renderer's model inventory comes from installed CSL metadata.
 
 - `airlines.toml`: operating callsign, home area, served ICAO prefixes, category, aircraft weights and explicitly permitted partner liveries. Both endpoints must be served and at least one must be in the home area. A Singapore Airlines hub preference at Sydney does not create Singapore Airlines flights from Sydney to Melbourne.

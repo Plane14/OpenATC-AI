@@ -139,6 +139,8 @@ pub struct Interface {
     atis_radio: openatc_core::state::Radio,
     atis_airport: String,
     atis_pending: bool,
+    /// The native host suppresses its own ATIS while this broadcast is selected.
+    pub receives_atis: bool,
     /// Audio capture and playback.
     pub speech: Speech,
     /// Open page index.
@@ -394,6 +396,7 @@ impl Interface {
             atis_radio: openatc_core::state::Radio::Com1,
             atis_airport: String::new(),
             atis_pending: false,
+            receives_atis: false,
             speech: Speech::default(),
             page: 0,
             active_radio: openatc_core::state::Radio::Com1,
@@ -1313,6 +1316,9 @@ impl Interface {
             && self.radio_power
             && self.requested_frequency_khz.is_none()
             && !instruction_waiting
+            && station.is_some_and(|s| s.service == "ATIS");
+        self.receives_atis = self.engine.connected()
+            && self.radio_power
             && station.is_some_and(|s| s.service == "ATIS");
         if self.atis_frequency != 0
             && (!active
