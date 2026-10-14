@@ -248,6 +248,8 @@ pub struct Interface {
     pub last_action: String,
     /// Prevent duplicate automatic replies while the command is in flight.
     pub auto_reply_pending: bool,
+    /// Radio associated with the automatic reply currently in flight.
+    auto_reply_radio: openatc_core::state::Radio,
     /// Copilot transmission is queued; its decision waits until playback finishes.
     pub copilot_reply_prepared: bool,
     /// Prepared transmission that must reach the local audio queue before commit.
@@ -462,6 +464,7 @@ impl Interface {
             last_voice_check: 0.0,
             last_action: String::new(),
             auto_reply_pending: false,
+            auto_reply_radio: openatc_core::state::Radio::Com1,
             copilot_reply_prepared: false,
             copilot_prepared_sequence: 0,
             last_copilot_reply_sequence: 0,
@@ -1117,6 +1120,25 @@ impl Interface {
         }
     }
 
+    /// Busy state for the controlling channel, independent of the other receiver.
+    pub fn radio_busy(&self, radio: openatc_core::state::Radio) -> bool {
+        self.radio_audio_busy(radio) || self.auto_reply_pending && self.auto_reply_radio == radio
+    }
+
+    fn radio_audio_busy(&self, radio: openatc_core::state::Radio) -> bool {
+        let playback = if radio == openatc_core::state::Radio::Com2 {
+            self.speech_com2.busy()
+        } else {
+            self.speech.busy()
+        };
+        playback
+            || self.speech.recording() && self.ptt_radio == radio
+            || self
+                .speech_queue
+                .iter()
+                .any(|entry| entry.radio.unwrap_or_default() == radio)
+    }
+
     /// Speak one entry with the role voice and levels.
     pub fn speak_entry(&mut self, entry: &openatc_core::state::Transmission) {
         let role = if entry.speaker == "GROUND" {
@@ -1199,9 +1221,7 @@ impl Interface {
         self.update_speech(&state);
         if self.settings.copilot_replies
             && !self.auto_reply_pending
-            && !self.speech.busy()
-            && !self.speech.recording()
-            && self.speech_queue.is_empty()
+            && !self.radio_audio_busy(state.control_radio)
             && let Some(last) = state
                 .transcript
                 .iter()
@@ -1214,14 +1234,13 @@ impl Interface {
         {
             self.last_copilot_reply_sequence = last.sequence;
             self.auto_reply_pending = true;
+            self.auto_reply_radio = state.control_radio;
             self.engine
                 .post("/request/copilot-prepare", serde_json::json!({}));
         }
         if self.copilot_reply_prepared
             && self.last_speech_sequence >= self.copilot_prepared_sequence
-            && !self.speech.busy()
-            && !self.speech.recording()
-            && self.speech_queue.is_empty()
+            && !self.radio_audio_busy(state.control_radio)
         {
             self.copilot_reply_prepared = false;
             self.engine.post(
@@ -1233,9 +1252,7 @@ impl Interface {
         if self.settings.copilot_replies
             && (self.settings.copilot_tunes || self.settings.auto_tune_handoff)
             && !self.auto_reply_pending
-            && !self.speech.busy()
-            && !self.speech.recording()
-            && self.speech_queue.is_empty()
+            && !self.radio_audio_busy(handoff_radio)
             && state.frequency_sequence > self.last_checkin_sequence
             && state.telemetry.frequency(handoff_radio) == Some(state.recommended_frequency_khz)
             && state
@@ -1251,6 +1268,7 @@ impl Interface {
         {
             self.last_checkin_sequence = state.frequency_sequence;
             self.auto_reply_pending = true;
+            self.auto_reply_radio = handoff_radio;
             self.engine.post(
                 "/request/copilot-checkin",
                 serde_json::json!({"radio":handoff_radio}),
@@ -2153,5 +2171,37 @@ mod layout_tests {
             interface.settings.window_bounds,
             Some([150, 1000, 1110, 240])
         );
+    }
+}
+
+#[cfg(test)]
+mod radio_busy_tests {
+    use super::*;
+    #[test]
+    fn another_receiver_queue_does_not_block_the_controlling_radio() {
+        let mut interface = Interface::new("http://127.0.0.1:1");
+        interface
+            .speech_queue
+            .push_back(openatc_core::state::Transmission {
+                radio: Some(openatc_core::state::Radio::Com2),
+                speaker: "ATC".into(),
+                information_only: false,
+                pilot_reply: String::new(),
+                background: false,
+                text: String::new(),
+                sequence: 1,
+                position: String::new(),
+                voice: String::new(),
+                delivery: String::new(),
+                speed: 1.0,
+                urgent: false,
+            });
+        assert!(!interface.radio_busy(openatc_core::state::Radio::Com1));
+        assert!(interface.radio_busy(openatc_core::state::Radio::Com2));
+        interface.speech_queue.clear();
+        interface.auto_reply_pending = true;
+        interface.auto_reply_radio = openatc_core::state::Radio::Com2;
+        assert!(!interface.radio_busy(openatc_core::state::Radio::Com1));
+        assert!(interface.radio_busy(openatc_core::state::Radio::Com2));
     }
 }

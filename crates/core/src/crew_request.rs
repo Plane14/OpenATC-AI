@@ -56,6 +56,8 @@ pub struct Intent {
     pub services: Vec<Service>,
     /// Verify slide indications after any requested change.
     pub cross_check: bool,
+    /// A non-operational remark with no requested controls or services.
+    pub conversation_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +73,9 @@ pub struct ControlAction {
 impl Intent {
     /// Enforce role, range, count and duplicate-control limits.
     pub fn valid(&self, profile: &CrewProfile, role: &str) -> bool {
+        if self.conversation_only {
+            return self.actions.is_empty() && self.services.is_empty() && !self.cross_check;
+        }
         if self.actions.is_empty() && self.services.is_empty() && !self.cross_check {
             return false;
         }

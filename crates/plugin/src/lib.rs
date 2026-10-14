@@ -505,10 +505,7 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     if let Some(t) = &telemetry {
         let mut observed = t.clone();
         observed.radio_sequence_seen = Some(interface.last_speech_sequence);
-        observed.radio_busy = interface.speech.busy()
-            || interface.speech.recording()
-            || !interface.speech_queue.is_empty()
-            || interface.auto_reply_pending;
+        observed.radio_busy = interface.radio_busy(interface.engine.state().control_radio);
         interface.engine.telemetry(observed);
     }
     interface.tick();
@@ -521,10 +518,7 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     // Playback and recording occupy the radio until their queues drain.
     if let Some(telemetry) = telemetry.as_mut() {
         telemetry.radio_sequence_seen = Some(interface.last_speech_sequence);
-        telemetry.radio_busy = interface.speech.busy()
-            || interface.speech.recording()
-            || !interface.speech_queue.is_empty()
-            || interface.auto_reply_pending;
+        telemetry.radio_busy = interface.radio_busy(interface.engine.state().control_radio);
     }
     // Send telemetry after processing the current UI requests.
     if let Some(telemetry) = &telemetry {

@@ -32,3 +32,5 @@ User: bring me tea and a sandwich, and tell me something funny
 JSON: {"actions":[],"services":["tea","snack"],"cross_check":false}
 User: turn off cabin lights, could I have some water and a joke?
 JSON: {"actions":[{"control":"cabin_brightness","value":0}],"services":["water"],"cross_check":false}
+
+For a message that is purely conversation with no requested control, cabin service or verification, return {"actions":[],"services":[],"cross_check":false,"conversation_only":true}. This includes ordinary questions, small talk, jokes and requests to tell a story. Do not turn a mention of pushback, departure or a control in conversational context into an action. For actual actions or services keep conversation_only false (or omit it). Never use conversation_only to bypass an unknown, unsafe, negated or ambiguous control request; those still return {}.

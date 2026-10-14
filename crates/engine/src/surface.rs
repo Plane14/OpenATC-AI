@@ -56,10 +56,16 @@ pub async fn post_telemetry(
             return Json(json!({"accepted":true})).into_response();
         }
         let radio_busy = telemetry.radio_busy
-            || state.pending_copilot_reply.is_some()
+            || state
+                .pending_copilot_reply
+                .as_ref()
+                .is_some_and(|reply| reply.request.radio == state.session.control_radio)
             || telemetry.radio_sequence_seen.is_some_and(|seen| {
                 state.session.transcript.iter().any(|entry| {
-                    entry.sequence > seen && entry.speaker == "ATC" && !entry.background
+                    entry.sequence > seen
+                        && entry.speaker == "ATC"
+                        && !entry.background
+                        && entry.radio.unwrap_or_default() == state.session.control_radio
                 })
             });
         if super::discipline::tick(&mut state, !radio_busy) || radio_busy {
@@ -373,6 +379,33 @@ mod tests {
             ground_speed_knots: 3.0,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn an_unheard_other_radio_call_does_not_block_the_ground_handoff() {
+        let mut state = fixture();
+        add_transmission(
+            &mut state.session,
+            "ATC",
+            "Other station report",
+            &openatc_core::state::SpeechTag {
+                radio: Some(openatc_core::state::Radio::Com2),
+                ..Default::default()
+            },
+        );
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+        post_telemetry(
+            AxumState(shared.clone()),
+            Json(Telemetry {
+                radio_sequence_seen: Some(0),
+                ..telemetry()
+            }),
+        )
+        .await;
+        assert_eq!(
+            shared.read().await.session.recommended_frequency_khz,
+            118700
+        );
     }
 
     #[tokio::test]

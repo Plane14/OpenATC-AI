@@ -493,6 +493,9 @@ fn batch_reply(s: &mut crate::EngineState, batch: Batch) -> String {
             )
         };
         text = say("crew_batch_complete", &[("items", items)]);
+        if !text.ends_with(['.', '?', '!']) {
+            text.push('.');
+        }
     }
     let busy_cabin = s.cabin.preparing_for_turbulence
         || matches!(s.session.mission.severity.as_str(), "urgent" | "emergency")
@@ -947,6 +950,16 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         return Some(reply(&mut s, role, "crew_action_clarify", &[], false));
     }
     if let Some(intent) = parsed {
+        if intent.conversation_only {
+            s.session
+                .transcript
+                .retain(|entry| entry.sequence != pilot_sequence);
+            let settings = s.settings.clone();
+            drop(s);
+            let mut conversation = request.clone();
+            conversation.intent = "conversation".into();
+            return Some(crate::routes::actor_chat(shared, &settings, &conversation).await);
+        }
         if !s.session.crew_actions.is_empty() {
             return Some(reply(&mut s, role, "crew_actions_busy", &[], false));
         }
@@ -1054,5 +1067,66 @@ mod narration_tests {
             "Heading 275 set",
             &protected
         ));
+    }
+}
+
+#[cfg(test)]
+mod conversation_routing_tests {
+    use super::*;
+    use axum::{Router, routing::post};
+
+    #[tokio::test]
+    async fn polite_joke_request_is_conversation_without_pushback_or_control_actions() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/v1/chat/completions", post(|Json(body):Json<serde_json::Value>| async move {
+                let classifier = body["messages"][0]["content"].as_str().unwrap().contains("Allowed controls:");
+                let content = if classifier { json!({"actions":[],"services":[],"cross_check":false,"conversation_only":true}).to_string() }
+                    else if body.get("response_format").is_some() { json!({"reply":"Here's a quick one: why did the biscuit visit the doctor? It felt crummy!"}).to_string() }
+                    else { "Here's a quick one: why did the biscuit visit the doctor? It felt crummy!".into() };
+                Json(json!({"choices":[{"message":{"content":content}}]}))
+            }))).await.unwrap();
+        });
+        let mut state = crate::test_state();
+        state.settings.ai_enabled = true;
+        state.settings.ai_model = "test".into();
+        state.settings.ai_url = format!("http://{address}");
+        state.session.phase = openatc_core::state::PhaseCode::Pushback;
+        state.crew.observed_at = Some(std::time::Instant::now());
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+        let response = request(
+            &shared,
+            &Request {
+                role: "cabin".into(),
+                intent: "pushback".into(),
+                text: "can you tell me a joke while we are waiting for pushback?".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(response.status().is_success());
+        let state = shared.read().await;
+        assert!(state.session.crew_actions.is_empty());
+        assert_eq!(
+            state.session.phase,
+            openatc_core::state::PhaseCode::Pushback
+        );
+        assert_eq!(state.session.transcript.len(), 2);
+        assert_eq!(
+            state.session.transcript.last().unwrap().speaker,
+            "ATTENDANT"
+        );
+        assert!(
+            state
+                .session
+                .transcript
+                .last()
+                .unwrap()
+                .text
+                .contains("biscuit")
+        );
+        server.abort();
     }
 }

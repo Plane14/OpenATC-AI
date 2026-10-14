@@ -112,6 +112,25 @@ fn intercept(
 /// Resolve fixes, published courses and heading intercepts without granting a clearance.
 /// Corridor protection and reachable vertical scheduling remain separate checks.
 pub fn crossings(start: Waypoint, legs: &[Leg], c: &Context<'_>) -> Result<Vec<Fix>, String> {
+    decode(start, legs, c, false)
+}
+
+/// Keep an initial boundary restriction for the full-flight solver to apply upstream.
+/// Unlike an aircraft check-in, planning must not assume its crossing altitude is already fixed.
+pub fn boundary_crossings(
+    start: Waypoint,
+    legs: &[Leg],
+    c: &Context<'_>,
+) -> Result<Vec<Fix>, String> {
+    decode(start, legs, c, true)
+}
+
+fn decode(
+    start: Waypoint,
+    legs: &[Leg],
+    c: &Context<'_>,
+    retain_boundary: bool,
+) -> Result<Vec<Fix>, String> {
     if legs.is_empty()
         || legs.len() > 128
         || !c.variation.is_finite()
@@ -125,6 +144,8 @@ pub fn crossings(start: Waypoint, legs: &[Leg], c: &Context<'_>) -> Result<Vec<F
     let mut from = [start.latitude, start.longitude];
     let mut altitude = start.altitude_feet;
     let mut result: Vec<Fix> = Vec::with_capacity(legs.len());
+    let mut indicated_speeds = Vec::with_capacity(legs.len());
+    let mut incoming_track = None;
     for (index, leg) in legs.iter().enumerate() {
         if !matches!(
             leg.terminator.as_str(),
@@ -194,7 +215,22 @@ pub fn crossings(start: Waypoint, legs: &[Leg], c: &Context<'_>) -> Result<Vec<F
                 .coordinate
         };
         let distance = distance_nm(from, coordinate);
-        let track = bearing(from, coordinate);
+        let track = if distance < 0.001 {
+            // A repeated fix has no bearing; retain the incoming path for wind conversion.
+            incoming_track
+                .or(course)
+                .or_else(|| {
+                    legs.get(index + 1).and_then(|next| {
+                        Points::runway(next, c.airport)
+                            .or_else(|| c.points.resolve(next, &c.airport.icao))
+                            .filter(|point| distance_nm(coordinate, point.coordinate) >= 0.001)
+                            .map(|point| bearing(coordinate, point.coordinate))
+                    })
+                })
+                .ok_or("Initial terminal boundary has no usable course")?
+        } else {
+            bearing(from, coordinate)
+        };
         let arrival_heading =
             if leg.terminator == "CF" || leg.terminator == "CA" || leg.terminator == "VI" {
                 Some(course.ok_or("Course leg has no published course")?)
@@ -234,23 +270,42 @@ pub fn crossings(start: Waypoint, legs: &[Leg], c: &Context<'_>) -> Result<Vec<F
                         "Coincident terminal crossings have conflicting courses or turns".into(),
                     );
                 }
-                if leg.speed_description == "+" && ground_knots > previous.ground_knots {
-                    return Err(
-                        "Coincident minimum-speed crossing needs a joint speed solution".into(),
-                    );
+                if (indicated - indicated_speeds.last().copied().unwrap_or(indicated)).abs() > 1e-6
+                {
+                    return Err("Coincident terminal crossing needs a joint speed solution".into());
                 }
                 previous.minimum_feet = low;
                 previous.maximum_feet = high;
                 previous.preferred_feet = preferred_feet.clamp(low, high);
-                previous.ground_knots = previous.ground_knots.min(ground_knots);
+                previous.ground_knots = air::wind(
+                    c.atmosphere
+                        .true_knots(indicated, previous.preferred_feet)?,
+                    track,
+                    c.wind_from,
+                    c.wind_knots,
+                )?
+                .0;
                 previous.arrival_heading = previous.arrival_heading.or(arrival_heading);
                 previous.required_turn = previous.required_turn.or(required_turn);
                 altitude = previous.preferred_feet;
+            } else if retain_boundary {
+                indicated_speeds.push(indicated);
+                result.push(Fix {
+                    coordinate,
+                    arrival_heading,
+                    minimum_feet,
+                    maximum_feet,
+                    preferred_feet,
+                    ground_knots,
+                    required_turn,
+                });
+                altitude = preferred_feet;
             } else if altitude < minimum_feet || altitude > maximum_feet {
                 return Err("Initial fix restriction is not satisfied".into());
             }
             continue;
         }
+        indicated_speeds.push(indicated);
         result.push(Fix {
             coordinate,
             arrival_heading,
@@ -261,6 +316,7 @@ pub fn crossings(start: Waypoint, legs: &[Leg], c: &Context<'_>) -> Result<Vec<F
             required_turn,
         });
         from = coordinate;
+        incoming_track = Some(track);
         altitude = preferred_feet;
     }
     if result.is_empty() {
@@ -317,8 +373,8 @@ mod tests {
             points: &points,
             atmosphere,
             variation: 0.0,
-            wind_from: 0.0,
-            wind_knots: 0.0,
+            wind_from: 90.0,
+            wind_knots: 20.0,
             indicated_knots: 150.0,
             maximum_intercept_nm: 40.0,
             climb_fpm: 1000.0,
@@ -349,8 +405,40 @@ mod tests {
             atmosphere.geometric(3000.0, false).unwrap()
         );
         assert!(fixes[0].preferred_feet <= fixes[0].maximum_feet);
+        let expected = air::wind(
+            atmosphere
+                .true_knots(150.0, fixes[0].preferred_feet)
+                .unwrap(),
+            bearing([start.latitude, start.longitude], fixes[0].coordinate),
+            context.wind_from,
+            context.wind_knots,
+        )
+        .unwrap()
+        .0;
+        assert!((fixes[0].ground_knots - expected).abs() < 1e-6);
         second.altitude_one = Some(500);
-        assert!(crossings(start, &[first, second], &context).is_err());
+        assert!(crossings(start, &[first.clone(), second], &context).is_err());
+
+        // A planned join is constrained upstream; a live check-in must already meet it.
+        let boundary = Waypoint {
+            latitude: fixes[0].coordinate[0],
+            longitude: fixes[0].coordinate[1],
+            altitude_feet: 0.0,
+        };
+        assert!(crossings(boundary, &[first.clone()], &context).is_err());
+        let retained = boundary_crossings(boundary, &[first.clone()], &context).unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].minimum_feet, fixes[0].minimum_feet);
+
+        let mut slower = first.clone();
+        slower.speed_knots = Some(100.0);
+        slower.speed_description = "-".into();
+        assert!(
+            boundary_crossings(boundary, &[first, slower], &context)
+                .err()
+                .unwrap()
+                .contains("joint speed solution")
+        );
     }
     #[test]
     fn mixed_pressure_bands_keep_their_physical_limits() {

@@ -10,6 +10,7 @@ use crate::{
 };
 
 /// A resolved crossing after decoding its published leg and pressure reference.
+#[derive(Clone)]
 pub struct Fix {
     /// Latitude and longitude in degrees.
     pub coordinate: [f64; 2],

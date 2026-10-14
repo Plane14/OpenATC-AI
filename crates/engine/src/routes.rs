@@ -1485,6 +1485,18 @@ fn social_reply(state: &crate::EngineState, text: &str, role: &str) -> Option<St
         .map(|key| openatc_core::dialogue::say(&key, &[]))
 }
 
+pub(crate) async fn actor_chat(
+    shared: &Shared,
+    settings: &Settings,
+    request: &Request,
+) -> Response {
+    if request.role == "copilot" {
+        copilot_chat(shared, settings, request).await
+    } else {
+        crew_chat(shared, settings, request, request.role == "cabin").await
+    }
+}
+
 async fn crew_chat(
     shared: &Shared,
     settings: &Settings,

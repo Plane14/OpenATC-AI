@@ -469,3 +469,56 @@ fn installed_klax_identifies_reported_aircraft_positions() {
         );
     }
 }
+
+#[test]
+fn displayed_fallback_hold_circle_is_a_reachable_clearance_limit() {
+    use openatc_core::{
+        airport::{Airport, holding_marker_position, taxi_hold_reached},
+        state::{Point, TaxiClearance, Telemetry},
+    };
+    let airport = Airport {
+        taxi_hold_lines: vec![[
+            Point {
+                east: -10.0,
+                north: -200.0,
+                height: 0.0,
+            },
+            Point {
+                east: 10.0,
+                north: 200.0,
+                height: 0.0,
+            },
+        ]],
+        ..Default::default()
+    };
+    let route = TaxiClearance {
+        points: vec![
+            Point {
+                north: -500.0,
+                ..Default::default()
+            },
+            Point::default(),
+        ],
+        hold_short_runway: "04L".into(),
+        approved: true,
+        ..Default::default()
+    };
+    let marker = holding_marker_position(&airport, &route.points).unwrap();
+    assert!(marker.north.abs() > 120.0);
+    let telemetry = Telemetry {
+        latitude: marker.north / 111320.0,
+        longitude: marker.east / 111320.0,
+        position_valid: true,
+        on_ground: true,
+        ..Default::default()
+    };
+    assert!(taxi_hold_reached(&airport, &route, &telemetry));
+    assert!(!taxi_hold_reached(
+        &airport,
+        &route,
+        &Telemetry {
+            latitude: -800.0 / 111320.0,
+            ..telemetry
+        }
+    ));
+}

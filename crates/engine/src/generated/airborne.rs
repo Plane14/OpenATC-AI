@@ -37,10 +37,19 @@ pub(super) fn compile(
         return Err("Combined airborne crossings exceed the planning budget".into());
     }
     let mut stages = Vec::with_capacity(count);
-    let mut crossings = Vec::with_capacity(count);
+    let mut crossings: Vec<Fix> = Vec::with_capacity(count);
     for section in sections {
-        stages.extend(std::iter::repeat_n(section.stage, section.crossings.len()));
-        crossings.extend(section.crossings);
+        for crossing in section.crossings {
+            if let Some(previous) = crossings.last_mut()
+                && openatc_core::arrival::distance_nm(previous.coordinate, crossing.coordinate)
+                    < 0.001
+            {
+                merge(previous, &crossing)?;
+            } else {
+                stages.push(section.stage);
+                crossings.push(crossing);
+            }
+        }
     }
     let legs = trajectory::compile(
         rotation,
@@ -63,6 +72,36 @@ pub(super) fn compile(
         .collect::<Vec<_>>();
     // The complete movement route is compiled only after a real rollout and taxi-in are attached.
     Ok(segments)
+}
+
+fn merge(previous: &mut Fix, next: &Fix) -> Result<(), String> {
+    let minimum = previous.minimum_feet.max(next.minimum_feet);
+    let maximum = previous.maximum_feet.min(next.maximum_feet);
+    if minimum > maximum {
+        return Err("Coincident flight sections have conflicting crossing levels".into());
+    }
+    if previous
+        .arrival_heading
+        .zip(next.arrival_heading)
+        .is_some_and(|(a, b)| openatc_core::navigation::turn(a, b).abs() > 1.0)
+        || previous
+            .required_turn
+            .zip(next.required_turn)
+            .is_some_and(|(a, b)| a != b)
+    {
+        return Err("Coincident flight sections have conflicting courses or turns".into());
+    }
+    // Do not discard a minimum-speed restriction by selecting the slower of two joins.
+    // A speed change at the same point needs an upstream, aircraft-specific deceleration plan.
+    if (previous.ground_knots - next.ground_knots).abs() > 1e-6 {
+        return Err("Coincident flight sections need a joint airspeed solution".into());
+    }
+    previous.minimum_feet = minimum;
+    previous.maximum_feet = maximum;
+    previous.preferred_feet = next.preferred_feet.clamp(minimum, maximum);
+    previous.arrival_heading = previous.arrival_heading.or(next.arrival_heading);
+    previous.required_turn = previous.required_turn.or(next.required_turn);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -171,6 +210,23 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].points.last() == pair[1].points.first())
         );
+    }
+
+    #[test]
+    fn a_repeated_approach_entry_limits_the_incoming_star_leg() {
+        let (start, mut sections, envelope) = inputs();
+        let mut initial = sections[2].crossings[0].clone();
+        initial.maximum_feet = 500.0;
+        initial.preferred_feet = 500.0;
+        sections[3].crossings.insert(0, initial);
+        let segments = compile(start, 0.0, 0.0, sections, &envelope, |_, _| true).unwrap();
+        assert_eq!(segments.len(), 4);
+        assert_eq!(segments[2].points.last().unwrap().altitude_feet, 500.0);
+        let (start, mut sections, envelope) = inputs();
+        let mut initial = sections[2].crossings[0].clone();
+        initial.ground_knots = 80.0;
+        sections[3].crossings.insert(0, initial);
+        assert!(compile(start, 0.0, 0.0, sections, &envelope, |_, _| true).is_err());
     }
 
     #[test]

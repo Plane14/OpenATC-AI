@@ -1980,9 +1980,12 @@ pub fn taxi_hold_reached(airport: &Airport, route: &TaxiClearance, telemetry: &T
     };
     let here = airport_point(airport, telemetry.latitude, telemetry.longitude);
     if !route.hold_short_runway.is_empty()
-        && route.holding_marker_point.is_some_and(|marker| {
-            flat_distance(&here, &marker) <= HOLDING_MARKER_RADIUS_METRES + 5.0
-        })
+        && route
+            .holding_marker_point
+            .or_else(|| holding_marker_position(airport, &route.points))
+            .is_some_and(|marker| {
+                flat_distance(&here, &marker) <= HOLDING_MARKER_RADIUS_METRES + 5.0
+            })
     {
         return true;
     }
