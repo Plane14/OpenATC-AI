@@ -1,0 +1,3 @@
+# Role dialogue never grants aircraft movement permissions.
+version = 1
+narration_reject = ['(?i)\b(?:clear(?:ed)?|approved|authori[sz]ed)\s+(?:for|to)\s+(?:arm(?:ing)?|disarm(?:ing)?|depart|take ?off|cross|land)\b']

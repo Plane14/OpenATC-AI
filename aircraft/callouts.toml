@@ -8,9 +8,13 @@ maximum_agl_feet = 500.0
 maximum_delay_seconds = 1.0
 # ToLiss names are present in its installed systems module; unavailable values fall back to stock.
 # These documented stock bugs are V1, VR and V2. Custom profiles may override the sources.
+ias_refs = ["sim/flightmodel/position/indicated_airspeed", "sim/cockpit2/gauges/indicators/airspeed_kts_pilot"]
 v1_refs = ["AirbusFBW/V1Value", "AirbusFBW/V1", "sim/cockpit2/gauges/actuators/airspeed_bugs[0]"]
 vr_refs = ["AirbusFBW/VR", "sim/cockpit2/gauges/actuators/airspeed_bugs[1]"]
 v2_refs = ["sim/cockpit2/gauges/actuators/airspeed_bugs[2]"]
 v1_text = "V one"
 vr_text = "Rotate"
 v2_text = "V two"
+v1_vr_text = "V one. Rotate"
+log_labels = ["V1", "Rotate", "V2"]
+log_template = "{callout} · {speed} kt"

@@ -2,61 +2,19 @@
 use crate::crew::{CrewProfile, parse_many, validate};
 use serde::Deserialize;
 
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-/// Cabin services with no aircraft-control side effects.
-pub enum Service {
-    /// Request a coffee.
-    Coffee,
-    /// Request a tea.
-    Tea,
-    /// Request drinking water.
-    Water,
-    /// Request a meal without assuming dietary preferences.
-    Meal,
-    /// Request a light snack.
-    Snack,
-    /// Request juice.
-    Juice,
-    /// Report the observed simulated cabin state.
-    PassengerStatus,
-    /// Acknowledge preparation without claiming the checks are complete.
-    DeparturePreparation,
-    /// Ask the cabin crew to prepare for arrival without changing controls.
-    LandingPreparation,
-    /// Ask the cabin crew to keep watch over the passengers.
-    PassengerWatch,
-}
-
-impl Service {
-    /// Editable action fragment inserted into the attendant's reply.
-    pub fn response(self) -> &'static str {
-        match self {
-            Self::Coffee => "crew_service_coffee",
-            Self::Tea => "crew_service_tea",
-            Self::Water => "crew_service_water",
-            Self::Meal => "crew_service_meal",
-            Self::Snack => "crew_service_snack",
-            Self::Juice => "crew_service_juice",
-            Self::PassengerStatus => "cabin_request_passengers",
-            Self::DeparturePreparation => "cabin_departure_preparing",
-            Self::LandingPreparation => "cabin_request_landing",
-            Self::PassengerWatch => "cabin_request_watch",
-        }
-    }
-}
-
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 /// All parts of one pilot request, validated together before execution.
 pub struct Intent {
+    /// Spoken conversation from the role, held separately from executable controls.
+    pub reply: String,
+    /// Compact conversational continuity; never authoritative aircraft state.
+    pub memory: String,
     /// Aircraft controls in execution order.
     pub actions: Vec<ControlAction>,
-    /// Cabin services to acknowledge in the combined reply.
-    pub services: Vec<Service>,
     /// Verify slide indications after any requested change.
     pub cross_check: bool,
-    /// A non-operational remark with no requested controls or services.
+    /// Legacy hint; validated actions determine whether execution is needed.
     pub conversation_only: bool,
 }
 
@@ -73,15 +31,11 @@ pub struct ControlAction {
 impl Intent {
     /// Enforce role, range, count and duplicate-control limits.
     pub fn valid(&self, profile: &CrewProfile, role: &str) -> bool {
-        if self.conversation_only {
-            return self.actions.is_empty() && self.services.is_empty() && !self.cross_check;
-        }
-        if self.actions.is_empty() && self.services.is_empty() && !self.cross_check {
-            return false;
+        if self.actions.is_empty() && !self.cross_check {
+            return !self.reply.trim().is_empty() || self.conversation_only;
         }
         if self.actions.len() > 8
-            || self.services.len() > 6
-            || (role != "cabin" && (!self.services.is_empty() || self.cross_check))
+            || (role != "cabin" && self.cross_check)
         {
             return false;
         }
@@ -90,399 +44,77 @@ impl Intent {
                 && !self.actions[..i]
                     .iter()
                     .any(|a| a.control == action.control)
-        }) && self
-            .services
-            .iter()
-            .enumerate()
-            .all(|(i, service)| !self.services[..i].contains(service))
+        })
     }
 }
 
-/// Editable spelling corrections and clause recognisers for interphone requests.
+/// Reply checks are separate from language understanding and control mappings.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Grammar {
-    split: String,
-    cross_check: String,
-    drink: String,
-    #[serde(default)]
-    statement: Option<String>,
-    #[serde(default)]
-    social: Option<String>,
-    #[serde(default)]
+pub struct ReplyPolicy {
+    version: u32,
     narration_reject: Vec<String>,
-    replacements: std::collections::BTreeMap<String, String>,
-    services: std::collections::BTreeMap<String, Service>,
 }
-impl Grammar {
-    /// Load the installed grammar, retaining bundled defaults for older installations.
+impl ReplyPolicy {
+    /// Load editable response constraints, falling back to bundled policy.
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                include_str!("../../../cabin/language.toml").to_owned()
+                include_str!("../../../cabin/response-policy.toml").into()
             }
             Err(error) => return Err(error.to_string()),
         };
         if text.len() > 16384 {
-            return Err("Crew language file exceeds 16 KiB".into());
+            return Err("Reply policy is too large".into());
         }
-        let result: Self = toml::from_str(&text).map_err(|error| error.to_string())?;
-        for pattern in [&result.split, &result.cross_check, &result.drink] {
+        let policy: Self = toml::from_str(&text).map_err(|error| error.to_string())?;
+        if policy.version != 1 || policy.narration_reject.len() > 16 {
+            return Err("Unsupported reply policy".into());
+        }
+        for pattern in &policy.narration_reject {
             regex::Regex::new(pattern).map_err(|error| error.to_string())?;
         }
-        for pattern in [&result.statement, &result.social].into_iter().flatten() {
-            regex::Regex::new(pattern).map_err(|error| error.to_string())?;
-        }
-        if result.narration_reject.len() > 16 {
-            return Err("Too many crew narration guards".into());
-        }
-        for pattern in &result.narration_reject {
-            regex::Regex::new(pattern).map_err(|error| error.to_string())?;
-        }
-        if result.replacements.len() > 128
-            || result.replacements.iter().any(|(from, to)| {
-                from.is_empty()
-                    || to.is_empty()
-                    || !from.chars().all(char::is_alphabetic)
-                    || !to.chars().all(char::is_alphabetic)
-            })
-        {
-            return Err("Crew corrections must contain words only".into());
-        }
-        Ok(result)
+        Ok(policy)
     }
-    /// Reject claims outside crew authority using the installed language policy.
+    /// Keep role replies from issuing aircraft movement permissions.
     pub fn narration_allowed(&self, text: &str) -> bool {
         self.narration_reject
             .iter()
             .all(|pattern| regex::Regex::new(pattern).is_ok_and(|pattern| !pattern.is_match(text)))
     }
-    /// Route purely social remarks to conversation rather than action classification.
-    pub fn social_only(&self, text: &str) -> bool {
-        let Some(pattern) = self
-            .social
-            .as_ref()
-            .and_then(|pattern| regex::Regex::new(pattern).ok())
-        else {
-            return false;
-        };
-        let Ok(split) = regex::Regex::new(&self.split) else {
-            return false;
-        };
-        let normalized = self.normalize(text);
-        let clauses = split
-            .split(&normalized)
-            .map(str::trim)
-            .filter(|clause| !clause.is_empty())
-            .collect::<Vec<_>>();
-        !clauses.is_empty() && clauses.iter().all(|clause| pattern.is_match(clause))
-    }
-    /// Preserve punctuation and numbers while replacing only explicitly listed words.
-    pub fn normalize(&self, text: &str) -> String {
-        let lower = text.to_lowercase();
-        let token = regex::Regex::new(r"\p{L}+").unwrap();
-        token
-            .replace_all(&lower, |capture: &regex::Captures<'_>| {
-                self.replacements
-                    .get(&capture[0])
-                    .cloned()
-                    .unwrap_or_else(|| capture[0].to_owned())
-            })
-            .into_owned()
-    }
 }
 
-/// Parse common requests without relying on a language model.
+/// Explicit mapped-control fallback when role conversations are disabled.
 pub fn parse(profile: &CrewProfile, role: &str, text: &str) -> Option<Intent> {
-    let grammar: Grammar = toml::from_str(include_str!("../../../cabin/language.toml")).ok()?;
-    parse_with(profile, role, text, &grammar)
-}
-
-/// Interpret all clauses using the selected editable grammar.
-pub fn parse_with(
-    profile: &CrewProfile,
-    role: &str,
-    text: &str,
-    grammar: &Grammar,
-) -> Option<Intent> {
-    let normalized = grammar.normalize(text);
-    let split = regex::Regex::new(&grammar.split).ok()?;
-    let social = grammar
-        .social
-        .as_ref()
-        .map(|pattern| regex::Regex::new(pattern))
-        .transpose()
-        .ok()?;
-    let lower = split
-        .split(&normalized)
-        .filter(|clause| !clause.trim().is_empty())
-        .filter(|clause| {
-            !social
-                .as_ref()
-                .is_some_and(|pattern| pattern.is_match(clause.trim()))
-        })
-        .collect::<Vec<_>>()
-        .join(" and ");
-    let mut intent = Intent::default();
-    let mut controls = Vec::new();
-    if role == "cabin" {
-        let split = regex::Regex::new(&grammar.split).ok()?;
-        let check = regex::Regex::new(&grammar.cross_check).ok()?;
-        let drink = regex::Regex::new(&grammar.drink).ok()?;
-        let statement = grammar
-            .statement
-            .as_ref()
-            .map(|pattern| regex::Regex::new(pattern))
-            .transpose()
-            .ok()?;
-        for clause in split.split(&lower).map(str::trim).filter(|s| !s.is_empty()) {
-            if check.is_match(clause) {
-                intent.cross_check = true;
-            } else if let Some(service) = [
-                ("cabin_request_passengers", Service::PassengerStatus),
-                ("cabin_request_departure", Service::DeparturePreparation),
-                ("cabin_request_landing", Service::LandingPreparation),
-                ("cabin_request_watch", Service::PassengerWatch),
-            ]
-            .into_iter()
-            .find_map(|(key, service)| {
-                crate::dialogue::phrases(key)
-                    .iter()
-                    .any(|phrase| clause.contains(phrase))
-                    .then_some(service)
-            }) {
-                if !intent.services.contains(&service) {
-                    intent.services.push(service);
-                }
-            } else if let Some(capture) = drink.captures(clause) {
-                let service = *grammar.services.get(&capture[1])?;
-                if !intent.services.contains(&service) {
-                    intent.services.push(service);
-                }
-            } else if statement
-                .as_ref()
-                .is_some_and(|pattern| pattern.is_match(clause))
-            {
-                continue;
-            } else {
-                controls.push(clause);
-            }
-        }
-    } else {
-        controls.push(&lower);
-    }
-    if !controls.is_empty() {
-        intent.actions = parse_many(profile, role, &controls.join(" and "))?
+    let intent = Intent {
+        actions: parse_many(profile, role, text)?
             .into_iter()
             .map(|(control, value)| ControlAction { control, value })
-            .collect();
-    }
+            .collect(),
+        ..Default::default()
+    };
     intent.valid(profile, role).then_some(intent)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn profile() -> CrewProfile {
-        let aircraft: toml::Value =
-            toml::from_str(include_str!("../../../aircraft/toliss_a320.toml")).unwrap();
-        aircraft["aircraft"]["crew"].clone().try_into().unwrap()
-    }
     #[test]
-    fn exact_compound_requests_and_typos_keep_all_intents() {
-        let intent = parse(&profile(),"cabin","get passengers ready, can i have a coffee and can you cross check and arm doors please").unwrap();
-        assert_eq!(
-            intent.services,
-            vec![Service::DeparturePreparation, Service::Coffee]
-        );
-        assert!(intent.cross_check);
-        assert_eq!(intent.actions[0].control, "slides");
-        for text in [
-            "corss check and arm doors please",
-            "cross chek and arm dorrs please",
-            "arm dorrs and corss chek please",
-        ] {
-            let intent = parse(&profile(), "cabin", text).unwrap();
-            assert!(intent.cross_check);
-            assert_eq!(intent.actions[0].control, "slides");
-            assert_eq!(intent.actions[0].value, 1.0);
-        }
-        let intent = parse(&profile(), "ground", "remove ext pwr and chocks").unwrap();
-        assert_eq!(intent.actions.len(), 2);
-        assert!(intent.actions.iter().all(|action| action.value == 0.0));
-        assert!(parse(&profile(), "cabin", "do not arm dorrs and coffee please").is_none());
-    }
-    #[test]
-    fn ground_banter_does_not_hide_actions_or_unknown_requests() {
-        let intent = parse(&profile(), "ground", "disoconnect external power and chocks please kind sir, and have a beer for me after that! you deserve it haha").unwrap();
-        assert_eq!(intent.actions.len(), 2);
-        for (role, text, control) in [
-            (
-                "cabin",
-                "turn off cabin lights and have a beer for me",
-                "cabin_brightness",
-            ),
-            (
-                "copilot",
-                "set heading 270 and have a beer for me",
-                "heading",
-            ),
-        ] {
-            let parsed = parse(&profile(), role, text).unwrap();
-            assert_eq!(parsed.actions.len(), 1);
-            assert_eq!(parsed.actions[0].control, control);
-        }
-        let grammar: Grammar =
-            toml::from_str(include_str!("../../../cabin/language.toml")).unwrap();
-        assert!(
-            !grammar.narration_allowed("Slides unconfirmed, but we're in the clear for arming.")
-        );
-        assert!(
-            grammar.narration_allowed("I cannot confirm the slides. Please check the indications.")
-        );
-        assert!(grammar.social_only("have a beer for me after that! you deserve it haha"));
-        assert!(!grammar.social_only("disconnect power and have a beer for me"));
-
-        assert!(intent.actions.iter().all(|action| action.value == 0.0));
-        assert!(
-            parse(
-                &profile(),
-                "ground",
-                "disconnect external power and connect imaginary thing and have a beer for me"
-            )
-            .is_none()
-        );
-        assert!(
-            parse(
-                &profile(),
-                "ground",
-                "do not disconnect external power and have a beer for me"
-            )
-            .is_none()
-        );
-    }
-    #[test]
-    fn time_to_bring_coffee_and_sandwich_is_a_service_request() {
-        let intent = parse(
-            &profile(),
-            "cabin",
-            "do you have time to get me a coffee and sandwich?",
+    fn conversation_has_no_menu_or_control_side_effects() {
+        let profile = CrewProfile::default();
+        let intent: Intent =
+            serde_json::from_str(r#"{"actions":[],"cross_check":false,"conversation_only":true}"#)
+                .unwrap();
+        assert!(intent.valid(&profile, "cabin"));
+        let reply: Intent = serde_json::from_str(r#"{"reply":"I'll check the galley for you.","actions":[]}"#).unwrap();
+        assert!(reply.valid(&profile, "cabin"));
+        assert!(parse(&profile, "cabin", "coffee and a sandwich please").is_none());
+        assert!(serde_json::from_str::<Intent>(r#"{"services":["dessert","something to drink"]}"#).is_err());
+        let invalid: Intent = serde_json::from_str(
+            r#"{"actions":[{"control":"unlisted","value":1}],"conversation_only":true}"#,
         )
         .unwrap();
-        assert!(intent.actions.is_empty());
-        assert_eq!(intent.services, vec![Service::Coffee, Service::Snack]);
-    }
-    #[test]
-    fn cabin_preparation_and_watch_are_services_not_switch_changes() {
-        let watch = parse(&profile(), "cabin", "I have turned off the seat belt sign, it won't be for long so keep an eye on the passengers please.").unwrap();
-        assert!(watch.actions.is_empty());
-        assert_eq!(watch.services, vec![Service::PassengerWatch]);
-        let landing = parse(&profile(), "cabin", "prepare cabin for landing").unwrap();
-        assert!(landing.actions.is_empty());
-        assert_eq!(landing.services, vec![Service::LandingPreparation]);
-        let combined = parse(
-            &profile(),
-            "cabin",
-            "prepare cabin for landing and turn off cabin lights please",
-        )
-        .unwrap();
-        assert_eq!(combined.actions[0].value, 0.0);
-        assert_eq!(combined.services, vec![Service::LandingPreparation]);
-    }
-    #[test]
-    fn light_switch_requests_preserve_stacked_services() {
-        for text in [
-            "turn off cabin lights, can i have a coffee",
-            "can i have a coffee and turn cabin lights off please",
-            "cabin lights off and coffee please",
-            "turn off cabin ligths and can i have a cofee",
-            "set cabin lights to 0% and coffee please",
-        ] {
-            let intent = parse(&profile(), "cabin", text).unwrap();
-            assert_eq!(intent.actions.len(), 1, "{text}");
-            assert_eq!(intent.actions[0].control, "cabin_brightness");
-            assert_eq!(intent.actions[0].value, 0.0);
-            assert_eq!(intent.services, vec![Service::Coffee]);
-        }
-        let intent = parse(
-            &profile(),
-            "cabin",
-            "how are the passengers, turn off cabin lights, can i have a coffee",
-        )
-        .unwrap();
-        assert_eq!(
-            intent.services,
-            vec![Service::PassengerStatus, Service::Coffee]
-        );
-        assert_eq!(intent.actions[0].value, 0.0);
-        assert!(
-            parse(
-                &profile(),
-                "cabin",
-                "do not turn off cabin lights and coffee please"
-            )
-            .is_none()
-        );
-    }
-    #[test]
-    fn cabin_service_and_control_order_do_not_depend_on_a_comma() {
-        for text in [
-            "can i please have a coffe and can you cross check and arm doors",
-            "arm and cross check, can you bring me a quick coffee before we push back?",
-            "arm doors and cross-check and coffee please",
-        ] {
-            let intent = parse(&profile(), "cabin", text).unwrap();
-            assert_eq!(intent.services, vec![Service::Coffee]);
-            assert!(intent.cross_check);
-            assert_eq!(intent.actions.len(), 1);
-            assert_eq!(intent.actions[0].control, "slides");
-            assert_eq!(intent.actions[0].value, 1.0);
-        }
-    }
-    #[test]
-    fn no_unrequested_or_unknown_controls() {
-        for text in [
-            "coffee please and set mystery switch",
-            "do not arm doors and coffee please",
-            "are the doors armed? and coffee please",
-        ] {
-            assert!(parse(&profile(), "cabin", text).is_none());
-        }
-        assert!(parse(&profile(), "ground", "coffee please").is_none());
-        let intent = parse(&profile(), "cabin", "cross check and tea please").unwrap();
-        assert!(intent.actions.is_empty());
-    }
-    #[test]
-    fn passenger_question_does_not_discard_explicit_light_command() {
-        let intent = parse(
-            &profile(),
-            "cabin",
-            "how are the passengers and get you turn off cabin lights and get ready for depature?",
-        )
-        .unwrap();
-        assert_eq!(intent.actions.len(), 1);
-        assert_eq!(intent.actions[0].control, "cabin_brightness");
-        assert_eq!(intent.actions[0].value, 0.0);
-        assert_eq!(
-            intent.services,
-            vec![Service::PassengerStatus, Service::DeparturePreparation]
-        );
-        assert!(
-            parse(
-                &profile(),
-                "cabin",
-                "how are the passengers and do not turn off cabin lights"
-            )
-            .is_none()
-        );
-        assert!(
-            parse(
-                &profile(),
-                "cabin",
-                "how are the passengers and set mystery switch"
-            )
-            .is_none()
-        );
+        assert!(!invalid.valid(&profile, "cabin"));
     }
 }

@@ -72,12 +72,11 @@ pub fn prompt(state: &EngineState, role: &str, request: &str) -> String {
     format!(
         "{}",
         state.prompts.guidance.get("crew_context").replace("{{facts}}", &json!({
-            "role":role,"recentConversationNewestFirst":recent,"phase":state.session.phase,"telemetry":state.session.telemetry,
+            "role":role,"recentConversationNewestFirst":recent,"conversationNotes":state.crew.memories.get(role),"phase":state.session.phase,"telemetry":state.session.telemetry,
             "plan":plan,"clearance":state.session.clearance,
             "taxiClearance":state.session.taxi_clearance,"controllers":owners,
             "controlsFresh":fresh,"controls":controls,"pendingActions":state.session.crew_actions,
             "requestMemory":state.request_memory.context(role),
-            "cabinServiceRequestCounts":state.crew.service_requests,
             "simulatedCabin":state.cabin,
             "mission":state.session.mission,
         }).to_string())

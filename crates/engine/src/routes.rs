@@ -278,6 +278,7 @@ pub async fn debug_cancel_actions(AxumState(shared): AxumState<Shared>) -> Respo
     state.session_generation = state.session_generation.wrapping_add(1);
     state.session.crew_actions.clear();
     state.crew.batch = None;
+    state.crew.memories.clear();
     state.request_memory.cancel_pending();
     state.session.taxi_clearance.holding_channel = 0;
     Json(json!({"accepted":true})).into_response()
@@ -343,8 +344,8 @@ fn reset_flight(state: &mut crate::EngineState) {
     state.flow = super::flight::FlightFlow::default();
     state.crew.checklist = None;
     state.crew.batch = None;
+    state.crew.memories.clear();
     state.crew.pushback = None;
-    state.crew.service_requests.clear();
     state.request_memory = Default::default();
     state.cabin.reset();
     state.mission = Default::default();
@@ -1521,11 +1522,15 @@ async fn crew_chat(
     };
     let off = openatc_core::dialogue::say("crew_chat_needs_ai_intent_classification_on", &[]);
     let busy = openatc_core::dialogue::say("crew_line_is_busy_try_again", &[]);
-    let social = social_reply(
-        &*shared.read().await,
-        &request.text,
-        if attendant { "cabin" } else { "ground" },
-    );
+    let social = if settings.ai_enabled {
+        None
+    } else {
+        social_reply(
+            &*shared.read().await,
+            &request.text,
+            if attendant { "cabin" } else { "ground" },
+        )
+    };
     let unconfirmed_service = !attendant
         && [
             "connect ",
@@ -1540,7 +1545,7 @@ async fn crew_chat(
         ]
         .iter()
         .any(|prefix| request.text.trim().to_lowercase().starts_with(prefix));
-    let cabin_report = if attendant {
+    let cabin_report = if attendant && !settings.ai_enabled {
         super::cabin::report(&mut *shared.write().await, &request.text)
     } else {
         None
@@ -1748,7 +1753,11 @@ async fn classify_request(
 }
 
 async fn copilot_chat(shared: &Shared, settings: &Settings, request: &Request) -> Response {
-    let social = social_reply(&*shared.read().await, &request.text, "copilot");
+    let social = if settings.ai_enabled {
+        None
+    } else {
+        social_reply(&*shared.read().await, &request.text, "copilot")
+    };
     let generation = shared.read().await.session_generation;
     let callsign = shared.read().await.session.plan.callsign.clone();
     let prompts = shared.read().await.copilot_chat_prompt();

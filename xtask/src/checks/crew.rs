@@ -1,6 +1,7 @@
 use super::*;
 struct Crew<'a> {
     engine: &'a Engine,
+    model: &'a Model,
     profile: Value,
     values: Value,
 }
@@ -19,7 +20,9 @@ impl Crew<'_> {
         self.engine.post("crew/ack",json!({"sequence":task["sequence"],"aircraft":task["aircraft"],"success":success,"detail":"test simulator confirmation"}))
     }
     fn action(&mut self, role: &str, text: &str, control: &str, value: f64) -> Result<Value> {
+        self.model.propose(json!([{"control":control,"value":value}]));
         let v = self.request(role, text)?;
+        *self.model.proposal.lock().unwrap() = None;
         assert_eq!(v["result"]["pending"], true, "{v}");
         let tasks = v["state"]["crewActions"].as_array().unwrap();
         assert_eq!(tasks.len(), 1);
@@ -36,6 +39,13 @@ impl Crew<'_> {
         Ok(done)
     }
     fn denied(&self, role: &str, text: &str) -> Result {
+        *self.model.proposal.lock().unwrap() = None;
+        if !serde_json::from_str::<Value>(&self.model.answer.lock().unwrap()).is_ok_and(|answer| answer.get("actions").is_some()) {
+            let profile: openatc_core::crew::CrewProfile = serde_json::from_value(self.profile.clone())?;
+            if let Some(actions) = openatc_core::crew::parse_many(&profile, role, text) {
+                self.model.propose(json!(actions.into_iter().map(|(control,value)| json!({"control":control,"value":value})).collect::<Vec<_>>()));
+            }
+        }
         let v = self.request(role, text)?;
         rejected(&v);
         assert!(
@@ -46,6 +56,7 @@ impl Crew<'_> {
     }
 }
 pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
+    e.settings(json!({"aiEnabled":false}))?;
     let profile: toml::Value = toml::from_str(&fs::read_to_string(
         repo().join("aircraft/toliss_a320.toml"),
     )?)?;
@@ -56,6 +67,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     )?;
     let mut c = Crew {
         engine: e,
+        model: m,
         profile,
         values: json!({"heading":0,"altitude":5000,"gear":1,"beacon":0,"seatbelts":0,"slides":0,"cabin_brightness":100,"chocks":0}),
     };
@@ -74,7 +86,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     ] {
         c.action(role, text, control, value)?;
     }
-    let v = c.request("ground", "remove ext pwr and chocks")?;
+    let v = c.request("ground", "remove external power and chocks")?;
     let tasks = v["state"]["crewActions"].as_array().unwrap();
     assert_eq!(tasks.len(), 2);
     assert!(tasks.iter().all(|t| t["value"].as_f64() == Some(0.)));
@@ -109,6 +121,8 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         "cabin_brightness",
         50.,
     )?;
+    m.set(json!({"reply":"Cabin lights off. I will get the passengers ready for departure."}));
+    e.settings(json!({"aiEnabled":true,"aiModel":"test","aiUrl":m.url()}))?;
     let combined = c.action(
         "cabin",
         "how are the passengers and get you turn off cabin lights and get ready for depature?",
@@ -128,6 +142,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
             .unwrap()["speaker"],
         "ATTENDANT"
     );
+    m.set(json!({"reply":"Cabin lights off. I will bring you a coffee."}));
     for text in [
         "turn off cabin lights, can i have a coffee",
         "can i have a coffee and turn cabin lights off please",
@@ -141,6 +156,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
             "{reply}"
         );
     }
+    m.set(json!({"reply":"I will keep an eye on the passengers and prepare the cabin."}));
     for text in [
         "prepare cabin for landing",
         "I have turned off the seat belt sign, it won't be for long so keep an eye on the passengers please.",
@@ -162,6 +178,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
             "ATTENDANT"
         );
     }
+    m.set(json!({"reply":"Cabin lights off. I will prepare the cabin for landing."}));
     let landing = c.action(
         "cabin",
         "prepare cabin for landing and turn off lights please",
@@ -169,6 +186,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         0.,
     )?;
     assert!(latest(&landing["state"]).to_lowercase().contains("landing"));
+    e.settings(json!({"aiEnabled":false}))?;
     let pending = c.request("cabin", "turn on cabin lights")?;
     let task = pending["state"]["crewActions"][0].clone();
     let watch = c.request("cabin", "keep an eye on the passengers please")?;
@@ -187,12 +205,15 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     let query = c.request("cabin", "crosscheck")?;
     accepted(&query);
     assert!(query["state"]["crewActions"].as_array().unwrap().is_empty());
+    e.settings(json!({"aiEnabled":true}))?;
+    m.set(json!({"reply":"Slides armed and cross-checked. I will bring you coffee."}));
     for text in [
         "get passengers ready, can i have a coffee and can you cross check and arm doors please",
         "corss chek and arm dorrs please and coffee please",
         "can i please have a coffe and can you cross check and arm doors",
         "arm and cross check, can you bring me a quick coffee before we push back?",
     ] {
+        m.propose(json!([{"control":"slides","value":1}]));
         let request = c.request("cabin", text)?;
         let tasks = request["state"]["crewActions"].as_array().unwrap();
         assert_eq!(tasks.len(), 1);
@@ -202,6 +223,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         let text = latest(&done["state"]).to_lowercase();
         assert!(text.contains("armed") && text.contains("cross-check") && text.contains("coffee"));
     }
+    e.settings(json!({"aiEnabled":false}))?;
     c.action("cabin", "doors to manual", "slides", 0.)?;
     for text in ["is beacon on?", "don't turn beacon on"] {
         assert!(
@@ -318,6 +340,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     assert!(m.prompt().contains("confirmed result"));
     assert!(m.prompt().contains("have a beer for me"));
     m.set(json!({"reply":"External power disconnected and chocks removed, Captain. Ha, thanks! Enjoy your flight."}));
+    m.propose(json!([{"control":"external_power","value":0},{"control":"chocks","value":0}]));
     let banter = c.request("ground", "disoconnect external power and chocks please kind sir, and have a beer for me after that! you deserve it haha")?;
     accepted(&banter);
     let tasks = banter["state"]["crewActions"].as_array().unwrap();
@@ -353,7 +376,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         let done = c.action(role, request, control, value)?;
         assert!(latest(&done["state"]).contains("Ha,"));
     }
-    m.set(json!({"actions":[],"services":["coffee","snack"],"cross_check":false}));
+    m.set(json!({"reply":"I will bring you coffee and something to eat. Here is a quick joke for you.","actions":[],"cross_check":false,"memory":"Captain requested coffee and food."}));
     let refreshments = c.request("cabin", "do you have time to get me a coffee and sandwich? wehave alittle time before push back. also do you know a good joke?")?;
     accepted(&refreshments);
     assert!(
@@ -375,6 +398,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         "{reply}"
     );
     m.set(json!({"reply":"Slides could not be confirmed, but we're in the clear for arming."}));
+    m.propose(json!([{"control":"slides","value":1}]));
     let doors = c.request("cabin", "arm doors")?;
     let denied = c.ack(&doors["state"]["crewActions"][0], false)?;
     let spoken = latest(&denied["state"]).to_lowercase();
@@ -403,7 +427,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         })
         .unwrap();
     assert!(!classifier.contains("Pilot wording examples"));
-    assert!(classifier.contains("obvious misspelled"));
+    assert!(classifier.contains("Understand misspellings"));
     drop(requests);
     m.set(
         json!({"actions":[{"control":"chocks","value":0},{"control":"external_power","value":0}]}),

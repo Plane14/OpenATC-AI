@@ -918,6 +918,7 @@ fn record_row(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
         ui.new_line();
         if ui.button("Copy ATC conversation") {
             let mut text = crate::debug::conversation(&interface.engine.state());
+            let _ = writeln!(text, "Callouts: {}", interface.callout_status);
             let _ = writeln!(
                 text,
                 "\nDispatch draft: {} -> {} | runway {} | imported {}",

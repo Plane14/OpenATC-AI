@@ -9,16 +9,19 @@
 //! only owned data (`String`, numbers) ever crosses threads.
 
 mod compute;
+mod config;
+mod setup;
 mod json_mode;
 mod synthesis;
 
+mod llm_config;
 use axum::{
     Json, Router,
     extract::{Multipart, State},
     http::StatusCode,
     routing::{get, post},
 };
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use llama_cpp_2::{
     context::params::LlamaContextParams, llama_backend::LlamaBackend, llama_batch::LlamaBatch,
     model::LlamaModel, model::params::LlamaModelParams, sampling::LlamaSampler,
@@ -35,6 +38,18 @@ use tokio::sync::oneshot;
 
 #[derive(Parser)]
 struct Args {
+    /// Saved TOML settings; explicit command-line options take precedence.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Create or edit saved settings in the terminal, then exit.
+    #[arg(long)]
+    configure: bool,
+    /// Open a local browser settings editor without loading inference models.
+    #[arg(long)]
+    configure_web: bool,
+    /// Editable TOML schema for the setup interfaces.
+    #[arg(long)]
+    settings_schema: Option<PathBuf>,
     #[command(flatten)]
     cpu: compute::CpuOptions,
     /// Local speech model. Kokoro is the default; Kitten uses Mini 0.8.
@@ -50,8 +65,46 @@ struct Args {
     #[arg(long)]
     models_dir: Option<PathBuf>,
     /// KV context size for the LLM.
-    #[arg(long, default_value_t = 4096)]
+    #[arg(long, default_value_t = 4096, value_parser = clap::value_parser!(u32).range(1024..=1048576))]
     ctx_size: u32,
+    /// CPU threads used for token generation (omit to use the backend default).
+    #[arg(long, value_parser = clap::value_parser!(i32).range(1..=128))]
+    threads: Option<i32>,
+    /// CPU threads used for prompt processing.
+    #[arg(long, value_parser = clap::value_parser!(i32).range(1..=128))]
+    batch_threads: Option<i32>,
+    /// Choose the largest bounded GPU context while retaining VRAM headroom.
+    #[arg(long, conflicts_with = "ctx_size")]
+    ctx_auto: bool,
+    /// Maximum context attempted by automatic sizing.
+    #[arg(long, default_value_t = 32768, value_parser = clap::value_parser!(u32).range(2048..=1048576))]
+    ctx_max: u32,
+    /// Free VRAM retained after model/context allocation.
+    #[arg(long, default_value_t = 1536)]
+    vram_reserve_mib: u64,
+    /// Language model; speech providers are unchanged.
+    #[arg(long, value_enum, default_value_t = llm_config::Model::Qwen25)]
+    llm_model: llm_config::Model,
+    /// TOML manifest containing one custom GGUF language model.
+    #[arg(long)]
+    llm_manifest: Option<PathBuf>,
+    /// Optional custom GGUF download, with an explicit size and checksum.
+    #[arg(long, conflicts_with = "llm_manifest")]
+    llm_url: Option<String>,
+    #[arg(long)]
+    llm_name: Option<String>,
+    #[arg(long)]
+    llm_file: Option<String>,
+    #[arg(long)]
+    llm_sha256: Option<String>,
+    #[arg(long)]
+    llm_bytes: Option<u64>,
+    /// Chat template override for a custom model; otherwise use its GGUF metadata.
+    #[arg(long)]
+    chat_template: Option<String>,
+    /// Optional model-specific assistant prefix, such as a closed thinking block.
+    #[arg(long)]
+    assistant_prefix: Option<String>,
     /// STT compute: auto prefers the compiled GPU backend and falls back to CPU.
     #[arg(long, default_value = "auto")]
     stt_backend: String,
@@ -62,6 +115,8 @@ struct Args {
 
 /// One inference request crossing into the llama thread.
 struct InferenceJob {
+    tokenize_only: bool,
+    grammar: Option<String>,
     json: bool,
     messages: Vec<ChatMessage>,
     temperature: f32,
@@ -193,6 +248,7 @@ struct AppState {
     model_name: String,
     model_status: BTreeMap<String, String>,
     backend: String,
+    context_tokens: u32,
     stt_backend: String,
     llm_device: compute::DeviceStatus,
     tts_status: synthesis::Status,
@@ -249,29 +305,54 @@ fn complete(
     temperature: f32,
     max_new: u32,
     json: bool,
+    direct_reply: bool,
+    native_template: bool,
+    template_override: Option<&str>,
+    assistant_prefix: Option<&str>,
+    tokenize_only: bool,
+    custom_grammar: Option<&str>,
 ) -> Result<Completion, String> {
-    context.clear_kv_cache();
-    let prompt = chatml_prompt(messages);
+    let mut prompt = if native_template || template_override.is_some() {
+        let template = match template_override {
+            Some(value) => llama_cpp_2::model::LlamaChatTemplate::new(value).map_err(|error| error.to_string())?,
+            None => model.chat_template(None).map_err(|error| format!("custom model chat template: {error:?}; set --chat-template explicitly"))?,
+        };
+        let messages = messages.iter().map(|message| llama_cpp_2::model::LlamaChatMessage::new(message.role.clone(), message.content.clone()).map_err(|error| error.to_string())).collect::<Result<Vec<_>,_>>()?;
+        model.apply_chat_template(&template, &messages, true).map_err(|error| format!("chat template failed: {error:?}"))?
+    } else { chatml_prompt(messages) };
+    if let Some(prefix) = assistant_prefix {
+        prompt.push_str(prefix);
+    } else if direct_reply && !native_template {
+        prompt.push_str("<think>\n\n</think>\n\n");
+    }
     let vocab = model.vocab();
     let tokens = vocab.tokenize(prompt.as_bytes(), true, true);
+    if tokenize_only {
+        return Ok(Completion { text: String::new(), prompt_tokens: u32::try_from(tokens.len()).unwrap_or(u32::MAX), output_tokens: 0 });
+    }
+    context.clear_kv_cache();
     let max_new = max_new.clamp(1, 1024) as usize;
     if tokens.len() + max_new + 8 >= n_ctx as usize {
         return Err("prompt plus max_tokens exceeds context size".to_owned());
     }
-    let mut batch = LlamaBatch::new(tokens.len() + max_new, 1);
-    for (index, token) in tokens.iter().enumerate() {
-        batch
-            .add(
-                *token,
-                i32::try_from(index).unwrap_or(i32::MAX),
-                &[0],
-                index + 1 == tokens.len(),
-            )
-            .map_err(|error| format!("batch overflow: {error:?}"))?;
+    let mut batch = LlamaBatch::new(512, 1);
+    for (chunk_index, chunk) in tokens.chunks(512).enumerate() {
+        batch.clear();
+        for (offset, token) in chunk.iter().enumerate() {
+            let index = chunk_index * 512 + offset;
+            batch
+                .add(
+                    *token,
+                    i32::try_from(index).unwrap_or(i32::MAX),
+                    &[0],
+                    index + 1 == tokens.len(),
+                )
+                .map_err(|error| format!("batch overflow: {error:?}"))?;
+        }
+        context
+            .decode(&mut batch)
+            .map_err(|error| format!("decode failed: {error:?}"))?;
     }
-    context
-        .decode(&mut batch)
-        .map_err(|error| format!("decode failed: {error:?}"))?;
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(42, |time| time.subsec_nanos());
@@ -286,7 +367,7 @@ fn complete(
         ])
     };
     let mut sampler = if json {
-        let grammar = LlamaSampler::grammar(model, json_mode::GRAMMAR, "root")
+        let grammar = LlamaSampler::grammar(model, custom_grammar.unwrap_or(json_mode::GRAMMAR), "root")
             .map_err(|e| format!("JSON grammar: {e}"))?;
         LlamaSampler::chain_simple([grammar, sampling])
     } else {
@@ -328,7 +409,16 @@ fn inference_loop(
     ctx_size: u32,
     jobs: &mpsc::Receiver<InferenceJob>,
     force_cpu: bool,
-    ready: &mpsc::Sender<Result<compute::DeviceStatus, String>>,
+    ready: &mpsc::Sender<Result<(compute::DeviceStatus, u32), String>>,
+    automatic: bool,
+    maximum: u32,
+    reserve_mib: u64,
+    model_choice: llm_config::Model,
+    threads: Option<i32>,
+    batch_threads: Option<i32>,
+    native_template: bool,
+    template_override: Option<String>,
+    assistant_prefix: Option<String>,
 ) -> Result<(), String> {
     let backend =
         LlamaBackend::init().map_err(|error| format!("backend init failed: {error:?}"))?;
@@ -361,37 +451,66 @@ fn inference_loop(
                 return Err(message);
             }
         };
-        let params = LlamaContextParams::default()
-            .with_n_ctx(std::num::NonZeroU32::new(ctx_size))
-            .with_n_batch(ctx_size)
-            .with_offload_kqv(use_gpu)
-            .with_op_offload(use_gpu);
-        let mut context = match model.new_context(&backend, params) {
-            Ok(context) => context,
-            Err(error) if use_gpu => {
+        let automatic = automatic && use_gpu && llm_config::free_vram_mib().is_some();
+        let mut selected = None;
+        for size in llm_config::candidates(ctx_size, automatic, maximum) {
+            let mut params = LlamaContextParams::default()
+                .with_n_ctx(std::num::NonZeroU32::new(size))
+                .with_n_batch(512)
+                .with_offload_kqv(use_gpu)
+                .with_op_offload(use_gpu);
+            if let Some(threads) = threads {
+                params = params.with_n_threads(threads);
+            }
+            if let Some(threads) = batch_threads {
+                params = params.with_n_threads_batch(threads);
+            }
+            eprintln!("LLM context={size} generation_threads={} batch_threads={}", params.n_threads(), params.n_threads_batch());
+            match model.new_context(&backend, params) {
+                Ok(context) => {
+                    if automatic
+                        && llm_config::free_vram_mib().is_none_or(|free| free < reserve_mib)
+                    {
+                        drop(context);
+                        continue;
+                    }
+                    selected = Some((context, size));
+                    break;
+                }
+                Err(error) => {
+                    eprintln!("Context {size} could not be allocated: {error:?}");
+                }
+            }
+        }
+        let Some((mut context, selected_size)) = selected else {
+            if use_gpu {
                 device = compute::DeviceStatus::new(
                     "cpu",
-                    format!("GPU context allocation failed: {error:?}"),
+                    "GPU context allocation could not retain requested headroom",
                 );
                 continue;
             }
-            Err(error) => {
-                let message = format!("context init failed: {error:?}");
-                let _ = ready.send(Err(message.clone()));
-                return Err(message);
-            }
+            let message = "No supported context could be allocated".to_owned();
+            let _ = ready.send(Err(message.clone()));
+            return Err(message);
         };
         context.print_memory_breakdown();
-        let _ = ready.send(Ok(device));
+        let _ = ready.send(Ok((device, selected_size)));
         for job in jobs {
             let result = complete(
                 &model,
                 &mut context,
-                ctx_size,
+                selected_size,
                 &job.messages,
                 job.temperature,
                 job.max_tokens,
                 job.json,
+                model_choice.direct_reply(),
+                native_template,
+                template_override.as_deref(),
+                assistant_prefix.as_deref(),
+                job.tokenize_only,
+                job.grammar.as_deref(),
             );
             let _ = job.reply.send(result);
         }
@@ -485,7 +604,14 @@ async fn chat_completions(
         request.model.clone()
     };
     let (reply_tx, reply_rx) = oneshot::channel();
+    let grammar = if let Some(schema) = request.response_format.as_ref().and_then(|format| format.pointer("/json_schema/schema")) {
+        let schema = schema.to_string();
+        if schema.len() > 32768 { return Err(api_error(StatusCode::BAD_REQUEST, "JSON schema exceeds 32 KiB".into())); }
+        Some(llama_cpp_2::json_schema_to_grammar(&schema).map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?)
+    } else { None };
     let job = InferenceJob {
+        tokenize_only: false,
+        grammar,
         json: json_mode::enabled(request.response_format.as_ref())
             .map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?,
         messages: request.messages,
@@ -531,6 +657,27 @@ async fn chat_completions(
     }))
 }
 
+/// Count the exact rendered prompt with the loaded model's tokenizer.
+async fn tokenize(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ChatRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    if request.messages.is_empty() || request.messages.len() > 64
+        || request.messages.iter().map(|message| message.content.len()).sum::<usize>() > 262144 {
+        return Err(api_error(StatusCode::BAD_REQUEST, "Prompt must contain 1–64 messages and at most 256 KiB".into()));
+    }
+    let reserve = request.max_tokens.unwrap_or(512).clamp(1, 1024);
+    let (reply, result) = oneshot::channel();
+    state.inference.jobs.send(InferenceJob {
+        tokenize_only: true, grammar: None, json: false, messages: request.messages,
+        temperature: 0.0, max_tokens: reserve, reply,
+    }).map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    let completion = result.await.map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?;
+    Ok(Json(serde_json::json!({"promptTokens":completion.prompt_tokens,"contextTokens":state.context_tokens,
+        "reservedOutputTokens":reserve,"fits":completion.prompt_tokens.saturating_add(reserve).saturating_add(8) < state.context_tokens})))
+}
+
 /// Liveness plus per-model file status (recorded at startup).
 async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
@@ -540,6 +687,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "compute": {"llm": state.llm_device, "stt": state.stt_backend, "tts": state.tts_status.device},
         "ttsProvider": state.tts_status.provider,
         "models": state.model_status,
+        "llm": {"model":state.model_name,"contextTokens":state.context_tokens,"maxOutputTokens":1024},
     }))
 }
 
@@ -748,6 +896,8 @@ fn ensure_all(
 async fn ensure_models(
     root: std::path::PathBuf,
     provider: synthesis::Provider,
+    llm: llm_config::Model,
+    custom: Option<Manifest>,
 ) -> Result<(std::path::PathBuf, Manifest, BTreeMap<String, String>), String> {
     std::fs::create_dir_all(&root)
         .map_err(|error| format!("cannot create {}: {error}", root.display()))?;
@@ -762,6 +912,16 @@ async fn ensure_models(
                 .map_err(|error| error.to_string())?
                 .model,
         );
+    }
+    manifest
+        .model
+        .retain(|entry| !entry.path.starts_with("llm/") || entry.name == llm.manifest_name());
+    if let Some(custom) = custom {
+        if custom.model.iter().any(|model| manifest.model.iter().any(|existing| !existing.path.starts_with("llm/") && existing.name == model.name)) {
+            return Err("Custom language model name collides with a speech model".into());
+        }
+        manifest.model.retain(|entry| !entry.path.starts_with("llm/"));
+        manifest.model.extend(custom.model);
     }
     let lock_path = root.join("models.lock.toml");
     let lockfile: Lockfile = std::fs::read_to_string(&lock_path)
@@ -786,9 +946,35 @@ async fn ensure_models(
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
-    let args = Args::parse();
+    let command_line: Vec<_> = std::env::args_os().collect();
+    let initial = Args::parse_from(&command_line);
+    let config_path = initial.config.clone().unwrap_or_else(|| openatc_platform::state_dir().join("server.toml"));
+    if initial.configure_web {
+        return setup::browser(&config_path, initial.settings_schema.as_deref()).await;
+    }
+    if initial.configure {
+        return setup::terminal(&config_path, initial.settings_schema.as_deref());
+    }
+    use std::io::IsTerminal;
+    if !config_path.exists() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        setup::terminal(&config_path, initial.settings_schema.as_deref())?;
+    }
+    let args = match std::fs::read_to_string(&config_path) {
+        Ok(source) => Args::parse_from(config::arguments(&source, &command_line, &Args::command()).unwrap_or_else(|error| {
+            eprintln!("{}: {error}", config_path.display());
+            std::process::exit(2);
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && initial.config.is_none() => initial,
+        Err(error) => {
+            eprintln!("cannot read {}: {error}", config_path.display());
+            std::process::exit(2);
+        }
+    };
     let root = args.models_dir.clone().unwrap_or_else(models_dir);
-    let (root, manifest, status) = ensure_models(root, args.tts_provider).await?;
+    let custom = llm_config::configured_manifest(&args)?;
+    let custom_template = custom.is_some();
+    let (root, manifest, status) = ensure_models(root, args.tts_provider, args.llm_model, custom).await?;
+    let model_name = manifest.model.iter().find(|entry| entry.path.starts_with("llm/")).ok_or("manifest has no language model")?.name.clone();
     let llm_path = resolve(
         &root,
         manifest
@@ -826,15 +1012,6 @@ async fn main() -> Result<(), String> {
     let (job_tx, job_rx) = mpsc::channel();
     let (llm_ready_tx, llm_ready_rx) = mpsc::channel();
     let force_llm_cpu = args.cpu.llm();
-    let loader = std::thread::spawn(move || {
-        inference_loop(
-            &llm_path,
-            args.ctx_size,
-            &job_rx,
-            force_llm_cpu,
-            &llm_ready_tx,
-        )
-    });
     let sidecar_bin = sidecar_path(args.stt_bin.as_deref());
     let (stt_child, stt_base_url, stt_backend_name) =
         start_sidecar(&sidecar_bin, &stt_path, &stt_backend).await?;
@@ -846,19 +1023,36 @@ async fn main() -> Result<(), String> {
         root,
     };
     let tts_loader = std::thread::spawn(move || synthesis::run(&config, tts_rx, &tts_ready_tx));
-    let (llm_device, tts_status) = tokio::task::spawn_blocking(move || {
-        let timeout = std::time::Duration::from_secs(300);
-        Ok::<_, String>((
-            llm_ready_rx
-                .recv_timeout(timeout)
-                .map_err(|e| format!("LLM startup: {e}"))??,
-            tts_ready_rx
-                .recv_timeout(timeout)
-                .map_err(|e| format!("TTS startup: {e}"))??,
-        ))
+    let tts_status = tokio::task::spawn_blocking(move || {
+        tts_ready_rx.recv_timeout(std::time::Duration::from_secs(300))
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("TTS startup: {e}"))??;
+    let loader = std::thread::spawn(move || {
+        inference_loop(
+            &llm_path,
+            args.ctx_size,
+            &job_rx,
+            force_llm_cpu,
+            &llm_ready_tx,
+            args.ctx_auto,
+            args.ctx_max,
+            args.vram_reserve_mib,
+            args.llm_model,
+            args.threads,
+            args.batch_threads,
+            custom_template,
+            args.chat_template,
+            args.assistant_prefix,
+        )
+    });
+    let (llm_device, context_tokens) = tokio::task::spawn_blocking(move || {
+        llm_ready_rx.recv_timeout(std::time::Duration::from_secs(300))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("LLM startup: {e}"))??;
     let state = Arc::new(AppState {
         inference: InferenceHandle { jobs: job_tx },
         tts: TtsHandle { jobs: tts_tx },
@@ -867,7 +1061,8 @@ async fn main() -> Result<(), String> {
             client: reqwest::Client::new(),
             child: stt_child,
         },
-        model_name: "qwen2.5:7b-instruct".to_owned(),
+        model_name,
+        context_tokens,
         model_status: status,
         backend: llm_device.device.clone(),
         stt_backend: stt_backend_name,
@@ -886,6 +1081,7 @@ async fn serve(state: Arc<AppState>, host: String, port: u16) -> Result<(), Stri
         .route("/health", get(health))
         .route("/v1/voices", get(list_voices))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/tokenize", post(tokenize))
         .route("/v1/audio/transcriptions", post(transcriptions))
         .route("/v1/audio/speech", post(speech))
         .with_state(state);

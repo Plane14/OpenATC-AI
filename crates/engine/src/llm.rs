@@ -23,7 +23,14 @@ pub async fn structured<T: DeserializeOwned>(
     system: &str,
     user: &str,
 ) -> Result<T, StructuredError> {
-    let content = complete_request(client, url, model, temperature, system, user, true)
+    structured_format(client,url,model,temperature,system,user,None).await
+}
+
+pub async fn structured_format<T: DeserializeOwned>(
+    client: &reqwest::Client, url: &str, model: &str, temperature: f32,
+    system: &str, user: &str, schema: Option<serde_json::Value>,
+) -> Result<T, StructuredError> {
+    let content = complete_request(client, url, model, temperature, system, user, true, schema)
         .await
         .map_err(StructuredError::Service)?;
     let value: serde_json::Value = serde_json::from_str(&content)
@@ -59,7 +66,7 @@ pub async fn narration(
     Ok(result.reply.trim().to_owned())
 }
 
-fn spoken(reply: &str) -> Result<(), String> {
+pub(crate) fn spoken(reply: &str) -> Result<(), String> {
     let lower = reply.to_lowercase();
     if reply.trim().is_empty()
         || reply.len() > 65536
@@ -75,6 +82,18 @@ fn spoken(reply: &str) -> Result<(), String> {
         return Err("Invalid spoken AI reply".into());
     }
     Ok(())
+}
+
+/// Older compatible servers may omit this capability; new servers count exactly.
+pub async fn prompt_fits(client: &reqwest::Client, url: &str, system: &str, user: &str) -> Option<bool> {
+    let mut request = client.post(format!("{}/v1/tokenize", url.trim_end_matches('/')));
+    if let Ok(key) = std::env::var("OPENATC_AI_KEY") { request = request.bearer_auth(key); }
+    let response = request
+        .timeout(std::time::Duration::from_secs(5))
+        .json(&serde_json::json!({"messages":[{"role":"system","content":system},{"role":"user","content":user}],"max_tokens":384}))
+        .send().await.ok()?;
+    if !response.status().is_success() { return None; }
+    response.json::<serde_json::Value>().await.ok()?.get("fits")?.as_bool()
 }
 
 /// Format bounded exchanges after the caller selects the appropriate actor history.
@@ -109,7 +128,7 @@ pub async fn text(
     system: &str,
     user: &str,
 ) -> Result<String, String> {
-    let reply = complete_request(client, url, model, temperature, system, user, false).await?;
+    let reply = complete_request(client, url, model, temperature, system, user, false, None).await?;
     spoken(&reply)?;
     Ok(reply.trim().to_owned())
 }
@@ -122,6 +141,7 @@ async fn complete_request(
     system: &str,
     user: &str,
     structured: bool,
+    schema: Option<serde_json::Value>,
 ) -> Result<String, String> {
     let mut body = serde_json::json!({
         "model": model,
@@ -132,7 +152,10 @@ async fn complete_request(
         ],
     });
     if structured {
-        body["response_format"] = serde_json::json!({"type":"json_object"});
+        body["response_format"] = match schema {
+            Some(schema) => serde_json::json!({"type":"json_schema","json_schema":{"name":"crew_reply","strict":true,"schema":schema}}),
+            None => serde_json::json!({"type":"json_object"}),
+        };
         body["max_tokens"] = serde_json::json!(384);
     }
     let mut call = client

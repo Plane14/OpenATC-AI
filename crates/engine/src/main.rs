@@ -420,6 +420,7 @@ async fn main() {
         .route("/debug/cancel-actions", post(routes::debug_cancel_actions))
         .route("/crew/observe", post(crew::observe))
         .route("/crew/ack", post(crew::acknowledge))
+        .route("/crew/callout", post(crew::callout_log))
         .route("/request", post(routes::post_request))
         .route("/request/auto-reply", post(routes::post_auto_reply))
         .route("/request/copilot-reply", post(routes::post_copilot_reply))

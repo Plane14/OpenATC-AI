@@ -187,6 +187,7 @@ pub(crate) fn install_ai(destination: &Path) -> Result {
     }
     tree(&data, &bin.join("espeak-ng-data"))?;
     shared_libraries(&release, &bin)?;
+    tree(&repo().join("server"), &destination.join("server"))?;
     println!("Installed AI runtime: {}", bin.display());
     Ok(())
 }
@@ -224,6 +225,7 @@ pub(crate) fn collect(product: &str, output: &Path) -> Result {
                 )?;
             }
             tree(&espeak_data(&release)?, &output.join("espeak-ng-data"))?;
+            tree(&repo().join("server"), &output.join("server"))?;
         }
         _ => return Err("Expected plugin or ai-server".into()),
     }

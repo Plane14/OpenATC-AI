@@ -98,6 +98,8 @@ pub struct Interface {
     pub nearby_stations: Vec<openatc_core::stations::Station>,
     /// Station/weather reception status.
     pub radio_notice: String,
+    /// Takeoff speed and cached audio diagnostics.
+    pub callout_status: String,
     /// Voice names returned by the configured TTS service.
     pub available_voices: Vec<openatc_core::voices::Voice>,
     /// Voice catalogue request is pending.
@@ -380,6 +382,7 @@ impl Interface {
             occupied_airport: String::new(),
             nearby_stations: Vec::new(),
             radio_notice: String::new(),
+            callout_status: String::new(),
             available_voices: Vec::new(),
             voices_loading: false,
             voices_notice: String::new(),
@@ -1054,7 +1057,7 @@ impl Interface {
         }
         for entry in &state.transcript {
             if entry.sequence > self.last_speech_sequence {
-                if matches!(entry.speaker.as_str(), "ATIS" | "SYSTEM") {
+                if matches!(entry.speaker.as_str(), "ATIS" | "SYSTEM") || entry.delivery == "preloaded-callout" {
                     self.last_speech_sequence = entry.sequence;
                     continue;
                 }

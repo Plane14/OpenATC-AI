@@ -22,6 +22,7 @@ struct Model {
     port: u16,
     requests: Arc<Mutex<Vec<Value>>>,
     answer: Arc<Mutex<String>>,
+    proposal: Arc<Mutex<Option<String>>>,
     slow: Arc<AtomicBool>,
     started: Arc<AtomicBool>,
     release: Arc<AtomicBool>,
@@ -35,26 +36,28 @@ impl Model {
         listener.set_nonblocking(true)?;
         let requests = Arc::new(Mutex::new(Vec::new()));
         let answer = Arc::new(Mutex::new(answer.to_owned()));
+        let proposal = Arc::new(Mutex::new(None));
         let slow = Arc::new(AtomicBool::new(false));
         let started = Arc::new(AtomicBool::new(false));
         let release = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
-        let (r, a, s, b, g, q) = (
+        let (r, a, s, b, g, q, p) = (
             requests.clone(),
             answer.clone(),
             slow.clone(),
             started.clone(),
             release.clone(),
             stop.clone(),
+            proposal.clone(),
         );
         let worker = thread::spawn(move || {
             while !q.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        let (r, a, s, b, g) =
-                            (r.clone(), a.clone(), s.clone(), b.clone(), g.clone());
+                        let (r, a, s, b, g, p) =
+                            (r.clone(), a.clone(), s.clone(), b.clone(), g.clone(), p.clone());
                         thread::spawn(move || {
-                            if let Err(e) = serve(stream, r, a, s, b, g) {
+                            if let Err(e) = serve(stream, r, a, s, b, g, p) {
                                 eprintln!("Fake model: {e}");
                             }
                         });
@@ -70,6 +73,7 @@ impl Model {
             port,
             requests,
             answer,
+            proposal,
             slow,
             started,
             release,
@@ -89,7 +93,12 @@ impl Model {
             .unwrap()
             .into()
     }
+    fn propose(&self, controls: Value) {
+        let reply = serde_json::from_str::<Value>(&self.answer.lock().unwrap()).ok().and_then(|value| value["reply"].as_str().map(str::to_owned)).unwrap_or_default();
+        *self.proposal.lock().unwrap() = Some(json!({"reply":reply,"actions":controls,"cross_check":false,"memory":""}).to_string());
+    }
     fn set(&self, value: Value) {
+        *self.proposal.lock().unwrap() = None;
         *self.answer.lock().unwrap() = value.to_string();
     }
 }
@@ -109,6 +118,7 @@ fn serve(
     slow: Arc<AtomicBool>,
     started: Arc<AtomicBool>,
     release: Arc<AtomicBool>,
+    proposal: Arc<Mutex<Option<String>>>,
 ) -> Result {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut data = Vec::new();
@@ -166,7 +176,12 @@ fn serve(
         {
             json!({"intent":"taxi","altitudeFeet":0,"waypoint":""}).to_string()
         } else {
-            answer.lock().unwrap().clone()
+            let answer = answer.lock().unwrap().clone();
+            if request["messages"][0]["content"].as_str().unwrap_or("").contains("Allowed controls:") {
+                proposal.lock().unwrap().clone().unwrap_or(answer)
+            } else if let Ok(value) = serde_json::from_str::<Value>(&answer) {
+                value.get("reply").map(|reply| json!({"reply":reply}).to_string()).unwrap_or(answer)
+            } else { answer }
         };
         (
             200,

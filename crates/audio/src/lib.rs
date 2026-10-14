@@ -191,7 +191,9 @@ pub struct Speech {
     cached_inputs: Vec<AudioDevice>,
     cached_outputs: Vec<AudioDevice>,
     preload_cancelled: Arc<AtomicBool>,
+    preload_retry: Arc<Mutex<std::collections::BTreeMap<String, std::time::Instant>>>,
     warming: Option<std::sync::mpsc::Receiver<WarmContext>>,
+    warming_failed_at: Option<std::time::Instant>,
     prepared: Arc<Mutex<std::collections::BTreeMap<String, Option<Arc<Vec<f32>>>>>>,
 }
 
@@ -232,7 +234,9 @@ impl Speech {
             cached_inputs: Vec::new(),
             cached_outputs: Vec::new(),
             preload_cancelled: Arc::new(AtomicBool::new(false)),
+            preload_retry: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             warming: None,
+            warming_failed_at: None,
             prepared: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
         }
     }
@@ -579,12 +583,22 @@ impl Speech {
             return true;
         }
         if let Some(receiver) = &self.warming {
-            if let Ok(mut context) = receiver.try_recv() {
-                self.context = context.0 as *mut MaContext;
-                context.0 = 0;
+            match receiver.try_recv() {
+                Ok(mut context) => {
+                    self.context = context.0 as *mut MaContext;
+                    context.0 = 0;
+                    self.warming = None;
+                    if self.context.is_null() { self.warming_failed_at = Some(std::time::Instant::now()); }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.warming = None;
+                    self.warming_failed_at = Some(std::time::Instant::now());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
             return !self.context.is_null();
         }
+        if self.warming_failed_at.is_some_and(|at| at.elapsed().as_secs() < 5) { return false; }
         let (sender, receiver) = std::sync::mpsc::channel();
         self.warming = Some(receiver);
         self.track_job(std::thread::spawn(move || {
@@ -613,6 +627,13 @@ impl Speech {
                 return;
             }
         }
+        if self
+            .preload_retry
+            .lock()
+            .is_ok_and(|times| times.get(key).is_some_and(|at| at.elapsed().as_secs() < 5))
+        {
+            return;
+        }
         if !self.warm_output() {
             return;
         }
@@ -633,6 +654,8 @@ impl Speech {
         let endpoint = endpoint.to_owned();
         let key = key.to_owned();
         let body = serde_json::json!({"text":text,"speaker":"copilot","voice":voice,"speed":speed,"delivery":"normal","urgent":false});
+        let retry = self.preload_retry.clone();
+        let status = self.status.clone();
         let cancelled = self.preload_cancelled.clone();
         self.track_job(std::thread::spawn(move || {
             let frames = openatc_http::post_wav_cancelled(
@@ -649,9 +672,27 @@ impl Speech {
             let mut cache = cache
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // A failed asset stays unavailable until the next flight/configuration reset.
-            cache.insert(key, Some(Arc::new(frames.unwrap_or_default())));
+            // Failed clips retry after a short backoff; successful assets stay cached.
+            if let Some(frames) = frames {
+                cache.insert(key, Some(Arc::new(frames)));
+            } else {
+                cache.remove(&key);
+                if let Ok(mut status) = status.lock() { *status = format!("Callout {key} synthesis failed; retry pending"); }
+                if let Ok(mut retry) = retry.lock() {
+                    retry.insert(key, std::time::Instant::now());
+                }
+            }
         }));
+    }
+
+    /// Whether the short clip has finished decoding and can play immediately.
+    pub fn preloaded(&self, key: &str) -> bool {
+        self.prepared.lock().is_ok_and(|cache| {
+            cache
+                .get(key)
+                .and_then(Option::as_ref)
+                .is_some_and(|frames| !frames.is_empty())
+        })
     }
 
     /// Start already decoded audio; no synthesis request occurs at the trigger speed.
@@ -677,15 +718,17 @@ impl Speech {
         let cancelled = self.cancelled.clone();
         let busy = self.busy_job.clone();
         let playing = self.playing.clone();
+        let status = self.status.clone();
         self.track_job(std::thread::spawn(move || {
             playing.store(true, Ordering::SeqCst);
-            let _ = play_frames(
+            let result = play_frames(
                 context as *mut MaContext,
                 &output,
                 &frames,
                 volume.clamp(0.0, 1.0),
                 &cancelled,
             );
+            if let Err(error) = result && let Ok(mut status) = status.lock() { *status = format!("Callout output failed: {error}"); }
             playing.store(false, Ordering::SeqCst);
             busy.store(false, Ordering::SeqCst);
         }));
@@ -697,6 +740,7 @@ impl Speech {
         self.stop_speech();
         self.preload_cancelled.store(true, Ordering::SeqCst);
         self.preload_cancelled = Arc::new(AtomicBool::new(false));
+        self.preload_retry = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
         if self.context.is_null() {
             self.warming = None;
         }

@@ -13,12 +13,20 @@ struct Policy {
     reset_below_knots: f64,
     maximum_agl_feet: f64,
     maximum_delay_seconds: f64,
+    #[serde(default)]
+    ias_refs: Vec<String>,
     v1_refs: Vec<String>,
     vr_refs: Vec<String>,
     v2_refs: Vec<String>,
     v1_text: String,
     vr_text: String,
     v2_text: String,
+    #[serde(default)]
+    v1_vr_text: Option<String>,
+    #[serde(default)]
+    log_labels: Vec<String>,
+    #[serde(default)]
+    log_template: Option<String>,
 }
 #[derive(Default)]
 pub struct Runtime {
@@ -26,11 +34,14 @@ pub struct Runtime {
     source: String,
     policy: Option<Policy>,
     refs: Vec<Vec<crate::panel::Readings>>,
+    ias: Vec<crate::panel::Readings>,
     voice_key: String,
     fired: [bool; 3],
     pending: std::collections::VecDeque<(usize, std::time::Instant)>,
     playing: Option<usize>,
     previous: Option<f64>,
+    rebound: Option<std::time::Instant>,
+    status: String,
     pub active: bool,
 }
 impl Runtime {
@@ -101,6 +112,25 @@ impl Runtime {
             self.active = false;
             return;
         };
+        if self.rebound.is_none_or(|at| at.elapsed().as_secs() >= 2) {
+            self.rebound = Some(std::time::Instant::now());
+            self.ias = p
+                .ias_refs
+                .iter()
+                .take(8)
+                .filter_map(|name| crate::panel::find_readings(data, name))
+                .collect();
+            self.refs = [&p.v1_refs, &p.vr_refs, &p.v2_refs]
+                .into_iter()
+                .map(|names| {
+                    names
+                        .iter()
+                        .take(8)
+                        .filter_map(|name| crate::panel::find_readings(data, name))
+                        .collect()
+                })
+                .collect();
+        }
         let settings = &interface.settings;
         let state = interface.engine.state();
         let key = format!(
@@ -110,7 +140,7 @@ impl Runtime {
             settings.tts_model,
             settings.copilot_voice,
             settings.copilot_speed * settings.tts_speed,
-            [p.v1_text.as_str(), p.vr_text.as_str(), p.v2_text.as_str()]
+            [p.v1_text.as_str(), p.vr_text.as_str(), p.v2_text.as_str(), p.v1_vr_text.as_deref().unwrap_or("")]
         );
         if self.voice_key != key {
             self.audio.clear_preloaded();
@@ -142,6 +172,9 @@ impl Runtime {
                     settings.copilot_speed * settings.tts_speed,
                 );
             }
+            if let Some(text) = p.v1_vr_text.as_ref().filter(|text| !text.is_empty() && text.len() < 64) {
+                self.audio.preload("3", &interface.engine.endpoint(), text, &settings.copilot_voice, settings.copilot_speed * settings.tts_speed);
+            }
         }
         let speeds: Vec<_> =
             self.refs
@@ -155,6 +188,22 @@ impl Runtime {
                 })
                 .collect();
         let speeds: [Option<f64>; 3] = speeds.try_into().unwrap_or([None; 3]);
+        let status = format!(
+            "V-speeds {:?}; cached {:?}; phase {:?}; {}",
+            speeds,
+            [
+                self.audio.preloaded("0"),
+                self.audio.preloaded("1"),
+                self.audio.preloaded("2")
+            ],
+            state.phase,
+            self.audio.status()
+        );
+        if self.status != status {
+            crate::debug_log(&format!("OpenATC callouts: {status}\n"));
+            self.status = status.clone();
+        }
+        interface.callout_status = status;
         let valid = [(0, 1), (1, 2), (0, 2)]
             .iter()
             .all(|(a, b)| speeds[*a].zip(speeds[*b]).is_none_or(|(a, b)| a <= b));
@@ -168,7 +217,17 @@ impl Runtime {
             self.previous = None;
             return;
         }
-        let Some(ias) = telemetry.indicated_speed_knots.filter(|v| v.is_finite()) else {
+        let Some(ias) = self
+            .ias
+            .iter()
+            .find_map(|read| {
+                read()
+                    .first()
+                    .copied()
+                    .filter(|v| v.is_finite() && *v > 0.0)
+            })
+            .or(telemetry.indicated_speed_knots.filter(|v| v.is_finite()))
+        else {
             return;
         };
         let crossed = crossings(self.previous, ias, speeds, self.fired);
@@ -176,15 +235,18 @@ impl Runtime {
         if !self.audio.busy() {
             self.playing = None;
         }
+        let rotation_clip = rotation_clip(&crossed, p.v1_vr_text.as_ref().is_some_and(|text| !text.is_empty() && text.len() < 64));
+        let combined = rotation_clip == 3;
         for i in crossed {
             self.fired[i] = true;
+            if combined && i == 0 { continue; }
             if i == 1 {
                 // Rotate takes precedence over V1; V2 waits briefly for rotation to finish.
                 self.pending.retain(|(call, _)| *call != 0);
                 if self.playing != Some(1) && self.audio.busy() {
                     self.audio.stop_speech();
                 }
-                self.pending.push_front((i, std::time::Instant::now()));
+                self.pending.push_front((rotation_clip, std::time::Instant::now()));
             } else {
                 self.pending.push_back((i, std::time::Instant::now()));
             }
@@ -203,8 +265,23 @@ impl Runtime {
         {
             self.pending.pop_front();
             self.playing = Some(i);
+            let entries = log_entries(p, speeds, i);
+            interface.engine.post("/crew/callout", serde_json::json!({"entries":entries,"callsign":state.plan.callsign}));
         }
     }
+}
+fn log_entries(policy: &Policy, speeds: [Option<f64>;3], clip: usize) -> Vec<String> {
+    let bundled: toml::Value = toml::from_str(include_str!("../../../aircraft/callouts.toml")).expect("bundled callout policy");
+    let template = policy.log_template.as_deref().unwrap_or_else(|| bundled["log_template"].as_str().unwrap());
+    let indices: &[usize] = if clip == 3 { &[0,1] } else { std::slice::from_ref(&clip) };
+    indices.iter().filter_map(|index| {
+        let speed = speeds.get(*index).copied().flatten()?;
+        let label = policy.log_labels.get(*index).map(String::as_str).unwrap_or_else(|| bundled["log_labels"][*index].as_str().unwrap());
+        Some(template.replace("{callout}", label).replace("{speed}",&format!("{speed:.0}")))
+    }).collect()
+}
+fn rotation_clip(crossed: &[usize], combined_available: bool) -> usize {
+    if combined_available && crossed.contains(&0) && crossed.contains(&1) { 3 } else { 1 }
 }
 fn crossings(
     previous: Option<f64>,
@@ -227,6 +304,27 @@ fn crossings(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reported_speeds_and_equal_rotation_keep_their_calls() {
+        let speeds = [Some(127.0), Some(146.0), Some(148.0)];
+        let mut fired = [false; 3];
+        for (previous, current, expected) in [(126.0,127.0,0),(145.0,146.0,1),(147.0,148.0,2)] {
+            let crossed = super::crossings(Some(previous), current, speeds, fired);
+            assert_eq!(crossed, vec![expected]);
+            fired[expected] = true;
+        }
+        assert!(super::crossings(Some(148.0),149.0,speeds,fired).is_empty());
+        let crossed = super::crossings(Some(145.0),146.0,[Some(146.0),Some(146.0),Some(148.0)],[false;3]);
+        assert_eq!(crossed, vec![0,1]);
+        assert_eq!(super::rotation_clip(&crossed,true),3);
+        assert_eq!(super::rotation_clip(&[1],true),1);
+        assert_eq!(super::rotation_clip(&crossed,false),1);
+        let policy: super::Policy = toml::from_str(include_str!("../../../aircraft/callouts.toml")).unwrap();
+        assert_eq!(super::log_entries(&policy,speeds,0),vec!["V1 · 127 kt"]);
+        assert_eq!(super::log_entries(&policy,speeds,1),vec!["Rotate · 146 kt"]);
+        assert_eq!(super::log_entries(&policy,speeds,2),vec!["V2 · 148 kt"]);
+        assert_eq!(super::log_entries(&policy,[Some(146.0),Some(146.0),Some(148.0)],3),vec!["V1 · 146 kt","Rotate · 146 kt"]);
+    }
     #[test]
     fn close_speeds_fire_once_and_never_on_a_late_attach_or_rejected_takeoff() {
         assert_eq!(
