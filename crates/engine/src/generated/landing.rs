@@ -71,17 +71,16 @@ pub(super) fn plan(
             if edge.one_way && first != edge.first {
                 continue;
             }
-            let (Some(entrance), Some(exit)) = (nodes.get(&first), nodes.get(&second)) else {
+            let (Some(entrance), Some(_exit)) = (nodes.get(&first), nodes.get(&second)) else {
                 continue;
             };
             let at =
                 (entrance.east - start.east) * unit[0] + (entrance.north - start.north) * unit[1];
             let offset =
                 (entrance.east - start.east) * unit[1] - (entrance.north - start.north) * unit[0];
-            if offset.abs() > 2.0
+            if offset.abs() > policy.surface_sample_meters * 2.0
                 || at < along + braking + radius * 2.0
                 || at + envelope >= length
-                || openatc_core::airport::within_runway(airport, exit)
             {
                 continue;
             }
@@ -90,7 +89,53 @@ pub(super) fn plan(
             }) {
                 continue;
             }
-            candidates.push((at, *entrance, *exit));
+            let mut queue =
+                std::collections::VecDeque::from([(second, BTreeSet::from([first, second]))]);
+            let mut visits = 0;
+            while let Some((node, visited)) = queue.pop_front() {
+                visits += 1;
+                if visits > 32 {
+                    break;
+                }
+                let point = nodes[&node];
+                let geographic = position(airport, point);
+                let clear = !openatc_core::airport::within_runway(airport, &point)
+                    && openatc_core::traffic::runway_position(
+                        airport,
+                        runway_name,
+                        geographic[0],
+                        geographic[1],
+                    )
+                    .is_some_and(|(_, across, _, _)| across.abs() > runway.width / 2.0 + envelope);
+                if clear {
+                    candidates.push((at, *entrance, point));
+                    break;
+                }
+                if visited.len() >= 8 {
+                    continue;
+                }
+                for connection in airport
+                    .edges
+                    .iter()
+                    .filter(|edge| !edge.runway && edge.size >= aircraft.parking_size())
+                {
+                    let next = if connection.first == node {
+                        Some(connection.second)
+                    } else if !connection.one_way && connection.second == node {
+                        Some(connection.first)
+                    } else {
+                        None
+                    };
+                    if let Some(next) = next
+                        && nodes.contains_key(&next)
+                        && !visited.contains(&next)
+                    {
+                        let mut path = visited.clone();
+                        path.insert(next);
+                        queue.push_back((next, path));
+                    }
+                }
+            }
         }
     }
     candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
@@ -198,4 +243,66 @@ pub(super) fn plan(
         });
     }
     Err("No verified forward runway exit within the landing and taxi envelope".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires installed airport scenery"]
+    fn nice_exit_stays_on_pavement_and_slows_before_turning() {
+        let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
+        let airport = super::super::airport(&root, "LFMN").unwrap();
+        let aircraft = openatc_core::traffic::profiles::aircraft("A320").unwrap();
+        let handling = &animation::builtin().unwrap()[&animation::Kind::Jet];
+        let policy = parse_operations(include_str!("../../../../traffic/operations.toml")).unwrap();
+        let runway = airport
+            .runways
+            .iter()
+            .find(|runway| runway.first_name == "04R" || runway.second_name == "04R")
+            .unwrap();
+        let (first, second) = if runway.first_name == "04R" {
+            (runway.first, runway.second)
+        } else {
+            (runway.second, runway.first)
+        };
+        let length = (second.east - first.east).hypot(second.north - first.north);
+        let point = Point {
+            east: first.east + (second.east - first.east) * 300.0 / length,
+            north: first.north + (second.north - first.north) * 300.0 / length,
+            height: 0.0,
+        };
+        let geographic = position(&airport, point);
+        let touchdown = Waypoint {
+            latitude: geographic[0],
+            longitude: geographic[1],
+            altitude_feet: airport.elevation_feet,
+        };
+        let exit = plan(
+            &airport, "04R", touchdown, 140.0, aircraft, handling, &policy,
+        )
+        .unwrap();
+        assert_eq!(exit.rollout.len(), 2);
+        assert_eq!(exit.rollout[1].knots, handling.taxi_turn_knots);
+        assert!(!openatc_core::airport::within_runway(
+            &airport,
+            &openatc_core::airport::airport_point(
+                &airport,
+                exit.vacated.latitude,
+                exit.vacated.longitude
+            )
+        ));
+        assert!(exit.rollout.iter().all(|segment| {
+            segment
+                .resources
+                .iter()
+                .any(|resource| resource.starts_with("RUNWAY/LFMN/"))
+        }));
+        openatc_core::traffic::motion::Route::compile(
+            exit.rollout,
+            aircraft.climb_fpm,
+            aircraft.descent_fpm,
+        )
+        .unwrap();
+    }
 }

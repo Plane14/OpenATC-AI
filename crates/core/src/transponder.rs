@@ -67,6 +67,25 @@ mod tests {
         let controls =
             super::Controls::parse(include_str!("../../../aircraft/transponder.toml")).unwrap();
         assert_eq!(controls.code_dataref, "sim/cockpit/radios/transponder_code");
+        assert_eq!(
+            controls.code_digits,
+            [
+                "AirbusFBW/XPDR4",
+                "AirbusFBW/XPDR3",
+                "AirbusFBW/XPDR2",
+                "AirbusFBW/XPDR1"
+            ]
+        );
+        let selected = super::digits(6450).unwrap();
+        let bindings = controls
+            .code_digits
+            .iter()
+            .zip(selected)
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(bindings[&"AirbusFBW/XPDR4".to_owned()], 6);
+        assert_eq!(bindings[&"AirbusFBW/XPDR3".to_owned()], 4);
+        assert_eq!(bindings[&"AirbusFBW/XPDR2".to_owned()], 5);
+        assert_eq!(bindings[&"AirbusFBW/XPDR1".to_owned()], 0);
         let power = controls.power.unwrap();
         assert_eq!(power.dataref, "AirbusFBW/XPDRTCASMode");
         assert_eq!(power.on, 1);
