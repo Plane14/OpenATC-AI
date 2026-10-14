@@ -353,6 +353,33 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         let done = c.action(role, request, control, value)?;
         assert!(latest(&done["state"]).contains("Ha,"));
     }
+    m.set(json!({"actions":[],"services":["coffee","snack"],"cross_check":false}));
+    let refreshments = c.request("cabin", "do you have time to get me a coffee and sandwich? wehave alittle time before push back. also do you know a good joke?")?;
+    accepted(&refreshments);
+    assert!(
+        refreshments["state"]["crewActions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let requests = m.requests.lock().unwrap();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.to_string().contains("wehave alittle time"))
+    );
+    drop(requests);
+    let reply = latest(&refreshments["state"]).to_lowercase();
+    assert!(
+        reply.contains("coffee") && (reply.contains("snack") || reply.contains("something to eat")),
+        "{reply}"
+    );
+    m.set(json!({"reply":"Slides could not be confirmed, but we're in the clear for arming."}));
+    let doors = c.request("cabin", "arm doors")?;
+    let denied = c.ack(&doors["state"]["crewActions"][0], false)?;
+    let spoken = latest(&denied["state"]).to_lowercase();
+    assert!(!spoken.contains("clear for arming"));
+    assert!(spoken.contains("not") || spoken.contains("unable"));
     m.set(json!({"reply":"They seem comfortable, Captain. It's calm back here."}));
     let mood = c.request("cabin", "how are the passengers? are they happy?")?;
     accepted(&mood);

@@ -233,8 +233,11 @@ pub(super) fn radio(e: &mut Engine, m: &Model) -> Result {
     contains(&v, "5000");
     assert!(!v["result"]["message"].as_str().unwrap().contains("99000"));
     let prompt = m.prompt();
+    let framing: toml::Value = toml::from_str(&fs::read_to_string(
+        repo().join("prompts/interaction.toml"),
+    )?)?;
     for expected in [
-        "Style examples",
+        framing["examples"].as_str().unwrap(),
         "clearance-delivery controller",
         "current task is clearance",
         &last,

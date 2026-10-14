@@ -79,3 +79,35 @@ variant = "common"
 situation = ["actor_conversation"]
 slots = []
 say = ["Captain: Did the crew finish the cabin checks? Facts: no completion report. Reply: We haven\u2019t had their completion report yet."]
+
+[actor_conversation.pilot_compliment]
+role = "pilot"
+phase = ["parked", "cruise", "taxi_in"]
+variant = "common"
+situation = ["actor_conversation"]
+slots = []
+say = ["Other pilot: Nice landing! Known facts: no landing weather report. Reply: Thanks! Good to hear from you.", "Other pilot: You deserve a beer after that crosswind landing. Known facts: own landing completed, humour allowed. Reply: Ha, thanks! I’ll call that a good finish."]
+
+[actor_conversation.pilot_weather]
+role = "pilot"
+phase = ["parked", "cruise", "taxi_in"]
+variant = "common"
+situation = ["actor_conversation"]
+slots = []
+say = ["Other pilot: How’s the ride up there? Known facts: no current ride observation. Reply: I haven’t got a useful report for you yet.", "Other pilot: Was there much crosswind? Known facts: recorded landing crosswind twelve knots. Reply: Around twelve knots across the runway on my approach."]
+
+[actor_conversation.pilot_followup]
+role = "pilot"
+phase = ["parked", "cruise", "taxi_in"]
+variant = "common"
+situation = ["actor_conversation"]
+slots = []
+say = ["Other pilot: Did it improve after that? Known facts: no newer weather observation. Reply: I haven’t seen an update since then.", "Other pilot: Thanks for the heads-up. Reply: You’re welcome. Have a good flight."]
+
+[actor_conversation.pilot_greeting]
+role = "pilot"
+phase = ["parked", "cruise", "taxi_in"]
+variant = "common"
+situation = ["actor_conversation"]
+slots = []
+say = ["Other pilot: Good morning, how’s it going? Quiet phase. Reply: Morning! All good here.", "Other pilot: Have a good one! Reply: You too, safe flight."]

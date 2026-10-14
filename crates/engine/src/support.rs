@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 /// Role prompts with file-loaded overrides and shipped fallbacks.
 pub struct Prompts {
+    /// Shared framing and context instructions loaded from TOML.
+    pub guidance: Guidance,
     /// Wording rules for an already validated ATC decision.
     pub atc: String,
     /// Structured interpretation of multi-part crew requests.
@@ -60,6 +62,7 @@ impl PromptFile {
             return Err("Role prompts must be nonempty and at most 64 KiB each".into());
         }
         Ok(Prompts {
+            guidance: Guidance::default(),
             atc: self.atc_reply,
             crew_actions: self.crew_actions,
             crew_response: self.crew_response,
@@ -108,7 +111,10 @@ pub fn load_prompts(config_dir: &Path, exe_dir: &Path) -> Prompts {
                 .map_err(|error| error.to_string())
                 .and_then(|file| file.into_prompts(candidate.to_string_lossy().into_owned()))
             {
-                Ok(loaded) => return loaded,
+                Ok(mut loaded) => {
+                    loaded.guidance = Guidance::load(&candidate.join("interaction.toml"));
+                    return loaded;
+                }
                 Err(error) => eprintln!(
                     "Invalid role prompt catalogue {}: {error}",
                     candidate.display()
@@ -120,6 +126,7 @@ pub fn load_prompts(config_dir: &Path, exe_dir: &Path) -> Prompts {
             continue;
         }
         prompts.source = candidate.to_string_lossy().into_owned();
+        prompts.guidance = Guidance::load(&candidate.join("interaction.toml"));
         for (name, target) in [
             ("atc_reply.txt", &mut prompts.atc),
             ("crew_actions.txt", &mut prompts.crew_actions),
@@ -186,101 +193,6 @@ pub fn save_json(path: &Path, data: &serde_json::Value) -> Result<(), String> {
 }
 
 /// Bearer header from an env key, absent when unset.
-fn auth_header(name: &str) -> Option<String> {
-    std::env::var(name).ok().map(|key| format!("Bearer {key}"))
-}
-
-/// POST JSON to an OpenAI-compatible chat endpoint, returning the body text.
-pub async fn chat_complete(
-    client: &reqwest::Client,
-    url: &str,
-    model: &str,
-    temperature: f32,
-    system: &str,
-    user: &str,
-) -> Result<String, String> {
-    complete_request(client, url, model, temperature, system, user, false).await
-}
-
-/// Request a JSON object for validated operational intents.
-pub async fn chat_complete_structured(
-    client: &reqwest::Client,
-    url: &str,
-    model: &str,
-    temperature: f32,
-    system: &str,
-    user: &str,
-) -> Result<String, String> {
-    complete_request(client, url, model, temperature, system, user, true).await
-}
-
-async fn complete_request(
-    client: &reqwest::Client,
-    url: &str,
-    model: &str,
-    temperature: f32,
-    system: &str,
-    user: &str,
-    structured: bool,
-) -> Result<String, String> {
-    let mut body = serde_json::json!({
-        "model": model,
-        "temperature": temperature,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    });
-    if structured {
-        body["response_format"] = serde_json::json!({"type":"json_object"});
-        body["max_tokens"] = serde_json::json!(384);
-    }
-    let mut call = client
-        .post(format!("{url}/v1/chat/completions"))
-        .json(&body);
-    if let Some(authorization) = auth_header("OPENATC_AI_KEY") {
-        call = call.header("Authorization", authorization);
-    }
-    let reply = call
-        .send()
-        .await
-        .map_err(|_| "AI endpoint unavailable.".to_owned())?;
-    if !reply.status().is_success() {
-        return Err("AI endpoint unavailable.".to_owned());
-    }
-    let parsed: serde_json::Value = reply
-        .json()
-        .await
-        .map_err(|_| "AI endpoint unavailable.".to_owned())?;
-    Ok(chat_content(&parsed))
-}
-
-/// Extract the assistant message from a chat completion body.
-#[must_use]
-pub fn chat_content(parsed: &serde_json::Value) -> String {
-    parsed
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
-}
-
-/// Trim quotes and whitespace and limit the reply to 500 characters.
-#[must_use]
-pub fn clean_reply(mut text: String) -> String {
-    let trimmed = text
-        .trim_matches(|value: char| value.is_whitespace() || value == '"' || value == '\'')
-        .to_owned();
-    text = trimmed;
-    if text.len() > 500 {
-        text.truncate(500);
-    }
-    text
-}
-
 /// GET a upstream /health with short timeouts.
 pub async fn service_ok(client: &reqwest::Client, url: &str) -> bool {
     if url.is_empty() {
@@ -330,5 +242,63 @@ mod prompt_tests {
         file.cabin.clear();
         assert!(file.into_prompts("bad".into()).is_err());
         assert!(toml::from_str::<PromptFile>(&format!("{text}\nunknown = true")).is_err());
+    }
+}
+
+/// Shared instruction strings; missing fields retain bundled TOML defaults.
+pub struct Guidance(std::collections::BTreeMap<String, String>);
+impl Default for Guidance {
+    fn default() -> Self {
+        Self(
+            toml::from_str(include_str!("../../../prompts/interaction.toml"))
+                .expect("bundled interaction instructions"),
+        )
+    }
+}
+impl Guidance {
+    fn load(path: &Path) -> Self {
+        let mut result = Self::default();
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return result;
+        };
+        let overrides = toml::from_str::<std::collections::BTreeMap<String, String>>(&text);
+        match overrides {
+            Ok(values)
+                if text.len() <= 65536
+                    && values.iter().all(|(key, value)| {
+                        result.0.contains_key(key)
+                            && !value.trim().is_empty()
+                            && value.len() <= 16384
+                    }) =>
+            {
+                result.0.extend(values)
+            }
+            _ => eprintln!("Invalid shared prompt instructions: {}", path.display()),
+        }
+        result
+    }
+    pub fn get(&self, key: &str) -> &str {
+        self.0.get(key).expect("known shared prompt instruction")
+    }
+}
+
+#[cfg(test)]
+mod guidance_tests {
+    use super::*;
+    #[test]
+    fn editable_framing_loads_without_requiring_a_complete_new_catalogue() {
+        let directory =
+            std::env::temp_dir().join(format!("openatc-guidance-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("interaction.toml");
+        std::fs::write(&path, "examples = 'Custom example guidance'\n").unwrap();
+        let loaded = Guidance::load(&path);
+        assert_eq!(loaded.get("examples"), "Custom example guidance");
+        assert!(!loaded.get("crew_context").is_empty());
+        assert_eq!(
+            Guidance::default().get("speech_rules"),
+            include_str!("../../../prompts/speech_rules.txt").trim()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

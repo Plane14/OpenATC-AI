@@ -1,7 +1,8 @@
 //! HTTP endpoints for dialogue, flight plans, simulator data and speech.
 
 use super::Shared;
-use super::support::{chat_complete, clean_reply, service_ok};
+use super::llm::{clean_reply, text as chat_complete};
+use super::support::service_ok;
 use axum::{
     Json,
     extract::{FromRequest, State as AxumState},
@@ -18,9 +19,7 @@ use openatc_core::intents::{Realism, discipline_preset};
 use openatc_core::ops::{delivery_preset, parse_voice_pool, validate_flight_plan};
 use openatc_core::regions::{region_for, units_for_region};
 use openatc_core::simbrief::parse_simbrief;
-use openatc_core::speech::{
-    PromptContext, SpeechPool, build_prompt, parse_ai_output, sample_slots,
-};
+use openatc_core::speech::{PromptContext, SpeechPool, parse_ai_output, sample_slots};
 use openatc_core::state::{PhaseCode, Request, SpeechTag, State, TaxiClearance};
 use openatc_core::{UnitSystem, resolve_units};
 use openatc_settings::{Congestion, Delivery, Settings, Units};
@@ -1568,16 +1567,11 @@ async fn crew_chat(
             let state = shared.read().await;
             let role = if attendant { "attendant" } else { "ground" };
             let phase = format!("{:?}", state.session.phase).to_lowercase();
-            let live = format!(
-                "\nLive flight phase: {phase}. On ground: {}. Ground speed: {:.1} knots. Departure: {}. Destination: {}. Answer only the captain's current request. Examples are not current events. Do not claim an action was performed unless simulator confirmation is supplied.\n",
-                state.session.telemetry.on_ground,
-                state.session.telemetry.ground_speed_knots,
-                state.session.plan.departure,
-                state.session.plan.destination
-            );
+            let live = state.prompts.guidance.get("crew_live").replace("{{facts}}", &json!({"phase":phase,"onGround":state.session.telemetry.on_ground,"groundSpeedKnots":state.session.telemetry.ground_speed_knots,"departure":state.session.plan.departure,"destination":state.session.plan.destination}).to_string());
             system
                 + &live
                 + &crate::context::prompt(&state, role, &request.text)
+                + state.prompts.guidance.get("examples")
                 + &if social.is_some() {
                     reply_text.clone()
                 } else {
@@ -1698,62 +1692,43 @@ async fn classify_request(
     );
     let prompts = shared.read().await.classify_prompt();
     let mut classify = prompts;
-    classify += " Recover clear typing errors and speech-recognition mistakes in request words regardless of phraseology settings. Preserve all operational identifiers and numeric values; never fill missing readback items from the issued clearance. Ask for clarification by returning conversation when the intended request or value is ambiguous.";
-    classify += " Return one JSON object containing only intent, altitudeFeet (an integer, zero if absent), and waypoint (a string, empty if absent). Do not include permissions, text, role, clearanceSequence or readbackKind.";
-    if preset == "relaxed" {
-        classify += " Accept casual phrasing and slang; resolve the best-guess intent.";
-    } else if preset == "real" {
-        classify += " Require standard phraseology; use conversation when unsure.";
+    {
+        let state = shared.read().await;
+        classify.push('\n');
+        classify += state.prompts.guidance.get("classify_common");
+        if preset == "relaxed" {
+            classify.push('\n');
+            classify += state.prompts.guidance.get("classify_relaxed");
+        } else if preset == "real" {
+            classify.push('\n');
+            classify += state.prompts.guidance.get("classify_real");
+        }
     }
     classify += &crate::context::prompt(&*shared.read().await, role, &request.text);
     let client = shared.read().await.client.clone();
-    let mut call = client.post(format!("{}/v1/chat/completions", settings.ai_url));
-    if let Ok(key) = std::env::var("OPENATC_AI_KEY") {
-        call = call.header("Authorization", format!("Bearer {key}"));
-    }
-    let reply = call
-        .json(&json!({
-            "model": settings.ai_model,
-            "temperature": 0,
-            "response_format": {"type":"json_object"},
-            "messages": [
-                {"role": "system", "content": classify},
-                {"role": "user", "content": request.text},
-            ],
-        }))
-        .send()
-        .await;
-    let Ok(reply) = reply else {
-        return Err(openatc_core::dialogue::say(
-            "notice_ai_endpoint_unavailable",
-            &[],
-        ));
+    let content = match crate::llm::structured::<Value>(
+        &client,
+        &settings.ai_url,
+        &settings.ai_model,
+        0.0,
+        &classify,
+        &request.text,
+    )
+    .await
+    {
+        Ok(parsed) => parsed.to_string(),
+        Err(crate::llm::StructuredError::Invalid(error)) => {
+            eprintln!("ATC classification rejected: {error}");
+            String::new()
+        }
+        Err(crate::llm::StructuredError::Service(_)) => {
+            return Err(openatc_core::dialogue::say(
+                "notice_ai_endpoint_unavailable",
+                &[],
+            ));
+        }
     };
-    if !reply.status().is_success() {
-        return Err(openatc_core::dialogue::say(
-            "notice_ai_endpoint_unavailable",
-            &[],
-        ));
-    }
-    let Ok(parsed) = reply.json::<Value>().await else {
-        return Err(openatc_core::dialogue::say(
-            "notice_ai_endpoint_unavailable",
-            &[],
-        ));
-    };
-    let Some(content) = parsed
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_str)
-    else {
-        return Err(openatc_core::dialogue::say(
-            "notice_ai_endpoint_unavailable",
-            &[],
-        ));
-    };
-    let mut interpreted = crate::intent::parse_or_clarify(content, request, role);
+    let mut interpreted = crate::intent::parse_or_clarify(&content, request, role);
     if interpreted.intent == "readback" {
         openatc_core::readback::prepare(&shared.read().await.session, &mut interpreted);
     }
@@ -1775,12 +1750,13 @@ async fn copilot_chat(shared: &Shared, settings: &Settings, request: &Request) -
         )
     };
     if request.intent != "conversation" {
-        system += " The captain addressed an ATC task to you, but you cannot transmit on frequency. Briefly redirect them to say it themselves, then offer to read it back.";
+        system += shared.read().await.prompts.guidance.get("copilot_redirect");
     }
     {
         let state = shared.read().await;
         let phase = format!("{:?}", state.session.phase).to_lowercase();
         system += &crate::context::prompt(&state, "copilot", &request.text);
+        system += state.prompts.guidance.get("examples");
         system += &social
             .clone()
             .unwrap_or_else(|| few_shots(&state.speech, "copilot", &[], &phase));
@@ -2520,29 +2496,22 @@ pub(crate) async fn atc_request(
         .get(&history_key)
         .cloned()
         .unwrap_or_default();
+    let role_key = format!("atc_{}", receiving.service.to_lowercase());
     let role_description = match receiving.service.as_str() {
-        "Clearance" => {
-            "You are the clearance-delivery controller, issuing the recorded IFR route, initial altitude, squawk and departure runway."
+        "Clearance" | "Ground" | "Tower" | "Approach" | "Departure" | "Center" => {
+            state.prompts.guidance.get(&role_key)
         }
-        "Ground" => {
-            "You are the ground controller, coordinating authorized surface movements and runway hold restrictions."
-        }
-        "Tower" => {
-            "You are the tower controller, responsible for runway operations. You may cover delivery or ground duties only when the supplied station services and recorded instruction authorize that duty."
-        }
-        "Approach" => {
-            "You are the approach controller, managing the recorded terminal-arrival instructions."
-        }
-        "Departure" => {
-            "You are the departure controller, managing the recorded climb and departure instructions."
-        }
-        "Center" => {
-            "You are the area controller, managing the recorded en-route instructions and handoffs."
-        }
-        _ => {
-            "You are the tuned station controller. Speak only within the supplied station services and recorded instruction."
-        }
+        _ => state.prompts.guidance.get("atc_default"),
     };
+    let wording_context = state
+        .prompts
+        .guidance
+        .get("atc_wording")
+        .replace("{{service}}", &receiving.service)
+        .replace("{{role}}", role_description)
+        .replace("{{intent}}", &intent)
+        .replace("{{previous}}", &format!("{previous_wording:?}"));
+    let example_guidance = state.prompts.guidance.get("examples").to_owned();
     let phase = format!("{:?}", state.session.phase).to_lowercase();
     let rules = if state.session.ifr { "ifr" } else { "vfr" };
     let wording_prompt =
@@ -2568,9 +2537,11 @@ pub(crate) async fn atc_request(
         && !settings.ai_model.is_empty()
         && !["ready", "readback", "acknowledge"].contains(&request.intent.as_str())
     {
-        let system = format!(
-            "{wording_prompt}\nService: {}. {role_description} Your current task is {intent}; the live flight phase is {phase}. The controller decision is already made; you are wording it, not making a new decision. Preserve every operational token, instruction and value in its original order. Never add commands, change numbers, remove negations or introduce facts. Previous transmission for this station and task: {previous_wording:?}. Avoid repeating that wording where safe filler permits; standard operational terms must remain exact. Style examples:\n{examples}",
-            receiving.service
+        let system = crate::llm::prompt(
+            &wording_prompt,
+            &example_guidance,
+            &[examples],
+            &wording_context.replace("{{phase}}", &phase),
         );
         if let Ok(Ok(candidate)) = tokio::time::timeout(
             std::time::Duration::from_secs(8),
@@ -2785,7 +2756,12 @@ pub async fn post_suggest(
                 .to_owned(),
             );
         }
-        let mut prompt = build_prompt(&examples, &context);
+        let samples = sample_slots();
+        let lines = examples
+            .iter()
+            .flat_map(|entry| entry.say.iter().map(|line| render_template(line, &samples)))
+            .collect::<Vec<_>>();
+        let mut prompt = crate::llm::prompt(state.prompts.guidance.get("speech_rules"), state.prompts.guidance.get("examples"), &lines, &json!({"role":context.role,"situation":context.situation,"phase":context.phase,"callsign":context.callsign}).to_string());
         let _ = write!(
             prompt,
             "\nSpeech context: airport {airport}, flight rules {flight_rules}."
@@ -2804,13 +2780,20 @@ pub async fn post_suggest(
             openatc_core::dialogue::say("notice_ai_generation_is_off_587c5e7e", &[]).to_owned(),
         );
     }
+    let current_request = shared
+        .read()
+        .await
+        .prompts
+        .guidance
+        .get("suggest_request")
+        .to_owned();
     match chat_complete(
         &client,
         &settings.ai_url,
         &settings.ai_model,
         0.3,
         &prompt,
-        "Speak.",
+        &current_request,
     )
     .await
     {

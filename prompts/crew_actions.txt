@@ -22,3 +22,13 @@ JSON: {"actions":[],"services":[],"cross_check":true}
 Return at most eight actions and six services. Never return speech or claim an action succeeded. The engine validates the proposal and waits for aircraft confirmation.
 
 Preparing the cabin for landing is landing_preparation, without unrequested switch actions. Keep an eye on the passengers is passenger_watch. A statement that the captain has already changed a switch is not a request to change it again. Preserve these services when combined with explicit light commands.
+
+Separate requested actions and cabin services from incidental conversation in the same message. A joke request, compliment, spare-time comment or casual question must not cause you to discard a clear action or service. The actor reply handles that conversation afterwards. Recover joined words when clear (wehave a little time means we have a little time). Do you have time to get me something is a service request, not merely a yes/no availability question. A sandwich or sandwiches is snack. Do not invent a control for a joke.
+User: do you have time to get me a coffee and sandwich? wehave alittle time before push back. also do you know a good joke?
+JSON: {"actions":[],"services":["coffee","snack"],"cross_check":false}
+User: how are the passengers? can you arm and cross check?
+JSON: {"actions":[{"control":"slides","value":1}],"services":["passenger_status"],"cross_check":true}
+User: bring me tea and a sandwich, and tell me something funny
+JSON: {"actions":[],"services":["tea","snack"],"cross_check":false}
+User: turn off cabin lights, could I have some water and a joke?
+JSON: {"actions":[{"control":"cabin_brightness","value":0}],"services":["water"],"cross_check":false}

@@ -363,13 +363,7 @@ pub(crate) async fn narrate(
         .into_iter()
         .flat_map(|example| example.say.iter().take(2).cloned().collect::<Vec<_>>())
         .collect::<Vec<_>>();
-    let speaker = match role {
-        "cabin" => "ATTENDANT",
-        "ground" => "GROUND",
-        _ => "COPILOT",
-    };
-    let recent:Vec<_>=s.session.transcript.windows(2).rev().filter(|pair| pair[0].speaker==s.session.plan.callsign && pair[1].speaker==speaker).take(4)
-        .map(|pair| json!({"captain":pair[0].text.chars().take(512).collect::<String>(),"reply":pair[1].text.chars().take(768).collect::<String>()})).collect();
+    let recent = crate::context::conversation(&s, role, 4, 768);
     let controls: Vec<_> = s
         .session
         .crew_controls
@@ -382,19 +376,24 @@ pub(crate) async fn narrate(
         "departure":s.session.plan.departure,"destination":s.session.plan.destination,"cabin":s.cabin,"controls":controls,
         "missionIncident":s.session.mission.incident,"recentConversationNewestFirst":recent,"serviceCounts":s.crew.service_requests,
         "humourAllowed":s.settings.llm_phrase_variety && !s.cabin.preparing_for_turbulence && s.session.taxi_clearance.crossing_runway.is_empty() && !matches!(s.session.phase,openatc_core::state::PhaseCode::Departure|openatc_core::state::PhaseCode::Approach|openatc_core::state::PhaseCode::Landed) && s.session.mission.incident.is_empty()}).to_string();
-    let system = format!(
-        "{}\n{}\n{}\n{}\n{}",
-        role_prompt,
-        personality,
-        s.prompts.crew_response,
-        serde_json::to_string(&examples).unwrap_or_default(),
-        context
+    let system = crate::llm::prompt(
+        &[
+            role_prompt.as_str(),
+            personality.as_str(),
+            &s.prompts.crew_response,
+        ]
+        .join("\n"),
+        s.prompts.guidance.get("examples"),
+        &examples,
+        &context,
     );
     let client = s.client.clone();
     let settings = s.settings.clone();
+    let language_path = s.config_dir.join("cabin/language.toml");
     drop(s);
+    let language = openatc_core::crew::request::Grammar::load(&language_path).ok();
     let user = json!({"currentRequest":request,"confirmedResult":fallback}).to_string();
-    let response = crate::support::chat_complete_structured(
+    let response = crate::llm::narration(
         &client,
         &settings.ai_url,
         &settings.ai_model,
@@ -407,14 +406,14 @@ pub(crate) async fn narrate(
         &user,
     )
     .await;
-    let Some(reply) = response
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|value| value["reply"].as_str().map(str::to_owned))
-    else {
+    let Ok(reply) = response else {
         return fallback.to_owned();
     };
-    if valid_narration(&reply, fallback, protected) {
+    if valid_narration(&reply, fallback, protected)
+        && language
+            .as_ref()
+            .is_some_and(|language| language.narration_allowed(&reply))
+    {
         reply.trim().to_owned()
     } else {
         fallback.to_owned()
@@ -424,7 +423,10 @@ pub(crate) async fn narrate(
 fn valid_narration(reply: &str, fallback: &str, protected: &[String]) -> bool {
     let lower = reply.to_lowercase();
     let failed = fallback.to_lowercase();
-    if reply.trim().is_empty()
+    if lower.matches("captain").count() > 1
+        || reply.contains("?.")
+        || reply.contains("!.")
+        || reply.trim().is_empty()
         || reply.len() > 1200
         || [
             "simulat",
@@ -916,7 +918,7 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                 .crew_actions
                 .replace("{{role}}", role);
             let prompt = format!("{instructions}\nAllowed controls: {}", json!(allowed));
-            crate::support::chat_complete_structured(
+            crate::llm::structured::<openatc_core::crew::request::Intent>(
                 &client,
                 &settings.ai_url,
                 &settings.ai_model,
@@ -926,7 +928,6 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
             )
             .await
             .ok()
-            .and_then(|v| serde_json::from_str::<openatc_core::crew::request::Intent>(&v).ok())
             .filter(|intent| intent.valid(&profile, role))
         } else {
             None
@@ -1036,6 +1037,11 @@ mod narration_tests {
             "You're welcome.",
             "Heading 275 set",
             &protected
+        ));
+        assert!(!super::valid_narration(
+            "Yes, Captain, Captain, I cannot confirm the slides?.",
+            "Slides could not be confirmed",
+            &[]
         ));
         let failed = vec!["Slides could not be confirmed".to_owned()];
         assert!(!super::valid_narration(

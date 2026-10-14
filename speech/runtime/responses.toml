@@ -1543,7 +1543,7 @@ say = ["{first} and {last}"]
 
 [crew_batch_complete]
 slots = ["items"]
-say = ["All right, Captain. {items}.", "Yes, Captain, {items}.", "Of course, Captain. {items}.", "There you go, Captain: {items}."]
+say = ["{items}"]
 
 [crew_completed_unconfirmed]
 slots = ["item"]

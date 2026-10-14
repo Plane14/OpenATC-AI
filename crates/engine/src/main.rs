@@ -10,6 +10,7 @@ mod initiative;
 mod instructions;
 mod intent;
 mod lifecycle;
+mod llm;
 mod memory;
 mod missions;
 mod parking;

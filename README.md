@@ -602,3 +602,5 @@ The floating plugin window remembers its position, expanded size and ATC transcr
 Crew requests can combine controls with a friendly remark. Editable language rules separate recognised social clauses from actions while preserving the complete request for the actor’s reply; unknown controls and negations still require clarification.
 
 Generated-traffic flight installation now retains its controller plan atomically. Joint airborne scheduling is tested across departure, en-route, arrival and approach restrictions; connection to the production full-flight factory remains unfinished, so this is not yet a complete generated traffic lifecycle.
+
+All voice actors share the controller engine’s LLM transport and reply-decoding pipeline. Editable TOML role instructions, shared framing in `prompts/interaction.toml`, and example phrases teach tone and behaviour; live facts and conversation history guide fresh replies. Aircraft permissions and confirmed action outcomes remain enforced by Rust.

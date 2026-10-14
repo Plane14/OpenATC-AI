@@ -104,6 +104,8 @@ pub struct Grammar {
     statement: Option<String>,
     #[serde(default)]
     social: Option<String>,
+    #[serde(default)]
+    narration_reject: Vec<String>,
     replacements: std::collections::BTreeMap<String, String>,
     services: std::collections::BTreeMap<String, Service>,
 }
@@ -127,6 +129,12 @@ impl Grammar {
         for pattern in [&result.statement, &result.social].into_iter().flatten() {
             regex::Regex::new(pattern).map_err(|error| error.to_string())?;
         }
+        if result.narration_reject.len() > 16 {
+            return Err("Too many crew narration guards".into());
+        }
+        for pattern in &result.narration_reject {
+            regex::Regex::new(pattern).map_err(|error| error.to_string())?;
+        }
         if result.replacements.len() > 128
             || result.replacements.iter().any(|(from, to)| {
                 from.is_empty()
@@ -138,6 +146,12 @@ impl Grammar {
             return Err("Crew corrections must contain words only".into());
         }
         Ok(result)
+    }
+    /// Reject claims outside crew authority using the installed language policy.
+    pub fn narration_allowed(&self, text: &str) -> bool {
+        self.narration_reject
+            .iter()
+            .all(|pattern| regex::Regex::new(pattern).is_ok_and(|pattern| !pattern.is_match(text)))
     }
     /// Route purely social remarks to conversation rather than action classification.
     pub fn social_only(&self, text: &str) -> bool {
@@ -316,6 +330,12 @@ mod tests {
         }
         let grammar: Grammar =
             toml::from_str(include_str!("../../../cabin/language.toml")).unwrap();
+        assert!(
+            !grammar.narration_allowed("Slides unconfirmed, but we're in the clear for arming.")
+        );
+        assert!(
+            grammar.narration_allowed("I cannot confirm the slides. Please check the indications.")
+        );
         assert!(grammar.social_only("have a beer for me after that! you deserve it haha"));
         assert!(!grammar.social_only("disconnect power and have a beer for me"));
 
@@ -336,6 +356,17 @@ mod tests {
             )
             .is_none()
         );
+    }
+    #[test]
+    fn time_to_bring_coffee_and_sandwich_is_a_service_request() {
+        let intent = parse(
+            &profile(),
+            "cabin",
+            "do you have time to get me a coffee and sandwich?",
+        )
+        .unwrap();
+        assert!(intent.actions.is_empty());
+        assert_eq!(intent.services, vec![Service::Coffee, Service::Snack]);
     }
     #[test]
     fn cabin_preparation_and_watch_are_services_not_switch_changes() {
