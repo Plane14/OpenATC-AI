@@ -93,6 +93,10 @@ pub struct EngineState {
     /// Latest simulator airport weather, timestamped at receipt.
     /// Information letter advances only when the rounded airport observation changes.
     pub atis_information: BTreeMap<String, (String, usize)>,
+    /// Bounded geometry cache for weather-based ATIS runway selection.
+    pub atis_runways: BTreeMap<String, Vec<openatc_core::airport::Runway>>,
+    /// A runway change advances the information letter independently of weather changes.
+    pub atis_last_runway: BTreeMap<String, String>,
     /// Surface observations received from X-Plane, with freshness timestamps.
     pub sim_weather: BTreeMap<String, (serde_json::Value, std::time::Instant)>,
     /// Loaded airport, if any.
@@ -369,6 +373,8 @@ async fn main() {
         station_root: String::new(),
         sim_weather: BTreeMap::new(),
         atis_information: BTreeMap::new(),
+        atis_runways: BTreeMap::new(),
+        atis_last_runway: BTreeMap::new(),
         airport: None,
         arrival_airport: None,
         arrival_profile: None,
@@ -487,6 +493,8 @@ fn test_state() -> EngineState {
         station_root: String::new(),
         sim_weather: BTreeMap::new(),
         atis_information: BTreeMap::new(),
+        atis_runways: BTreeMap::new(),
+        atis_last_runway: BTreeMap::new(),
         airport: None,
         arrival_airport: None,
         arrival_profile: None,

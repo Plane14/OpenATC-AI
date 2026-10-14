@@ -11,27 +11,43 @@ use crate::{
 
 /// A resolved crossing after decoding its published leg and pressure reference.
 pub struct Fix {
+    /// Latitude and longitude in degrees.
     pub coordinate: [f64; 2],
+    /// Crossing floor converted to geometric feet MSL.
     pub minimum_feet: f64,
+    /// Crossing ceiling converted to geometric feet MSL.
     pub maximum_feet: f64,
+    /// Desired geometric level before restrictions are applied.
     pub preferred_feet: f64,
     /// Ground speed after applying the aircraft envelope, wind and published IAS limit.
     pub ground_knots: f64,
+    /// Published turn direction, when specified.
     pub required_turn: Option<curves::Turn>,
 }
 
+/// Performance and sampling limits used during planning.
 pub struct Envelope {
+    /// Maximum bank for planned turns.
     pub bank_degrees: f64,
+    /// Maximum angular turn rate in degrees per second.
     pub turn_rate_degrees_sec: f64,
+    /// Maximum climb rate in feet per minute.
     pub climb_fpm: f64,
+    /// Maximum descent rate in feet per minute.
     pub descent_fpm: f64,
+    /// Maximum spacing between protection samples.
     pub spacing_meters: f64,
+    /// Permitted curve length beyond the direct connection.
     pub maximum_detour_meters: f64,
 }
 
+/// A sampled connection ending at its crossing restriction.
 pub struct Leg {
+    /// Geographic path with geometric heights.
     pub points: Vec<Waypoint>,
+    /// Planned speed over the ground.
     pub ground_knots: f64,
+    /// Duration at the planned speed.
     pub seconds: f64,
 }
 

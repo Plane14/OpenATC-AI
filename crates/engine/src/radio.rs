@@ -76,6 +76,8 @@ pub async fn ensure_index(shared: &Shared) -> Result<(), String> {
             s.map_airports = index.1;
             s.sim_weather.clear();
             s.atis_information.clear();
+            s.atis_runways.clear();
+            s.atis_last_runway.clear();
         }
     }
     Ok(())
@@ -236,6 +238,7 @@ pub async fn atis(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
             &[],
         ));
     }
+    let station = station.clone();
     let Some((weather, when)) = s
         .sim_weather
         .get(&station.airport)
@@ -246,13 +249,47 @@ pub async fn atis(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
             &[],
         ));
     };
+    let weather = weather.clone();
+    let observed_at = *when;
+    let _ = when;
+    let cached = s.airport.as_ref().filter(|airport| airport.icao == station.airport)
+        .or_else(|| s.arrival_airport.as_ref().filter(|airport| airport.icao == station.airport))
+        .map(|airport| airport.runways.clone())
+        .filter(|runways| !runways.is_empty())
+        .or_else(|| s.atis_runways.get(&station.airport).cloned());
+    let root = s.settings.simulator_root.clone();
+    let workers = s.workers.clone();
+    drop(s);
+    let runways = match cached {
+        Some(runways) => runways,
+        None => {
+            let id = station.airport.clone();
+            let path = root.clone();
+            workers.run(move || openatc_core::airport::load_airport_from_simulator(&path, &id,
+                &|path| std::path::Path::new(path).is_file(),
+                &|path| std::fs::read_to_string(path).map_err(|error| error.to_string()))
+                .map(|airport| airport.runways)).await.ok().and_then(Result::ok).unwrap_or_default()
+        }
+    };
+    let mut s = shared.write().await;
+    if s.settings.simulator_root != root || s.session.telemetry.frequency(radio) != Some(station.khz)
+        || observed_at.elapsed().as_secs() >= 45 {
+        return error(openatc_core::dialogue::say("notice_not_tuned_to_atis_f8ae1999", &[]));
+    }
+    if !runways.is_empty() {
+        if s.atis_runways.len() >= 32 && !s.atis_runways.contains_key(&station.airport) {
+            if let Some(key) = s.atis_runways.keys().next().cloned() {
+                s.atis_runways.remove(&key);
+                s.atis_last_runway.remove(&key);
+            }
+        }
+        s.atis_runways.insert(station.airport.clone(), runways.clone());
+    }
     let number = |key: &str| weather[key].as_f64().unwrap_or(0.);
     let clouds = weather.get("clouds").and_then(Value::as_str).map_or_else(
         || openatc_core::dialogue::say("weather_cloud_report_unavailable", &[]),
         str::to_owned,
     );
-    let letter = s.atis_information.get(&station.airport).map_or(0, |v| v.1);
-    let code = openatc_core::dialogue::say(&format!("atis_information_{letter:02}"), &[]);
     let runway = if station.airport == s.session.plan.departure {
         &s.session.plan.runway
     } else if station.airport == s.session.plan.destination {
@@ -260,11 +297,20 @@ pub async fn atis(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
     } else {
         ""
     };
+    let runway = atis_runway(&runways, runway, number("windDegrees"), number("windKnots"));
+    if !runway.is_empty() {
+        if s.atis_last_runway.insert(station.airport.clone(), runway.clone()).is_some_and(|previous| previous != runway)
+            && let Some(information) = s.atis_information.get_mut(&station.airport) {
+            information.1 = (information.1 + 1) % 26;
+        }
+    }
+    let letter = s.atis_information.get(&station.airport).map_or(0, |v| v.1);
+    let code = openatc_core::dialogue::say(&format!("atis_information_{letter:02}"), &[]);
     let runway_text = if runway.is_empty() {
         openatc_core::dialogue::say("runway_information_unavailable", &[])
     } else {
         openatc_core::dialogue::say(
-            "planned_runway_confirm_with_controller",
+            "atis_runway_in_use",
             &[("runway", (runway).to_string())],
         )
     };
@@ -283,7 +329,7 @@ pub async fn atis(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
         )
     };
     let text = openatc_core::dialogue::say(
-        "automatic_terminal_information_information_simulator_observation_wind",
+        "atis_broadcast",
         &[
             ("airport", (station.airport_name).clone()),
             ("code", code.clone()),
@@ -297,8 +343,32 @@ pub async fn atis(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
             ("runway_text", (runway_text).clone()),
         ],
     );
-    let _ = when;
+    let mut tag = crate::flight::tag(&mut s, &station);
+    tag.radio = Some(radio);
+    openatc_core::apply::add_transmission(&mut s.session, "ATIS", &text, &tag);
+    s.session.transcript.last_mut().unwrap().information_only = true;
     Json(json!({"text":text,"airport":station.airport,"information":code,"source":"simulator","frequency":station.khz,"radio":radio})).into_response()
+}
+
+fn atis_runway(runways: &[openatc_core::airport::Runway], assigned: &str, wind: f64, knots: f64) -> String {
+    let mut candidates = Vec::new();
+    for runway in runways {
+        let length = (runway.second.east - runway.first.east).hypot(runway.second.north - runway.first.north);
+        if !length.is_finite() || length < 100.0 { continue; }
+        let course = (runway.second.east - runway.first.east).atan2(runway.second.north - runway.first.north).to_degrees();
+        for (name, course) in [(&runway.first_name, course), (&runway.second_name, course + 180.0)] {
+            if !name.is_empty() {
+                candidates.push((name.clone(), knots * (wind - course).to_radians().cos(), length));
+            }
+        }
+    }
+    candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.2.total_cmp(&a.2)).then(a.0.cmp(&b.0)));
+    if let Some(best) = candidates.first()
+        && let Some(planned) = candidates.iter().find(|candidate| candidate.0 == assigned)
+        && (planned.1 - best.1).abs() < 0.01 {
+        return planned.0.clone();
+    }
+    candidates.first().map_or_else(String::new, |candidate| candidate.0.clone())
 }
 
 /// Render the appropriate speech event after the structured controller decision.
@@ -579,6 +649,17 @@ mod tests {
         });
         let sample = json!({"windDegrees":240,"windKnots":8,"visibilityMeters":10000,
             "temperatureC":20,"dewpointC":12,"pressureHpa":1015,"clouds":"Clear"});
+        state.airport = Some(openatc_core::airport::Airport {
+            icao: "TEST".into(),
+            runways: vec![openatc_core::airport::Runway {
+                first_name: "09".into(), second_name: "27".into(),
+                first: Default::default(), second: openatc_core::state::Point { east: 2000.0, ..Default::default() },
+                ..Default::default()
+            }], ..Default::default()
+        });
+        state.session.plan.departure = "TEST".into();
+        state.session.plan.runway = "09".into();
+        state.atis_information.insert("TEST".into(), ("weather".into(), 0));
         state
             .sim_weather
             .insert("TEST".into(), (sample, std::time::Instant::now()));
@@ -591,6 +672,22 @@ mod tests {
         let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(result["radio"], "com2");
         assert_eq!(result["frequency"], 118700);
+        assert!(result["text"].as_str().unwrap().contains("Runway 27 in use"));
+        assert!(!result["text"].as_str().unwrap().to_lowercase().contains("simulat"));
+        {
+            let state = shared.read().await;
+            let entry = state.session.transcript.last().unwrap();
+            assert_eq!(entry.speaker, "ATIS");
+            assert_eq!(entry.text, result["text"].as_str().unwrap());
+            assert_eq!(entry.radio, Some(openatc_core::state::Radio::Com2));
+            assert!(!entry.is_controller_instruction());
+        }
+        shared.write().await.sim_weather.get_mut("TEST").unwrap().0["windDegrees"] = json!(90);
+        let response = super::atis(State(shared.clone()), Json(json!({"radio":"com2"}))).await;
+        let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let revised: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(revised["text"].as_str().unwrap().contains("Runway 09 in use"));
+        assert_ne!(revised["information"], result["information"]);
         assert_eq!(result["airport"], "TEST");
         assert!(result["text"].as_str().is_some_and(|text| !text.is_empty()));
         assert!(

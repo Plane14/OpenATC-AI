@@ -9,15 +9,15 @@ use openatc_core::{
 
 #[derive(Clone)]
 pub(super) struct Exchange {
-    id: u32,
-    segment: usize,
-    station: Station,
-    callsign: String,
-    messages: Vec<(bool, String)>,
-    next: usize,
+    pub(super) id: u32,
+    pub(super) segment: usize,
+    pub(super) station: Station,
+    pub(super) callsign: String,
+    pub(super) messages: Vec<(bool, String)>,
+    pub(super) next: usize,
     pub(super) due: Instant,
-    grant: bool,
-    tune_after: Option<i32>,
+    pub(super) grant: bool,
+    pub(super) tune_after: Option<i32>,
 }
 
 fn station(state: &EngineState, airport: &Airport) -> Option<Station> {
@@ -94,6 +94,13 @@ fn departure_hold(state: &mut EngineState) {
         })
     {
         if state.generated.tower_ready.contains(&pose.id) {
+            if let Some(prepared) = state.generated.flights.get(&pose.id).cloned()
+                && let Err(error) = super::flight::install(&mut state.generated, pose.id, &prepared)
+                && state.generated.warnings.len() < 128
+            {
+                state.generated.warnings.push(error);
+                state.generated.flights.remove(&pose.id);
+            }
             continue;
         }
         let Some(frame) = state
@@ -585,6 +592,9 @@ pub fn tick(state: &mut EngineState) {
             });
             break;
         }
+    }
+    if state.generated.exchange.is_none() {
+        state.generated.exchange = super::flight::exchange(state);
     }
     if state.generated.exchange.is_none() {
         departure_hold(state);

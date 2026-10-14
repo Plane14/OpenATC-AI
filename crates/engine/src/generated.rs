@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod departure;
+mod flight;
 mod policy;
 mod radio;
 pub use radio::tick as radio_tick;
@@ -49,6 +50,7 @@ pub struct Runtime {
     reported_holds: BTreeSet<(u32, usize)>,
     tower_notified: BTreeSet<u32>,
     tower_ready: BTreeSet<u32>,
+    flights: BTreeMap<u32, Arc<flight::Prepared>>,
 }
 
 fn next_job() -> u64 {
@@ -1032,6 +1034,7 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) {
             });
             let generation = runtime.world.generation();
             for pose in runtime.world.snapshot() {
+                if pose.recovering { continue; }
                 if pose.awaiting_clearance {
                     if !matches!(
                         pose.stage,
@@ -1090,6 +1093,10 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) {
                 runtime
                     .world
                     .reserve_next_taxi(generation, pose.id, &blocked);
+                if runtime.flights.contains_key(&pose.id)
+                    && runtime.approved_orders.contains(&(pose.id, pose.segment + 1)) {
+                    runtime.world.authorise_continuation(generation, pose.id, pose.segment + 1, &blocked);
+                }
             }
         }
         runtime.world.advance(seconds, telemetry.paused);

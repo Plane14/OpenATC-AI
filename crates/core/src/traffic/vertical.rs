@@ -3,8 +3,11 @@
 /// A crossing restriction expressed in geometric feet MSL by the caller.
 #[derive(Clone, Copy, Debug)]
 pub struct Crossing {
+    /// Lowest permitted geometric level, feet MSL.
     pub minimum_feet: f64,
+    /// Highest permitted geometric level, feet MSL.
     pub maximum_feet: f64,
+    /// Desired level before future restrictions are considered.
     pub preferred_feet: f64,
     /// Travel time from the preceding crossing, including the initial position.
     pub seconds: f64,

@@ -138,6 +138,42 @@ fn number(text: &str, scale: f64, minimum: f64, maximum: f64) -> Result<Option<f
 }
 
 impl Catalogue {
+    /// Join runway, common and explicitly selected enroute parts without sorting their fixes together.
+    pub fn departure(&self, name: &str, runway: &str, transition: &str) -> Result<Vec<&[Leg]>, String> {
+        if name.is_empty() || runway.is_empty() {
+            return Err("Departure needs a procedure and runway".into());
+        }
+        let exact = format!("RW{runway}");
+        let shared = format!("RW{}B", runway.trim_end_matches(['L', 'R', 'C']));
+        let routes: Vec<_> = self.0.iter().filter(|(key, _)| key.kind == "SID" && key.name == name).collect();
+        let exact_routes: Vec<_> = routes.iter().filter(|(key, _)| key.transition == exact).collect();
+        let runway_routes: Vec<_> = if exact_routes.is_empty() {
+            routes.iter().filter(|(key, _)| key.transition == shared).collect()
+        } else { exact_routes };
+        if runway_routes.len() != 1 {
+            return Err("Departure runway transition is missing or ambiguous".into());
+        }
+        let common: Vec<_> = routes.iter().filter(|(key, _)| key.transition.is_empty()).collect();
+        if common.len() > 1 {
+            return Err("Departure common segment is ambiguous".into());
+        }
+        let mut result = vec![runway_routes[0].1.as_slice()];
+        if let Some((_, legs)) = common.first() { result.push(legs.as_slice()); }
+        if !transition.is_empty() {
+            if transition.starts_with("RW") {
+                return Err("Enroute departure transition cannot be a runway".into());
+            }
+            let selected: Vec<_> = routes.iter().filter(|(key, _)| key.transition == transition).collect();
+            if selected.len() != 1 {
+                return Err("Enroute departure transition is missing or ambiguous".into());
+            }
+            result.push(selected[0].1.as_slice());
+        }
+        if result.iter().any(|legs| legs.is_empty()) || result.iter().map(|legs| legs.len()).sum::<usize>() > 512 {
+            return Err("Assembled departure exceeds its leg budget".into());
+        }
+        Ok(result)
+    }
     /// Assemble one named approach with an explicit transition and unambiguous recovery.
     pub fn approach(&self, name: &str, transition: &str) -> Result<Approach<'_>, String> {
         let routes: Vec<_> = self

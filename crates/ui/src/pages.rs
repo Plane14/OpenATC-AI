@@ -508,7 +508,7 @@ fn transcript_view(ui: &imgui::Ui, interface: &mut Interface, state: &State, hei
             let airport = if interface.local_airport.icao.is_empty() { &interface.airport } else { &interface.local_airport };
             let badge = transcript_badge(entry, airport, state.telemetry.com1_khz);
             let color = widgets::text_color(ui, match entry.speaker.as_str() {
-                "ATC" => [0.48, 0.77, 0.94, 1.0],
+                "ATC" | "ATIS" => [0.48, 0.77, 0.94, 1.0],
                 "CABIN" | "ATTENDANT" => [0.75, 0.83, 0.77, 1.0],
                 "GROUND" => [0.86, 0.79, 0.59, 1.0],
                 "COPILOT" => [0.76, 0.79, 0.89, 1.0],
@@ -545,6 +545,7 @@ fn transcript_badge(
         "COPILOT" => "Copilot".to_owned(),
         "CABIN" | "ATTENDANT" => "Attendant".to_owned(),
         "GROUND" => "Ground services".to_owned(),
+        "ATIS" => "ATIS".to_owned(),
         "SYSTEM" => "INFO".to_owned(),
         "ATC" => {
             let position = entry.position.trim();
@@ -3539,6 +3540,53 @@ mod tests {
         }
         assert!(!interface.transcript_follow_latest);
         assert!((interface.transcript_scroll - reading).abs() < 2.0);
+    }
+
+    #[test]
+    fn all_speakers_follow_the_bottom_without_interrupting_history() {
+        let _guard = CONTEXT_LOCK.lock().unwrap();
+        let mut ctx = headless();
+        let mut interface = interface_with_airport();
+        let mut state = filled_state();
+        let template = state.transcript[0].clone();
+        state.transcript = (1..=80).map(|sequence| Transmission {
+            sequence, text: format!("Conversation entry {sequence}."), ..template.clone()
+        }).collect();
+        let draw = |ctx: &mut imgui::Context, interface: &mut Interface, state: &State| {
+            let ui = ctx.frame();
+            ui.window("Log actors").position([0.0, 0.0], imgui::Condition::Always)
+                .size([800.0, 600.0], imgui::Condition::Always)
+                .build(|| transcript_view(ui, interface, state, 300.0));
+            ctx.render();
+        };
+        for _ in 0..4 { draw(&mut ctx, &mut interface, &state); }
+        assert!(interface.transcript_follow_latest);
+        ctx.io_mut().add_mouse_pos_event([150.0, 130.0]);
+        draw(&mut ctx, &mut interface, &state);
+        ctx.io_mut().add_mouse_wheel_event([0.0, 5.0]);
+        for _ in 0..3 { draw(&mut ctx, &mut interface, &state); }
+        assert!(!interface.transcript_follow_latest);
+        let history = interface.transcript_scroll;
+        let actors = ["ATC", "COPILOT", "ATTENDANT", "GROUND", "TEST1", "ATIS"];
+        for actor in actors {
+            state.transcript.push(Transmission { speaker: actor.into(),
+                sequence: state.transcript.last().unwrap().sequence + 1,
+                text: format!("New message from {actor}."), ..template.clone() });
+            for _ in 0..4 { draw(&mut ctx, &mut interface, &state); }
+            assert!(!interface.transcript_follow_latest, "{actor} interrupted history");
+            assert!((interface.transcript_scroll - history).abs() < 2.0);
+        }
+        ctx.io_mut().add_mouse_wheel_event([0.0, -1000.0]);
+        for _ in 0..4 { draw(&mut ctx, &mut interface, &state); }
+        assert!(interface.transcript_follow_latest);
+        for actor in actors {
+            state.transcript.push(Transmission { speaker: actor.into(),
+                sequence: state.transcript.last().unwrap().sequence + 1,
+                text: format!("Following {actor}."), ..template.clone() });
+            for _ in 0..4 { draw(&mut ctx, &mut interface, &state); }
+            assert!(interface.transcript_follow_latest, "{actor} did not follow the bottom");
+        }
+        assert_eq!(transcript_badge(&Transmission { speaker: "ATIS".into(), ..template }, &interface.airport, 118700), "ATIS");
     }
 
     #[test]

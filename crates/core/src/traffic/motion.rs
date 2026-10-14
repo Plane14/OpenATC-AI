@@ -229,6 +229,8 @@ pub struct Pose {
     pub awaiting_clearance: bool,
     /// This route has reached its final clearance limit.
     pub complete: bool,
+    /// The aircraft is following its separately checked recovery instead of the normal flight.
+    pub recovering: bool,
 }
 
 #[derive(Clone)]
@@ -333,6 +335,7 @@ impl Aircraft {
             awaiting_clearance: (!self.authorised || self.holding && self.speed == 0.0)
                 && !self.complete,
             complete: self.complete,
+            recovering: self.recovering,
         }
     }
     fn duration(&self) -> f64 {

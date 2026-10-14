@@ -1031,6 +1031,10 @@ impl Interface {
         }
         for entry in &state.transcript {
             if entry.sequence > self.last_speech_sequence {
+                if matches!(entry.speaker.as_str(), "ATIS" | "SYSTEM") {
+                    self.last_speech_sequence = entry.sequence;
+                    continue;
+                }
                 if entry.urgent && entry.speaker == "ATC" {
                     self.speech.stop_speech();
                     self.speech_queue.clear();
@@ -1375,7 +1379,7 @@ impl Interface {
                         urgent: false,
                     });
                     self.radio_notice = format!(
-                        "ATIS {} • simulator weather",
+                        "ATIS {}",
                         reply.data["information"].as_str().unwrap_or("")
                     );
                 }

@@ -610,10 +610,10 @@ say = [
   "Planned runway is {runway}; confirm with the controller.",
 ]
 
-[automatic_terminal_information_information_simulator_observation_wind]
+[atis_broadcast]
 slots = ["airport", "code", "wind_direction", "wind_speed", "visibility", "clouds", "temperature", "dewpoint", "pressure", "runway_text"]
 say = [
-  "{airport} automatic terminal information. Information {code}. Simulator observation. Wind {wind_direction} degrees, {wind_speed} knots. Visibility {visibility} metres. {clouds}. Temperature {temperature}, dew point {dewpoint}. {pressure}. {runway_text} Advise information {code} on initial contact.",
+  "{airport} automatic terminal information. Information {code}. Wind {wind_direction} degrees, {wind_speed} knots. Visibility {visibility} metres. {clouds}. Temperature {temperature}, dew point {dewpoint}. {pressure}. {runway_text} Advise information {code} on initial contact.",
 ]
 
 [runway_information_unavailable]
@@ -624,6 +624,10 @@ say = [
   "No runway information available.",
   "Runway information is not available.",
 ]
+
+[atis_runway_in_use]
+slots = ["runway"]
+say = ["Runway {runway} in use."]
 
 [does_not_provide_that_service_no_published]
 slots = ["name", "wanted"]
@@ -17161,7 +17165,7 @@ say = ["An operational exchange or changed traffic interrupted the conversation.
 
 [notice_cannot_restore_over_a_connected_simulator_flight_1bcb59f1]
 slots = []
-say = ["Cannot restore over a connected simulator flight"]
+say = ["Cannot restore over a connected flight"]
 
 [notice_cannot_save_configuration_bc3aa171]
 slots = []
@@ -17245,7 +17249,7 @@ say = ["flightRules must be ifr or vfr"]
 
 [notice_incomplete_simulator_weather_a96360ec]
 slots = []
-say = ["Incomplete simulator weather"]
+say = ["Weather observation incomplete"]
 
 [notice_invalid_audio_body_3bfa74cf]
 slots = []
@@ -17269,7 +17273,7 @@ say = ["Invalid request"]
 
 [notice_invalid_simulator_pressure_eb56730f]
 slots = []
-say = ["Invalid simulator pressure"]
+say = ["Pressure observation unavailable"]
 
 [notice_invalid_stand_fc950a75]
 slots = []
@@ -17361,7 +17365,7 @@ say = ["SimBrief download failed. Check Pilot ID and generate a flight first."]
 
 [notice_simulator_airport_weather_unavailable_8fc27abd]
 slots = []
-say = ["Simulator airport weather unavailable"]
+say = ["Airport weather observation unavailable"]
 
 [notice_simulator_folder_changed_refresh_the_map_d952617e]
 slots = []
