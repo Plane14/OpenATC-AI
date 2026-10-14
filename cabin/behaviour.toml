@@ -9,3 +9,6 @@ resting_brightness_percent = 30.0
 crew_observation_max_age_seconds = 3.0
 fallback_tick_limit_seconds = 2.0
 simulation_tick_limit_seconds = 30.0
+
+# Baseline mood for fictional cabin conversation.
+passenger_mood = "settled"

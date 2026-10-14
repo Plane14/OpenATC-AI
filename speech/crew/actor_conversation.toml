@@ -1,0 +1,81 @@
+# Style examples for generated crew replies; fictional examples never establish live facts.
+
+[actor_conversation.ground_servicing]
+role = "ground"
+phase = ["parked", "clearance", "pushback", "taxi", "departure", "cruise", "arrival", "approach", "landed", "taxi_in", "finished"]
+variant = "common"
+situation = ["actor_conversation"]
+slots = []
+say = ["Captain: Remove chocks and external power, then have a beer for me! Confirmed: both removed. Reply: Power disconnected and chocks removed. I\u2019ll settle for a coffee for now\u2014safe flight!"]
+
+[actor_conversation.ground_farewell]
+role = "ground"
+phase = ["parked", "clearance", "pushback", "taxi", "departure", "cruise", "arrival", "approach", "landed", "taxi_in", "finished"]
+variant = "common"
+situation = ["actor_conversation"]
+slots = []
+say = ["Captain: Thanks, have a good day. Reply: You too! Have a great flight."]
+
+[actor_conversation.ground_follow_up]
+role = "ground"
+phase = ["parked", "clearance", "pushback", "taxi", "departure", "cruise", "arrival", "approach", "landed", "taxi_in", "finished"]
+variant = "common"
+situation = ["actor_conversation"]
+slots = []
+say = ["Captain: Is the power disconnected now? Facts: power is disconnected. Reply: Yes, it\u2019s disconnected."]
+
+[actor_conversation.attendant_seating]
+role = "attendant"
+phase = ["parked", "clearance", "pushback", "taxi", "departure", "cruise", "arrival", "approach", "landed", "taxi_in", "finished"]
+variant = "common"
+situation = ["actor_conversation"]
+slots = []
+say = ["Captain: Are they all seated? Facts: passenger count known, none in the lavatory, all seated. Reply: Yes, Captain, everyone\u2019s seated. We\u2019re finishing the cabin checks."]
+
+[actor_conversation.attendant_mood]
+role = "attendant"
+phase = ["parked", "clearance", "pushback", "taxi", "departure", "cruise", "arrival", "approach", "landed", "taxi_in", "finished"]
+variant = "common"
+situation = ["actor_conversation"]
+slots = []
+say = ["Captain: Are they happy? Facts: cabin mood settled, no incident. Reply: They seem comfortable, Captain. It\u2019s calm back here."]
+
+[actor_conversation.attendant_follow_up]
+role = "attendant"
+phase = ["parked", "clearance", "pushback", "taxi", "departure", "cruise", "arrival", "approach", "landed", "taxi_in", "finished"]
+variant = "common"
+situation = ["actor_conversation"]
+slots = []
+say = ["Captain: Good, keep an eye on them. Reply: Will do. I\u2019ll let you know if anyone needs your attention."]
+
+[actor_conversation.attendant_coffee]
+role = "attendant"
+phase = ["parked", "clearance", "pushback", "taxi", "departure", "cruise", "arrival", "approach", "landed", "taxi_in", "finished"]
+variant = "common"
+situation = ["actor_conversation"]
+slots = []
+say = ["Captain: Another coffee, please. Facts: earlier coffee requests, quiet flight. Reply: Of course, Captain. I\u2019ll bring one up when I can."]
+
+[actor_conversation.copilot_controls]
+role = "copilot"
+phase = ["parked", "clearance", "pushback", "taxi", "departure", "cruise", "arrival", "approach", "landed", "taxi_in", "finished"]
+variant = "common"
+situation = ["actor_conversation"]
+slots = []
+say = ["Captain: Set heading 270, thanks. Confirmed: heading target 270. Reply: Heading 270 set. You\u2019re welcome."]
+
+[actor_conversation.copilot_follow_up]
+role = "copilot"
+phase = ["parked", "clearance", "pushback", "taxi", "departure", "cruise", "arrival", "approach", "landed", "taxi_in", "finished"]
+variant = "common"
+situation = ["actor_conversation"]
+slots = []
+say = ["Captain: What did we set that to? Facts: last confirmed heading target 270. Reply: We set the heading target to 270."]
+
+[actor_conversation.copilot_unknown]
+role = "copilot"
+phase = ["parked", "clearance", "pushback", "taxi", "departure", "cruise", "arrival", "approach", "landed", "taxi_in", "finished"]
+variant = "common"
+situation = ["actor_conversation"]
+slots = []
+say = ["Captain: Did the crew finish the cabin checks? Facts: no completion report. Reply: We haven\u2019t had their completion report yet."]

@@ -306,6 +306,21 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         1.,
     )?;
     c.denied("ground", "connect high pressure air")?;
+    m.set(json!({"reply":"Chocks removed. Ha, coffee first! Have a good flight."}));
+    e.settings(json!({"aiEnabled":true,"aiModel":"test","aiUrl":m.url()}))?;
+    let narrated = c.action(
+        "ground",
+        "remove chocks. have a beer for me haha",
+        "chocks",
+        0.,
+    )?;
+    assert!(latest(&narrated["state"]).contains("coffee first"));
+    assert!(m.prompt().contains("confirmed result"));
+    assert!(m.prompt().contains("have a beer for me"));
+    m.set(json!({"reply":"They seem comfortable, Captain. It's calm back here."}));
+    let mood = c.request("cabin", "how are the passengers? are they happy?")?;
+    accepted(&mood);
+    assert!(latest(&mood["state"]).contains("comfortable"));
     m.set(json!({"actions":[{"control":"heading","value":275}]}));
     e.settings(json!({"aiEnabled":true,"aiModel":"test","aiUrl":m.url()}))?;
     c.action(
@@ -314,9 +329,19 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         "heading",
         275.,
     )?;
-    assert!(m.prompt().contains("Allowed controls:"));
-    assert!(!m.prompt().contains("Pilot wording examples"));
-    assert!(m.prompt().contains("obvious misspelled"));
+    let requests = m.requests.lock().unwrap();
+    let classifier = requests
+        .iter()
+        .rev()
+        .find_map(|request| {
+            request["messages"][0]["content"]
+                .as_str()
+                .filter(|prompt| prompt.contains("Allowed controls:"))
+        })
+        .unwrap();
+    assert!(!classifier.contains("Pilot wording examples"));
+    assert!(classifier.contains("obvious misspelled"));
+    drop(requests);
     m.set(
         json!({"actions":[{"control":"chocks","value":0},{"control":"external_power","value":0}]}),
     );

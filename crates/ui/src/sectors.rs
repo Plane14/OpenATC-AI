@@ -30,6 +30,16 @@ fn reserve_label(
     true
 }
 
+fn continuous_leg(
+    from: &openatc_core::state::RouteFix,
+    to: &openatc_core::state::RouteFix,
+) -> bool {
+    ["", "TF", "DF"].contains(&to.path_terminator.as_str())
+        || (to.path_terminator == "IF"
+            && to.constraint_source.starts_with("STAR ")
+            && from.constraint_source != to.constraint_source)
+}
+
 fn triangulate(points: &[[f32; 2]]) -> Vec<[[f32; 2]; 3]> {
     let points = if points.len() > 3 && points.first() == points.last() {
         &points[..points.len() - 1]
@@ -119,9 +129,9 @@ pub fn page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
     ui.checkbox("Show traffic", &mut interface.map_traffic_visible);
     widgets::same_line_if_fits(
         ui,
-        ui.calc_text_size("Assumed flight plan")[0] + ui.frame_height() + 12.0,
+        ui.calc_text_size("Flight path")[0] + ui.frame_height() + 12.0,
     );
-    ui.checkbox("Assumed flight plan", &mut interface.map_plan_visible);
+    ui.checkbox("Flight path", &mut interface.map_plan_visible);
     if interface.map_plan_visible {
         widgets::muted_wrapped(
             ui,
@@ -227,14 +237,14 @@ pub fn page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
                 } else {
                     [0.35, 0.65, 0.85, 0.75]
                 };
-                if active {
+                if volume.contains(t) {
                     let polygon = volume
                         .points
                         .iter()
                         .map(|point| project(*point))
                         .collect::<Vec<_>>();
                     for [a, b, c] in triangulate(&polygon) {
-                        draw.add_triangle(a, b, c, [0.25, 0.90, 0.72, 0.08])
+                        draw.add_triangle(a, b, c, [color[0]*0.06, color[1]*0.06, color[2]*0.06, 0.22])
                             .filled(true)
                             .build();
                     }
@@ -337,7 +347,7 @@ pub fn page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
                 } else {
                     [0.85, 0.85, 0.95, 0.85]
                 };
-                if ["", "TF", "DF"].contains(&pair[1].path_terminator.as_str()) {
+                if continuous_leg(&pair[0], &pair[1]) {
                     draw.add_line(a, b, color).thickness(2.0).build();
                 } else {
                     let length = (b[0] - a[0]).hypot(b[1] - a[1]);
@@ -520,6 +530,20 @@ pub fn page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn arrival_initial_fix_keeps_its_filed_connection_continuous() {
+        let from = openatc_core::state::RouteFix::default();
+        let mut to = openatc_core::state::RouteFix {
+            path_terminator: "IF".into(),
+            constraint_source: "STAR DEVO3E / installed CIFP".into(),
+            ..Default::default()
+        };
+        assert!(super::continuous_leg(&from, &to));
+        to.constraint_source = "SID BASI8A / installed CIFP".into();
+        assert!(!super::continuous_leg(&from, &to));
+        to.path_terminator = "RF".into();
+        assert!(!super::continuous_leg(&from, &to));
+    }
     #[test]
     fn sector_fill_preserves_concave_boundaries_and_closed_rings() {
         let points = [

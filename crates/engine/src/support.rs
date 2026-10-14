@@ -8,6 +8,8 @@ pub struct Prompts {
     pub atc: String,
     /// Structured interpretation of multi-part crew requests.
     pub crew_actions: String,
+    /// Conversation grounded in an already verified crew result.
+    pub crew_response: String,
     /// Cabin crew system prompt.
     pub cabin: String,
     /// Ground crew system prompt.
@@ -27,6 +29,8 @@ pub struct Prompts {
 struct PromptFile {
     atc_reply: String,
     crew_actions: String,
+    #[serde(default = "default_crew_response")]
+    crew_response: String,
     cabin: String,
     ground: String,
     copilot_readback: String,
@@ -34,11 +38,16 @@ struct PromptFile {
     copilot_chat: String,
 }
 
+fn default_crew_response() -> String {
+    include_str!("../../../prompts/crew_response.txt").to_owned()
+}
+
 impl PromptFile {
     fn into_prompts(self, source: String) -> Result<Prompts, String> {
         if [
             &self.atc_reply,
             &self.crew_actions,
+            &self.crew_response,
             &self.cabin,
             &self.ground,
             &self.copilot_readback,
@@ -53,6 +62,7 @@ impl PromptFile {
         Ok(Prompts {
             atc: self.atc_reply,
             crew_actions: self.crew_actions,
+            crew_response: self.crew_response,
             cabin: self.cabin,
             ground: self.ground,
             copilot: self.copilot_readback,
@@ -113,6 +123,7 @@ pub fn load_prompts(config_dir: &Path, exe_dir: &Path) -> Prompts {
         for (name, target) in [
             ("atc_reply.txt", &mut prompts.atc),
             ("crew_actions.txt", &mut prompts.crew_actions),
+            ("crew_response.txt", &mut prompts.crew_response),
             ("cabin.txt", &mut prompts.cabin),
             ("ground.txt", &mut prompts.ground),
             ("copilot_readback.txt", &mut prompts.copilot),
@@ -296,6 +307,10 @@ mod prompt_tests {
         assert_eq!(
             prompts.crew_actions,
             include_str!("../../../prompts/crew_actions.txt")
+        );
+        assert_eq!(
+            prompts.crew_response,
+            include_str!("../../../prompts/crew_response.txt")
         );
         assert_eq!(prompts.cabin, include_str!("../../../prompts/cabin.txt"));
         assert_eq!(prompts.ground, include_str!("../../../prompts/ground.txt"));

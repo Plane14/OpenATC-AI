@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 
 pub struct Batch {
     outcomes: Vec<String>,
+    request: String,
     services: Vec<openatc_core::crew::request::Service>,
     started: std::time::Instant,
 }
@@ -313,10 +314,169 @@ pub async fn acknowledge(AxumState(shared): AxumState<Shared>, Json(ack): Json<A
     if s.session.crew_actions.is_empty()
         && let Some(batch) = s.crew.batch.take()
     {
+        let request = batch.request.clone();
+        let protected = batch.outcomes.clone();
+        let generation = s.session_generation;
         let text = batch_reply(&mut s, batch);
-        speak(&mut s, &action.role, &text);
+        drop(s);
+        let text = narrate(&shared, &action.role, &request, &text, &protected).await;
+        s = shared.write().await;
+        if s.session_generation == generation && s.crew.aircraft == ack.aircraft {
+            speak(&mut s, &action.role, &text);
+        }
     }
     Json(json!({"accepted":true,"state":snapshot(&s.session,&s.settings)})).into_response()
+}
+
+pub(crate) async fn narrate(
+    shared: &Shared,
+    role: &str,
+    request: &str,
+    fallback: &str,
+    protected: &[String],
+) -> String {
+    let s = shared.read().await;
+    if !s.settings.ai_enabled || s.settings.ai_model.is_empty() {
+        return fallback.to_owned();
+    }
+    let personality = match role {
+        "cabin" => &s.settings.attendant_personality,
+        "ground" => &s.settings.ground_personality,
+        _ => &s.settings.copilot_personality,
+    };
+    let role_prompt = match role {
+        "cabin" => &s.prompts.cabin,
+        "ground" => &s.prompts.ground,
+        _ => &s.prompts.copilot_chat,
+    };
+    let role_prompt = crate::support::fill_prompt(role_prompt, &s.session.plan.callsign);
+    let voice_role = if role == "cabin" { "attendant" } else { role };
+    let examples = s
+        .speech
+        .select(
+            voice_role,
+            &["actor_conversation"],
+            &format!("{:?}", s.session.phase).to_lowercase(),
+            "icao",
+            4,
+        )
+        .into_iter()
+        .flat_map(|example| example.say.iter().take(2).cloned().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let speaker = match role {
+        "cabin" => "ATTENDANT",
+        "ground" => "GROUND",
+        _ => "COPILOT",
+    };
+    let recent:Vec<_>=s.session.transcript.windows(2).rev().filter(|pair| pair[0].speaker==s.session.plan.callsign && pair[1].speaker==speaker).take(4)
+        .map(|pair| json!({"captain":pair[0].text.chars().take(512).collect::<String>(),"reply":pair[1].text.chars().take(768).collect::<String>()})).collect();
+    let controls: Vec<_> = s
+        .session
+        .crew_controls
+        .iter()
+        .filter(|control| control.role == role)
+        .take(12)
+        .map(|control| json!({"id":control.id,"available":control.available,"value":s.crew.values.get(&control.id)}))
+        .collect();
+    let context=json!({"phase":s.session.phase,"onGround":s.session.telemetry.on_ground,"groundSpeedKnots":s.session.telemetry.ground_speed_knots,
+        "departure":s.session.plan.departure,"destination":s.session.plan.destination,"cabin":s.cabin,"controls":controls,
+        "missionIncident":s.session.mission.incident,"recentConversationNewestFirst":recent,"serviceCounts":s.crew.service_requests,
+        "humourAllowed":s.settings.llm_phrase_variety && !s.cabin.preparing_for_turbulence && s.session.taxi_clearance.crossing_runway.is_empty() && !matches!(s.session.phase,openatc_core::state::PhaseCode::Departure|openatc_core::state::PhaseCode::Approach|openatc_core::state::PhaseCode::Landed) && s.session.mission.incident.is_empty()}).to_string();
+    let system = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        role_prompt,
+        personality,
+        s.prompts.crew_response,
+        serde_json::to_string(&examples).unwrap_or_default(),
+        context
+    );
+    let client = s.client.clone();
+    let settings = s.settings.clone();
+    drop(s);
+    let user = json!({"currentRequest":request,"confirmedResult":fallback}).to_string();
+    let response = crate::support::chat_complete_structured(
+        &client,
+        &settings.ai_url,
+        &settings.ai_model,
+        if settings.llm_phrase_variety {
+            0.6
+        } else {
+            0.2
+        },
+        &system,
+        &user,
+    )
+    .await;
+    let Some(reply) = response
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value["reply"].as_str().map(str::to_owned))
+    else {
+        return fallback.to_owned();
+    };
+    if valid_narration(&reply, fallback, protected) {
+        reply.trim().to_owned()
+    } else {
+        fallback.to_owned()
+    }
+}
+
+fn valid_narration(reply: &str, fallback: &str, protected: &[String]) -> bool {
+    let lower = reply.to_lowercase();
+    let failed = fallback.to_lowercase();
+    if reply.trim().is_empty()
+        || reply.len() > 1200
+        || [
+            "simulat",
+            "plugin",
+            "language model",
+            "artificial intelligence",
+        ]
+        .iter()
+        .any(|word| lower.contains(word))
+        || ((failed.contains("unconfirmed")
+            || failed.contains("not confirm")
+            || failed.contains("could not")
+            || failed.contains("couldn’t")
+            || failed.contains("can’t confirm"))
+            && ![
+                "not",
+                "can't",
+                "can’t",
+                "cannot",
+                "couldn",
+                "unable",
+                "haven’t",
+                "haven't",
+            ]
+            .iter()
+            .any(|word| lower.contains(word)))
+    {
+        return false;
+    }
+    let outcomes = protected.join(" ").to_lowercase();
+    if [
+        "heading", "altitude", "chocks", "power", "lights", "gear", "flaps", "speed",
+    ]
+    .iter()
+    .any(|term| outcomes.contains(term) && !lower.contains(term))
+        || (outcomes.contains("slides") && !lower.contains("slides") && !lower.contains("doors"))
+    {
+        return false;
+    }
+    let numbers = |text: &str| {
+        text.split(|c: char| !c.is_ascii_digit() && c != '.')
+            .filter_map(|part| part.trim_matches('.').parse::<f64>().ok())
+            .collect::<Vec<_>>()
+    };
+    let actual = numbers(&reply);
+    if numbers(&outcomes)
+        .iter()
+        .any(|number| !actual.contains(number))
+    {
+        return false;
+    }
+    true
 }
 
 fn batch_reply(s: &mut crate::EngineState, batch: Batch) -> String {
@@ -506,10 +666,18 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
             &mut s,
             Batch {
                 outcomes: Vec::new(),
+                request: request.text.clone(),
                 services: intent.services.clone(),
                 started: std::time::Instant::now(),
             },
         );
+        let generation = s.session_generation;
+        drop(s);
+        let message = narrate(shared, role, &request.text, &message, &[]).await;
+        s = shared.write().await;
+        if s.session_generation != generation {
+            return Some(reply(&mut s, role, "crew_action_clarify", &[], false));
+        }
         speak(&mut s, role, &message);
         return Some(Json(json!({"result":{"accepted":true,"message":message},"state":snapshot(&s.session,&s.settings)})).into_response());
     }
@@ -777,6 +945,7 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         }
         let mut batch = Batch {
             outcomes: Vec::new(),
+            request: request.text.clone(),
             services: intent.services,
             started: std::time::Instant::now(),
         };
@@ -785,7 +954,6 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                 .outcomes
                 .push(say(cross_check(&s), &[]).trim_end_matches('.').to_owned());
         }
-        let batched = intent.actions.len() > 1 || !batch.services.is_empty() || intent.cross_check;
         for action in intent.actions {
             let (id, value) = (action.control, action.value);
             let c = profile.controls.get(&id)?;
@@ -819,13 +987,19 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
             }
         }
         if s.session.crew_actions.is_empty() {
+            let generation = s.session_generation;
+            let protected = batch.outcomes.clone();
             let message = batch_reply(&mut s, batch);
+            drop(s);
+            let message = narrate(shared, role, &request.text, &message, &protected).await;
+            s = shared.write().await;
+            if s.session_generation != generation {
+                return Some(reply(&mut s, role, "crew_action_clarify", &[], false));
+            }
             speak(&mut s, role, &message);
             return Some(Json(json!({"result":{"accepted":true,"message":message},"state":snapshot(&s.session,&s.settings)})).into_response());
         }
-        if batched {
-            s.crew.batch = Some(batch);
-        }
+        s.crew.batch = Some(batch);
         return Some(Json(json!({"result":{"accepted":true,"pending":true},"state":snapshot(&s.session,&s.settings)})).into_response());
     }
     if !recognized {
@@ -835,4 +1009,38 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         return None;
     }
     Some(reply(&mut s, role, "crew_action_clarify", &[], false))
+}
+
+#[cfg(test)]
+mod narration_tests {
+    #[test]
+    fn generated_reply_keeps_control_outcomes_and_operational_numbers() {
+        let protected = vec!["Heading 275 set".to_owned()];
+        assert!(super::valid_narration(
+            "Heading 275 set. You're welcome.",
+            "Heading 275 set",
+            &protected
+        ));
+        assert!(!super::valid_narration(
+            "Heading 270 set.",
+            "Heading 275 set",
+            &protected
+        ));
+        assert!(!super::valid_narration(
+            "You're welcome.",
+            "Heading 275 set",
+            &protected
+        ));
+        let failed = vec!["Slides could not be confirmed".to_owned()];
+        assert!(!super::valid_narration(
+            "Doors armed and checked.",
+            &failed[0],
+            &failed
+        ));
+        assert!(!super::valid_narration(
+            "The simulator shows heading 275.",
+            "Heading 275 set",
+            &protected
+        ));
+    }
 }

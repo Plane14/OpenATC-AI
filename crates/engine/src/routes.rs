@@ -1543,8 +1543,18 @@ async fn crew_chat(
     } else {
         off.clone()
     };
+    if cabin_report.is_some() || social.is_some() {
+        reply_text = crate::crew::narrate(
+            shared,
+            if attendant { "cabin" } else { "ground" },
+            &request.text,
+            &reply_text,
+            &[],
+        )
+        .await;
+    }
     if cabin_report.is_none()
-        && (social.is_none() || settings.llm_phrase_variety)
+        && social.is_none()
         && !unconfirmed_service
         && settings.ai_enabled
         && !settings.ai_model.is_empty()

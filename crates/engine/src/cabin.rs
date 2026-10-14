@@ -11,6 +11,8 @@ use std::{io::Read, path::Path, time::Instant};
 #[serde(deny_unknown_fields)]
 struct Policy {
     version: u32,
+    #[serde(default = "default_mood")]
+    passenger_mood: String,
     turbulence_preparation_seconds: f64,
     service_cycle_seconds: f64,
     lavatory_start_seconds: f64,
@@ -21,6 +23,12 @@ struct Policy {
     fallback_tick_limit_seconds: f64,
     simulation_tick_limit_seconds: f64,
 }
+fn default_mood() -> String {
+    toml::from_str::<toml::Value>(include_str!("../../../cabin/behaviour.toml"))
+        .ok()
+        .and_then(|value| value["passenger_mood"].as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
 impl Policy {
     fn parse(text: &str) -> Result<Self, String> {
         if text.len() > 8192 {
@@ -29,7 +37,9 @@ impl Policy {
         let policy: Self = toml::from_str(text).map_err(|error| error.to_string())?;
         let bounded =
             |value: f64, low: f64, high: f64| value.is_finite() && (low..=high).contains(&value);
-        if policy.version != 1
+        if policy.passenger_mood.is_empty()
+            || policy.passenger_mood.len() > 64
+            || policy.version != 1
             || !bounded(policy.turbulence_preparation_seconds, 10.0, 600.0)
             || !bounded(policy.service_cycle_seconds, 60.0, 7200.0)
             || !bounded(
@@ -60,8 +70,11 @@ pub struct Cabin {
     policy: Policy,
     /// Planned passenger count; zero means no manifest is available.
     passengers: i32,
+    /// Persistent fictional cabin mood, not a sensor reading.
+    passenger_mood: String,
     /// Simulated occupants, not a reading from an aircraft lavatory sensor.
     lavatory: u32,
+    seated_passengers: Option<i32>,
     pub preparing_for_turbulence: bool,
     pub preparing_for_landing: bool,
     pub watching_passengers: bool,
@@ -82,7 +95,9 @@ impl Default for Cabin {
             policy: Policy::parse(include_str!("../../../cabin/behaviour.toml"))
                 .expect("bundled cabin policy"),
             passengers: 0,
+            passenger_mood: default_mood(),
             lavatory: 0,
+            seated_passengers: None,
             preparing_for_turbulence: false,
             preparing_for_landing: false,
             watching_passengers: false,
@@ -203,6 +218,7 @@ fn belts(state: &EngineState) -> Option<bool> {
 }
 
 pub fn tick(state: &mut EngineState) {
+    state.cabin.passenger_mood = state.cabin.policy.passenger_mood.clone();
     let belts = belts(state);
     state.cabin.tick(
         state.session.phase,
@@ -211,6 +227,12 @@ pub fn tick(state: &mut EngineState) {
         belts,
         state.session.telemetry.simulation_seconds,
     );
+    state.cabin.seated_passengers = (state.cabin.passengers > 0
+        && !matches!(
+            state.session.phase,
+            PhaseCode::Parked | PhaseCode::Clearance
+        ))
+    .then_some((state.cabin.passengers - state.cabin.lavatory as i32).max(0));
 }
 
 /// Answer cabin reports and turbulence briefings without granting aircraft permissions.
