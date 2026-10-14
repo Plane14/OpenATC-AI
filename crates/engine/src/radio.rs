@@ -424,8 +424,16 @@ pub async fn atis(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
     let repeated = s.atis_logged.get(&log_key) == Some(&code);
     if !repeated {
         s.atis_logged.insert(log_key, code.clone());
-        openatc_core::apply::add_transmission(&mut s.session, "ATIS", &text, &tag);
-        s.session.transcript.last_mut().unwrap().information_only = true;
+        // Keep the current bulletin in one row while reception continues to loop.
+        if let Some(entry) = s.session.transcript.iter_mut().rev().find(|entry| {
+            entry.speaker == "ATIS" && entry.radio == Some(radio) && entry.position == tag.position
+        }) {
+            entry.text.clone_from(&text);
+            entry.voice.clone_from(&tag.voice);
+        } else {
+            openatc_core::apply::add_transmission(&mut s.session, "ATIS", &text, &tag);
+            s.session.transcript.last_mut().unwrap().information_only = true;
+        }
     }
     Json(json!({"text":text,"airport":station.airport,"information":code,"source":"simulator","frequency":station.khz,"radio":radio})).into_response()
 }
@@ -834,6 +842,10 @@ mod tests {
                 .contains("Runway 09 in use")
         );
         assert_ne!(revised["information"], result["information"]);
+        let state = shared.read().await;
+        assert_eq!(state.session.transcript.len(), count);
+        assert_eq!(state.session.transcript.last().unwrap().text, revised["text"].as_str().unwrap());
+        drop(state);
         assert_eq!(result["airport"], "TEST");
         assert!(result["text"].as_str().is_some_and(|text| !text.is_empty()));
         assert!(
