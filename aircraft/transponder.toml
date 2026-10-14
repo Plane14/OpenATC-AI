@@ -1,4 +1,5 @@
 # Setting a code never changes the transponder/TCAS mode selector.
+default_code_dataref = "sim/cockpit2/radios/actuators/transponder_code"
 code_dataref = "sim/cockpit/radios/transponder_code"
 
 # Digits are listed left to right; ToLiss numbers them from the right.

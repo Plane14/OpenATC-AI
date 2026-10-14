@@ -1,84 +1,61 @@
 //! Apply a deliberate squawk selection without changing the flight crew's TCAS mode.
-use xplane::data::{DataRead, DataReadWrite, ReadOnly, borrowed::DataRef};
+use std::collections::BTreeMap;
+use xplane::data::{DataRead, DataReadWrite, ReadWrite, borrowed::DataRef};
+
+enum Binding {
+    Integer(DataRef<i32, ReadWrite>),
+    Float(DataRef<f32, ReadWrite>),
+}
+impl Binding {
+    fn set(&mut self, value: i32) {
+        match self {
+            Self::Integer(reference) => reference.set(value),
+            Self::Float(reference) => reference.set(value as f32),
+        }
+    }
+    fn matches(&self, value: i32) -> bool {
+        match self {
+            Self::Integer(reference) => reference.get() == value,
+            Self::Float(reference) => reference.get() == value as f32,
+        }
+    }
+}
 
 pub(super) fn select(
     data: &mut xplane::data::DataApi,
     code: i32,
     controls: &openatc_core::transponder::Controls,
 ) -> Result<(), String> {
-    if !(0..=7777).contains(&code)
-        || !format!("{code:04}")
-            .bytes()
-            .all(|digit| (b'0'..=b'7').contains(&digit))
-    {
-        return Err("Invalid transponder code".into());
-    }
-    let value: DataRef<i32, ReadOnly> = data
-        .find(&controls.code_dataref)
-        .map_err(|_| "Transponder code control unavailable")?;
-    let mut value = value
-        .writeable()
-        .map_err(|_| "Transponder code control is read-only")?;
-    if controls.code_digits.len() == 4 {
-        let references = controls
-            .code_digits
-            .iter()
-            .map(|name| {
-                data.find::<i32, _>(name)
+    let names = std::iter::once(&controls.code_dataref)
+        .chain(controls.default_code_dataref.iter())
+        .chain(controls.code_digits.iter())
+        .chain(controls.power.iter().map(|power| &power.dataref));
+    let mut bindings = BTreeMap::new();
+    for name in names {
+        let binding = data
+            .find::<i32, _>(name)
+            .ok()
+            .and_then(|reference| reference.writeable().ok())
+            .map(Binding::Integer)
+            .or_else(|| {
+                data.find::<f32, _>(name)
                     .ok()
                     .and_then(|reference| reference.writeable().ok())
-            })
-            .collect::<Option<Vec<_>>>();
-        if let Some(mut references) = references {
-            for (reference, digit) in references
-                .iter_mut()
-                .zip(openatc_core::transponder::digits(code)?)
-            {
-                reference.set(digit);
-            }
-        } else {
-            let references = controls
-                .code_digits
-                .iter()
-                .map(|name| {
-                    data.find::<f32, _>(name)
-                        .ok()
-                        .and_then(|reference| reference.writeable().ok())
-                })
-                .collect::<Option<Vec<_>>>();
-            if let Some(mut references) = references {
-                for (reference, digit) in references
-                    .iter_mut()
-                    .zip(openatc_core::transponder::digits(code)?)
-                {
-                    reference.set(digit as f32);
-                }
-            }
+                    .map(Binding::Float)
+            });
+        if let Some(binding) = binding {
+            bindings.insert(name.clone(), binding);
         }
     }
-    value.set(code);
-    // The two-position AUTO/ON switch is separate from the five-position mode selector.
-    if let Some(power) = &controls.power {
-        if let Ok(value) = data.find::<i32, _>(&power.dataref) {
-            let mut selector = value
-                .writeable()
-                .map_err(|_| "Aircraft power selector is read-only")?;
-            selector.set(power.on);
-            if selector.get() != power.on {
-                return Err("Code selected; aircraft did not accept the ON selector".into());
-            }
-        } else if let Ok(value) = data.find::<f32, _>(&power.dataref) {
-            let mut selector = value
-                .writeable()
-                .map_err(|_| "Aircraft power selector is read-only")?;
-            selector.set(power.on as f32);
-            if selector.get() != power.on as f32 {
-                return Err("Code selected; aircraft did not accept the ON selector".into());
-            }
-        }
+    let writes = controls.writes(code, |name| bindings.contains_key(name))?;
+    for (name, value) in &writes {
+        bindings.get_mut(name).unwrap().set(*value);
     }
-    if value.get() != code {
-        return Err("Aircraft did not accept the transponder code".into());
+    if writes
+        .iter()
+        .any(|(name, value)| !bindings[name].matches(*value))
+    {
+        return Err("Aircraft did not accept the transponder selection".into());
     }
     Ok(())
 }

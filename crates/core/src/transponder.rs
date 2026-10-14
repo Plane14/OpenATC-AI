@@ -6,6 +6,9 @@ use serde::Deserialize;
 pub struct Controls {
     /// Writable integer transponder code.
     pub code_dataref: String,
+    /// Standard aircraft control used when the custom digit group is absent.
+    #[serde(default)]
+    pub default_code_dataref: Option<String>,
     /// Optional individual code digits used by custom aircraft.
     #[serde(default)]
     pub code_digits: Vec<String>,
@@ -40,6 +43,10 @@ impl Controls {
                 || result.code_digits.iter().any(|name| !valid(name))))
             || !valid(&result.code_dataref)
             || result
+                .default_code_dataref
+                .as_ref()
+                .is_some_and(|name| !valid(name))
+            || result
                 .power
                 .as_ref()
                 .is_some_and(|power| !valid(&power.dataref) || !(0..=10).contains(&power.on))
@@ -47,6 +54,37 @@ impl Controls {
             return Err("Invalid transponder binding".into());
         }
         Ok(result)
+    }
+    /// Build only writes supported by the current aircraft; mode controls are never included.
+    pub fn writes(
+        &self,
+        code: i32,
+        available: impl Fn(&str) -> bool,
+    ) -> Result<Vec<(String, i32)>, String> {
+        let digits = digits(code)?;
+        let custom =
+            self.code_digits.len() == 4 && self.code_digits.iter().all(|name| available(name));
+        let code_ref = if custom {
+            &self.code_dataref
+        } else {
+            self.default_code_dataref
+                .as_ref()
+                .unwrap_or(&self.code_dataref)
+        };
+        if !available(code_ref) {
+            return Err("Aircraft transponder code control unavailable".into());
+        }
+        let mut writes = Vec::new();
+        if custom {
+            writes.extend(self.code_digits.iter().cloned().zip(digits));
+        }
+        writes.push((code_ref.clone(), code));
+        if let Some(power) = &self.power
+            && available(&power.dataref)
+        {
+            writes.push((power.dataref.clone(), power.on));
+        }
+        Ok(writes)
     }
     /// Installed overrides use the same schema as the bundled mapping.
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
@@ -63,6 +101,24 @@ impl Controls {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn default_aircraft_use_only_the_standard_code_control() {
+        let controls =
+            super::Controls::parse(include_str!("../../../aircraft/transponder.toml")).unwrap();
+        let name = "sim/cockpit2/radios/actuators/transponder_code";
+        assert_eq!(
+            controls
+                .writes(6450, |candidate| candidate == name)
+                .unwrap(),
+            vec![(name.into(), 6450)]
+        );
+        assert_eq!(
+            controls.writes(42, |candidate| candidate == name).unwrap(),
+            vec![(name.into(), 42)]
+        );
+        assert!(controls.writes(8911, |_| true).is_err());
+        assert!(controls.writes(6450, |_| false).is_err());
+    }
+    #[test]
     fn bindings_keep_power_and_mode_separate() {
         let controls =
             super::Controls::parse(include_str!("../../../aircraft/transponder.toml")).unwrap();
@@ -76,6 +132,15 @@ mod tests {
                 "AirbusFBW/XPDR1"
             ]
         );
+        let writes = controls
+            .writes(6450, |_| true)
+            .unwrap()
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(writes["AirbusFBW/XPDR4"], 6);
+        assert_eq!(writes["AirbusFBW/XPDR1"], 0);
+        assert_eq!(writes["sim/cockpit/radios/transponder_code"], 6450);
+        assert!(!writes.contains_key("sim/cockpit2/radios/actuators/transponder_mode"));
         let selected = super::digits(6450).unwrap();
         let bindings = controls
             .code_digits
