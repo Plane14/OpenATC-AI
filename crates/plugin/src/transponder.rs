@@ -19,6 +19,43 @@ pub(super) fn select(
     let mut value = value
         .writeable()
         .map_err(|_| "Transponder code control is read-only")?;
+    if controls.code_digits.len() == 4 {
+        let references = controls
+            .code_digits
+            .iter()
+            .map(|name| {
+                data.find::<i32, _>(name)
+                    .ok()
+                    .and_then(|reference| reference.writeable().ok())
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(mut references) = references {
+            for (reference, digit) in references
+                .iter_mut()
+                .zip(openatc_core::transponder::digits(code)?)
+            {
+                reference.set(digit);
+            }
+        } else {
+            let references = controls
+                .code_digits
+                .iter()
+                .map(|name| {
+                    data.find::<f32, _>(name)
+                        .ok()
+                        .and_then(|reference| reference.writeable().ok())
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(mut references) = references {
+                for (reference, digit) in references
+                    .iter_mut()
+                    .zip(openatc_core::transponder::digits(code)?)
+                {
+                    reference.set(digit as f32);
+                }
+            }
+        }
+    }
     value.set(code);
     // The two-position AUTO/ON switch is separate from the five-position mode selector.
     if let Some(power) = &controls.power {

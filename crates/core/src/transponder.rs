@@ -6,6 +6,9 @@ use serde::Deserialize;
 pub struct Controls {
     /// Writable integer transponder code.
     pub code_dataref: String,
+    /// Optional individual code digits used by custom aircraft.
+    #[serde(default)]
+    pub code_digits: Vec<String>,
     /// Optional aircraft-specific power selector, distinct from the mode selector.
     pub power: Option<Power>,
 }
@@ -32,7 +35,10 @@ impl Controls {
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || b"/_-".contains(&byte))
         };
-        if !valid(&result.code_dataref)
+        if (!result.code_digits.is_empty()
+            && (result.code_digits.len() != 4
+                || result.code_digits.iter().any(|name| !valid(name))))
+            || !valid(&result.code_dataref)
             || result
                 .power
                 .as_ref()
@@ -60,14 +66,32 @@ mod tests {
     fn bindings_keep_power_and_mode_separate() {
         let controls =
             super::Controls::parse(include_str!("../../../aircraft/transponder.toml")).unwrap();
-        assert_eq!(
-            controls.code_dataref,
-            "sim/cockpit2/radios/actuators/transponder_code"
-        );
+        assert_eq!(controls.code_dataref, "sim/cockpit/radios/transponder_code");
         let power = controls.power.unwrap();
         assert_eq!(power.dataref, "AirbusFBW/XPDRTCASMode");
         assert_eq!(power.on, 1);
         assert!(super::Controls::parse("code_dataref = 'bad name'").is_err());
         assert!(super::Controls::parse("code_dataref = 'sim/code'\nmode = 0").is_err());
+    }
+}
+
+/// Preserve leading zeros while expanding an octal squawk into display digits.
+pub fn digits(code: i32) -> Result<[i32; 4], String> {
+    if !(0..=7777).contains(&code) {
+        return Err("Invalid transponder code".into());
+    }
+    let result = [code / 1000, code / 100 % 10, code / 10 % 10, code % 10];
+    if result.iter().any(|digit| *digit > 7) {
+        return Err("Invalid transponder code".into());
+    }
+    Ok(result)
+}
+#[cfg(test)]
+mod digit_tests {
+    #[test]
+    fn code_order_and_leading_zeros_are_preserved() {
+        assert_eq!(super::digits(6111).unwrap(), [6, 1, 1, 1]);
+        assert_eq!(super::digits(42).unwrap(), [0, 0, 4, 2]);
+        assert!(super::digits(8911).is_err());
     }
 }
