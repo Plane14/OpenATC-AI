@@ -119,6 +119,8 @@ pub struct EngineState {
     pub controllers: Controllers,
     /// Role prompts.
     pub prompts: support::Prompts,
+    /// Cached speech identifier pronunciation, separate from displayed text.
+    pub pronunciation: Arc<openatc_core::radiotelephony::Pronunciation>,
     /// Region table from file, empty when built-in.
     pub regions: BTreeMap<String, Region>,
     /// Regions file path, empty when built-in.
@@ -315,6 +317,7 @@ async fn main() {
         load_regions(std::path::Path::new(&regions_path)).unwrap_or_default()
     };
     let speech_source = support::resolve_speech_dir(&config_dir, &exe_dir);
+    let pronunciation = Arc::new(support::load_pronunciation(&config_dir, &speech_source));
     eprintln!(
         "Speech library: {speech_source}; phrase variety: {}",
         settings.llm_phrase_variety
@@ -390,6 +393,7 @@ async fn main() {
         mora: Default::default(),
         controllers,
         prompts,
+        pronunciation,
         regions,
         regions_path,
         speech,
@@ -515,6 +519,7 @@ fn test_state() -> EngineState {
         mora: Default::default(),
         controllers: Controllers::default(),
         prompts: support::load_prompts(&config_dir, &config_dir),
+        pronunciation: Arc::new(Default::default()),
         regions: BTreeMap::new(),
         regions_path: String::new(),
         speech: Default::default(),

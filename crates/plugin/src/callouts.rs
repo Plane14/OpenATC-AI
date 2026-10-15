@@ -259,6 +259,12 @@ impl Runtime {
         );
         let combined = rotation_clip == 3;
         for i in crossed {
+            crate::debug_log(&format!(
+                "OpenATC callout threshold: index={i} target={:?} IAS={ias:.1} AGL={:.1} busy={}\n",
+                speeds[i],
+                telemetry.height_agl_feet,
+                self.audio.busy()
+            ));
             self.fired[i] = true;
             if combined && i == 0 {
                 continue;
@@ -280,14 +286,23 @@ impl Runtime {
             .front()
             .is_some_and(|(_, at)| at.elapsed().as_secs_f64() > p.maximum_delay_seconds)
         {
-            self.pending.pop_front();
+            if let Some((index, at)) = self.pending.pop_front() {
+                crate::debug_log(&format!(
+                    "OpenATC callout expired: clip={index} queued_ms={} IAS={ias:.1}\n",
+                    at.elapsed().as_millis()
+                ));
+            }
         }
-        if let Some((i, _)) = self.pending.front().copied()
+        if let Some((i, queued)) = self.pending.front().copied()
             && self
                 .audio
                 .play_preloaded(&i.to_string(), settings.copilot_volume)
         {
             self.pending.pop_front();
+            crate::debug_log(&format!(
+                "OpenATC callout playback: clip={i} queued_ms={} IAS={ias:.1}\n",
+                queued.elapsed().as_millis()
+            ));
             self.playing = Some(i);
             let entries = log_entries(p, speeds, i);
             interface.engine.post(

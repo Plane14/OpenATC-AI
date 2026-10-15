@@ -1,10 +1,6 @@
 //! Native release packages and the small launcher shipped with their payloads.
 use crate::{Result, distribution, repo, run};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{fs, path::Path, process::Command};
 
 fn write(path: &Path, text: &str) -> Result {
     fs::create_dir_all(path.parent().ok_or("Missing parent")?)?;
@@ -20,6 +16,187 @@ fn executable(path: &Path) -> Result {
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
+}
+
+fn welcome(product: &str, version: &str) -> String {
+    let (name, intro, notice, start) = if product == "plugin" {
+        (
+            "X-Plane 12 Plugin",
+            "Install OpenATC AI into your chosen X-Plane 12 installation.",
+            "Close X-Plane before installing or updating the plugin.",
+            "Run the included installer and select the X-Plane root folder. For manual installation, use the complete OpenATC folder supplied in the ZIP download.",
+        )
+    } else {
+        (
+            "AI Server",
+            "Run speech and language services on this computer or a separate machine on your network.",
+            "First startup downloads the selected models. Allow sufficient disk space and keep your internet connection available.",
+            "Launch the included OpenATC server launcher. Keep personal configuration and downloaded models when upgrading. Follow the installation guide to connect the plugin to this server.",
+        )
+    };
+    include_str!("../../packaging/installer/welcome.html")
+        .replace("@PRODUCT@", name)
+        .replace("@VERSION@", version)
+        .replace("@INTRO@", intro)
+        .replace("@NOTICE@", notice)
+        .replace("@START@", start)
+}
+
+fn branding(bundle: &Path, product: &str, version: &str) -> Result {
+    check_branding()?;
+    distribution::tree(&repo().join("assets/installer"), &bundle.join("branding"))?;
+    write(&bundle.join("Welcome.html"), &welcome(product, version))
+}
+
+fn check_branding() -> Result {
+    let root = repo().join("assets/installer");
+    for (name, width, height) in [
+        ("wizard.bmp", 164u32, 314u32),
+        ("wizard-2x.bmp", 328, 628),
+        ("wizard-small.bmp", 55, 55),
+        ("wizard-small-2x.bmp", 110, 110),
+    ] {
+        let bytes = fs::read(root.join(name))?;
+        if bytes.len() < 54 || &bytes[..2] != b"BM" {
+            return Err(format!("Invalid installer bitmap: {name}").into());
+        }
+        let number = |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        if number(18) != width
+            || number(22) != height
+            || u16::from_le_bytes(bytes[28..30].try_into().unwrap()) != 24
+            || number(30) != 0
+            || number(2) as usize != bytes.len()
+        {
+            return Err(
+                format!("Installer bitmap has unexpected dimensions or encoding: {name}").into(),
+            );
+        }
+    }
+    for name in ["banner.png", "sidebar.png", "icon.png"] {
+        let bytes = fs::read(root.join(name))?;
+        if bytes.len() < 33 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" || &bytes[12..16] != b"IHDR" {
+            return Err(format!("Invalid installer PNG: {name}").into());
+        }
+        let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+        if width == 0 || height == 0 || (name == "icon.png" && (width != 1024 || height != 1024)) {
+            return Err(format!("Installer PNG has unexpected dimensions: {name}").into());
+        }
+    }
+    let icon = fs::read(root.join("setup.ico"))?;
+    if icon.len() < 102 || &icon[..6] != b"\0\0\x01\0\x06\0" {
+        return Err("Installer icon must contain six Windows icon sizes".into());
+    }
+    for index in 0..6 {
+        let entry = 6 + index * 16;
+        let length = u32::from_le_bytes(icon[entry + 8..entry + 12].try_into().unwrap()) as usize;
+        let offset = u32::from_le_bytes(icon[entry + 12..entry + 16].try_into().unwrap()) as usize;
+        if length == 0
+            || offset < 102
+            || offset
+                .checked_add(length)
+                .is_none_or(|end| end > icon.len())
+        {
+            return Err("Installer icon contains an invalid image range".into());
+        }
+    }
+    Ok(())
+}
+
+/// Exercise the native packaging tools with tiny payloads before building model runtimes.
+fn native_platform() -> &'static str {
+    if cfg!(windows) {
+        "windows-x64"
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            "macos-arm64"
+        } else {
+            "macos-intel"
+        }
+    } else {
+        "linux-x64"
+    }
+}
+
+pub fn preflight(platform: &str) -> Result {
+    if platform != native_platform() {
+        return Err(
+            "Packaging preflight must run on the selected native platform and architecture".into(),
+        );
+    }
+    check_branding()?;
+    let work = tempfile::tempdir()?;
+    for product in ["plugin", "ai-server"] {
+        let root = work.path().join(product);
+        let bundle = root.join("bundle");
+        let output = root.join("packages");
+        fs::create_dir_all(&output)?;
+        branding(&bundle, product, "0.0.0-preflight")?;
+        for name in ["INSTALL.txt", "INSTALL.md", "README.md", "LICENSE"] {
+            write(
+                &bundle.join(name),
+                "Packaging preflight fixture; not a runnable release.",
+            )?;
+        }
+        fs::create_dir_all(bundle.join("licenses"))?;
+        let launcher = if product == "plugin" {
+            "openatc-install"
+        } else {
+            "openatc-launcher"
+        };
+        write(
+            &bundle.join(format!("{launcher}{}", std::env::consts::EXE_SUFFIX)),
+            "Packaging fixture",
+        )?;
+        executable(&bundle.join(format!("{launcher}{}", std::env::consts::EXE_SUFFIX)))?;
+        write(
+            &bundle.join("payload/OpenATC/preflight.txt"),
+            "Not a plugin binary",
+        )?;
+        let stem = format!("openatc-{product}-preflight");
+        zip(&bundle, &output.join(format!("{stem}.zip")))?;
+        match platform {
+            "windows-x64" => windows(&bundle, &output, &stem, product, "0.0.0-preflight")?,
+            "macos-intel" | "macos-arm64" => {
+                macos(&bundle, &output, &stem, product, "0.0.0-preflight")?;
+                let app = if product == "plugin" {
+                    "OpenATC Plugin Installer"
+                } else {
+                    "OpenATC AI Server"
+                };
+                run(Command::new("plutil")
+                    .arg("-lint")
+                    .arg(root.join(format!("disk-image/{app}.app/Contents/Info.plist"))))?;
+                run(Command::new("hdiutil")
+                    .arg("verify")
+                    .arg(output.join(format!("{stem}.dmg"))))?;
+            }
+            _ => {}
+        }
+    }
+    println!(
+        "Installer branding and {platform} packaging preflight passed; runtime acceptance is separate."
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn installer_message(message: &str) -> Result {
+    let exe = std::env::current_exe()?;
+    let icon = exe
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("Cannot locate installer resources")?
+        .join("Resources/OpenATC.icns");
+    let dialog = if icon.is_file() {
+        "display dialog (item 1 of argv) with title \"OpenATC AI\" buttons {\"OK\"} default button \"OK\" with icon (POSIX file (item 2 of argv))"
+    } else {
+        "display dialog (item 1 of argv) with title \"OpenATC AI\" buttons {\"OK\"} default button \"OK\""
+    };
+    run(Command::new("osascript")
+        .args(["-e", "on run argv", "-e", dialog, "-e", "end run", "--"])
+        .arg(message)
+        .arg(icon))
 }
 
 /// Fetch fixed upstream releases and verify their bytes before execution.
@@ -73,8 +250,14 @@ fn version(value: &str) -> Result<String> {
 pub fn launch() -> Result {
     let exe = std::env::current_exe()?;
     let root = exe.parent().ok_or("Cannot locate bundled files")?;
-    let product = fs::read_to_string(root.join("product.txt"))?;
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if exe
+        .file_stem()
+        .is_some_and(|name| name == "openatc-install")
+    {
+        return crate::installer::launch(root, &args);
+    }
+    let product = fs::read_to_string(root.join("product.txt"))?;
     if args.first().is_some_and(|a| a == "--help") {
         println!(
             "OpenATC {}\nPlugin: supply the X-Plane directory, or choose it in the folder dialog.\nAI server: arguments are forwarded to openatc-ai (for example --host 0.0.0.0 --port 8099).",
@@ -83,62 +266,58 @@ pub fn launch() -> Result {
         return Ok(());
     }
     if product.trim() == "plugin" {
-        let sim = if let Some(path) = args.first() {
-            PathBuf::from(path)
-        } else {
-            #[cfg(target_os = "macos")]
-            let result = Command::new("osascript")
-                .args([
-                    "-e",
-                    "POSIX path of (choose folder with prompt \"Select your X-Plane 12 folder\")",
-                ])
-                .output()?;
-            #[cfg(windows)]
-            let result = Command::new("powershell.exe").args(["-NoProfile", "-STA", "-Command", "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Select your X-Plane 12 folder'; if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath } else { exit 1 }"]).output()?;
-            #[cfg(all(not(target_os = "macos"), not(windows)))]
-            let result = {
-                let mut picker = if std::env::var_os("FLATPAK_ID").is_some() {
-                    let mut host = Command::new("flatpak-spawn");
-                    host.args(["--host", "zenity"]);
-                    host
-                } else {
-                    Command::new("zenity")
-                };
-                picker.args(["--file-selection", "--directory", "--title=Select your X-Plane 12 folder"]).output().map_err(|_| "Supply the X-Plane directory as an argument, or install zenity for the folder picker")?
-            };
-            if !result.status.success() {
-                return Err("Installation cancelled".into());
-            }
-            PathBuf::from(String::from_utf8(result.stdout)?.trim())
-        };
-        if !sim.join("Resources/plugins").is_dir() {
-            return Err("Select the X-Plane root folder, containing Resources/plugins".into());
-        }
-        let target = sim.join("Resources/plugins/OpenATC");
-        if target.exists() {
-            let backup = openatc_platform::data_dir().join("openatc-ai/backups");
-            fs::create_dir_all(&backup)?;
-            let saved = tempfile::Builder::new()
-                .prefix("OpenATC-")
-                .tempdir_in(backup)?
-                .keep();
-            distribution::tree(&target, &saved)?;
-            println!("Previous plugin backed up to {}", saved.display());
-        }
-        let source = root.join("payload/OpenATC");
-        // Keep existing station overrides; personal settings live outside the plugin.
-        let overrides = fs::read(target.join("radio-stations.toml")).ok();
-        distribution::tree(&source, &target)?;
-        if let Some(bytes) = overrides {
-            fs::write(target.join("radio-stations.toml"), bytes)?;
-        }
-        println!("Installed {}. Restart X-Plane.", target.display());
-        Ok(())
+        crate::installer::launch(root, &args)
     } else if product.trim() == "ai-server" {
+        #[cfg(target_os = "macos")]
+        {
+            use std::io::IsTerminal;
+            if !std::io::stdin().is_terminal() && !args.iter().any(|a| a == "--terminal-child") {
+                let mode = if args.is_empty() {
+                    let choice = Command::new("osascript").args(["-e", "button returned of (display dialog \"OpenATC AI Server\" buttons {\"Cancel\", \"Configure\", \"Start\"} default button \"Start\" cancel button \"Cancel\")"]).output()?;
+                    if !choice.status.success() {
+                        return Ok(());
+                    }
+                    (String::from_utf8(choice.stdout)?.trim() == "Configure")
+                        .then_some("--configure")
+                } else {
+                    None
+                };
+                let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
+                let mut shell = format!("{} --terminal-child", quote(&exe.to_string_lossy()));
+                for arg in &args {
+                    shell.push(' ');
+                    shell.push_str(&quote(&arg.to_string_lossy()));
+                }
+                if let Some(mode) = mode {
+                    shell.push(' ');
+                    shell.push_str(mode);
+                }
+                // LaunchServices opens Terminal without an Apple-events automation grant.
+                use std::os::unix::fs::PermissionsExt;
+                let script = tempfile::Builder::new()
+                    .prefix("openatc-server-")
+                    .suffix(".command")
+                    .tempfile()?;
+                fs::write(
+                    script.path(),
+                    format!("#!/bin/sh\nrm -f -- \"$0\"\nexec {shell}\n"),
+                )?;
+                fs::set_permissions(script.path(), fs::Permissions::from_mode(0o700))?;
+                let (file, path) = script.keep()?;
+                drop(file);
+                if let Err(error) = run(Command::new("open").args(["-a", "Terminal"]).arg(&path)) {
+                    let _ = fs::remove_file(path);
+                    return Err(error);
+                }
+                return Ok(());
+            }
+        }
         let bin = root.join("bin");
         let mut command =
             Command::new(bin.join(format!("openatc-ai{}", std::env::consts::EXE_SUFFIX)));
-        command.args(args).current_dir(&bin);
+        command
+            .args(args.into_iter().filter(|a| a != "--terminal-child"))
+            .current_dir(&bin);
         #[cfg(target_os = "linux")]
         {
             let mut paths = vec![bin.clone()];
@@ -159,6 +338,11 @@ pub fn package(product: &str, platform: &str, requested_version: &str) -> Result
     }
     if !["linux-x64", "windows-x64", "macos-intel", "macos-arm64"].contains(&platform) {
         return Err("Unknown platform".into());
+    }
+    if platform != native_platform() {
+        return Err(
+            "Release packaging must run on the selected native platform and architecture".into(),
+        );
     }
     let version = version(requested_version)?;
     let output = repo().join("packages");
@@ -215,36 +399,50 @@ pub fn package(product: &str, platform: &str, requested_version: &str) -> Result
     write(
         &bundle.join("INSTALL.txt"),
         &format!(
-            "OpenATC {product} {version}\n\nClose X-Plane before installing the plugin. Run {launcher} and select your X-Plane root directory, or pass that directory as an argument.\nThe complete plugin folder is also in payload/OpenATC and can be copied to Resources/plugins/OpenATC.\n\nFor the AI server, run openatc-launcher --host 0.0.0.0 --port 8099 to serve your LAN, or omit --host to listen locally. Models download on first startup; internet access and sufficient disk space are required. Set the plugin's AI/STT/TTS base URLs to http://SERVER-IP:8099. Models and personal settings are stored separately and are preserved on upgrades.\n"
+            "OpenATC {product} {version}\n\nRead INSTALL.md for platform-specific installation, configuration and removal. On Linux extract the plugin ZIP and run sh ./install.sh (no sudo).\n\nClose X-Plane before installing the plugin. Run {launcher} and select your X-Plane root directory, or pass that directory as an argument.\nThe complete plugin folder is also in payload/OpenATC and can be copied to Resources/plugins/OpenATC.\n\nFor the AI server, run openatc-launcher --host 0.0.0.0 --port 8099 to serve your LAN, or omit --host to listen locally. Models download on first startup; internet access and sufficient disk space are required. Set the plugin's AI/STT/TTS base URLs to http://SERVER-IP:8099. Models and personal settings are stored separately and are preserved on upgrades.\n"
         ),
     )?;
+    if product == "plugin" {
+        for (name, operation) in [("install.sh", "--install"), ("uninstall.sh", "--uninstall")] {
+            write(
+                &bundle.join(name),
+                &format!(
+                    "#!/bin/sh\nset -eu\nbase=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nexec \"$base/openatc-install\" {operation} \"$@\"\n"
+                ),
+            )?;
+            executable(&bundle.join(name))?;
+        }
+    }
+    fs::copy(repo().join("docs/INSTALL.md"), bundle.join("INSTALL.md"))?;
+    branding(&bundle, product, &version)?;
+    sign_payload(&bundle)?;
     let stem = format!("openatc-{product}-{version}-{platform}");
     zip(&bundle, &output.join(format!("{stem}.zip")))?;
     match platform {
+        "linux-x64" if product == "plugin" => {}
         "linux-x64" => linux(&bundle, &output, &stem, product, &version, launcher)?,
         "windows-x64" => windows(&bundle, &output, &stem, product, &version)?,
-        _ => macos(&bundle, &output, &stem, product)?,
+        _ => macos(&bundle, &output, &stem, product, &version)?,
     }
-    for entry in fs::read_dir(&output)? {
-        let path = entry?.path();
-        if path
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy().starts_with(&stem))
-            && path.extension().is_some_and(|e| e != "sha256")
-        {
-            use sha2::{Digest, Sha256};
-            let hash = Sha256::digest(fs::read(&path)?);
-            write(
-                &path.with_extension(format!(
-                    "{}.sha256",
-                    path.extension().unwrap().to_string_lossy()
-                )),
-                &format!(
-                    "{hash:x}  {}\n",
-                    path.file_name().unwrap().to_string_lossy()
-                ),
-            )?;
-        }
+    let extensions: &[&str] = match platform {
+        "linux-x64" if product == "plugin" => &["zip"],
+        "linux-x64" => &["zip", "deb", "rpm", "AppImage", "flatpak"],
+        "windows-x64" => &["zip", "exe"],
+        _ => &["zip", "dmg"],
+    };
+    for extension in extensions {
+        let filename = if *extension == "exe" {
+            format!("{stem}-setup.exe")
+        } else {
+            format!("{stem}.{extension}")
+        };
+        let path = output.join(&filename);
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(fs::read(&path)?);
+        write(
+            &output.join(format!("{filename}.sha256")),
+            &format!("{hash:x}  {filename}\n"),
+        )?;
     }
     Ok(())
 }
@@ -279,27 +477,143 @@ fn zip(root: &Path, output: &Path) -> Result {
 
 fn windows(bundle: &Path, output: &Path, stem: &str, product: &str, version: &str) -> Result {
     let script = bundle.parent().unwrap().join("installer.iss");
-    let destination = if product == "plugin" {
-        "{autopf32}\\Steam\\steamapps\\common\\X-Plane 12\\Resources\\plugins\\OpenATC"
+    let appearance = include_str!("../../packaging/installer/windows-branding.iss")
+        .replace("@BRANDING_DIR@", &bundle.join("branding").to_string_lossy());
+    let name = if product == "plugin" {
+        "OpenATC Plugin"
     } else {
-        "{autopf}\\OpenATC AI"
+        "OpenATC AI Server"
     };
-    let source = if product == "plugin" {
-        bundle.join("payload/OpenATC")
+    let directory = if product == "plugin" {
+        "OpenATC Plugin Installer"
     } else {
-        bundle.to_owned()
+        "OpenATC AI Server"
     };
-    write(
-        &script,
-        &format!(
-            "[Setup]\nAppId=OpenATC-{product}\nAppName=OpenATC {product}\nAppVersion={version}\nDefaultDirName={destination}\nDisableProgramGroupPage=yes\nPrivilegesRequired=admin\nArchitecturesAllowed=x64compatible\nArchitecturesInstallIn64BitMode=x64compatible\nOutputDir={}\nOutputBaseFilename={stem}-setup\nCompression=lzma2\nSolidCompression=yes\nUninstallFilesDir={{localappdata}}\\OpenATC\\uninstall-{product}\n[Files]\nSource: \"{}\\*\"; DestDir: \"{{app}}\"; Flags: recursesubdirs createallsubdirs ignoreversion\n",
-            output.display(),
-            source.display()
-        ),
-    )?;
+    let mut content = format!(
+        "[Setup]\n{appearance}\nAppId=OpenATC-{product}\nAppName={name}\nAppVersion={version}\nDefaultDirName={{localappdata}}\\Programs\\{directory}\nDisableProgramGroupPage=yes\nDisableWelcomePage=no\nDisableFinishedPage=no\nLicenseFile={}\nPrivilegesRequired=lowest\nArchitecturesAllowed=x64compatible\nArchitecturesInstallIn64BitMode=x64compatible\nOutputDir={}\nOutputBaseFilename={stem}-setup\nCompression=lzma2\nSolidCompression=yes\n[Files]\n",
+        bundle.join("LICENSE").display(),
+        output.display()
+    );
+    if windows_certificate()?.is_some() {
+        let directory = bundle.parent().unwrap().join("signed-uninstallers");
+        fs::create_dir_all(&directory)?;
+        let signing = format!(
+            "SignTool=openatc\nSignedUninstaller=yes\nSignedUninstallerDir={}\n",
+            directory.display()
+        );
+        content = content.replace("[Files]\n", &format!("{signing}[Files]\n"));
+    }
+    if product == "plugin" {
+        content.push_str(&format!(
+            "Source: \"{}\"; Flags: dontcopy\n",
+            bundle.join("openatc-install.exe").display()
+        ));
+    }
+    content.push_str(&format!("Source: \"{}\\*\"; DestDir: \"{{app}}\"; Flags: recursesubdirs createallsubdirs ignoreversion\n",bundle.display()));
+    if product == "plugin" {
+        content.push_str("[UninstallDelete]\nType: files; Name: \"{app}\\xplane-path.txt\"\n");
+        content.push_str(include_str!("../../packaging/installer/windows-plugin.iss"));
+    } else {
+        content.push_str("[Icons]\nName: \"{autoprograms}\\OpenATC AI Server\"; Filename: \"{app}\\openatc-launcher.exe\"\nName: \"{autoprograms}\\Configure OpenATC AI Server\"; Filename: \"{app}\\openatc-launcher.exe\"; Parameters: \"--configure-web\"\n");
+    }
+    write(&script, &content)?;
     let compiler = std::env::var_os("ISCC")
         .unwrap_or_else(|| "C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe".into());
-    run(Command::new(compiler).arg(script))
+    let mut command = Command::new(compiler);
+    if let Some(thumbprint) = windows_certificate()? {
+        command.arg(format!("/Sopenatc=signtool.exe sign /sha1 {thumbprint} /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $f"));
+    }
+    run(command.arg(script))
+}
+
+fn windows_certificate() -> Result<Option<String>> {
+    let value = std::env::var("OPENATC_WINDOWS_SIGN_CERT_SHA1").ok();
+    if value
+        .as_ref()
+        .is_some_and(|v| v.len() != 40 || !v.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err(
+            "OPENATC_WINDOWS_SIGN_CERT_SHA1 must contain a 40-character certificate thumbprint"
+                .into(),
+        );
+    }
+    Ok(value)
+}
+
+// Sign nested native files before archives are assembled. Never sign model data.
+fn sign_payload(bundle: &Path) -> Result {
+    let windows = if cfg!(windows) {
+        windows_certificate()?
+    } else {
+        None
+    };
+    let apple = if cfg!(target_os = "macos") {
+        std::env::var("OPENATC_MAC_SIGN_IDENTITY").ok()
+    } else {
+        None
+    };
+    if windows.is_none() && apple.is_none() {
+        return Ok(());
+    }
+    for entry in walkdir::WalkDir::new(bundle).follow_links(false) {
+        let entry = entry?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if let Some(thumbprint) = &windows {
+            if path
+                .extension()
+                .is_some_and(|ext| ["exe", "dll", "xpl"].iter().any(|e| ext == *e))
+            {
+                run(Command::new("signtool.exe")
+                    .args([
+                        "sign",
+                        "/sha1",
+                        thumbprint,
+                        "/fd",
+                        "SHA256",
+                        "/tr",
+                        "http://timestamp.digicert.com",
+                        "/td",
+                        "SHA256",
+                    ])
+                    .arg(path))?;
+                run(Command::new("signtool.exe")
+                    .args(["verify", "/pa"])
+                    .arg(path))?;
+            }
+        }
+        if let Some(identity) = &apple {
+            use std::io::Read;
+            let mut magic = [0u8; 4];
+            let n = fs::File::open(path)?.read(&mut magic)?;
+            if n == 4
+                && matches!(
+                    magic,
+                    [0xcf, 0xfa, 0xed, 0xfe]
+                        | [0xfe, 0xed, 0xfa, 0xcf]
+                        | [0xca, 0xfe, 0xba, 0xbe]
+                        | [0xca, 0xfe, 0xba, 0xbf]
+                )
+            {
+                run(Command::new("codesign")
+                    .args([
+                        "--force",
+                        "--timestamp",
+                        "--options",
+                        "runtime",
+                        "--sign",
+                        identity,
+                    ])
+                    .arg(path))?;
+                run(Command::new("codesign")
+                    .args(["--verify", "--strict"])
+                    .arg(path))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -324,6 +638,8 @@ fn bundle_linux_libraries(bin: &Path) -> Result {
                 "librt.so",
                 "libresolv.so",
                 "libutil.so",
+                "libcuda.so",
+                "libnvidia",
             ]
             .iter()
             .any(|base| library.starts_with(base))
@@ -359,27 +675,122 @@ fn bundle_linux_libraries(bin: &Path) -> Result {
     Ok(())
 }
 
-fn macos(bundle: &Path, output: &Path, stem: &str, product: &str) -> Result {
+fn macos(bundle: &Path, output: &Path, stem: &str, product: &str, version: &str) -> Result {
     let image = bundle.parent().unwrap().join("disk-image");
     fs::create_dir_all(&image)?;
-    if product == "plugin" {
-        distribution::tree(&bundle.join("payload/OpenATC"), &image.join("OpenATC"))?;
-        fs::copy(bundle.join("INSTALL.txt"), image.join("INSTALL.txt"))?;
+    let (name, identifier, launcher) = if product == "plugin" {
+        (
+            "OpenATC Plugin Installer",
+            "org.openatc.plugininstaller",
+            "openatc-install",
+        )
     } else {
-        let contents = image.join("OpenATC AI.app/Contents");
-        distribution::tree(bundle, &contents.join("MacOS"))?;
-        write(
-            &contents.join("Info.plist"),
-            "<?xml version=\"1.0\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>org.openatc.ai</string><key>CFBundleName</key><string>OpenATC AI</string><key>CFBundleExecutable</key><string>openatc-launcher</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>",
-        )?;
+        ("OpenATC AI Server", "org.openatc.ai", "openatc-launcher")
+    };
+    let contents = image.join(format!("{name}.app/Contents"));
+    distribution::tree(bundle, &contents.join("MacOS"))?;
+    let numeric_version = version.split('-').next().unwrap_or(version);
+    write(
+        &contents.join("Info.plist"),
+        &format!(
+            "<?xml version=\"1.0\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>{identifier}</string><key>CFBundleName</key><string>{name}</string><key>CFBundleExecutable</key><string>{launcher}</string><key>CFBundleIconFile</key><string>OpenATC.icns</string><key>CFBundleShortVersionString</key><string>{numeric_version}</string><key>CFBundleVersion</key><string>{numeric_version}</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>"
+        ),
+    )?;
+    let resources = contents.join("Resources");
+    fs::create_dir_all(&resources)?;
+    let iconset = bundle.parent().unwrap().join("OpenATC.iconset");
+    fs::create_dir_all(&iconset)?;
+    for size in [16, 32, 128, 256, 512] {
+        for density in [1, 2] {
+            let suffix = if density == 2 { "@2x" } else { "" };
+            let pixels = (size * density).to_string();
+            run(Command::new("sips")
+                .args(["-z", &pixels, &pixels])
+                .arg(bundle.join("branding/icon.png"))
+                .arg("--out")
+                .arg(iconset.join(format!("icon_{size}x{size}{suffix}.png"))))?;
+        }
     }
+    run(Command::new("iconutil")
+        .args(["-c", "icns"])
+        .arg(&iconset)
+        .arg("-o")
+        .arg(resources.join("OpenATC.icns")))?;
+    distribution::tree(&bundle.join("branding"), &image.join("branding"))?;
+    for name in [
+        "Welcome.html",
+        "INSTALL.txt",
+        "INSTALL.md",
+        "README.md",
+        "LICENSE",
+    ] {
+        fs::copy(bundle.join(name), image.join(name))?;
+    }
+    distribution::tree(&bundle.join("licenses"), &image.join("licenses"))?;
+    #[cfg(unix)]
+    if product == "ai-server" {
+        std::os::unix::fs::symlink("/Applications", image.join("Applications"))?;
+    }
+    let app = contents.parent().unwrap();
+    if let Ok(identity) = std::env::var("OPENATC_MAC_SIGN_IDENTITY") {
+        run(Command::new("codesign")
+            .args([
+                "--force",
+                "--timestamp",
+                "--options",
+                "runtime",
+                "--sign",
+                &identity,
+            ])
+            .arg(app))?;
+        run(Command::new("codesign")
+            .args(["--verify", "--strict", "--deep"])
+            .arg(app))?;
+    }
+    let dmg = output.join(format!("{stem}.dmg"));
     run(Command::new("hdiutil")
         .args([
             "create", "-fs", "HFS+", "-format", "UDZO", "-volname", "OpenATC",
         ])
         .arg("-srcfolder")
         .arg(image)
-        .arg(output.join(format!("{stem}.dmg"))))
+        .arg(&dmg))?;
+    if let Ok(identity) = std::env::var("OPENATC_MAC_SIGN_IDENTITY") {
+        run(Command::new("codesign")
+            .args(["--timestamp", "--sign", &identity])
+            .arg(&dmg))?;
+    }
+    if let Ok(profile) = std::env::var("OPENATC_NOTARY_PROFILE") {
+        if std::env::var_os("OPENATC_MAC_SIGN_IDENTITY").is_none() {
+            return Err("Notarisation requires OPENATC_MAC_SIGN_IDENTITY".into());
+        }
+        let status = Command::new("xcrun")
+            .args(["notarytool", "submit"])
+            .arg(&dmg)
+            .args([
+                "--keychain-profile",
+                &profile,
+                "--wait",
+                "--timeout",
+                "30m",
+                "--output-format",
+                "json",
+            ])
+            .output()?;
+        let response: serde_json::Value = serde_json::from_slice(&status.stdout).map_err(
+            |_| "Notarisation did not return valid JSON; inspect the Apple submission log",
+        )?;
+        if !status.status.success()
+            || response.get("status").and_then(|v| v.as_str()) != Some("Accepted")
+        {
+            return Err(format!("Apple did not accept notarisation: {}. Inspect this submission with notarytool log.", response).into());
+        }
+        run(Command::new("xcrun").args(["stapler", "staple"]).arg(&dmg))?;
+        run(Command::new("xcrun")
+            .args(["stapler", "validate"])
+            .arg(&dmg))?;
+    }
+    Ok(())
 }
 
 fn linux(
@@ -429,7 +840,7 @@ fn deb(root: &Path, work: &Path, output: &Path, stem: &str, name: &str, version:
     write(
         &package.join("DEBIAN/control"),
         &format!(
-            "Package: {name}\nVersion: {}\nArchitecture: amd64\nMaintainer: OpenATC contributors <noreply@openatc.invalid>\nSection: games\nPriority: optional\nDepends: libc6 (>= 2.35), libstdc++6, libgcc-s1\nRecommends: zenity\nDescription: OpenATC flight simulation {name}\n Free and open-source X-Plane ATC software.\n",
+            "Package: {name}\nVersion: {}\nArchitecture: amd64\nMaintainer: OpenATC contributors <noreply@openatc.invalid>\nSection: games\nPriority: optional\nDepends: libc6 (>= 2.35), libstdc++6, libgcc-s1\nDescription: OpenATC flight simulation {name}\n Free and open-source X-Plane ATC software.\n",
             version.replace('-', "~")
         ),
     )?;
@@ -543,7 +954,7 @@ fn flatpak(
     fs::copy(repo().join("assets/logo.svg"), icon)?;
     let mut finish = Command::new("flatpak");
     finish
-        .args(["build-finish", "--share=network"])
+        .args(["build-finish", "--share=network", "--device=dri"])
         .arg(format!("--command=/app/openatc/{launcher}"));
     if product == "plugin" {
         finish.args([
@@ -572,6 +983,22 @@ fn flatpak(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn welcome_pages_have_local_assets_and_product_specific_instructions() {
+        check_branding().unwrap();
+        for product in ["plugin", "ai-server"] {
+            let page = welcome(product, "0.0.1-alpha.1");
+            assert!(page.contains("branding/banner.png"));
+            assert!(page.contains("0.0.1-alpha.1"));
+            assert!(!page.contains("@PRODUCT@") && !page.contains("@START@"));
+            assert!(!page.contains("Founder") && !page.contains("BIL4X4"));
+            assert_eq!(page.contains("Close X-Plane"), product == "plugin");
+            assert_eq!(
+                page.contains("downloads the selected models"),
+                product == "ai-server"
+            );
+        }
+    }
     #[test]
     fn release_versions_reject_paths_and_shell_text() {
         assert_eq!(version("v0.0.1-alpha.1").unwrap(), "0.0.1-alpha.1");

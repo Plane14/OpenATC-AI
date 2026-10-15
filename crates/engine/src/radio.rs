@@ -7,6 +7,24 @@ use axum::{
 };
 use serde_json::{Value, json};
 
+/// End only the affected receiver's ATIS log session when tuning or power changes.
+pub(crate) fn observe_atis_tuning(
+    state: &mut crate::EngineState,
+    previous: [Option<i32>; 2],
+    was_powered: bool,
+) {
+    use openatc_core::state::Radio;
+    for (index, radio) in [Radio::Com1, Radio::Com2].into_iter().enumerate() {
+        if !state.session.telemetry.radio_power
+            || !was_powered
+            || previous[index] != state.session.telemetry.frequency(radio)
+        {
+            let prefix = format!("{radio:?}/");
+            state.atis_logged.retain(|key, _| !key.starts_with(&prefix));
+        }
+    }
+}
+
 /// Wording history is separate from flight state, so a new flight keeps phrase rotation.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -420,20 +438,17 @@ pub async fn atis(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
     );
     let mut tag = crate::flight::tag(&mut s, &station);
     tag.radio = Some(radio);
-    let log_key = format!("{radio:?}/{}", station.airport);
-    let repeated = s.atis_logged.get(&log_key) == Some(&code);
+    let prefix = format!("{radio:?}/");
+    let log_key = format!("{prefix}{}", station.airport);
+    let bulletin = format!("{code}|{}|{runway}", weather_signature(&weather));
+    let repeated = s.atis_logged.get(&log_key) == Some(&bulletin);
     if !repeated {
-        s.atis_logged.insert(log_key, code.clone());
-        // Keep the current bulletin in one row while reception continues to loop.
-        if let Some(entry) = s.session.transcript.iter_mut().rev().find(|entry| {
-            entry.speaker == "ATIS" && entry.radio == Some(radio) && entry.position == tag.position
-        }) {
-            entry.text.clone_from(&text);
-            entry.voice.clone_from(&tag.voice);
-        } else {
-            openatc_core::apply::add_transmission(&mut s.session, "ATIS", &text, &tag);
-            s.session.transcript.last_mut().unwrap().information_only = true;
-        }
+        // A receiver has one current listening session. Retuning or a changed
+        // bulletin adds a new row; unchanged audio loops leave history alone.
+        s.atis_logged.retain(|key, _| !key.starts_with(&prefix));
+        s.atis_logged.insert(log_key, bulletin);
+        openatc_core::apply::add_transmission(&mut s.session, "ATIS", &text, &tag);
+        s.session.transcript.last_mut().unwrap().information_only = true;
     }
     Json(json!({"text":text,"airport":station.airport,"information":code,"source":"simulator","frequency":station.khz,"radio":radio})).into_response()
 }
@@ -843,12 +858,74 @@ mod tests {
         );
         assert_ne!(revised["information"], result["information"]);
         let state = shared.read().await;
-        assert_eq!(state.session.transcript.len(), count);
+        assert_eq!(state.session.transcript.len(), count + 1);
+        assert_eq!(
+            state.session.transcript[count - 1].text,
+            result["text"].as_str().unwrap()
+        );
         assert_eq!(
             state.session.transcript.last().unwrap().text,
             revised["text"].as_str().unwrap()
         );
         drop(state);
+        {
+            let mut state = shared.write().await;
+            state
+                .atis_logged
+                .insert("Com1/OTHER".into(), "unchanged".into());
+        }
+        for frequency in [121700, 118700] {
+            let mut telemetry = shared.read().await.session.telemetry.clone();
+            telemetry.com2_khz = Some(frequency);
+            telemetry.radio_busy = true;
+            assert!(
+                crate::surface::post_telemetry(State(shared.clone()), Json(telemetry))
+                    .await
+                    .status()
+                    .is_success()
+            );
+        }
+        assert!(shared.read().await.atis_logged.contains_key("Com1/OTHER"));
+        let atis_count = |state: &crate::EngineState| {
+            state
+                .session
+                .transcript
+                .iter()
+                .filter(|entry| entry.speaker == "ATIS")
+                .count()
+        };
+        let before_retune = atis_count(&*shared.read().await);
+        assert!(
+            super::atis(State(shared.clone()), Json(json!({"radio":"com2"})))
+                .await
+                .status()
+                .is_success()
+        );
+        assert_eq!(atis_count(&*shared.read().await), before_retune + 1);
+        assert!(
+            super::atis(State(shared.clone()), Json(json!({"radio":"com2"})))
+                .await
+                .status()
+                .is_success()
+        );
+        assert_eq!(atis_count(&*shared.read().await), before_retune + 1);
+        for powered in [false, true] {
+            let mut telemetry = shared.read().await.session.telemetry.clone();
+            telemetry.radio_power = powered;
+            assert!(
+                crate::surface::post_telemetry(State(shared.clone()), Json(telemetry))
+                    .await
+                    .status()
+                    .is_success()
+            );
+        }
+        assert!(
+            super::atis(State(shared.clone()), Json(json!({"radio":"com2"})))
+                .await
+                .status()
+                .is_success()
+        );
+        assert_eq!(atis_count(&*shared.read().await), before_retune + 2);
         assert_eq!(result["airport"], "TEST");
         assert!(result["text"].as_str().is_some_and(|text| !text.is_empty()));
         assert!(

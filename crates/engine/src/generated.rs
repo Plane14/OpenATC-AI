@@ -1078,95 +1078,28 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
                                         terminal_surfaces.get(&input.destination.icao).ok_or(
                                             "Arrival runway surface is unavailable".to_owned(),
                                         )?;
-                                    let departure_floor_feet = input.origin.elevation_feet.min(
-                                        departure_weather.atmosphere.geometric(
-                                            departure_surface.height(
-                                                departure_surface
-                                                    .point(departure_surface.threshold),
-                                            ),
-                                            false,
-                                        )?,
-                                    );
-                                    let arrival_floor_feet = input.destination.elevation_feet.min(
-                                        arrival_weather.atmosphere.geometric(
-                                            arrival_surface.height(
-                                                arrival_surface.point(arrival_surface.threshold),
-                                            ),
-                                            false,
-                                        )?,
-                                    );
-                                    let mut reason =
-                                        "No terminal candidate is available".to_owned();
-                                    for (candidate, terminal) in terminal_routes.iter().enumerate()
-                                    {
-                                        match airborne::resolve(airborne::Request {
-                                            candidate,
-                                            terminal,
-                                            rotation: surface.rotation,
-                                            origin: &input.origin,
-                                            destination: &input.destination,
-                                            points,
-                                            departure_weather,
-                                            arrival_weather,
-                                            aircraft,
-                                            handling: &handling[&kind],
-                                            intercept_limit_nm: policy.terminal_intercept_limit_nm,
-                                            departure_floor_feet,
-                                            arrival_floor_feet,
-                                        }) {
-                                            Ok(decoded) => return Ok(decoded),
-                                            Err(error) => reason = error,
-                                        }
+                                    airborne::Planner {
+                                        rotation: surface.rotation,
+                                        origin: &input.origin,
+                                        destination: &input.destination,
+                                        points,
+                                        departure_weather,
+                                        arrival_weather,
+                                        aircraft,
+                                        handling: &handling[&kind],
+                                        policy: &policy,
+                                        departure_surface,
+                                        arrival_surface,
+                                        observed: &input.observed,
+                                        reserved: &reserved_arrival_stands,
                                     }
-                                    Err(reason)
+                                    .arrival(&terminal_routes)
                                 })();
                                 match decoded {
-                                    Ok(decoded) => {
-                                        let arrival = (|| {
-                                            let surface = terminal_surfaces
-                                                .get(&input.destination.icao)
-                                                .ok_or("Arrival runway surface is unavailable")?;
-                                            let crossing = decoded
-                                                .approach
-                                                .last()
-                                                .ok_or("Approach has no threshold crossing")?;
-                                            let angle = terminal_routes[decoded.candidate]
-                                                .approach
-                                                .last()
-                                                .and_then(|leg| leg.vertical_angle_degrees)
-                                                .ok_or(
-                                                    "Approach has no published final descent angle",
-                                                )?;
-                                            landing::prepare(landing::Request {
-                                                airport: &input.destination,
-                                                surface,
-                                                crossing: openatc_core::traffic::motion::Waypoint {
-                                                    latitude: crossing.coordinate[0],
-                                                    longitude: crossing.coordinate[1],
-                                                    altitude_feet: crossing.preferred_feet,
-                                                },
-                                                angle_degrees: angle,
-                                                airspeed: crossing
-                                                    .airspeed
-                                                    .ok_or("Approach airspeed is unresolved")?,
-                                                aircraft,
-                                                handling: &handling[&kind],
-                                                policy: &policy,
-                                                observed: &input.observed,
-                                                reserved: &reserved_arrival_stands,
-                                            })
-                                        })();
-                                        match arrival {
-                                            Ok(arrival) => {
-                                                reserved_arrival_stands
-                                                    .insert(arrival.parking.stand.clone());
-                                                nominal_arrivals.insert(id, Arc::new(arrival));
-                                            }
-                                            Err(error) => warnings.push(format!(
-                                                "{} / {}: arrival geometry: {error}",
-                                                input.origin.icao, stand.name
-                                            )),
-                                        }
+                                    Ok((decoded, arrival)) => {
+                                        reserved_arrival_stands
+                                            .insert(arrival.parking.stand.clone());
+                                        nominal_arrivals.insert(id, Arc::new(arrival));
                                         decoded_terminals.insert(id, Arc::new(decoded));
                                     }
                                     Err(error) => warnings.push(format!(
@@ -2296,6 +2229,72 @@ mod tests {
             );
             assert!((point.altitude_feet - slope.height(local)).abs() < 1e-8);
         }
+        let (&arrival_id, _) = scene.nominal_arrivals.first_key_value().unwrap();
+        let selected = &scene.terminal_routes[scene.decoded_terminals[&arrival_id].candidate];
+        let mut unusable = selected.clone();
+        unusable.approach.last_mut().unwrap().vertical_angle_degrees = None;
+        let candidates = vec![unusable, selected.clone()];
+        let arrival_data =
+            openatc_core::arrival::ArrivalAirport::load(&root, scene.destination.clone()).unwrap();
+        let arrival_surface =
+            runway::Surface::new(&scene.destination, "35R", &arrival_data.thresholds, 2.0).unwrap();
+        let frame = scene
+            .frames
+            .iter()
+            .find(|frame| frame.target.id == arrival_id)
+            .unwrap();
+        let unreserved = BTreeSet::new();
+        let planner = airborne::Planner {
+            rotation: scene.nominal_departures[&arrival_id].rotation,
+            origin: &scene.airport,
+            destination: &scene.destination,
+            points: scene.terminal_points.as_ref().unwrap(),
+            departure_weather: &scene.environments["LFMN"],
+            arrival_weather: &scene.environments["LIMC"],
+            aircraft: profiles.aircraft_for(&frame.target.aircraft).unwrap(),
+            handling: &scene.movement[&arrival_id],
+            policy: &policy,
+            departure_surface: &runway_surface,
+            arrival_surface: &arrival_surface,
+            observed: &[],
+            reserved: &unreserved,
+        };
+        let (retried, arrival) = planner.arrival(&candidates).unwrap();
+        assert_eq!(
+            retried.candidate, 1,
+            "A decodable but unusable first landing must not exhaust alternatives"
+        );
+        assert_eq!(
+            arrival.flare.points.last(),
+            arrival.parking.exit.rollout[0].points.first()
+        );
+        let mut limited = policy.clone();
+        limited.terminal_candidate_limit = 1;
+        let bounded = airborne::Planner {
+            policy: &limited,
+            ..planner
+        };
+        assert!(
+            bounded
+                .arrival(&candidates)
+                .err()
+                .unwrap()
+                .contains("among 1 terminal candidates")
+        );
+        let occupied: BTreeSet<_> = scene
+            .destination
+            .parking
+            .iter()
+            .map(|stand| stand.name.clone())
+            .collect();
+        let blocked = airborne::Planner {
+            reserved: &occupied,
+            ..planner
+        };
+        assert!(
+            blocked.arrival(&candidates).is_err(),
+            "Retry cannot bypass occupied parking"
+        );
         assert!(
             scene
                 .frames

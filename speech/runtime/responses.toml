@@ -17581,3 +17581,35 @@ say = ["Understood, Captain.", "All right, Captain.", "Of course. I'll leave you
 [crew_ground_interphone_disconnected]
 slots = []
 say = ["Ground interphone disconnected. Ramp crew are no longer on the line."]
+
+[crossing_altitude_missed]
+slots = ["callsign", "fix"]
+say = ["{callsign}, check your altitude. The altitude restriction at {fix} was not met.", "{callsign}, verify altitude. You did not meet the published altitude restriction at {fix}.", "{callsign}, the altitude restriction at {fix} was not met. Advise if unable to comply."]
+
+[crossing_speed_missed]
+slots = ["callsign", "fix"]
+say = ["{callsign}, check your speed. The speed restriction at {fix} was not met.", "{callsign}, verify speed. You did not meet the published speed restriction at {fix}.", "{callsign}, the speed restriction at {fix} was not met. Advise if unable to comply."]
+
+[pilot_checking_crossing_altitude]
+slots = ["callsign", "fix"]
+say = ["Checking altitude at {fix}, {callsign}.", "Checking the altitude restriction at {fix}, {callsign}."]
+
+[pilot_checking_crossing_speed]
+slots = ["callsign", "fix"]
+say = ["Checking speed at {fix}, {callsign}.", "Checking the speed restriction at {fix}, {callsign}."]
+
+[published_speed_maximum_reminder]
+slots = ["callsign", "fix", "speed"]
+say = ["{callsign}, cross {fix} at {speed} knots or less.", "{callsign}, make your speed {speed} knots or less by {fix}.", "{callsign}, plan to cross {fix} at {speed} knots or less."]
+
+[published_speed_exact_reminder]
+slots = ["callsign", "fix", "speed"]
+say = ["{callsign}, cross {fix} at {speed} knots.", "{callsign}, make your speed {speed} knots by {fix}.", "{callsign}, plan to cross {fix} at {speed} knots."]
+
+[pilot_published_speed_maximum]
+slots = ["callsign", "fix", "speed"]
+say = ["{speed} knots or less at {fix}, {callsign}.", "Cross {fix} at {speed} knots or less, {callsign}."]
+
+[pilot_published_speed_exact]
+slots = ["callsign", "fix", "speed"]
+say = ["{speed} knots at {fix}, {callsign}.", "Cross {fix} at {speed} knots, {callsign}."]

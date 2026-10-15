@@ -18,6 +18,10 @@ on:
         type: choice
         options: [all, plugin, ai-server]
         default: all
+      preflight_only:
+        description: 'Check installer packaging with small fixtures; skip full application/model builds'
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -25,6 +29,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      preflight: ${{ steps.matrix.outputs.preflight }}
       version: ${{ steps.matrix.outputs.version }}
     steps:
       - id: matrix
@@ -55,11 +60,44 @@ jobs:
           done
           [ "$matrix" != '[]' ] || { echo 'No build targets selected'; exit 1; }
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "preflight=$(jq -c 'unique_by(.platform) | map({platform,runner})' <<< "$matrix")" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
   checks:
+    if: ${{ inputs.preflight_only != true }}
     uses: ./.github/workflows/build.yml
+  packaging-preflight:
+    needs: prepare
+    name: Installer preflight / ${{ matrix.platform }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.preflight) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: installer-preflight-${{ matrix.platform }}
+      - name: Install Windows installer compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup --version=6.4.3 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test installer discovery and transactions
+        run: cargo test --locked -p xtask installer::tests
+      - name: Validate installer assets and native package generation
+        shell: bash
+        run: |
+          test -s docs/INSTALL.md
+          test -s docs/RELEASE_PACKAGING.md
+          cargo run --locked -p xtask -- release-preflight ${{ matrix.platform }}
   native:
-    needs: [prepare, checks]
+    if: ${{ inputs.preflight_only != true }}
+    needs: [prepare, checks, packaging-preflight]
     name: ${{ matrix.platform }} / ${{ matrix.product }}
     strategy:
       fail-fast: false
@@ -81,7 +119,7 @@ jobs:
         if: runner.os == 'Windows'
       - name: Install Linux build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential clang libclang-dev cmake pkg-config rpm dpkg-dev flatpak zenity
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang libclang-dev cmake pkg-config
       - name: Configure Windows native tools
         if: runner.os == 'Windows'
         shell: pwsh
@@ -132,6 +170,23 @@ jobs:
         run: |
           echo "SDKROOT=$(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
           echo "LIBCLANG_PATH=$(dirname "$(xcrun --find clang)")/../lib" >> "$GITHUB_ENV"
+      - name: Import optional Windows publisher certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          OPENATC_WINDOWS_CERT_PFX_BASE64: ${{ secrets.OPENATC_WINDOWS_CERT_PFX_BASE64 }}
+          OPENATC_WINDOWS_CERT_PASSWORD: ${{ secrets.OPENATC_WINDOWS_CERT_PASSWORD }}
+        run: ./packaging/installer/import-signing.ps1
+      - name: Import optional Apple publisher certificate
+        if: runner.os == 'macOS'
+        env:
+          OPENATC_MAC_CERT_P12_BASE64: ${{ secrets.OPENATC_MAC_CERT_P12_BASE64 }}
+          OPENATC_MAC_CERT_PASSWORD: ${{ secrets.OPENATC_MAC_CERT_PASSWORD }}
+          OPENATC_MAC_SIGN_IDENTITY: ${{ secrets.OPENATC_MAC_SIGN_IDENTITY }}
+          OPENATC_APPLE_ID: ${{ secrets.OPENATC_APPLE_ID }}
+          OPENATC_APPLE_PASSWORD: ${{ secrets.OPENATC_APPLE_PASSWORD }}
+          OPENATC_APPLE_TEAM_ID: ${{ secrets.OPENATC_APPLE_TEAM_ID }}
+        run: bash packaging/installer/import-signing.sh
       - uses: actions/cache@v4
         if: matrix.platform == 'macos-intel' && matrix.product == 'ai-server'
         id: onnx-cache
@@ -218,9 +273,10 @@ jobs:
           choco install innosetup --version=6.4.3 --yes --no-progress
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install Linux packaging runtimes
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.product == 'ai-server'
         run: |
           set -euo pipefail
+          sudo apt-get install -y rpm dpkg-dev flatpak
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user --noninteractive flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08
           cargo xtask fetch-package-tools "$RUNNER_TEMP/package-tools"
@@ -250,6 +306,15 @@ jobs:
           name: native-${{ matrix.platform }}-${{ matrix.product }}
           path: build-artifacts/
           if-no-files-found: error
+      - name: Remove temporary Apple signing keychain
+        if: always() && runner.os == 'macOS'
+        run: |
+          keychain="$RUNNER_TEMP/openatc-signing.keychain-db"
+          if [ -f "$keychain" ]; then
+            security default-keychain -d user -s "$HOME/Library/Keychains/login.keychain-db"
+            security delete-keychain "$keychain"
+          fi
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: native

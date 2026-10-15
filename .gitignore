@@ -123,6 +123,8 @@ scratch/
 *.md
 !README.md
 !/docs/AI_SERVER.md
+!/docs/INSTALL.md
+!/docs/RELEASE_PACKAGING.md
 MEMORY*
 TASKS*
 TODO*

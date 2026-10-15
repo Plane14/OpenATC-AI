@@ -138,6 +138,115 @@ pub(super) fn resolve(input: Request<'_>) -> Result<Decoded, String> {
     })
 }
 
+/// Aircraft-specific production planning context; candidate attempts have no world side effects.
+pub(super) struct Planner<'a> {
+    pub rotation: Waypoint,
+    pub origin: &'a openatc_core::airport::Airport,
+    pub destination: &'a openatc_core::airport::Airport,
+    pub points: &'a openatc_core::traffic::coordinates::Points,
+    pub departure_weather: &'a super::environment::Environment,
+    pub arrival_weather: &'a super::environment::Environment,
+    pub aircraft: &'a openatc_core::traffic::profiles::Aircraft,
+    pub handling: &'a openatc_core::traffic::animation::Handling,
+    pub policy: &'a super::Operations,
+    pub departure_surface: &'a super::runway::Surface,
+    pub arrival_surface: &'a super::runway::Surface,
+    pub observed: &'a [openatc_core::state::TrafficTarget],
+    pub reserved: &'a std::collections::BTreeSet<String>,
+}
+impl Planner<'_> {
+    /// Select only after the published crossing connects through landing and parking.
+    /// A decodable approach alone is insufficient to consume a flight's candidate slot.
+    pub fn arrival(
+        &self,
+        candidates: &[super::routing::Terminal],
+    ) -> Result<(Decoded, super::landing::Arrival), String> {
+        let departure_floor_feet = self.origin.elevation_feet.min(
+            self.departure_weather.atmosphere.geometric(
+                self.departure_surface.height(
+                    self.departure_surface
+                        .point(self.departure_surface.threshold),
+                ),
+                false,
+            )?,
+        );
+        let arrival_floor_feet = self.destination.elevation_feet.min(
+            self.arrival_weather.atmosphere.geometric(
+                self.arrival_surface
+                    .height(self.arrival_surface.point(self.arrival_surface.threshold)),
+                false,
+            )?,
+        );
+        let mut reason = "No terminal candidate is available".to_owned();
+        let mut attempted = 0;
+        for (candidate, terminal) in candidates
+            .iter()
+            .take(self.policy.terminal_candidate_limit)
+            .enumerate()
+        {
+            attempted += 1;
+            let attempt = (|| {
+                let decoded = resolve(Request {
+                    candidate,
+                    terminal,
+                    rotation: self.rotation,
+                    origin: self.origin,
+                    destination: self.destination,
+                    points: self.points,
+                    departure_weather: self.departure_weather,
+                    arrival_weather: self.arrival_weather,
+                    aircraft: self.aircraft,
+                    handling: self.handling,
+                    intercept_limit_nm: self.policy.terminal_intercept_limit_nm,
+                    departure_floor_feet,
+                    arrival_floor_feet,
+                })?;
+                let crossing = decoded
+                    .approach
+                    .last()
+                    .ok_or("Approach has no threshold crossing")?;
+                let angle = terminal
+                    .approach
+                    .last()
+                    .and_then(|leg| leg.vertical_angle_degrees)
+                    .ok_or("Approach has no published final descent angle")?;
+                let arrival = super::landing::prepare(super::landing::Request {
+                    airport: self.destination,
+                    surface: self.arrival_surface,
+                    crossing: Waypoint {
+                        latitude: crossing.coordinate[0],
+                        longitude: crossing.coordinate[1],
+                        altitude_feet: crossing.preferred_feet,
+                    },
+                    angle_degrees: angle,
+                    airspeed: crossing.airspeed.ok_or("Approach airspeed is unresolved")?,
+                    aircraft: self.aircraft,
+                    handling: self.handling,
+                    policy: self.policy,
+                    observed: self.observed,
+                    reserved: self.reserved,
+                })?;
+                if !self.departure_weather.fresh() || !self.arrival_weather.fresh() {
+                    return Err("Terminal weather expired before arrival selection".to_owned());
+                }
+                Ok((decoded, arrival))
+            })();
+            match attempt {
+                Ok(prepared) => return Ok(prepared),
+                Err(error) => {
+                    reason = format!(
+                        "{}/{}/{}: {error}",
+                        terminal.departure_name, terminal.arrival_name, terminal.approach_name
+                    )
+                }
+            }
+        }
+        Err(format!(
+            "No complete arrival among {attempted} terminal candidates: {reason}"
+        ))
+    }
+}
+
 pub(super) struct Section {
     pub stage: Stage,
     pub crossings: Vec<Fix>,

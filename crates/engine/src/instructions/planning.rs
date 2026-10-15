@@ -12,6 +12,26 @@ pub struct Policy {
     pub minimum_change_feet: i32,
     #[serde(default = "default_select_ils")]
     pub select_runway_ils: bool,
+    #[serde(default = "notice_seconds")]
+    pub speed_notice_seconds: f64,
+    #[serde(default = "notice_deceleration")]
+    pub speed_notice_deceleration: f64,
+    #[serde(default = "notice_min")]
+    pub speed_notice_min_nm: f64,
+    #[serde(default = "notice_max")]
+    pub speed_notice_max_nm: f64,
+}
+fn notice_seconds() -> f64 {
+    90.0
+}
+fn notice_deceleration() -> f64 {
+    1.0
+}
+fn notice_min() -> f64 {
+    8.0
+}
+fn notice_max() -> f64 {
+    30.0
 }
 fn default_select_ils() -> bool {
     true
@@ -33,6 +53,10 @@ impl Policy {
             || !(5.0..=30.0).contains(&policy.lead_nm)
             || !(100..=2000).contains(&policy.level_step_feet)
             || !(100..=1000).contains(&policy.minimum_change_feet)
+            || !(30.0..=180.0).contains(&policy.speed_notice_seconds)
+            || !(0.25..=3.0).contains(&policy.speed_notice_deceleration)
+            || !(3.0..=15.0).contains(&policy.speed_notice_min_nm)
+            || !(policy.speed_notice_min_nm..=50.0).contains(&policy.speed_notice_max_nm)
         {
             return Err("Vertical policy contains invalid planning margins".into());
         }

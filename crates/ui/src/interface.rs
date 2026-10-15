@@ -307,6 +307,7 @@ pub struct Interface {
     /// Transcript share of the ATC page.
     pub transcript_fraction: f32,
     pending_window_bounds: Option<[i32; 4]>,
+    pending_mode_height: Option<f32>,
     /// Frequency picked on the radio page, if any.
     pub requested_frequency_khz: Option<i32>,
     /// Squawk selected from a clearance or transcript link.
@@ -501,6 +502,7 @@ impl Interface {
             compact: false,
             transcript_fraction: 0.57,
             pending_window_bounds: None,
+            pending_mode_height: None,
             requested_frequency_khz: None,
             requested_squawk: None,
             requested_frequency_radio: openatc_core::state::Radio::Com1,
@@ -938,10 +940,7 @@ impl Interface {
                 fresh.settings_loaded = self.settings_loaded;
                 fresh.last_settings_json = self.last_settings_json.clone();
                 fresh.simulator_host = self.simulator_host;
-                fresh.window_offset = self.window_offset;
-                fresh.window_size = self.window_size;
-                fresh.can_pop_out = self.can_pop_out;
-                fresh.popped_out = self.popped_out;
+                fresh.preserve_window_layout(self);
                 fresh.current_airport = self.current_airport.clone();
                 fresh.flight_reset_generation = self.flight_reset_generation;
                 fresh.clipboard = self.clipboard.take();
@@ -1604,17 +1603,51 @@ impl Interface {
         fault.clone_into(&mut self.engine_fault);
     }
 
+    fn preserve_window_layout(&mut self, previous: &Self) {
+        self.window_offset = previous.window_offset;
+        self.window_size = previous.window_size;
+        self.can_pop_out = previous.can_pop_out;
+        self.popped_out = previous.popped_out;
+        self.compact = previous.compact;
+        self.manual_compact = previous.manual_compact;
+        self.expanded_height = previous.expanded_height;
+        self.transcript_fraction = previous.transcript_fraction;
+        self.pending_window_bounds = previous.pending_window_bounds;
+        self.pending_mode_height = previous.pending_mode_height;
+        self.window_actions.height = previous.window_actions.height;
+        self.window_actions.restore_bounds = previous.window_actions.restore_bounds;
+    }
+
     /// Apply host window placement for this frame.
     pub fn set_window_frame(&mut self, frame: WindowFrame) {
-        if self.settings_loaded
-            && self.pending_window_bounds.is_none()
-            && !self.compact
-            && !frame.popped_out
+        if let Some(height) = self.pending_mode_height
+            && ((frame.size[1] - height).abs() <= 2.0
+                || (frame.size[1] - self.window_size[1]).abs() > 2.0)
         {
-            if let Some(bounds) = frame.native_bounds {
-                self.settings.window_bounds = Some(bounds);
-            }
+            // The host can clamp a resize. Observe its size change before saving
+            // that frame as the expanded layout again.
+            self.pending_mode_height = None;
+        }
+        if self.settings_loaded {
             self.settings.transcript_fraction = self.transcript_fraction;
+            if self.pending_window_bounds.is_none()
+                && self.pending_mode_height.is_none()
+                && !frame.popped_out
+                && let Some([left, top, right, _]) = frame.native_bounds
+            {
+                if self.compact {
+                    let height = self
+                        .settings
+                        .window_bounds
+                        .map_or(self.expanded_height.round() as i32, |bounds| {
+                            bounds[1] - bounds[3]
+                        });
+                    self.settings.window_bounds = Some([left, top, right, top - height]);
+                } else {
+                    self.settings.window_bounds = frame.native_bounds;
+                    self.expanded_height = frame.size[1];
+                }
+            }
         }
         self.window_offset = frame.position;
         self.window_size = frame.size;
@@ -1628,7 +1661,9 @@ impl Interface {
         self.manual_compact = false;
         if self.compact {
             self.compact = false;
-            self.window_actions.height = Some(self.expanded_height);
+            let height = self.expanded_height.max(460.0 * self.settings.ui_scale);
+            self.pending_mode_height = Some(height);
+            self.window_actions.height = Some(height);
         }
     }
 
@@ -1636,13 +1671,16 @@ impl Interface {
         if !matches!(self.page, 0 | 10) || self.compact || !self.modal_intent.is_empty() {
             return;
         }
-        self.expanded_height = self.window_size[1];
+        if self.pending_mode_height.is_none() {
+            self.expanded_height = self.window_size[1];
+        }
         self.compact = true;
         self.manual_compact = manual;
         let scale = self.settings.ui_scale;
-        let compact_height = (self.window_size[1] * self.transcript_fraction + 36.0 * scale)
+        let compact_height = (self.expanded_height * self.transcript_fraction + 36.0 * scale)
             .max(200.0 * scale)
-            .min(self.window_size[1]);
+            .min(self.expanded_height);
+        self.pending_mode_height = Some(compact_height);
         self.window_actions.height = Some(compact_height);
     }
 
@@ -2200,6 +2238,80 @@ mod typed_transmission_tests {
 
 #[cfg(test)]
 mod layout_tests {
+    fn frame(bounds: [i32; 4]) -> super::WindowFrame {
+        super::WindowFrame {
+            native_bounds: Some(bounds),
+            position: [0.0, 0.0],
+            size: [
+                (bounds[2] - bounds[0]) as f32,
+                (bounds[1] - bounds[3]) as f32,
+            ],
+            can_pop_out: true,
+            popped_out: false,
+        }
+    }
+    #[test]
+    fn compact_moves_keep_the_full_height_and_pending_expansion_cannot_save_compact_bounds() {
+        let mut interface = super::Interface::new("http://127.0.0.1:1");
+        interface.settings_loaded = true;
+        interface.set_window_frame(frame([150, 1000, 1110, 240]));
+        interface.collapse(true);
+        // Observe the host's requested compact height before the user drags it.
+        let compact_height = interface.window_actions.height.unwrap().round() as i32;
+        interface.set_window_frame(frame([150, 1000, 1110, 1000 - compact_height]));
+        interface.set_window_frame(frame([210, 970, 1250, 970 - compact_height]));
+        assert_eq!(
+            interface.settings.window_bounds,
+            Some([210, 970, 1250, 210]),
+            "Moving/resizing compact mode must preserve its new anchor and expanded height"
+        );
+        interface.expand();
+        interface.set_window_frame(frame([210, 970, 1250, 970 - compact_height]));
+        assert_eq!(
+            interface.settings.window_bounds,
+            Some([210, 970, 1250, 210]),
+            "A pre-expansion host frame cannot replace saved full geometry"
+        );
+        interface.set_window_frame(frame([210, 970, 1250, 210]));
+        assert_eq!(
+            interface.settings.window_bounds,
+            Some([210, 970, 1250, 210])
+        );
+    }
+    #[test]
+    fn pending_expansion_does_not_replace_the_expanded_height_on_another_toggle() {
+        let mut interface = super::Interface::new("http://127.0.0.1:1");
+        interface.settings_loaded = true;
+        interface.set_window_frame(frame([150, 1000, 1110, 240]));
+        interface.collapse(true);
+        interface.set_window_frame(frame([150, 1000, 1110, 560]));
+        interface.expand();
+        interface.collapse(true);
+        interface.expand();
+        assert_eq!(interface.window_actions.height, Some(760.0));
+    }
+
+    #[test]
+    fn new_flight_keeps_splitter_and_compact_layout_state() {
+        let mut old = super::Interface::new("http://127.0.0.1:1");
+        old.settings_loaded = true;
+        old.transcript_fraction = 0.35;
+        old.set_window_frame(frame([150, 1000, 1110, 240]));
+        old.collapse(true);
+        let mut fresh = super::Interface::new("http://127.0.0.1:1");
+        fresh.settings = old.settings.clone();
+        fresh.settings_loaded = true;
+        fresh.preserve_window_layout(&old);
+        assert!(fresh.compact && fresh.manual_compact);
+        assert_eq!(fresh.transcript_fraction, 0.35);
+        assert_eq!(fresh.expanded_height, 760.0);
+        assert_eq!(fresh.pending_mode_height, old.pending_mode_height);
+        let restored: openatc_settings::Settings =
+            serde_json::from_value(serde_json::to_value(&fresh.settings).unwrap()).unwrap();
+        assert_eq!(restored.transcript_fraction, 0.35);
+        assert_eq!(restored.window_bounds, Some([150, 1000, 1110, 240]));
+    }
+
     #[test]
     fn compact_frames_do_not_overwrite_expanded_layout() {
         let mut interface = super::Interface::new("http://127.0.0.1:1");

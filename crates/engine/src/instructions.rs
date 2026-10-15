@@ -25,6 +25,7 @@ pub struct Monitor {
     pub previous: Option<openatc_core::state::Telemetry>,
     pub step_target: Option<i32>,
     pub checked_fix: usize,
+    pub speed_reminder: Option<(usize, f64)>,
     pub pending_sequence: u32,
     pub pending_since: Option<Instant>,
 }
@@ -339,6 +340,7 @@ pub fn tick(state: &mut EngineState, station: &Station) {
     let own = [t.latitude, t.longitude];
     if state.flow.monitor.route != c.route {
         state.flow.monitor.route = c.route.clone();
+        state.flow.monitor.speed_reminder = None;
         state.flow.monitor.heading = None;
         state.flow.monitor.next_fix = state
             .session
@@ -434,15 +436,20 @@ pub fn tick(state: &mut EngineState, station: &Station) {
                             .map(|(a, b)| a + (b - a) * f)
                     })
                     .or(t.indicated_speed_knots);
-                let violation = fix.minimum_altitude_feet.is_some_and(|v| {
+                let altitude_missed = fix.minimum_altitude_feet.is_some_and(|v| {
                     altitude(v, fix.minimum_altitude_is_flight_level) < f64::from(v) - 200.0
                 }) || fix.maximum_altitude_feet.is_some_and(|v| {
                     altitude(v, fix.maximum_altitude_is_flight_level) > f64::from(v) + 200.0
-                }) || matches!((fix.maximum_speed_knots,speed),(Some(v),Some(speed)) if speed>v+10.0)
+                });
+                let speed_missed = matches!((fix.maximum_speed_knots,speed),(Some(v),Some(speed)) if speed>v+10.0)
                     || matches!((fix.minimum_speed_knots,speed),(Some(v),Some(speed)) if speed<v-10.0);
-                if violation {
+                if altitude_missed || speed_missed {
                     let text = say(
-                        "crossing_restriction_missed",
+                        match (altitude_missed, speed_missed) {
+                            (true, true) => "crossing_restriction_missed",
+                            (true, false) => "crossing_altitude_missed",
+                            _ => "crossing_speed_missed",
+                        },
                         &[("callsign", call.clone()), ("fix", fix.identifier.clone())],
                     );
                     correct(
@@ -450,7 +457,11 @@ pub fn tick(state: &mut EngineState, station: &Station) {
                         station,
                         text,
                         Some(say(
-                            "pilot_checking_restriction",
+                            match (altitude_missed, speed_missed) {
+                                (true, true) => "pilot_checking_restriction",
+                                (true, false) => "pilot_checking_crossing_altitude",
+                                _ => "pilot_checking_crossing_speed",
+                            },
                             &[("callsign", call.clone()), ("fix", fix.identifier.clone())],
                         )),
                     );
@@ -594,7 +605,92 @@ pub fn tick(state: &mut EngineState, station: &Station) {
     if descend(state, station) {
         return;
     }
+    if published_speed_reminder(state, station) {
+        return;
+    }
     climb(state, station);
+}
+
+fn published_speed_reminder(state: &mut EngineState, station: &Station) -> bool {
+    if !matches!(
+        state.session.phase,
+        PhaseCode::Arrival | PhaseCode::Approach
+    ) || state.flow.monitor.heading.is_some()
+        || state.flow.monitor.speed.is_some()
+    {
+        return false;
+    }
+    let t = &state.session.telemetry;
+    let Some(ias) = t
+        .indicated_speed_knots
+        .filter(|v| v.is_finite() && *v > 0.0)
+    else {
+        return false;
+    };
+    let next = state.flow.monitor.next_fix.max(1);
+    let fixes = &state.session.plan.fixes;
+    // An initial fix can carry a STAR speed before its first TF leg. A reminder
+    // names that published fix; it does not infer a vector or clear a shortcut.
+    if navigation::leg(fixes, next, t).map_or_else(
+        || {
+            fixes
+                .get(next)
+                .is_none_or(|fix| fix.path_terminator != "IF")
+        },
+        |leg| leg.cross_track_nm > 2.0,
+    ) {
+        return false;
+    }
+    let mut point = [t.latitude, t.longitude];
+    let mut distance = 0.0;
+    for (index, fix) in fixes.iter().enumerate().skip(next).take(16) {
+        let target = [fix.latitude, fix.longitude];
+        distance += openatc_core::arrival::distance_nm(point, target);
+        point = target;
+        let Some(limit) = fix
+            .maximum_speed_knots
+            .filter(|v| v.is_finite() && *v > 0.0)
+        else {
+            continue;
+        };
+        if ias <= limit + 5.0 {
+            continue;
+        }
+        let policy = &state.vertical_policy;
+        let seconds =
+            policy.speed_notice_seconds + (ias - limit) / policy.speed_notice_deceleration;
+        let lead = (t.ground_speed_knots.max(ias) * seconds / 3600.0)
+            .clamp(policy.speed_notice_min_nm, policy.speed_notice_max_nm);
+        if distance > lead || state.flow.monitor.speed_reminder == Some((index, limit)) {
+            return false;
+        }
+        let exact = fix.minimum_speed_knots == Some(limit);
+        let slots = [
+            ("callsign", state.session.plan.callsign.clone()),
+            ("fix", fix.identifier.clone()),
+            ("speed", format!("{limit:.0}")),
+        ];
+        let text = say(
+            if exact {
+                "published_speed_exact_reminder"
+            } else {
+                "published_speed_maximum_reminder"
+            },
+            &slots,
+        );
+        let pilot = say(
+            if exact {
+                "pilot_published_speed_exact"
+            } else {
+                "pilot_published_speed_maximum"
+            },
+            &slots,
+        );
+        state.flow.monitor.speed_reminder = Some((index, limit));
+        transmit(state, station, text, Some(pilot));
+        return true;
+    }
+    false
 }
 fn correct(state: &mut EngineState, station: &Station, text: String, pilot: Option<String>) {
     if !state.settings.enforce_clearance_constraints {
@@ -689,7 +785,12 @@ fn climb(state: &mut EngineState, station: &Station) {
     c.sequence = sequence;
     c.acknowledged = false;
     c.readback_scope = "altitude".into();
-    transmit(state, station, text, None);
+    transmit(
+        state,
+        station,
+        text,
+        Some(say("pilot_continue_climb", &slots)),
+    );
 }
 
 fn descend(state: &mut EngineState, station: &Station) -> bool {
@@ -764,7 +865,12 @@ fn descend(state: &mut EngineState, station: &Station) -> bool {
     c.readback_scope = "altitude".into();
     c.acknowledged = false;
     state.session.phase = PhaseCode::Arrival;
-    transmit(state, station, text, None);
+    transmit(
+        state,
+        station,
+        text,
+        Some(say("pilot_continue_descent", &slots)),
+    );
     true
 }
 
@@ -839,23 +945,24 @@ fn destination_descent(state: &mut EngineState, station: &Station) -> bool {
     if target < transition && pressure.is_none() {
         return false;
     }
+    let slots = [
+        ("callsign", state.session.plan.callsign.clone()),
+        (
+            "altitude",
+            openatc_core::altitude_text(
+                f64::from(target),
+                openatc_core::UnitSystem::Imperial,
+                true,
+            ),
+        ),
+    ];
     let mut text = say(
         if state.session.telemetry.vertical_speed_fpm < -200.0 {
             "automatic_continue_descent"
         } else {
             "automatic_descent"
         },
-        &[
-            ("callsign", state.session.plan.callsign.clone()),
-            (
-                "altitude",
-                openatc_core::altitude_text(
-                    f64::from(target),
-                    openatc_core::UnitSystem::Imperial,
-                    true,
-                ),
-            ),
-        ],
+        &slots,
     );
     if target < transition
         && let Some(pressure) = pressure
@@ -884,13 +991,161 @@ fn destination_descent(state: &mut EngineState, station: &Station) -> bool {
     clearance.readback_scope = "altitude".into();
     clearance.acknowledged = false;
     state.session.phase = PhaseCode::Arrival;
-    transmit(state, station, text, None);
+    transmit(
+        state,
+        station,
+        text,
+        Some(say("pilot_continue_descent", &slots)),
+    );
     true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn speed_fixture() -> (EngineState, Station) {
+        let mut state = crate::test_state();
+        state.session.phase = PhaseCode::Arrival;
+        state.flow.monitor.next_fix = 1;
+        state.session.telemetry = openatc_core::state::Telemetry {
+            position_valid: true,
+            on_ground: false,
+            longitude: 0.9,
+            indicated_speed_knots: Some(290.0),
+            ground_speed_knots: 400.0,
+            heading_degrees: 90.0,
+            altitude_feet: 9000.0,
+            indicated_altitude_feet: Some(9000.0),
+            ..Default::default()
+        };
+        state.session.clearance = Some(openatc_core::state::Clearance {
+            acknowledged: true,
+            altitude_feet: 9000,
+            ..Default::default()
+        });
+        state.session.plan.fixes = vec![
+            openatc_core::state::RouteFix {
+                longitude: 0.0,
+                ..Default::default()
+            },
+            openatc_core::state::RouteFix {
+                identifier: "LIMIT".into(),
+                longitude: 1.0,
+                maximum_speed_knots: Some(250.0),
+                path_terminator: "TF".into(),
+                ..Default::default()
+            },
+        ];
+        (
+            state,
+            Station {
+                service: "Center".into(),
+                ..Default::default()
+            },
+        )
+    }
+    #[test]
+    fn published_speed_notice_is_early_once_and_uses_ias() {
+        let (mut state, station) = speed_fixture();
+        tick(&mut state, &station);
+        let entry = state.session.transcript.last().unwrap();
+        assert!(entry.text.contains("250") && entry.text.contains("LIMIT"));
+        assert!(entry.pilot_reply.contains("250") && entry.pilot_reply.contains("LIMIT"));
+        assert_eq!(state.flow.monitor.next_fix, 1);
+        assert_eq!(
+            state.session.clearance.as_ref().unwrap().altitude_feet,
+            9000
+        );
+        state
+            .session
+            .transcript
+            .last_mut()
+            .unwrap()
+            .pilot_reply
+            .clear();
+        state.flow.monitor.last_call = None;
+        tick(&mut state, &station);
+        assert_eq!(state.session.transcript.len(), 1);
+        for ias in [Some(240.0), None] {
+            let (mut state, station) = speed_fixture();
+            state.session.telemetry.indicated_speed_knots = ias;
+            assert!(!published_speed_reminder(&mut state, &station));
+            assert!(state.session.transcript.is_empty());
+        }
+        let (mut state, station) = speed_fixture();
+        state.session.telemetry.longitude = 0.1;
+        assert!(!published_speed_reminder(&mut state, &station));
+        state.session.telemetry.longitude = 0.9;
+        state.flow.monitor.speed = Some(280.0);
+        assert!(!published_speed_reminder(&mut state, &station));
+        state.flow.monitor.speed = None;
+        state.session.plan.fixes[1].minimum_speed_knots = Some(250.0);
+        assert!(published_speed_reminder(&mut state, &station));
+        assert!(
+            !state
+                .session
+                .transcript
+                .last()
+                .unwrap()
+                .text
+                .contains("or less")
+        );
+    }
+    #[test]
+    fn successive_descent_readbacks_keep_direction_altitude_and_sequence() {
+        let (mut state, mut station) = speed_fixture();
+        station.name = "Test Center".into();
+        state.session.clearance.as_mut().unwrap().altitude_feet = 12000;
+        for (target, observed) in [(9000, 11000.0), (6000, 9085.0)] {
+            state.session.telemetry.altitude_feet = observed;
+            state.session.telemetry.indicated_altitude_feet = Some(observed);
+            state.session.plan.fixes[1].maximum_altitude_feet = Some(target);
+            assert!(descend(&mut state, &station));
+            let reply = openatc_core::readback::auto_reply(&state.session).unwrap();
+            assert_eq!(reply.altitude_feet, target);
+            assert_eq!(
+                reply.clearance_sequence,
+                state.session.clearance.as_ref().unwrap().sequence
+            );
+            assert!(
+                reply.text.to_lowercase().contains("descen"),
+                "{}",
+                reply.text
+            );
+            assert!(reply.text.contains(&target.to_string()), "{}", reply.text);
+            assert!(!reply.text.to_lowercase().contains("maintaining"));
+            state.session.clearance.as_mut().unwrap().acknowledged = true;
+            state
+                .session
+                .transcript
+                .last_mut()
+                .unwrap()
+                .pilot_reply
+                .clear();
+        }
+    }
+    #[test]
+    fn missed_crossing_reports_only_the_failed_quantity() {
+        for (altitude, ias, expected, excluded) in [
+            (9000.0, Some(290.0), "speed", "altitude"),
+            (9500.0, Some(240.0), "altitude", "speed"),
+            (9500.0, None, "altitude", "speed"),
+        ] {
+            let (mut state, station) = speed_fixture();
+            state.settings.enforce_clearance_constraints = true;
+            state.session.telemetry.longitude = 1.01;
+            state.session.telemetry.indicated_altitude_feet = Some(altitude);
+            state.session.telemetry.indicated_speed_knots = ias;
+            state.session.plan.fixes[1].maximum_altitude_feet = Some(9000);
+            state.session.plan.fixes[1].maximum_altitude_is_flight_level = Some(false);
+            tick(&mut state, &station);
+            let entry = state.session.transcript.last().unwrap();
+            assert!(entry.text.contains(expected), "{}", entry.text);
+            assert!(!entry.text.contains(excluded), "{}", entry.text);
+            assert!(entry.pilot_reply.contains(expected));
+            assert!(!entry.pilot_reply.contains(excluded));
+        }
+    }
     #[test]
     fn waypoint_limits_use_the_published_pressure_reference() {
         let fixture = |flight_level: bool, indicated: f64| {
@@ -1139,6 +1394,14 @@ mod tests {
             ..Default::default()
         };
         navigation::enrich(&mut state.session.plan, &root);
+        let devox = state
+            .session
+            .plan
+            .fixes
+            .iter()
+            .find(|fix| fix.identifier == "DEVOX")
+            .unwrap();
+        assert_eq!(devox.maximum_speed_knots, Some(250.0));
         state.session.phase = PhaseCode::Cruise;
         state.session.clearance = Some(openatc_core::state::Clearance {
             altitude_feet: 18000,
@@ -1181,6 +1444,35 @@ mod tests {
                 .unwrap()
                 .text
                 .contains("MC588")
+        );
+        state.session.clearance.as_mut().unwrap().acknowledged = true;
+        state
+            .session
+            .transcript
+            .last_mut()
+            .unwrap()
+            .pilot_reply
+            .clear();
+        state.flow.monitor.last_call = None;
+        state.session.telemetry.indicated_speed_knots = Some(290.0);
+        state.session.telemetry.ground_speed_knots = 400.0;
+        tick(
+            &mut state,
+            &Station {
+                service: "Center".into(),
+                ..Default::default()
+            },
+        );
+        let entry = state.session.transcript.last().unwrap();
+        assert!(
+            entry.text.contains("DEVOX") && entry.text.contains("250"),
+            "{}",
+            entry.text
+        );
+        assert!(entry.pilot_reply.contains("DEVOX") && entry.pilot_reply.contains("250"));
+        assert_eq!(
+            state.session.clearance.as_ref().unwrap().altitude_feet,
+            12000
         );
     }
     #[test]

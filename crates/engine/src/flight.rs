@@ -417,6 +417,44 @@ pub fn request(
         state.flow.evidence = 0;
         state.session.recommended_frequency_khz = station.khz;
         state.session.frequency_sequence = 0;
+        let pending_readback = state
+            .session
+            .clearance
+            .as_ref()
+            .is_some_and(|c| !c.acknowledged)
+            || state
+                .session
+                .transcript
+                .iter()
+                .rev()
+                .find(|entry| entry.is_controller_instruction())
+                .is_some_and(|entry| !entry.pilot_reply.is_empty());
+        let mut checkin = request.clone();
+        if !checkin.controller_initiated {
+            add_transmission(
+                &mut state.session,
+                &callsign,
+                &checkin.text,
+                &SpeechTag::default(),
+            );
+            checkin.controller_initiated = true;
+        }
+        // The normal arrival gate may answer first contact with the clearance
+        // itself. If it cannot, retain the ordinary check-in acknowledgement.
+        if !pending_readback
+            && station.service == "Tower"
+            && state.flow.approach_cleared
+            && !state.flow.landing_cleared
+            && arrival_tick(state, station)
+        {
+            let text = state
+                .session
+                .transcript
+                .last()
+                .map(|entry| entry.text.clone())
+                .unwrap_or_default();
+            return Some(json!({"accepted":true,"message":text}));
+        }
         let altitude = openatc_core::altitude_text(
             state.session.telemetry.reported_altitude_feet(),
             openatc_core::UnitSystem::Imperial,
@@ -486,7 +524,14 @@ pub fn request(
             )),
             _ => None,
         };
-        let result = respond(state, request, tag, true, text);
+        let result = respond(state, &checkin, tag, true, text);
+        if pending_readback {
+            // Contact acknowledgement must not hide an instruction still awaiting readback.
+            if let Some(last) = state.session.transcript.last_mut() {
+                last.information_only = true;
+            }
+            return Some(result);
+        }
         if let Some(reply) = reply
             && let Some(last) = state.session.transcript.last_mut()
         {
@@ -1988,6 +2033,112 @@ mod ownership_tests {
         );
     }
 
+    #[test]
+    fn tower_checkin_receives_one_ready_or_withheld_landing_response() {
+        for (blocked, radio, prepared) in [
+            (false, openatc_core::state::Radio::Com1, false),
+            (true, openatc_core::state::Radio::Com1, false),
+            (false, openatc_core::state::Radio::Com2, true),
+            (true, openatc_core::state::Radio::Com2, true),
+        ] {
+            let (mut state, _, tower) = arrival_state();
+            state.flow.approach_cleared = true;
+            state.session.arrival_wake_conflict = blocked;
+            if prepared {
+                add_transmission(
+                    &mut state.session,
+                    "COPILOT",
+                    "Test Tower, TEST, established final",
+                    &SpeechTag {
+                        radio: Some(radio),
+                        ..Default::default()
+                    },
+                );
+            }
+            let response = request(
+                &mut state,
+                &tower,
+                &Request {
+                    radio,
+                    controller_initiated: prepared,
+                    intent: "checkin".into(),
+                    text: "Test Tower, TEST, established final".into(),
+                    ..Default::default()
+                },
+                &SpeechTag {
+                    position: tower.name.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(response["accepted"], true);
+            assert_eq!(state.session.transcript.len(), 2);
+            let controller = state.session.transcript.last().unwrap();
+            assert_eq!(controller.speaker, "ATC");
+            assert_eq!(controller.radio, Some(radio));
+            assert!(!controller.text.to_lowercase().contains("roger"));
+            assert_eq!(state.flow.landing_cleared, !blocked);
+            assert_eq!(controller.text.contains("cleared to land"), !blocked);
+            if !blocked {
+                assert!(!controller.pilot_reply.is_empty());
+                assert!(!arrival_tick(&mut state, &tower));
+                assert_eq!(state.session.transcript.len(), 2);
+            }
+        }
+        let (mut state, _, tower) = arrival_state();
+        state.flow.approach_cleared = true;
+        // Away from the protected final, acknowledge contact without inventing a clearance.
+        state.session.telemetry.longitude = 1.0;
+        request(
+            &mut state,
+            &tower,
+            &Request {
+                intent: "checkin".into(),
+                text: "Test Tower, TEST".into(),
+                ..Default::default()
+            },
+            &SpeechTag::default(),
+        )
+        .unwrap();
+        assert_eq!(state.session.transcript.len(), 2);
+        assert!(!state.flow.landing_cleared);
+    }
+    #[test]
+    fn tower_checkin_cannot_hide_a_pending_instruction_or_grant_landing() {
+        let (mut state, _, tower) = arrival_state();
+        state.flow.approach_cleared = true;
+        let tag = SpeechTag {
+            position: tower.name.clone(),
+            ..Default::default()
+        };
+        add_transmission(&mut state.session, "ATC", "Maintain 4000 feet.", &tag);
+        let sequence = state.session.transcript.last().unwrap().sequence;
+        state.session.transcript.last_mut().unwrap().pilot_reply =
+            "Maintain 4000 feet, TEST.".into();
+        request(
+            &mut state,
+            &tower,
+            &Request {
+                intent: "checkin".into(),
+                text: "Test Tower, TEST".into(),
+                ..Default::default()
+            },
+            &tag,
+        )
+        .unwrap();
+        assert!(!state.flow.landing_cleared);
+        assert!(state.session.transcript.last().unwrap().information_only);
+        let outstanding = state
+            .session
+            .transcript
+            .iter()
+            .rev()
+            .find(|entry| entry.is_controller_instruction())
+            .unwrap();
+        assert_eq!(outstanding.sequence, sequence);
+        assert_eq!(outstanding.pilot_reply, "Maintain 4000 feet, TEST.");
+        assert!(!arrival_tick(&mut state, &tower));
+    }
     #[test]
     fn approach_tower_checkin_and_landing_are_separate_permissions() {
         let (mut state, approach, tower) = arrival_state();

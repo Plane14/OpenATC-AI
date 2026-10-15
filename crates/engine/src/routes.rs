@@ -347,6 +347,7 @@ fn reset_flight(state: &mut crate::EngineState) {
     let demo = state.session.demo;
     let next_sequence = state.session.next_sequence;
     state.session = State::default();
+    state.atis_logged.clear();
     state.flow = super::flight::FlightFlow::default();
     state.crew.checklist = None;
     state.crew.batch = None;
@@ -1015,7 +1016,7 @@ pub async fn post_speak(AxumState(state): AxumState<Shared>, Json(body): Json<Va
             .and_then(Value::as_bool)
             .unwrap_or(false),
     );
-    let (callsign, airports) = {
+    let (callsign, airports, pronunciation) = {
         let current = state.read().await;
         let mut airports = Vec::new();
         for token in text.split_whitespace() {
@@ -1034,10 +1035,18 @@ pub async fn post_speak(AxumState(state): AxumState<Shared>, Json(body): Json<Va
                 airports.push((id.to_owned(), airport.name.clone()));
             }
         }
-        (current.session.plan.callsign.clone(), airports)
+        (
+            current.session.plan.callsign.clone(),
+            airports,
+            current.pronunciation.clone(),
+        )
     };
-    let spoken_text =
-        openatc_core::radiotelephony::spoken_with_airports(&text, &callsign, &airports);
+    let spoken_text = openatc_core::radiotelephony::spoken_with_pronunciation(
+        &text,
+        &callsign,
+        &airports,
+        &pronunciation,
+    );
     let tts_body = json!({
         "model": settings.tts_model,
         "voice": voice,
@@ -2912,6 +2921,56 @@ fn clearance_rejection(
 #[cfg(test)]
 mod chatter_tests {
     use super::*;
+    #[tokio::test]
+    async fn speech_proxy_pronounces_taxiways_without_editing_the_transcript() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let inputs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = inputs.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/v1/audio/speech",
+                    axum::routing::post(move |Json(body): Json<Value>| {
+                        let captured = captured.clone();
+                        async move {
+                            captured
+                                .lock()
+                                .unwrap()
+                                .push(body["input"].as_str().unwrap().to_owned());
+                            vec![0u8; 44]
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let mut state = crate::test_state();
+        state.settings.tts_url = format!("http://{address}");
+        state.session.plan.callsign = "C-GTLT".into();
+        let text = "C-GTLT, Taxi via T, A, A1, hold short of runway 04L.";
+        add_transmission(&mut state.session, "ATC", text, &SpeechTag::default());
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+        for speaker in ["atc", "copilot", "pilot"] {
+            let response = post_speak(
+                AxumState(shared.clone()),
+                Json(json!({"text":text,"speaker":speaker})),
+            )
+            .await;
+            assert!(response.status().is_success());
+        }
+        let inputs = inputs.lock().unwrap();
+        assert_eq!(inputs.len(), 3);
+        assert!(inputs.iter().all(|input| {
+            input.contains("via Tango, Alfa, Alfa one, hold short of runway zero four left.")
+        }));
+        drop(inputs);
+        assert_eq!(shared.read().await.session.transcript[0].text, text);
+        server.abort();
+    }
+
     #[test]
     fn cockpit_voices_are_clean_while_received_radio_keeps_effects() {
         let mut settings = Settings::default();

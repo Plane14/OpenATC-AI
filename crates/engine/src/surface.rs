@@ -61,9 +61,21 @@ pub async fn post_telemetry(
         if crate::debug_jump::waiting(&mut state) {
             return Json(json!({"accepted":true})).into_response();
         }
+        let previous_receivers = [
+            state
+                .session
+                .telemetry
+                .frequency(openatc_core::state::Radio::Com1),
+            state
+                .session
+                .telemetry
+                .frequency(openatc_core::state::Radio::Com2),
+        ];
+        let was_powered = state.session.telemetry.radio_power;
         if let Err(error) = update_flight_phase(&mut state.session, &telemetry) {
             return bad_request(&error);
         }
+        crate::radio::observe_atis_tuning(&mut state, previous_receivers, was_powered);
         let channel = state.session.control_frequency().unwrap_or(0);
         if state
             .pending_copilot_reply

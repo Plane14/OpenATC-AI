@@ -7,3 +7,9 @@ minimum_change_feet = 500
 # Select and announce a published runway ILS when the imported plan omits it.
 # An explicitly selected approach always takes precedence.
 select_runway_ils = true
+
+# Published-speed reminder timing only; these margins do not model braking capability.
+speed_notice_seconds = 90.0
+speed_notice_deceleration = 1.0
+speed_notice_min_nm = 8.0
+speed_notice_max_nm = 30.0

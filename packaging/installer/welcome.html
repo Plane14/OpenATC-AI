@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenATC @PRODUCT@ · @VERSION@</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #06131e; color: #e8f1f6; font: 17px/1.65 system-ui, sans-serif; }
+  main { max-width: 980px; margin: 36px auto; border: 1px solid #244355; border-radius: 16px; overflow: hidden; background: #0b1e2b; }
+  .banner { display: block; width: 100%; height: auto; }
+  article { padding: 30px 42px 38px; }
+  .version { color: #67dcef; font-size: 14px; letter-spacing: .08em; }
+  h1 { margin: 8px 0 18px; font-size: 32px; line-height: 1.2; }
+  h2 { margin-top: 28px; font-size: 20px; }
+  p { margin: 12px 0; }
+  a { color: #65ddef; text-underline-offset: 3px; }
+  .notice { padding: 14px 18px; border-left: 3px solid #39d8ee; background: #102b3a; }
+  footer { margin-top: 28px; color: #a5bdcb; font-size: 14px; }
+  @media (max-width: 600px) { main { margin: 0; border-radius: 0; } article { padding: 24px; } }
+</style>
+<main>
+  <img class="banner" src="branding/banner.png" alt="OpenATC AI — AI air traffic control for X-Plane 12">
+  <article>
+    <div class="version">VERSION @VERSION@</div>
+    <h1>@PRODUCT@</h1>
+    <p>@INTRO@</p>
+    <div class="notice">@NOTICE@</div>
+    <h2>Getting started</h2>
+    <p>@START@</p>
+    <p>For installation steps and troubleshooting, open <a href="INSTALL.md">INSTALL.md</a>. The <a href="README.md">README</a> describes features and current limitations.</p>
+    <footer>OpenATC AI · <a href="LICENSE">Project licence</a> · Third-party notices are included in the licenses folder.</footer>
+  </article>
+</main>
+</html>

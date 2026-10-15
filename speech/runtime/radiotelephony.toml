@@ -1,0 +1,8 @@
+# Spoken identifiers only; the ATC log retains its original text.
+version = 1
+letters = ["Alfa", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliett", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa", "Quebec", "Romeo", "Sierra", "Tango", "Uniform", "Victor", "Whiskey", "X-ray", "Yankee", "Zulu"]
+digits = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "niner"]
+taxi_introducers = ["via", "taxiway", "taxiways", "twy"]
+taxi_connectors = ["and", "then"]
+maximum_taxi_letters = 2
+maximum_taxi_digits = 3

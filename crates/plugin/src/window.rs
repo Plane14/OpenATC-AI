@@ -110,8 +110,8 @@ impl WindowState {
                 && [left, top, right, bottom]
                     .iter()
                     .all(|value| (-100000..=100000).contains(value))
-                && right - left >= 520
-                && top - bottom >= 180
+                && right - left >= 442
+                && top - bottom >= 153
                 && right - left <= 4800
                 && top - bottom <= 3200
             {
@@ -123,8 +123,8 @@ impl WindowState {
                     &mut screen_right,
                     &mut screen_bottom,
                 );
-                let width = (right - left).min((screen_right - screen_left).max(520));
-                let height = (top - bottom).min((screen_top - screen_bottom).max(180));
+                let width = (right - left).min((screen_right - screen_left).max(442));
+                let height = (top - bottom).min((screen_top - screen_bottom).max(153));
                 let left = left.clamp(screen_left, (screen_right - width).max(screen_left));
                 let top = top.clamp((screen_bottom + height).min(screen_top), screen_top);
                 xplane_sys::XPLMSetWindowGeometry(window, left, top, left + width, top - height);
@@ -133,20 +133,6 @@ impl WindowState {
                 xplane_sys::XPLMTakeKeyboardFocus(std::ptr::null_mut());
                 xplane_sys::XPLMSetWindowIsVisible(window, 0);
                 return;
-            }
-            let minimum_size = [
-                actions.minimum_size[0].round() as i32,
-                actions.minimum_size[1].round() as i32,
-            ];
-            if minimum_size[0] > 0 && minimum_size != self.minimum_size {
-                self.minimum_size = minimum_size;
-                xplane_sys::XPLMSetWindowResizingLimits(
-                    window,
-                    minimum_size[0],
-                    minimum_size[1],
-                    4800,
-                    3200,
-                );
             }
             let (mut left, mut top, mut right, mut bottom) = (0, 0, 0, 0);
             xplane_sys::XPLMGetWindowGeometry(
@@ -157,6 +143,31 @@ impl WindowState {
                 &raw mut bottom,
             );
             let popped_out = xplane_sys::XPLMWindowIsPoppedOut(window) != 0;
+            let mut os_bounds = [left, top, right, bottom];
+            if popped_out {
+                xplane_sys::XPLMGetWindowGeometryOS(
+                    window,
+                    &raw mut os_bounds[0],
+                    &raw mut os_bounds[1],
+                    &raw mut os_bounds[2],
+                    &raw mut os_bounds[3],
+                );
+            }
+            let minimum_size = [
+                actions.minimum_size[0].round() as i32,
+                actions.minimum_size[1].round() as i32,
+            ];
+            let limits_changed = minimum_size[0] > 0 && minimum_size != self.minimum_size;
+            if limits_changed {
+                self.minimum_size = minimum_size;
+                xplane_sys::XPLMSetWindowResizingLimits(
+                    window,
+                    minimum_size[0],
+                    minimum_size[1],
+                    4800,
+                    3200,
+                );
+            }
             if actions.toggle_pop_out {
                 if popped_out {
                     xplane_sys::XPLMSetWindowPositioningMode(
@@ -193,13 +204,7 @@ impl WindowState {
             if popped_out {
                 let boxel_width = (right - left).max(1) as f32;
                 let boxel_height = (top - bottom).max(1) as f32;
-                xplane_sys::XPLMGetWindowGeometryOS(
-                    window,
-                    &raw mut left,
-                    &raw mut top,
-                    &raw mut right,
-                    &raw mut bottom,
-                );
+                [left, top, right, bottom] = os_bounds;
                 pixel_scale = [
                     (right - left) as f32 / boxel_width,
                     (top - bottom) as f32 / boxel_height,
@@ -230,7 +235,9 @@ impl WindowState {
             } else {
                 bottom = bottom.min(top - minimum_height);
             }
-            if current_bounds != [left, top, right, bottom] {
+            // SDK resizing limits may reposition a window. Use the geometry
+            // captured beforehand so changing modes preserves the screen anchor.
+            if limits_changed || current_bounds != [left, top, right, bottom] {
                 if popped_out {
                     xplane_sys::XPLMSetWindowGeometryOS(window, left, top, right, bottom);
                 } else {

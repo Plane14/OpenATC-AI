@@ -85,6 +85,39 @@ fn read_prompt_file(dir: &Path, name: &str) -> String {
     text
 }
 
+/// Load speech-only identifier pronunciation once, retaining bundled data on invalid overrides.
+pub fn load_pronunciation(
+    config_dir: &Path,
+    speech_source: &str,
+) -> openatc_core::radiotelephony::Pronunciation {
+    use std::io::Read;
+    let mut paths = vec![config_dir.join("speech/runtime/radiotelephony.toml")];
+    if !speech_source.is_empty() {
+        paths.push(Path::new(speech_source).join("runtime/radiotelephony.toml"));
+    }
+    for path in paths {
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                eprintln!("Radio pronunciation {}: {error}", path.display());
+                continue;
+            }
+        };
+        let mut text = String::new();
+        match file
+            .take(16385)
+            .read_to_string(&mut text)
+            .map_err(|error| error.to_string())
+            .and_then(|_| openatc_core::radiotelephony::Pronunciation::parse(&text))
+        {
+            Ok(policy) => return policy,
+            Err(error) => eprintln!("Invalid radio pronunciation {}: {error}", path.display()),
+        }
+    }
+    Default::default()
+}
+
 /// Replace every `{{callsign}}` placeholder.
 #[must_use]
 pub fn fill_prompt(text: &str, callsign: &str) -> String {

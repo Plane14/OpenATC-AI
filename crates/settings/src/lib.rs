@@ -544,8 +544,8 @@ impl Settings {
             if ![left, top, right, bottom]
                 .iter()
                 .all(|value| (-100000..=100000).contains(value))
-                || !(520..=4800).contains(&width)
-                || !(180..=3200).contains(&height)
+                || !(442..=4800).contains(&width)
+                || !(153..=3200).contains(&height)
             {
                 return Err(ValidationError::OutOfRange("window bounds", width as f32));
             }
@@ -835,6 +835,12 @@ mod layout_tests {
         let old: super::Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(old.window_bounds, None);
         assert_eq!(old.transcript_fraction, 0.57);
+        // Native minimum dimensions scale down with the supported 85% UI scale.
+        settings.ui_scale = 0.85;
+        settings.window_bounds = Some([30, 1000, 472, 847]);
+        settings.validate().unwrap();
+        settings.window_bounds = Some([30, 1000, 471, 847]);
+        assert!(settings.validate().is_err());
         settings.transcript_fraction = f32::NAN;
         assert!(settings.validate().is_err());
     }

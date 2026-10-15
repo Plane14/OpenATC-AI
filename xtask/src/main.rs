@@ -1,6 +1,7 @@
 //! Build, install and validation tools for OpenATC.
 mod checks;
 mod distribution;
+mod installer;
 mod release;
 use std::{
     error::Error,
@@ -33,6 +34,10 @@ fn main() {
     };
     if let Err(error) = result {
         eprintln!("{error}");
+        #[cfg(target_os = "macos")]
+        if launcher {
+            let _ = release::installer_message(&error.to_string());
+        }
         std::process::exit(1);
     }
 }
@@ -47,6 +52,7 @@ fn dispatch() -> Result {
         "install-plugin" => distribution::install_plugin(Path::new(arg(1)?), true),
         "install-ai" => distribution::install_ai(Path::new(arg(1)?)),
         "release-package" => release::package(arg(1)?, arg(2)?, arg(3)?),
+        "release-preflight" => release::preflight(arg(1)?),
         "fetch-package-tools" => release::fetch_tools(Path::new(arg(1)?)),
         "package" => distribution::package(arg(1)?),
         "collect-artifacts" => distribution::collect(

@@ -1014,6 +1014,34 @@ impl Plugin for OpenAtc {
     fn disable(&mut self, _xpapi: &mut xplane::XPAPI) {
         self.flight_loop = None;
         self.heartbeat = None;
+        let final_settings = {
+            let shared = self
+                .shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            shared
+                .interface
+                .as_ref()
+                .filter(|interface| interface.settings_loaded)
+                .map(|interface| {
+                    let mut settings = interface.settings.clone();
+                    settings.transcript_fraction = interface.transcript_fraction;
+                    (
+                        interface.engine.endpoint(),
+                        serde_json::to_value(&settings).unwrap_or(serde_json::Value::Null),
+                    )
+                })
+        };
+        // Flush the last drag/splitter change before stopping the companion; the
+        // normal debounce may not have elapsed when the pilot exits immediately.
+        if let Some((endpoint, settings)) = final_settings {
+            let _ = openatc_http::post_json(
+                &endpoint,
+                "/settings",
+                &settings,
+                Duration::from_millis(250),
+            );
+        }
         // Only our local companion accepts this session's PID. Independent
         // engines reject it; the remote AI/STT/TTS server is never contacted.
         let _ = openatc_http::post_json(

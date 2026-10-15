@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 
-/// Keep friendly questions unless the captain is closing or deferring the exchange.
-async fn pace_cabin_reply(
+/// Retain only questions needed to clarify the current operation.
+async fn pace_crew_reply(
     client: &reqwest::Client,
     settings: &openatc_settings::Settings,
     prompt: &str,
@@ -27,13 +27,13 @@ async fn pace_cabin_reply(
     if !reply.contains(['?', '？']) {
         return reply.to_owned();
     }
-    let schema = json!({"type":"object","additionalProperties":false,"required":["may_ask"],"properties":{"may_ask":{"type":"boolean"}}});
+    let schema = json!({"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"type":"string","enum":["answer","clarification","follow_up"]}}});
     let context =
         json!({"previousCrewReply":previous_reply,"captainMessage":request,"proposedReply":reply})
             .to_string();
     let decision = tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        crate::llm::structured_format::<BTreeMap<String, bool>>(
+        crate::llm::structured_format::<BTreeMap<String, String>>(
             client,
             &settings.ai_url,
             &settings.ai_model,
@@ -48,8 +48,8 @@ async fn pace_cabin_reply(
     .and_then(Result::ok);
     if decision
         .as_ref()
-        .and_then(|decision| decision.get("may_ask"))
-        != Some(&false)
+        .and_then(|decision| decision.get("kind"))
+        .is_some_and(|kind| matches!(kind.as_str(), "answer" | "clarification"))
     {
         return reply.to_owned();
     }
@@ -189,6 +189,13 @@ pub async fn observe(
     }
     Json(json!({"accepted":true})).into_response()
 }
+fn speaker(role: &str) -> &'static str {
+    match role {
+        "cabin" => "ATTENDANT",
+        "ground" => "GROUND",
+        _ => "COPILOT",
+    }
+}
 pub(crate) fn speak(s: &mut crate::EngineState, role: &str, text: &str) {
     let voice = match role {
         "cabin" => &s.settings.attendant_voice,
@@ -198,11 +205,7 @@ pub(crate) fn speak(s: &mut crate::EngineState, role: &str, text: &str) {
     .clone();
     add_transmission(
         &mut s.session,
-        match role {
-            "cabin" => "ATTENDANT",
-            "ground" => "GROUND",
-            _ => "COPILOT",
-        },
+        speaker(role),
         text,
         &SpeechTag {
             voice,
@@ -489,6 +492,7 @@ async fn compose(
         "humourAllowed":humour_allowed}).to_string();
     if social_only {
         context = json!({"phase":s.session.phase,"onGround":s.session.telemetry.on_ground,
+            "groundSpeedKnots":s.session.telemetry.ground_speed_knots,"departure":s.session.plan.departure,"destination":s.session.plan.destination,
             "passengers":s.session.plan.passengers,"humourAllowed":humour_allowed,
             "conversationNotes":s.crew.memories.get(role),"continuity":"Use the notes for facts about prior conversation; answer the current message, never recite an earlier reply"}).to_string();
     }
@@ -496,6 +500,7 @@ async fn compose(
         &[
             role_prompt.as_str(),
             personality.as_str(),
+            s.prompts.guidance.get("crew_conversation_rules"),
             if social_only {
                 s.prompts.guidance.get("crew_social_only")
             } else {
@@ -507,6 +512,15 @@ async fn compose(
         if social_only { &[] } else { &examples },
         &context,
     );
+    let pacing_prompt = s.prompts.guidance.get("crew_follow_up").to_owned();
+    let previous_reply = s
+        .session
+        .transcript
+        .iter()
+        .rev()
+        .find(|entry| entry.speaker == speaker(role))
+        .map(|entry| entry.text.clone())
+        .unwrap_or_default();
     let generation = s.session_generation;
     let aircraft = s.crew.aircraft.clone();
     let client = s.client.clone();
@@ -585,6 +599,15 @@ async fn compose(
         );
         return fallback.to_owned();
     };
+    let reply = pace_crew_reply(
+        &client,
+        &settings,
+        &pacing_prompt,
+        request,
+        &reply,
+        &previous_reply,
+    )
+    .await;
     if (if social_only {
         crate::llm::spoken(&reply).is_ok() && reply.len() <= 3000
     } else {
@@ -794,12 +817,12 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         let interpretation_context = s.prompts.guidance.get("crew_interpret_context").to_owned();
         let authority_prompt = s.prompts.guidance.get("crew_control_authority").to_owned();
         let pacing_prompt = s.prompts.guidance.get("crew_follow_up").to_owned();
-        let previous_cabin_reply = s
+        let previous_crew_reply = s
             .session
             .transcript
             .iter()
             .rev()
-            .find(|entry| entry.speaker == "ATTENDANT")
+            .find(|entry| entry.speaker == speaker(role))
             .map(|entry| entry.text.chars().take(512).collect::<String>())
             .unwrap_or_default();
         let role_prompt = match role {
@@ -818,10 +841,11 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
             .get(&format!("crew_actions_{role}"))
             .to_owned();
         let instructions = format!(
-            "{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             crate::support::fill_prompt(role_prompt, &s.session.plan.callsign),
             personality,
-            s.prompts.crew_actions.replace("{{role}}", role)
+            s.prompts.crew_actions.replace("{{role}}", role),
+            s.prompts.guidance.get("crew_conversation_rules")
         );
         let query = request.text.to_lowercase();
         let words: Vec<_> = query
@@ -937,16 +961,14 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         });
 
         let mut intent = intent;
-        if role == "cabin"
-            && let Some(intent) = intent.as_mut()
-        {
-            intent.reply = pace_cabin_reply(
+        if let Some(intent) = intent.as_mut() {
+            intent.reply = pace_crew_reply(
                 &client,
                 &settings,
                 &pacing_prompt,
                 &request.text,
                 &intent.reply,
-                &previous_cabin_reply,
+                &previous_crew_reply,
             )
             .await;
         }
@@ -1637,7 +1659,7 @@ mod conversation_routing_tests {
     }
 
     #[tokio::test]
-    async fn pacing_preserves_invited_questions_but_closes_a_deferral() {
+    async fn pacing_preserves_operational_clarification_but_closes_social_questions() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let allowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1646,7 +1668,7 @@ mod conversation_routing_tests {
             axum::serve(listener,Router::new().route("/v1/chat/completions",post(move |Json(body):Json<serde_json::Value>| {
                 let decision=decision.clone();async move {
                     assert!(body["messages"][1]["content"].as_str().unwrap().contains("previousCrewReply"));
-                    Json(json!({"choices":[{"message":{"content":json!({"may_ask":decision.load(std::sync::atomic::Ordering::SeqCst)}).to_string()}}]}))
+                    Json(json!({"choices":[{"message":{"content":json!({"kind":if decision.load(std::sync::atomic::Ordering::SeqCst){"clarification"}else{"follow_up"}}).to_string()}}]}))
                 }
             }))).await.unwrap();
         });
@@ -1656,7 +1678,7 @@ mod conversation_routing_tests {
         let client = reqwest::Client::new();
         let text = "Understood, Captain. I'll leave you to it. How is the flight going?";
         assert_eq!(
-            pace_cabin_reply(
+            pace_crew_reply(
                 &client,
                 &settings,
                 "pacing",
@@ -1667,10 +1689,25 @@ mod conversation_routing_tests {
             .await,
             "Understood, Captain. I'll leave you to it."
         );
+        assert_eq!(
+            pace_crew_reply(
+                &client, &settings, "pacing", "Ready for landing, heading two seven five and beacon on",
+                "Got it, ready for landing. Heading two seven five and beacon on are set. How's the family doing today?", ""
+            ).await,
+            "Got it, ready for landing. Heading two seven five and beacon on are set."
+        );
         allowed.store(true, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
-            pace_cabin_reply(&client, &settings, "pacing", "Let's chat", text, "").await,
-            text
+            pace_crew_reply(
+                &client,
+                &settings,
+                "pacing",
+                "Turn the lights down",
+                "Which lights should I dim?",
+                ""
+            )
+            .await,
+            "Which lights should I dim?"
         );
         server.abort();
     }
@@ -1685,8 +1722,8 @@ mod conversation_routing_tests {
             axum::serve(listener, Router::new().route("/v1/chat/completions", post(move |Json(body):Json<serde_json::Value>| { let calls = calls.clone(); async move {
                 calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let classifier = body["messages"][0]["content"].as_str().unwrap().contains("Allowed controls:");
-                let pacing = body["response_format"]["json_schema"]["schema"]["properties"].get("may_ask").is_some();
-                let content = if pacing {json!({"may_ask":true}).to_string()}
+                let pacing = body["response_format"]["json_schema"]["schema"]["properties"].get("kind").is_some();
+                let content = if pacing {json!({"kind":"answer"}).to_string()}
                     else if classifier { json!({"reply":"Here is a quick one: why did the biscuit visit the doctor? It felt crummy!","actions":[],"cross_check":false,"memory":"Captain enjoys biscuit jokes."}).to_string() }
                     else if body.get("response_format").is_some() { json!({"reply":"Here's a quick one: why did the biscuit visit the doctor? It felt crummy!"}).to_string() }
                     else { "Here's a quick one: why did the biscuit visit the doctor? It felt crummy!".into() };
@@ -1769,7 +1806,8 @@ mod conversation_routing_tests {
                     .contains("biscuit")
             );
         }
-        assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 6);
+        // Each of four replies uses interpretation and the shared question guard.
+        assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 8);
         let state = shared.read().await;
         for role in ["cabin", "copilot", "ground"] {
             assert_eq!(

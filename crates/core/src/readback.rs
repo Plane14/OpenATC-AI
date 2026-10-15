@@ -417,7 +417,12 @@ pub fn auto_reply(state: &State) -> Option<Request> {
         "ifr".clone_into(&mut request.readback_kind);
         request.altitude_feet = clearance.altitude_feet;
         request.waypoint.clone_from(&clearance.route);
-        request.text = if !clearance.readback_scope.is_empty() {
+        request.text = if clearance.readback_scope == "altitude"
+            && last.sequence == clearance.sequence
+            && !last.pilot_reply.is_empty()
+        {
+            last.pilot_reply.clone()
+        } else if !clearance.readback_scope.is_empty() {
             crate::dialogue::say(
                 &format!("pilot_{}_amendment", clearance.readback_scope),
                 &[
@@ -508,6 +513,37 @@ pub fn checkin_text(state: &State, station: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn altitude_reply_uses_only_the_current_instruction_sequence() {
+        let mut state = State::default();
+        state.plan.callsign = "TEST".into();
+        state.clearance = Some(crate::state::Clearance {
+            altitude_feet: 6000,
+            sequence: 2,
+            readback_scope: "altitude".into(),
+            ..Default::default()
+        });
+        crate::apply::add_transmission(
+            &mut state,
+            "ATC",
+            "Descend to 9000 feet.",
+            &crate::state::SpeechTag {
+                position: "Center".into(),
+                ..Default::default()
+            },
+        );
+        state.transcript.last_mut().unwrap().sequence = 1;
+        state.transcript.last_mut().unwrap().pilot_reply = "Descending to 9000 feet, TEST.".into();
+        let reply = auto_reply(&state).unwrap();
+        assert!(reply.text.contains("6000"));
+        assert!(!reply.text.contains("9000"));
+        state.transcript.last_mut().unwrap().sequence = 2;
+        state.transcript.last_mut().unwrap().pilot_reply = "Descending to 6000 feet, TEST.".into();
+        assert_eq!(
+            auto_reply(&state).unwrap().text,
+            "Descending to 6000 feet, TEST."
+        );
+    }
     #[test]
     fn short_replies_do_not_accept_wrong_runways_directions_or_levels() {
         assert!(matches_pilot_reply(
