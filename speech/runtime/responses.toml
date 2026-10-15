@@ -17526,3 +17526,12 @@ say = ["{items}. {reply}"]
 [crew_completed_cabin_brightness_value]
 slots = ["value"]
 say = ["Cabin lighting set to {value} percent", "Cabin lights are at {value} percent"]
+
+[ground_taxi_position_on_runway]
+slots = ["runway"]
+say = [
+  "Your position is on runway {runway}. Hold position and contact Tower for runway exit instructions.",
+  "You are on runway {runway}. Hold position. Contact Tower for instructions to vacate.",
+  "You are currently on runway {runway}. Hold position and contact Tower for instructions to vacate.",
+  "Your present position is on runway {runway}. Contact Tower for instructions; hold position.",
+]

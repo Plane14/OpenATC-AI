@@ -617,6 +617,11 @@ fn apply_taxi(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome {
         state.plan.runway.clone()
     };
     let prefix = if state.demo { "DEMO: " } else { "" };
+    if !ctx.runway_taxi_authorized && matches!(request.intent.as_str(), "taxi" | "gate")
+        && let Some(runway) = super::airport::runway_at_point(airport, &airport_point(airport, position.latitude, position.longitude))
+    {
+        return reply(state, ctx, false, crate::dialogue::say("ground_taxi_position_on_runway", &[("runway", format!("{}/{}", runway.first_name, runway.second_name))]));
+    }
     let normal = if request.intent == "gate" {
         let mut found = None;
         for stand in crate::parking::candidates(airport, state, size) {

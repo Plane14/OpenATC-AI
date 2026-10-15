@@ -277,6 +277,8 @@ Approved taxiway arrows remain visible from stands within 1,200 metres of the ro
 
 Automatic crossing requests reuse the active airport data and cached controller voices. An interrupted request releases its holding-point notification for retry, while route changes and traffic holds remain protected.
 
+A Ground taxi request made from physical runway pavement identifies the occupied runway and directs the pilot to Tower for exit instructions, rather than suggesting an unrelated departure-runway backtrack. Ordinary gate taxi routing remains subject to the same runway protection.
+
 Each intervening runway is a separate clearance limit. The controller can issue a crossing instruction when you approach the hold and traffic information permits it. A crossing clearance names the runway being crossed, which may differ from the departure runway. Read back the crossing before entering. Unknown traffic information does not count as a clear runway.
 
 After the crossing, the copilot can report vacated at the observed completion point. The next taxi instruction replaces the route and requires its own readback. In manual mode physical completion can advance the crossing workflow; a vacated report is not treated as an altitude readback.
@@ -488,7 +490,7 @@ Tower keeps checking the runway after issuing landing clearance. A newly observe
 
 Simulator work is bounded: telemetry is sampled twice a second and coalesced, so an outstanding request cannot build up a queue of old positions. HTTP and speech run on workers; route planning and compliance run in the engine. The panel shares immutable snapshots instead of copying the entire route and conversation each frame, and response parsing stays outside the UI lock. Static airport bounds, taxi node lookups and ILS beams are cached when the airport loads. Ground guidance displays at most 64 nearby arrows and reuses object instances between updates. The follow-me car uses one scenery instance, no aircraft flight model or AI traffic slot, and updates at up to 20 Hz with one terrain probe per movement update. It caches its route and stops at the acknowledged limit. The arrival terrain sampler is capped at 25 probes per half-second update. These are workload limits, not an FPS guarantee; measure performance with your scenery, aircraft and traffic settings using X-Plane's Plugin Admin performance page.
 
-The header's **New flight** icon opens a confirmation inside the plugin window. Starting a new flight clears the plan, conversation, permissions, guidance and pending crew actions. Settings, controller voices and actual aircraft controls remain. Reset errors expose retry controls. Use this to begin another test instead of unloading a live plugin.
+The header's **New flight** icon opens a confirmation inside the plugin window. Starting a new flight clears the plan, conversation, permissions, guidance and pending crew actions. Settings, controller voices and actual aircraft controls remain. The aircraft stays at its current physical position; choose a parking stand in X-Plane’s flight setup when restarting a gate-to-runway test. Reset errors expose retry controls. Use this to begin another test instead of unloading a live plugin.
 
 The developer fast-forward icon offers controlled surface jumps: an acknowledged route is required to move to the next hold, and takeoff clearance is required to move to the departure runway start. It does not grant permissions or jump into airborne phases. Third-party aircraft reposition behaviour still needs simulator testing.
 

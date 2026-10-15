@@ -465,6 +465,21 @@ fn distance_nm(latitude_a: f64, longitude_a: f64, latitude_b: f64, longitude_b: 
     2.0 * 3440.06479 * sine.sqrt().asin()
 }
 
+/// Physical runway pavement beneath the reference point, without hold-line safety margins.
+#[must_use]
+pub fn runway_at_point<'a>(airport: &'a Airport, point: &Point) -> Option<&'a Runway> {
+    airport.runways.iter().find(|runway| {
+        let east=runway.second.east-runway.first.east;
+        let north=runway.second.north-runway.first.north;
+        let length=east.hypot(north);
+        if length < 100.0 {return false;}
+        let x=point.east-runway.first.east;let y=point.north-runway.first.north;
+        let along=(x*east+y*north)/length;
+        let across=(x*north-y*east).abs()/length;
+        (0.0..=length).contains(&along) && across < runway.width/2.0
+    })
+}
+
 /// True when a local point lies on (or just beside) a runway strip.
 /// Whether a point lies within a physical runway corridor.
 pub fn within_runway(airport: &Airport, point: &Point) -> bool {
