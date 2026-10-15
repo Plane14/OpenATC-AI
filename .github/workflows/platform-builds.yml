@@ -81,12 +81,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: installer-preflight-${{ matrix.platform }}
-      - name: Install Windows installer compiler
+      - name: Locate Windows installer compiler
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install innosetup --version=6.4.3 --allow-downgrade --yes --no-progress
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (!(Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'The Windows runner is missing Inno Setup 6' }
+          $version = (Get-Item -LiteralPath $compiler).VersionInfo
+          $number = [version]::new($version.FileMajorPart, $version.FileMinorPart, $version.FileBuildPart)
+          if ($number.Major -ne 6 -or $number -lt [version]'6.4.3') { throw "Unsupported Inno Setup compiler: $number" }
+          Write-Host "Using Inno Setup $number at $compiler"
+          "ISCC=$compiler" >> $env:GITHUB_ENV
       - name: Test installer discovery and transactions
         run: cargo test --locked -p xtask installer::tests
       - name: Validate installer assets and native package generation
@@ -266,12 +271,17 @@ jobs:
           cargo xtask test-flight target/release/open-atc-engine speech
       - name: Build packaging tools
         run: cargo build --locked --release -p xtask
-      - name: Install Windows installer compiler
+      - name: Locate Windows installer compiler
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install innosetup --version=6.4.3 --allow-downgrade --yes --no-progress
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (!(Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'The Windows runner is missing Inno Setup 6' }
+          $version = (Get-Item -LiteralPath $compiler).VersionInfo
+          $number = [version]::new($version.FileMajorPart, $version.FileMinorPart, $version.FileBuildPart)
+          if ($number.Major -ne 6 -or $number -lt [version]'6.4.3') { throw "Unsupported Inno Setup compiler: $number" }
+          Write-Host "Using Inno Setup $number at $compiler"
+          "ISCC=$compiler" >> $env:GITHUB_ENV
       - name: Install Linux packaging runtimes
         if: runner.os == 'Linux' && matrix.product == 'ai-server'
         run: |

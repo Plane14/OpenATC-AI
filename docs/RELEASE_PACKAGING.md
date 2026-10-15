@@ -8,7 +8,7 @@ In GitHub Actions, select **Native platform builds**, choose a version and platf
 
 Choose the branch containing the committed changes in **Use workflow from**. Manual runs upload downloadable artifacts without creating a tag or publishing a release; the version field labels the packages. Start with **preflight_only** enabled, then run again with it disabled for complete packages and the shared Rust test gate. A single platform/product can be selected for a quicker full-package trial. Download outputs from **Artifacts** on the completed run's summary page. Rerunning an older tagged run still tests that tag's original commit, so it will not include later fixes.
 
-Windows jobs use the pinned Inno Setup compiler and explicitly permit downgrading a newer runner installation. Platform preflight jobs run independently so one failure does not cancel the other platforms' diagnostic results.
+Windows jobs use the Inno Setup 6 compiler supplied by the Windows 2022 runner. Both jobs validate its file version (6.4.3 or newer within major version 6), log the selected version and pass its absolute path through `ISCC`. They do not depend on downloading an older Chocolatey package. Platform preflight jobs run independently so one failure does not cancel the other platforms' diagnostic results.
 
 - Windows compiles the actual Inno appearance settings and images into installers with small fixture payloads. It does not execute or install those fixtures.
 - macOS generates both application layouts, converts the tower icon with `sips`/`iconutil`, creates DMGs with `hdiutil`, verifies the DMGs and checks the property lists with `plutil`. It does not launch or install those fixtures.
@@ -29,7 +29,7 @@ Only run the command matching the machine. After preflight, run the manual workf
 
 ## Shared appearance
 
-`assets/installer/banner.png` and `sidebar.png` follow the supplied forum artwork, with the personal founder/developer line removed. Their derived Windows BMP and ICO assets are prebuilt inputs; packaging does not require an image editor or another image-processing dependency. `packaging/installer/windows-branding.iss` supplies the native modern wizard appearance. It intentionally uses settings compatible with the pinned Inno Setup 6.4.3 compiler rather than newer dark-style directives.
+`assets/installer/banner.png` and `sidebar.png` follow the supplied forum artwork, with the personal founder/developer line removed. Their derived Windows BMP and ICO assets are prebuilt inputs; packaging does not require an image editor or another image-processing dependency. `packaging/installer/windows-branding.iss` supplies the native modern wizard appearance. It intentionally uses settings compatible with Inno Setup 6.4.3 and newer 6.x compilers rather than newer dark-style directives.
 
 The offline `Welcome.html` is assembled from `packaging/installer/welcome.html`. The wide banner, cyan accents and dark navy background are shared across ZIP/DMG packages. Plugin and server instructions differ. All page assets are local. The Mac plugin has an installer application offering Install / Update and Remove before folder selection; the server has its own application wrapper. Both use the existing tower logo as the application icon. Finder-launched installer success and error messages are shown as native dialogs rather than relying on an invisible terminal.
 
