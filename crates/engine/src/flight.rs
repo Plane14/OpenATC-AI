@@ -98,8 +98,14 @@ fn next_station(state: &EngineState, stations: &[Station], current: &Station) ->
     if state.session.phase == PhaseCode::Departure && t.height_agl_feet < 500.0 {
         return None;
     }
-    if arrival && state.flow.approach_cleared && arrival_distance < 12.0 {
-        return choose(&["Tower"], Some(&state.session.plan.destination));
+    if arrival && state.flow.approach_cleared
+        && final_position(state).is_some_and(|distance| distance < 12.0)
+    {
+        // Transfer final-approach communications before entering Tower's surface volume.
+        return stations.iter()
+            .filter(|station| station.receivable && station.service == "Tower"
+                && station.airport == state.session.plan.destination)
+            .min_by(|a, b| a.distance_nm.total_cmp(&b.distance_nm)).cloned();
     }
     let mut ahead = t.clone();
     let position = openatc_core::arrival::destination(
@@ -1127,6 +1133,15 @@ fn arrival_tick(state: &mut EngineState, current: &Station) -> bool {
         {
             return false;
         }
+        // Issue the published entry-level amendment before clearing the approach.
+        if let Some(entry) = state.arrival_profile.as_ref()
+            .and_then(|profile| openatc_core::arrival::target(profile, &state.session.plan.arrival_runway, approach))
+            .and_then(|target| target.intercept_feet)
+            && state.session.clearance.as_ref().is_some_and(|clearance| f64::from(clearance.altitude_feet) > entry)
+            && state.session.telemetry.indicated_altitude_feet.unwrap_or(state.session.telemetry.altitude_feet) > entry + 300.0
+        {
+            return false;
+        }
         let agl = state.session.telemetry.altitude_feet - airport.elevation_feet;
         if agl < 200.0 || agl > openatc_core::arrival::gradient(3.0) * distance + 500.0 {
             return false;
@@ -1499,6 +1514,40 @@ mod ownership_tests {
         state.flow.last_correction=Some(std::time::Instant::now()-std::time::Duration::from_secs(31));
         compliance(&mut state,&approach);
         assert_eq!(state.session.transcript.len(),before+1,"An off-final aircraft still needs level compliance");
+    }
+
+    #[test]
+    fn approach_clearance_waits_for_published_entry_level_amendment() {
+        let (mut state, approach, _) = arrival_state();
+        state.session.telemetry.latitude=-0.24;
+        state.session.telemetry.altitude_feet=5000.0;
+        let mut airport=state.arrival_airport.clone().unwrap();
+        airport.navaids.push(openatc_core::airport::Navaid{kind:"GS".into(),runway:"36".into(),glide_angle:3.0,..Default::default()});
+        state.arrival_profile=Some(openatc_core::arrival::ArrivalAirport{airport,intercepts:vec![openatc_core::arrival::Intercept{procedure:"I36".into(),altitude_feet:4000.0}],..Default::default()});
+        state.session.clearance=Some(openatc_core::state::Clearance{altitude_feet:5000,acknowledged:true,..Default::default()});
+        assert!(!arrival_tick(&mut state,&approach));
+        assert!(!state.flow.approach_cleared);
+        state.session.clearance.as_mut().unwrap().altitude_feet=4000;
+        assert!(arrival_tick(&mut state,&approach),"A valid entry clearance allows the approach while descending toward it");
+    }
+
+    #[test]
+    fn final_handoff_does_not_wait_for_tower_surface_altitude() {
+        let (mut state, approach, mut tower) = arrival_state();
+        state.session.telemetry.latitude=-0.19;
+        state.session.telemetry.altitude_feet=4000.0;
+        tower.airport="TEST".into();
+        tower.receivable=true;
+        tower.coverage=vec![Coverage{floor:0.0,ceiling:2000.0,points:vec![[-1.0,-1.0],[-1.0,1.0],[1.0,1.0],[1.0,-1.0]]}];
+        assert!(!tower.coverage[0].contains(&state.session.telemetry));
+        assert!(next_station(&state,&[tower.clone()],&approach).is_none());
+        assert!(arrival_tick(&mut state,&approach));
+        assert_eq!(next_station(&state,&[tower.clone()],&approach).unwrap().khz,tower.khz);
+        state.session.telemetry.longitude=0.02;
+        assert!(next_station(&state,&[tower.clone()],&approach).is_none(),"Being near the airport is not final establishment");
+        state.session.telemetry.longitude=0.0;
+        tower.receivable=false;
+        assert!(next_station(&state,&[tower],&approach).is_none(),"A handoff still requires radio reception");
     }
 
     #[test]
