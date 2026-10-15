@@ -11,6 +11,10 @@ use std::{io::Read, path::Path, time::Instant};
 #[serde(deny_unknown_fields)]
 struct Policy {
     version: u32,
+    #[serde(default = "default_ground_knots")]
+    ground_disconnect_knots: f64,
+    #[serde(default = "default_ground_meters")]
+    ground_disconnect_meters: f64,
     #[serde(default = "default_mood")]
     passenger_mood: String,
     turbulence_preparation_seconds: f64,
@@ -23,6 +27,11 @@ struct Policy {
     fallback_tick_limit_seconds: f64,
     simulation_tick_limit_seconds: f64,
 }
+fn ground_policy_value(key: &str) -> f64 {
+    toml::from_str::<toml::Value>(include_str!("../../../cabin/behaviour.toml")).expect("bundled cabin policy")[key].as_float().expect("ground movement threshold")
+}
+fn default_ground_knots() -> f64 {ground_policy_value("ground_disconnect_knots")}
+fn default_ground_meters() -> f64 {ground_policy_value("ground_disconnect_meters")}
 fn default_mood() -> String {
     toml::from_str::<toml::Value>(include_str!("../../../cabin/behaviour.toml"))
         .ok()
@@ -40,6 +49,8 @@ impl Policy {
         if policy.passenger_mood.is_empty()
             || policy.passenger_mood.len() > 64
             || policy.version != 1
+            || !bounded(policy.ground_disconnect_knots,0.5,5.0)
+            || !bounded(policy.ground_disconnect_meters,1.0,25.0)
             || !bounded(policy.turbulence_preparation_seconds, 10.0, 600.0)
             || !bounded(policy.service_cycle_seconds, 60.0, 7200.0)
             || !bounded(
@@ -134,6 +145,10 @@ impl Cabin {
             });
         }
         Ok(Self::default())
+    }
+
+    pub fn ground_disconnect_limits(&self) -> (f64, f64) {
+        (self.policy.ground_disconnect_knots,self.policy.ground_disconnect_meters)
     }
 
     pub fn reset(&mut self) {

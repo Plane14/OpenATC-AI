@@ -12,3 +12,7 @@ simulation_tick_limit_seconds = 30.0
 
 # Baseline mood for fictional cabin conversation.
 passenger_mood = "settled"
+
+# Ground headset disconnects once actual taxi movement is observed.
+ground_disconnect_knots = 1.0
+ground_disconnect_meters = 5.0

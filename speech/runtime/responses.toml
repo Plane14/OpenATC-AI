@@ -1465,6 +1465,14 @@ say = ["Request landing clearance from Tower."]
 slots = ["callsign", "runway", "airport"]
 say = ["{callsign}, expect runway {runway} at {airport}. Report established on final. No approach clearance issued."]
 
+[arrival_expect_approach]
+slots = ["callsign", "approach"]
+say = ["{callsign}, expect {approach}.", "{callsign}, plan for {approach}.", "{callsign}, expect the {approach}.", "{callsign}, {approach} is the approach in use."]
+
+[arrival_request_approach]
+slots = ["callsign"]
+say = ["{callsign}, advise requested approach.", "{callsign}, say requested approach.", "{callsign}, which approach do you request?", "{callsign}, confirm your requested approach."]
+
 [arrival_report_final]
 slots = ["callsign", "runway"]
 say = ["{callsign}, report final runway {runway}."]
@@ -17535,3 +17543,11 @@ say = [
   "You are currently on runway {runway}. Hold position and contact Tower for instructions to vacate.",
   "Your present position is on runway {runway}. Contact Tower for instructions; hold position.",
 ]
+
+[crew_conversation_pause_ack]
+slots = []
+say = ["Understood, Captain.", "All right, Captain.", "Of course. I'll leave you to it.", "Got it, Captain."]
+
+[crew_ground_interphone_disconnected]
+slots = []
+say = ["Ground interphone disconnected. Ramp crew are no longer on the line."]

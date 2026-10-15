@@ -15,6 +15,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 
+/// Keep friendly questions unless the captain is closing or deferring the exchange.
+async fn pace_cabin_reply(client: &reqwest::Client, settings: &openatc_settings::Settings, prompt: &str, request: &str, reply: &str, previous_reply: &str) -> String {
+    if !reply.contains(['?', '？']) {return reply.to_owned();}
+    let schema=json!({"type":"object","additionalProperties":false,"required":["may_ask"],"properties":{"may_ask":{"type":"boolean"}}});
+    let context=json!({"previousCrewReply":previous_reply,"captainMessage":request,"proposedReply":reply}).to_string();
+    let decision=tokio::time::timeout(std::time::Duration::from_secs(3),crate::llm::structured_format::<BTreeMap<String,bool>>(client,&settings.ai_url,&settings.ai_model,0.0,prompt,&context,Some(schema))).await.ok().and_then(Result::ok);
+    if decision.as_ref().and_then(|decision|decision.get("may_ask")) != Some(&false) {return reply.to_owned();}
+    let question=reply.find(['?', '？']).unwrap();
+    let prefix=&reply[..question];
+    // The preceding complete statement can acknowledge the captain without another question.
+    prefix.rfind(['.','!','\n']).map(|end|prefix[..=end].trim()).filter(|text|!text.is_empty())
+        .map_or_else(||say("crew_conversation_pause_ack",&[]),str::to_owned)
+}
+
 pub struct Batch {
     outcomes: Vec<String>,
     held_reply: String,
@@ -24,6 +38,7 @@ pub struct Batch {
 
 pub struct CrewSession {
     pub memories: BTreeMap<String, String>,
+    pub ground_taxi_origin: Option<[f64;2]>,
     pub aircraft: String,
     pub profile: CrewProfile,
     pub values: BTreeMap<String, f64>,
@@ -37,6 +52,7 @@ impl Default for CrewSession {
     fn default() -> Self {
         Self {
             memories: BTreeMap::new(),
+            ground_taxi_origin: None,
             aircraft: String::new(),
             profile: CrewProfile::default(),
             values: BTreeMap::new(),
@@ -558,6 +574,30 @@ fn cross_check(s: &crate::EngineState) -> &'static str {
     }
 }
 
+/// The ramp headset is available during stand work and pushback, not during taxi or flight.
+pub fn update_ground_connection(state: &mut crate::EngineState) {
+    use openatc_core::state::PhaseCode;
+    let t=&state.session.telemetry;
+    if !t.on_ground {state.session.ground_interphone_disconnected=true;}
+    if t.on_ground && (!t.position_valid || t.paused) {return;}
+    let (knots,meters)=state.cabin.ground_disconnect_limits();
+    if t.on_ground && state.session.phase == PhaseCode::Finished && t.ground_speed_knots < knots
+        && state.session.taxi_clearance.to_parking && state.session.taxi_clearance.guidance_complete {
+        state.session.ground_interphone_disconnected=false;
+        state.crew.ground_taxi_origin=None;
+    } else if matches!(state.session.phase,PhaseCode::Taxi|PhaseCode::TaxiIn|PhaseCode::Departure) {
+        let origin=*state.crew.ground_taxi_origin.get_or_insert([t.latitude,t.longitude]);
+        if t.ground_speed_knots >= knots && openatc_core::arrival::distance_nm(origin,[t.latitude,t.longitude])*1852.0 >= meters {
+            state.session.ground_interphone_disconnected=true;
+        }
+    } else {state.crew.ground_taxi_origin=None;}
+    if state.session.ground_interphone_disconnected && state.session.crew_actions.iter().any(|action|action.role == "ground") {
+        state.session.crew_actions.retain(|action|action.role != "ground");
+        state.crew.batch=None;
+        state.crew.pushback=None;
+    }
+}
+
 pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
     let role = request.role.as_str();
     if !["copilot", "cabin", "ground"].contains(&role) {
@@ -565,6 +605,10 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
     }
     let text = request.text.to_lowercase();
     let mut s = shared.write().await;
+    update_ground_connection(&mut s);
+    if role == "ground" && s.session.ground_interphone_disconnected {
+        return Some(Json(json!({"result":{"accepted":false,"silent":true,"notice":say("crew_ground_interphone_disconnected",&[])},"state":snapshot(&s.session,&s.settings)})).into_response());
+    }
     if role == "cabin"
         && let Some(text) = crate::missions::respond(&mut s, &request.text)
     {
@@ -587,10 +631,13 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         let client = s.client.clone();
         let interpretation_context = s.prompts.guidance.get("crew_interpret_context").to_owned();
         let authority_prompt = s.prompts.guidance.get("crew_control_authority").to_owned();
+        let pacing_prompt = s.prompts.guidance.get("crew_follow_up").to_owned();
+        let previous_cabin_reply = s.session.transcript.iter().rev().find(|entry|entry.speaker == "ATTENDANT").map(|entry|entry.text.chars().take(512).collect::<String>()).unwrap_or_default();
         let role_prompt = match role { "ground" => &s.prompts.ground, "cabin" => &s.prompts.cabin, _ => &s.prompts.copilot_chat };
         let personality = match role { "ground" => &s.settings.ground_personality, "cabin" => &s.settings.attendant_personality, _ => &s.settings.copilot_personality };
-        let instructions = format!("{}\n{}\n{}\n{}",crate::support::fill_prompt(role_prompt,&s.session.plan.callsign),personality,
-            s.prompts.crew_actions.replace("{{role}}", role),s.prompts.guidance.get(&format!("crew_actions_{role}")));
+        let role_guidance = s.prompts.guidance.get(&format!("crew_actions_{role}")).to_owned();
+        let instructions = format!("{}\n{}\n{}",crate::support::fill_prompt(role_prompt,&s.session.plan.callsign),personality,
+            s.prompts.crew_actions.replace("{{role}}", role));
         let query = request.text.to_lowercase();
         let words: Vec<_> = query.split(|character: char| !character.is_alphanumeric()).filter(|word| word.len() >= 3).collect();
         let mut candidates: Vec<_> = profile.controls.iter().filter(|(_, control)| control.role == role).collect();
@@ -604,8 +651,9 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
             && !matches!(s.session.phase,openatc_core::state::PhaseCode::Departure|openatc_core::state::PhaseCode::Approach|openatc_core::state::PhaseCode::Landed)
             && s.session.mission.incident.is_empty();
         let facts = json!({"recipient":role,"onGround":s.session.telemetry.on_ground,"phase":format!("{:?}",s.session.phase),
-            "passengers":s.session.plan.passengers,"conversationNotes":s.crew.memories.get(role),"humourAllowed":humour_allowed});
-        let mut prompt = format!("{instructions}\n{}", interpretation_context.replace("{{controls}}", &json!(allowed).to_string()).replace("{{facts}}", &facts.to_string()));
+            "passengers":s.session.plan.passengers,"conversationNotes":s.crew.memories.get(role),"humourAllowed":humour_allowed,
+            "flight":{"departure":s.session.plan.departure,"destination":s.session.plan.destination,"estimatedMinutes":(s.session.plan.estimated_minutes.is_finite() && s.session.plan.estimated_minutes>0.0).then_some(s.session.plan.estimated_minutes)}});
+        let mut prompt = format!("{instructions}\n{}\n{role_guidance}", interpretation_context.replace("{{controls}}", &json!(allowed).to_string()).replace("{{facts}}", &facts.to_string()));
         drop(s);
         while crate::llm::prompt_fits(&client, &settings.ai_url, &prompt, &request.text).await == Some(false) {
             if allowed.len() > 8 {
@@ -614,7 +662,7 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                 let mut state = shared.write().await;
                 return Some(reply(&mut state, role, "crew_action_clarify", &[], false));
             }
-            prompt = format!("{instructions}\n{}", interpretation_context.replace("{{controls}}", &json!(allowed).to_string()).replace("{{facts}}", &facts.to_string()));
+            prompt = format!("{instructions}\n{}\n{role_guidance}", interpretation_context.replace("{{controls}}", &json!(allowed).to_string()).replace("{{facts}}", &facts.to_string()));
         }
         let control_schema = if allowed.is_empty() { json!({"type":"string"}) } else {json!({"type":"string","enum":allowed.iter().filter_map(|control|control["control"].as_str()).collect::<Vec<_>>()})};
         let schema = json!({"type":"object","additionalProperties":false,
@@ -649,6 +697,10 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
             intent
         });
 
+        let mut intent=intent;
+        if role == "cabin" && let Some(intent)=intent.as_mut() {
+            intent.reply=pace_cabin_reply(&client,&settings,&pacing_prompt,&request.text,&intent.reply,&previous_cabin_reply).await;
+        }
         if std::env::var_os("OPENATC_ACTOR_TRACE").is_some() { eprintln!("Crew interpretation: {:?}", intent); }
         let intent = intent.filter(|intent| intent.valid_controls(&profile, role)
             && intent.conversation_points.len() <= 16
@@ -682,6 +734,10 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
             Some(intent)
         } else {None};
         s = shared.write().await;
+        update_ground_connection(&mut s);
+        if role == "ground" && s.session.ground_interphone_disconnected {
+            return Some(Json(json!({"result":{"accepted":false,"silent":true,"notice":say("crew_ground_interphone_disconnected",&[])},"state":snapshot(&s.session,&s.settings)})).into_response());
+        }
         if s.session_generation != generation || s.crew.aircraft != aircraft {
             return Some(reply(&mut s, role, "crew_action_clarify", &[], false));
         }
@@ -1163,6 +1219,65 @@ mod conversation_routing_tests {
 
 
     #[tokio::test]
+    async fn ramp_interphone_disconnects_for_actual_taxi_and_flight_not_pushback_permission() {
+        use openatc_core::state::PhaseCode;
+        let mut state=crate::test_state();
+        state.session.telemetry.position_valid=true;
+        state.session.telemetry.on_ground=true;
+        state.session.phase=PhaseCode::Pushback;
+        state.session.telemetry.ground_speed_knots=3.0;
+        update_ground_connection(&mut state);
+        assert!(!state.session.ground_interphone_disconnected);
+        state.session.phase=PhaseCode::Taxi;
+        state.session.telemetry.ground_speed_knots=0.0;
+        update_ground_connection(&mut state);
+        assert!(!state.session.ground_interphone_disconnected,"Taxi permission at the gate is not observed taxi movement");
+        state.session.telemetry.latitude+=0.0001;
+        state.session.telemetry.ground_speed_knots=2.0;
+        update_ground_connection(&mut state);
+        assert!(state.session.ground_interphone_disconnected);
+        state.session.telemetry.ground_speed_knots=0.0;
+        update_ground_connection(&mut state);
+        assert!(state.session.ground_interphone_disconnected,"Stopping at a hold does not reconnect a ramp headset");
+        state.session.phase=PhaseCode::Cruise;state.session.telemetry.on_ground=false;
+        state.settings.ai_enabled=true;
+        let shared=std::sync::Arc::new(tokio::sync::RwLock::new(state));
+        let response=request(&shared,&Request{role:"ground".into(),intent:"conversation".into(),text:"Are you well?".into(),..Default::default()}).await.unwrap();
+        let body=axum::body::to_bytes(response.into_body(),65536).await.unwrap();
+        let response:serde_json::Value=serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["result"]["silent"],true);
+        assert!(shared.read().await.session.transcript.is_empty(),"Disconnected ramp staff must not speak from the air");
+        let mut state=shared.write().await;
+        state.session.phase=PhaseCode::Finished;state.session.telemetry.on_ground=true;
+        state.session.taxi_clearance.to_parking=true;state.session.taxi_clearance.guidance_complete=true;
+        update_ground_connection(&mut state);
+        assert!(!state.session.ground_interphone_disconnected);
+    }
+
+    #[tokio::test]
+    async fn pacing_preserves_invited_questions_but_closes_a_deferral() {
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address=listener.local_addr().unwrap();
+        let allowed=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let decision=allowed.clone();
+        let server=tokio::spawn(async move {
+            axum::serve(listener,Router::new().route("/v1/chat/completions",post(move |Json(body):Json<serde_json::Value>| {
+                let decision=decision.clone();async move {
+                    assert!(body["messages"][1]["content"].as_str().unwrap().contains("previousCrewReply"));
+                    Json(json!({"choices":[{"message":{"content":json!({"may_ask":decision.load(std::sync::atomic::Ordering::SeqCst)}).to_string()}}]}))
+                }
+            }))).await.unwrap();
+        });
+        let mut settings=openatc_settings::Settings::default();settings.ai_url=format!("http://{address}");settings.ai_model="test".into();
+        let client=reqwest::Client::new();
+        let text="Understood, Captain. I'll leave you to it. How is the flight going?";
+        assert_eq!(pace_cabin_reply(&client,&settings,"pacing","Not yet",text,"Would you like a coffee?").await,"Understood, Captain. I'll leave you to it.");
+        allowed.store(true,std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(pace_cabin_reply(&client,&settings,"pacing","Let's chat",text,"").await,text);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn polite_joke_request_is_conversation_without_pushback_or_control_actions() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1172,7 +1287,9 @@ mod conversation_routing_tests {
             axum::serve(listener, Router::new().route("/v1/chat/completions", post(move |Json(body):Json<serde_json::Value>| { let calls = calls.clone(); async move {
                 calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let classifier = body["messages"][0]["content"].as_str().unwrap().contains("Allowed controls:");
-                let content = if classifier { json!({"reply":"Here is a quick one: why did the biscuit visit the doctor? It felt crummy!","actions":[],"cross_check":false,"memory":"Captain enjoys biscuit jokes."}).to_string() }
+                let pacing = body["response_format"]["json_schema"]["schema"]["properties"].get("may_ask").is_some();
+                let content = if pacing {json!({"may_ask":true}).to_string()}
+                    else if classifier { json!({"reply":"Here is a quick one: why did the biscuit visit the doctor? It felt crummy!","actions":[],"cross_check":false,"memory":"Captain enjoys biscuit jokes."}).to_string() }
                     else if body.get("response_format").is_some() { json!({"reply":"Here's a quick one: why did the biscuit visit the doctor? It felt crummy!"}).to_string() }
                     else { "Here's a quick one: why did the biscuit visit the doctor? It felt crummy!".into() };
                 Json(json!({"choices":[{"message":{"content":content}}]}))
@@ -1254,7 +1371,7 @@ mod conversation_routing_tests {
                     .contains("biscuit")
             );
         }
-        assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 6);
         let state = shared.read().await;
         for role in ["cabin", "copilot", "ground"] {
             assert_eq!(state.crew.memories.get(role).unwrap(), "Captain enjoys biscuit jokes.");

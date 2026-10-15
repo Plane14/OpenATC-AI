@@ -10,6 +10,11 @@ pub struct Policy {
     pub lead_nm: f64,
     pub level_step_feet: i32,
     pub minimum_change_feet: i32,
+    #[serde(default = "default_select_ils")]
+    pub select_runway_ils: bool,
+}
+fn default_select_ils() -> bool {
+    true
 }
 impl Default for Policy {
     fn default() -> Self {

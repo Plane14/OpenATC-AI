@@ -76,6 +76,7 @@ pub async fn post_telemetry(
                 super::generated::simulate(worker_state).await;
             });
         }
+        super::crew::update_ground_connection(&mut state);
         super::cabin::tick(&mut state);
         super::missions::clock(&mut state);
         super::traffic::observe(&mut state);

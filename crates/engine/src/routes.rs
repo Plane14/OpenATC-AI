@@ -279,6 +279,7 @@ pub async fn debug_cancel_actions(AxumState(shared): AxumState<Shared>) -> Respo
     state.session.crew_actions.clear();
     state.crew.batch = None;
     state.crew.memories.clear();
+    state.crew.ground_taxi_origin = None;
     state.request_memory.cancel_pending();
     state.session.taxi_clearance.holding_channel = 0;
     Json(json!({"accepted":true})).into_response()
@@ -419,7 +420,6 @@ pub async fn post_plan(
     let workers = state.read().await.workers.clone();
     let loaded = workers
         .run(move || {
-            openatc_core::navigation::enrich(&mut plan, &root);
             let airport = openatc_core::airport::load_airport_from_simulator(
                 &root,
                 &plan.destination,
@@ -432,10 +432,17 @@ pub async fn post_plan(
                 openatc_core::arrival::ArrivalAirport::load(&root, airport.clone()).ok()
             });
             let policy = super::instructions::VerticalPolicy::load(&config)?;
-            Ok::<_, String>((plan, airport, mora, profile, policy))
+            let selected_approach = if plan.approach.is_empty() && policy.select_runway_ils {
+                profile.as_ref().and_then(|profile| profile.default_ils(&plan.arrival_runway))
+            } else { None };
+            if let Some(approach) = &selected_approach {
+                plan.approach.clone_from(approach);
+            }
+            openatc_core::navigation::enrich(&mut plan, &root);
+            Ok::<_, String>((plan, airport, mora, profile, policy, selected_approach.is_some()))
         })
         .await;
-    let Ok(Ok((plan, arrival_airport, mora, profile, policy))) = loaded else {
+    let Ok(Ok((plan, arrival_airport, mora, profile, policy, selected_approach))) = loaded else {
         return bad_request(openatc_core::dialogue::say(
             "notice_could_not_load_flight_navigation_data_b01baf21",
             &[],
@@ -465,6 +472,7 @@ pub async fn post_plan(
     }
     // Loading the dispatch plan at the gate must not erase a crew exchange in progress.
     state.flow = Default::default();
+    state.flow.announce_approach = selected_approach;
     state.session.plan = plan;
     state.arrival_airport = arrival_airport;
     state.arrival_profile = profile;

@@ -813,6 +813,8 @@ pub struct State {
     /// Pending simulator-thread crew actions.
     #[serde(default)]
     pub crew_actions: Vec<crate::crew::Action>,
+    /// Wired ramp interphone has disconnected for taxi or flight.
+    pub ground_interphone_disconnected: bool,
     /// Aircraft controls and live availability.
     #[serde(default)]
     pub crew_controls: Vec<crate::crew::Capability>,
@@ -892,6 +894,7 @@ impl Default for State {
             atc_offer: None,
             emergency_declared: false,
             crew_actions: Vec::new(),
+            ground_interphone_disconnected: false,
             crew_controls: Vec::new(),
             clearance_cancelled: false,
             plan: FlightPlan::default(),

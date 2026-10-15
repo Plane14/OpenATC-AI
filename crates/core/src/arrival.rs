@@ -35,6 +35,40 @@ pub struct Intercept {
     pub altitude_feet: f64,
 }
 impl ArrivalAirport {
+    /// Choose a published ILS for an otherwise unspecified arrival. Prefer the
+    /// higher entry altitude when variants share a runway; the controller must
+    /// announce the choice before issuing its approach clearance.
+    pub fn default_ils(&self, runway: &str) -> Option<String> {
+        if runway.is_empty() {
+            return None;
+        }
+        self.intercepts
+            .iter()
+            .filter(|entry| {
+                self.airport
+                    .procedures
+                    .iter()
+                    .any(|procedure| procedure.kind == "APPCH" && procedure.name == entry.procedure)
+                    && entry
+                        .procedure
+                        .strip_prefix('I')
+                        .and_then(|name| name.strip_prefix(runway))
+                        .is_some_and(|suffix| matches!(suffix, "" | "X" | "Y" | "Z"))
+            })
+            .filter(|entry| {
+                target(self, runway, &entry.procedure).is_some_and(|target| {
+                    target.glide_degrees.is_some()
+                        && entry.altitude_feet > target.elevation_feet
+                        && entry.altitude_feet <= 20000.0
+                })
+            })
+            .max_by(|a, b| {
+                a.altitude_feet
+                    .total_cmp(&b.altitude_feet)
+                    .then_with(|| b.procedure.cmp(&a.procedure))
+            })
+            .map(|entry| entry.procedure.clone())
+    }
     /// Load approach entry data using the simulator's custom/default navdata priority.
     pub fn load(root: &str, airport: Airport) -> Result<Self, String> {
         use std::io::Read;
@@ -465,6 +499,45 @@ mod tests {
         let runway = target(&data, "09", "").unwrap();
         assert!((target_point(&data.airport, &runway).east - 300.0).abs() < 0.001);
         assert!(target(&data, "32L", "").is_none());
+    }
+    #[test]
+    fn default_ils_requires_matching_published_runway_and_glide_slope() {
+        let mut data = ArrivalAirport::default();
+        data.airport.runways.push(crate::airport::Runway {
+            first_name: "09".into(),
+            second_name: "27".into(),
+            second: Point {
+                east: 2000.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        for (procedure, altitude_feet) in [("I09Y", 3000.0), ("I09Z", 2000.0), ("I27", 5000.0)] {
+            data.intercepts.push(Intercept {
+                procedure: procedure.into(),
+                altitude_feet,
+            });
+            data.airport.procedures.push(crate::airport::Procedure {
+                kind: "APPCH".into(),
+                name: procedure.into(),
+                ..Default::default()
+            });
+        }
+        assert!(data.default_ils("09").is_none());
+        data.airport.navaids.push(crate::airport::Navaid {
+            kind: "GS".into(),
+            runway: "09".into(),
+            glide_angle: 3.0,
+            ..Default::default()
+        });
+        assert_eq!(data.default_ils("09").as_deref(), Some("I09Y"));
+        assert!(data.default_ils("27").is_none());
+        assert!(data.default_ils("").is_none());
+        assert!(data.default_ils("08").is_none());
+        data.airport
+            .procedures
+            .retain(|procedure| procedure.name != "I09Y");
+        assert_eq!(data.default_ils("09").as_deref(), Some("I09Z"));
     }
     #[test]
     fn cifp_entry_is_not_a_missed_approach_altitude() {

@@ -546,6 +546,10 @@ impl Interface {
         if self.reset_pending {
             return;
         }
+        if request.role == "ground" && (self.engine.state().ground_interphone_disconnected || !self.engine.state().telemetry.on_ground) {
+            self.notice=openatc_core::dialogue::say("crew_ground_interphone_disconnected",&[]);
+            return;
+        }
         if request.role != "copilot"
             && !can_transmit(&request.role, self.radio_power, self.bus_power)
         {
@@ -990,7 +994,8 @@ impl Interface {
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
                 if silent {
-                    "No answer — nobody on this frequency.".clone_into(&mut self.notice);
+                    self.notice=reply.data["result"]["notice"].as_str().filter(|notice|!notice.is_empty())
+                        .unwrap_or("No answer — nobody on this frequency.").to_owned();
                 } else {
                     self.notice.clear();
                 }

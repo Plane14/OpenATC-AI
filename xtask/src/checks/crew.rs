@@ -513,6 +513,7 @@ pub(super) fn live_actors(e: &mut Engine) -> Result {
     let model = std::env::var("OPENATC_LIVE_AI_MODEL").unwrap_or_else(|_| "qwen2.5-7b-instruct-q4_k_m".into());
     let mut passenger_plan = plan();
     passenger_plan["passengers"] = json!(170);
+    passenger_plan["estimatedMinutes"] = json!(43);
     e.post("plan", passenger_plan)?;
     e.settings(json!({"aiEnabled":true,"aiUrl":url,"aiModel":model,"llmPhraseVariety":true}))?;
     e.tune(118100,json!({"onGround":true,"positionValid":true,"groundSpeedKnots":0}))?;
@@ -534,7 +535,21 @@ pub(super) fn live_actors(e: &mut Engine) -> Result {
         }
     });
     let outcome = (|| -> Result {
-        let cases = [
+        let cases = if std::env::var("OPENATC_LIVE_ACTOR_SCENARIO").is_ok_and(|scenario|scenario == "closing") {
+            vec![
+                ("cabin", "I have turned off the seatbelt sign. It won't be for long. Please keep an eye on passengers and let them use the bathroom if needed.",json!({})),
+                ("cabin", "No issues here.",json!({})),
+                ("cabin", "Not yet.",json!({})),
+                ("cabin", "A little busy here, can we catch up later?",json!({})),
+                ("cabin", "Thanks, talk later.",json!({})),
+                ("cabin", "I have a quiet moment now. How are you doing? Feel free to chat for a bit.",json!({})),
+            ]
+        } else if std::env::var("OPENATC_LIVE_ACTOR_SCENARIO").is_ok_and(|scenario|scenario == "ground_context") {
+            vec![
+                ("ground","Are you well?",json!({})),
+                ("ground","We're only flying for about forty-three minutes today. Can I ask the cabin crew for a snack once we're ready?",json!({})),
+            ]
+        } else {vec![
             ("ground", "Hey buddy, long time no see! How is your family? Your kids must be getting tall. Can you disoconnect external power and remove those chocks, please? I'll be back in town soon and we should catch up over coffee. And tell me a joke while we wait!", json!({"external_power":0.0,"chocks":0.0})),
             ("ground", "Ha, thanks! Is your family still enjoying living here? I'll be back in town next week, perhaps we can all catch up then.", json!({})),
             ("cabin", "How are you and your family? I really enjoyed catching up last time. I'll be back in town soon! While we chat, can you arm the dorrs and corss chek them, turn off the cabin lights, and see if there is a spare sandwich for me? Also, do you have a good joke?", json!({"slides":1.0,"cabin_brightness":0.0})),
@@ -548,7 +563,7 @@ pub(super) fn live_actors(e: &mut Engine) -> Result {
             ("cabin", "What snack did I say was my favourite, and who is celebrating in the cabin? Could you check whether there is a spare plate of first-class caviar for us too? Leave the controls alone.", json!({})),
             ("copilot", "My sister's name is Nora and we are meeting in Hobart after this trip. Remember that for our chat. Don't adjust the heading or beacon. Tell me a different joke about our trip, rather than the one you told earlier.", json!({})),
             ("copilot", "What is my sister's name, and where are we meeting? What heading did you set earlier? Just tell me; do not change it again.", json!({})),
-        ];
+        ]};
         let mut report = Vec::new();
         let mut failures = 0;
         for (role, text, expected) in cases {
@@ -567,7 +582,9 @@ pub(super) fn live_actors(e: &mut Engine) -> Result {
             println!("{role}: actions={actual:?}; reply={reply}");
             report.push(json!({"role":role,"request":text,"expected":expected,"actions":actual,"passed":passed,"actionChecksPassed":passed,"conversationReview":"Pending manual review: coverage, continuity, repeated jokes, unsupported claims and control wording", "reply":reply,"seconds":started.elapsed().as_secs_f64()}));
         }
-        let folder = repo().join(".ai/actor-validation");
+        let mut folder = repo().join(".ai/actor-validation");
+        if let Ok(scenario)=std::env::var("OPENATC_LIVE_ACTOR_SCENARIO")
+            && ["closing","ground_context"].contains(&scenario.as_str()) {folder=folder.join(scenario);}
         fs::create_dir_all(&folder)?;
         fs::write(folder.join("report.json"),serde_json::to_string_pretty(&report)?)?;
         fs::copy(e.folder.path().join("engine.log"),folder.join("engine.log"))?;
