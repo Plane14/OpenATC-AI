@@ -6,6 +6,10 @@ The plugin and AI server remain separate downloads. A successful package build i
 
 In GitHub Actions, select **Native platform builds**, choose a version and platform, and enable **preflight_only**. This runs the small packaging checks without the full plugin/server/model builds or publication. The platform preflight checks both product layouts, even when the later product selection is narrower.
 
+Choose the branch containing the committed changes in **Use workflow from**. Manual runs upload downloadable artifacts without creating a tag or publishing a release; the version field labels the packages. Start with **preflight_only** enabled, then run again with it disabled for complete packages and the shared Rust test gate. A single platform/product can be selected for a quicker full-package trial. Download outputs from **Artifacts** on the completed run's summary page. Rerunning an older tagged run still tests that tag's original commit, so it will not include later fixes.
+
+Windows jobs use the pinned Inno Setup compiler and explicitly permit downgrading a newer runner installation. Platform preflight jobs run independently so one failure does not cancel the other platforms' diagnostic results.
+
 - Windows compiles the actual Inno appearance settings and images into installers with small fixture payloads. It does not execute or install those fixtures.
 - macOS generates both application layouts, converts the tower icon with `sips`/`iconutil`, creates DMGs with `hdiutil`, verifies the DMGs and checks the property lists with `plutil`. It does not launch or install those fixtures.
 - Each native preflight also runs the focused installer discovery/transaction tests. Linux validates artwork encodings and builds both ZIP layouts with small fixture payloads. It does not validate DEB/RPM/AppImage/Flatpak runtime behaviour.

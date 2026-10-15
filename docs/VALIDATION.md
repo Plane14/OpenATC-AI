@@ -1,5 +1,11 @@
 # Validation
 
+## Release build gate repairs — 16 October 2026
+
+The shipped-configuration test now validates transponder settings with their own loader and leaves callout policy validation to the plugin tests; other aircraft TOML files still undergo strict aircraft-profile validation. Role instruction catalogues and text copies now agree on trailing newlines. The exact shared CI test command passes locally: 415 tests passed, 25 environment-dependent tests ignored, with no failures. Formatting also passes.
+
+Windows preflight and package jobs explicitly allow downgrading an already-installed newer Inno Setup to the pinned compiler version. Independent preflight results are retained when another platform fails. Linux installer branding and packaging preflight passes. The Windows change still requires a native manual preflight run; local Linux checks do not verify Chocolatey or Windows installer execution. Manual workflow runs upload artifacts without publishing a tag or release; see `RELEASE_PACKAGING.md`.
+
 ## Crew request and context checks — 16 October 2026
 
 Shared requests explicitly reserve 512 output tokens for plain and structured replies. Dedicated crew dialogue uses compact role/fact context and ordered user/assistant exchanges, independently of the current-message control interpreter. Token counting and generation use the same message list. Context checks remove older complete exchanges and optional evidence; an essential request that cannot fit is refused. Role-scoped continuity retains bounded exact captain quotes, with relevance retrieval and flight/aircraft resets. Generated social summaries do not grant aircraft authority. Two current-request interpretations agree on control proposals; disagreements receive a separate quoted-source check. Rust retains profile, range, observation freshness and simulator acknowledgement requirements.

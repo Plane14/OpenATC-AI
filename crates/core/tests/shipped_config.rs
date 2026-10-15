@@ -18,9 +18,19 @@ fn shipped_configuration_loads() {
     for file in std::fs::read_dir(root.join("aircraft")).unwrap() {
         let path = file.unwrap().path();
         if path.extension().and_then(|value| value.to_str()) == Some("toml") {
-            openatc_core::profiles::load_aircraft_profile(&path)
-                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-            profiles += 1;
+            match path.file_name().and_then(|value| value.to_str()) {
+                // The plugin's callout tests validate this separate policy schema.
+                Some("callouts.toml") => continue,
+                Some("transponder.toml") => {
+                    openatc_core::transponder::Controls::load(&path)
+                        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                }
+                _ => {
+                    openatc_core::profiles::load_aircraft_profile(&path)
+                        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                    profiles += 1;
+                }
+            }
         }
     }
     assert!(profiles > 0);
