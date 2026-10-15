@@ -87,10 +87,7 @@ jobs:
         run: |
           $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
           if (!(Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'The Windows runner is missing Inno Setup 6' }
-          $version = (Get-Item -LiteralPath $compiler).VersionInfo
-          $number = [version]::new($version.FileMajorPart, $version.FileMinorPart, $version.FileBuildPart)
-          if ($number.Major -ne 6 -or $number -lt [version]'6.4.3') { throw "Unsupported Inno Setup compiler: $number" }
-          Write-Host "Using Inno Setup $number at $compiler"
+          Write-Host "Using Inno Setup compiler at $compiler; packaging preflight reports the engine version and checks compatibility."
           "ISCC=$compiler" >> $env:GITHUB_ENV
       - name: Test installer discovery and transactions
         run: cargo test --locked -p xtask installer::tests
@@ -277,10 +274,7 @@ jobs:
         run: |
           $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
           if (!(Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'The Windows runner is missing Inno Setup 6' }
-          $version = (Get-Item -LiteralPath $compiler).VersionInfo
-          $number = [version]::new($version.FileMajorPart, $version.FileMinorPart, $version.FileBuildPart)
-          if ($number.Major -ne 6 -or $number -lt [version]'6.4.3') { throw "Unsupported Inno Setup compiler: $number" }
-          Write-Host "Using Inno Setup $number at $compiler"
+          Write-Host "Using Inno Setup compiler at $compiler; packaging preflight reports the engine version and checks compatibility."
           "ISCC=$compiler" >> $env:GITHUB_ENV
       - name: Install Linux packaging runtimes
         if: runner.os == 'Linux' && matrix.product == 'ai-server'
