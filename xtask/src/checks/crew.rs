@@ -542,6 +542,12 @@ pub(super) fn live_actors(e: &mut Engine) -> Result {
             ("cabin", "That sounds lovely! What about the joke I asked for? And how are the passengers settling in?", json!({})),
             ("copilot", "Mate, how is your family? We should catch up when I'm back in town. Somewhere in all this chatter, could you set heading two seven five and switch the beacon on, please? And give me your best terrible joke!", json!({"heading":275.0,"beacon":1.0})),
             ("copilot", "Ha, very good. Remind me what heading I asked you to set? And would you like me to ask the attendant for sandwiches for both of us?", json!({})),
+            ("ground", "Let's catch up next Thursday at the Harbour Cafe. My dog's name is Miso. Just chatting, leave all the aircraft controls as they are. Tell me a different joke about our catch-up, not the one you told earlier.", json!({})),
+            ("ground", "What is my dog's name, and when and where did we agree to catch up? No need to change any controls.", json!({})),
+            ("cabin", "There is a football team celebrating their win in the cabin. My favourite snack is a meat pie with tomato sauce. Please keep those details in mind, leave the lights and doors alone, and tell me a fresh joke about the food rather than repeating your earlier joke.", json!({})),
+            ("cabin", "What snack did I say was my favourite, and who is celebrating in the cabin? Could you check whether there is a spare plate of first-class caviar for us too? Leave the controls alone.", json!({})),
+            ("copilot", "My sister's name is Nora and we are meeting in Hobart after this trip. Remember that for our chat. Don't adjust the heading or beacon. Tell me a different joke about our trip, rather than the one you told earlier.", json!({})),
+            ("copilot", "What is my sister's name, and where are we meeting? What heading did you set earlier? Just tell me; do not change it again.", json!({})),
         ];
         let mut report = Vec::new();
         let mut failures = 0;
@@ -559,7 +565,7 @@ pub(super) fn live_actors(e: &mut Engine) -> Result {
             }
             let reply = latest(&response["state"]);
             println!("{role}: actions={actual:?}; reply={reply}");
-            report.push(json!({"role":role,"request":text,"expected":expected,"actions":actual,"passed":passed,"reply":reply,"seconds":started.elapsed().as_secs_f64()}));
+            report.push(json!({"role":role,"request":text,"expected":expected,"actions":actual,"passed":passed,"actionChecksPassed":passed,"conversationReview":"Pending manual review: coverage, continuity, repeated jokes, unsupported claims and control wording", "reply":reply,"seconds":started.elapsed().as_secs_f64()}));
         }
         let folder = repo().join(".ai/actor-validation");
         fs::create_dir_all(&folder)?;

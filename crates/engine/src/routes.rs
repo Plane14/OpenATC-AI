@@ -1969,9 +1969,11 @@ pub(crate) async fn atc_request(
     if let Err(error) = super::radio::ensure_index(shared).await {
         return bad_request(error);
     }
-    let _ = refresh_voices(shared, false).await;
+    if !request.controller_initiated {
+        let _ = refresh_voices(shared, false).await;
+    }
     let generation = shared.read().await.session_generation;
-    if settings.congestion != Congestion::Off {
+    if !request.controller_initiated && settings.congestion != Congestion::Off {
         let millis = if settings.congestion == Congestion::Busy {
             1000 + rand::rng().random_range(0..3000)
         } else {
@@ -2040,8 +2042,13 @@ pub(crate) async fn atc_request(
             }
             _ => receiving.airport.clone(),
         };
+        let cached = if request.controller_initiated {
+            shared.read().await.airport.as_ref().filter(|airport| airport.icao == id).cloned()
+        } else { None };
         let workers = shared.read().await.workers.clone();
-        if let Ok(Ok(airport)) = workers
+        if let Some(airport) = cached {
+            operational_airport = Some(airport);
+        } else if let Ok(Ok(airport)) = workers
             .run(move || {
                 openatc_core::airport::load_airport_from_simulator(
                     &root,
@@ -2066,6 +2073,13 @@ pub(crate) async fn atc_request(
             "notice_flight_was_reset_previous_request_discarded_c0a5c48d",
             &[],
         ));
+    }
+
+    if request.controller_initiated && request.intent == "cross_runway"
+        && (state.session.taxi_clearance.sequence != request.clearance_sequence
+            || state.session.taxi_clearance.stage() != openatc_core::state::SurfaceStage::AtHold)
+    {
+        return Json(json!({"result":{"accepted":false,"silent":true},"state":snapshot(&state.session,&state.settings)})).into_response();
     }
 
     let current_stations =
