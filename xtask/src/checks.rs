@@ -201,6 +201,11 @@ fn serve(
                         .collect(),
                 )
                 .to_string()
+            } else if request
+                .pointer("/response_format/json_schema/schema/properties/control_targets")
+                .is_some()
+            {
+                proposal.lock().unwrap().clone().unwrap_or(answer)
             } else if request["messages"][0]["content"]
                 .as_str()
                 .unwrap_or("")

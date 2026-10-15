@@ -1,5 +1,15 @@
 # Validation
 
+## Crew request and context checks — 16 October 2026
+
+Shared requests now explicitly reserve 512 output tokens for plain and structured replies. Context checks discard optional social notes and then older captain messages before reducing the control catalogue; essential requests that cannot fit are refused. The interpreter uses a focused control-target check, independent of generated conversation, while Rust retains profile/range validation and simulator acknowledgement requirements. Crew question filtering evaluates each question separately so a requested joke cannot authorize an unrelated follow-up question.
+
+Focused regressions cover context exhaustion, preservation of mapped controls, requested jokes with unrelated questions, delayed observations, shared decoding and request memory. Real-model action fixtures use synthetic control observations and acknowledgements, and do not establish native aircraft control or audio acceptance. Extended conversation checks exposed unreliable personal-detail recall and repetitive jokes; those remain open. The final isolated Qwen2.5 Instruct run passed all 13 action cases, including mixed zero/off requests, lighting percentages and copilot controls. Crew, radio and clearance-to-parking replays also passed. Installed Linux binaries and prompt catalogues match the verified build.
+
+## Focused flight checks — 16 October 2026
+
+Fifteen targeted tests passed for window layout, advance speed notices and crossing warnings, compound instructions, crew pacing and ramp disconnection, taxiway pronunciation, callout thresholds, descent readbacks and ATIS reception. The installed Linux plugin matches the tested release artifact. Native window transitions, audible callout latency/overlap and taxiway pronunciation remain simulator acceptance checks.
+
 ## Flight repairs — 16 October 2026
 
 The latest Linux build includes the following repairs:

@@ -166,6 +166,7 @@ async fn complete_request(
     let mut body = serde_json::json!({
         "model": model,
         "temperature": temperature,
+        "max_tokens": 512,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -178,7 +179,6 @@ async fn complete_request(
             }
             None => serde_json::json!({"type":"json_object"}),
         };
-        body["max_tokens"] = serde_json::json!(512);
     }
     let mut call = client
         .post(format!("{}/v1/chat/completions", url.trim_end_matches('/')))
@@ -350,6 +350,45 @@ mod tests {
             );
             task.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn plain_and_structured_replies_share_the_reserved_output_budget() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/v1/chat/completions",
+                    post(|Json(body): Json<serde_json::Value>| async move {
+                        assert_eq!(body["max_tokens"], 512);
+                        let content = if body.get("response_format").is_some() {
+                            json!({"reply":"All set, Captain."}).to_string()
+                        } else {
+                            "All set, Captain.".to_owned()
+                        };
+                        Json(json!({"choices":[{"message":{"content":content}}]}))
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        assert_eq!(
+            text(&client, &origin, "test", 0.0, "role", "hello")
+                .await
+                .unwrap(),
+            "All set, Captain."
+        );
+        assert_eq!(
+            narration(&client, &origin, "test", 0.0, "role", "hello")
+                .await
+                .unwrap(),
+            "All set, Captain."
+        );
+        task.abort();
     }
 
     #[test]
