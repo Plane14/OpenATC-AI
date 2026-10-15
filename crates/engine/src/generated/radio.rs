@@ -20,6 +20,31 @@ pub(super) struct Exchange {
     pub(super) tune_after: Option<i32>,
 }
 
+pub(super) fn cancel_crossing(mut exchange: Exchange, runway: Option<&str>) -> Exchange {
+    let slots = [("callsign", exchange.callsign.clone())];
+    let instruction = runway.map_or_else(
+        || say("generated_taxi_hold", &slots),
+        |runway| {
+            say(
+                "generated_crossing_cancelled",
+                &[
+                    ("callsign", exchange.callsign.clone()),
+                    ("runway", runway.to_owned()),
+                ],
+            )
+        },
+    );
+    exchange.messages = vec![
+        (true, instruction),
+        (false, say("pilot_traffic_hold", &slots)),
+    ];
+    exchange.next = 0;
+    exchange.grant = false;
+    exchange.tune_after = None;
+    exchange.due = Instant::now();
+    exchange
+}
+
 fn station(state: &EngineState, airport: &Airport) -> Option<Station> {
     state
         .stations
@@ -610,6 +635,32 @@ pub fn tick(state: &mut EngineState) {
         return;
     }
     if exchange.next == exchange.messages.len() {
+        if exchange.grant
+            && state.generated.active_flights.contains(&exchange.id)
+            && state
+                .generated
+                .flights
+                .get(&exchange.id)
+                .and_then(|flight| flight.route.segment(exchange.segment))
+                .is_some_and(|segment| {
+                    segment.stage == openatc_core::traffic::motion::Stage::Crossing
+                })
+            && (state.session.telemetry.traffic.is_none()
+                || state.generated.crossing_blocked(
+                    exchange.id,
+                    exchange.segment,
+                    &super::observed_targets(&state.generated, &state.session.telemetry),
+                ))
+        {
+            let runway = state
+                .generated
+                .flights
+                .get(&exchange.id)
+                .and_then(|flight| flight.vacated_reports.get(&(exchange.segment + 1)))
+                .map(|report| report.runway.as_str());
+            state.generated.exchange = Some(cancel_crossing(exchange, runway));
+            return;
+        }
         if let Some(frequency) = exchange.tune_after
             && let Some(frame) = state
                 .generated
@@ -639,6 +690,7 @@ pub fn tick(state: &mut EngineState) {
         return;
     }
     let (controller, text) = &exchange.messages[exchange.next];
+    let spoken_text = state.generated.spoken_text(text);
     if state.settings.hear_traffic_radio
         && state.session.telemetry.radio_power
         && let Some(radio) = state.session.receiving_radio(exchange.station.khz)
@@ -653,20 +705,17 @@ pub fn tick(state: &mut EngineState) {
             }
         };
         tag.radio = Some(radio);
+        let spoken_callsign = state.generated.spoken_text(&exchange.callsign);
         add_transmission(
             &mut state.session,
-            if *controller {
-                "ATC"
-            } else {
-                &exchange.callsign
-            },
-            text,
+            if *controller { "ATC" } else { &spoken_callsign },
+            &spoken_text,
             &tag,
         );
         state.session.transcript.last_mut().unwrap().background = true;
     }
     exchange.due =
-        Instant::now() + Duration::from_secs_f64(text.chars().count() as f64 / rate + gap);
+        Instant::now() + Duration::from_secs_f64(spoken_text.chars().count() as f64 / rate + gap);
     exchange.next += 1;
     state.generated.exchange = Some(exchange);
 }

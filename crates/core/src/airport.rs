@@ -469,14 +469,17 @@ fn distance_nm(latitude_a: f64, longitude_a: f64, latitude_b: f64, longitude_b: 
 #[must_use]
 pub fn runway_at_point<'a>(airport: &'a Airport, point: &Point) -> Option<&'a Runway> {
     airport.runways.iter().find(|runway| {
-        let east=runway.second.east-runway.first.east;
-        let north=runway.second.north-runway.first.north;
-        let length=east.hypot(north);
-        if length < 100.0 {return false;}
-        let x=point.east-runway.first.east;let y=point.north-runway.first.north;
-        let along=(x*east+y*north)/length;
-        let across=(x*north-y*east).abs()/length;
-        (0.0..=length).contains(&along) && across < runway.width/2.0
+        let east = runway.second.east - runway.first.east;
+        let north = runway.second.north - runway.first.north;
+        let length = east.hypot(north);
+        if length < 100.0 {
+            return false;
+        }
+        let x = point.east - runway.first.east;
+        let y = point.north - runway.first.north;
+        let along = (x * east + y * north) / length;
+        let across = (x * north - y * east).abs() / length;
+        (0.0..=length).contains(&along) && across < runway.width / 2.0
     })
 }
 
@@ -2080,6 +2083,26 @@ pub fn crossing_vacated(airport: &Airport, route: &TaxiClearance, telemetry: &Te
 /// Keep arrival monitoring on Tower until the aircraft's extremities clear the runway.
 #[must_use]
 pub fn aircraft_on_runway(airport: &Airport, telemetry: &Telemetry) -> bool {
+    runway_occupied(airport, telemetry, None)
+}
+
+/// Apply the generated aircraft's validated editable dimensions to runway clearance.
+#[must_use]
+pub fn aircraft_on_runway_for(
+    airport: &Airport,
+    telemetry: &Telemetry,
+    profile: &crate::traffic::profiles::Aircraft,
+) -> bool {
+    if !(1.0..=150.0).contains(&profile.length) || !(1.0..=150.0).contains(&profile.wingspan) {
+        return true;
+    }
+    runway_occupied(airport, telemetry, Some(profile))
+}
+fn runway_occupied(
+    airport: &Airport,
+    telemetry: &Telemetry,
+    profile: Option<&crate::traffic::profiles::Aircraft>,
+) -> bool {
     let here = airport_point(airport, telemetry.latitude, telemetry.longitude);
     airport.runways.iter().any(|runway| {
         let dx = runway.second.east - runway.first.east;
@@ -2088,12 +2111,25 @@ pub fn aircraft_on_runway(airport: &Airport, telemetry: &Telemetry) -> bool {
         if length < 100.0 {
             return false;
         }
-        let (fore_aft, lateral) = crate::traffic::footprint(
-            &telemetry.aircraft_icao,
-            telemetry.wingspan_meters,
-            telemetry.heading_degrees,
-            dx.atan2(dn).to_degrees(),
-        );
+        let (fore_aft, lateral) = if let Some(profile) = profile {
+            let span = telemetry
+                .wingspan_meters
+                .filter(|s| s.is_finite() && (1.0..=150.0).contains(s))
+                .unwrap_or(profile.wingspan)
+                .max(profile.wingspan);
+            let angle = (telemetry.heading_degrees - dx.atan2(dn).to_degrees()).to_radians();
+            (
+                profile.length * angle.cos().abs() + span / 2.0 * angle.sin().abs(),
+                profile.length * angle.sin().abs() + span / 2.0 * angle.cos().abs(),
+            )
+        } else {
+            crate::traffic::footprint(
+                &telemetry.aircraft_icao,
+                telemetry.wingspan_meters,
+                telemetry.heading_degrees,
+                dx.atan2(dn).to_degrees(),
+            )
+        };
         let east = here.east - runway.first.east;
         let north = here.north - runway.first.north;
         let along = (east * dx + north * dn) / length;

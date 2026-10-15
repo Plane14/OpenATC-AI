@@ -77,10 +77,12 @@ pub fn established_star_leg(fixes: &[RouteFix], next: usize, t: &Telemetry) -> O
     })
 }
 
-/// Observe completion of a non-straight fix leg from its known outbound track, without inventing the incoming course.
+/// Observe a fly-by fix from its known outbound track without requiring a
+/// sample over the waypoint or extending the incoming course through a turn.
 pub fn fix_passed_on_outbound(fixes: &[RouteFix], next: usize, t: &Telemetry) -> bool {
     let Some(fix) = fixes.get(next).filter(|fix| {
-        ["IF", "CF", "AF", "RF"].contains(&fix.path_terminator.as_str()) && !fix.fly_over
+        ["IF", "TF", "DF", "CF", "AF", "RF"].contains(&fix.path_terminator.as_str())
+            && !fix.fly_over
     }) else {
         return false;
     };
@@ -125,7 +127,9 @@ fn procedure_order(
     } else if kind == "STAR" {
         catalogue.arrival(name, runway, transition)
     } else {
-        catalogue.approach(name, transition).map(|approach| vec![approach.transition, approach.landing])
+        catalogue
+            .approach(name, transition)
+            .map(|approach| vec![approach.transition, approach.landing])
     };
     let Ok(parts) = parts else {
         return Some(Default::default());
@@ -379,7 +383,10 @@ fn expand_terminal(plan: &mut FlightPlan, kind: &str, procedure: &str, fixes: &s
             .position(|fix| fix.identifier == plan.departure)
             .map_or(1, |index| index + 1)
     } else if kind == "APPCH" {
-        plan.fixes.iter().position(|fix| fix.identifier == plan.destination).unwrap_or(plan.fixes.len())
+        plan.fixes
+            .iter()
+            .position(|fix| fix.identifier == plan.destination)
+            .unwrap_or(plan.fixes.len())
     } else {
         let Some(anchor) = records.first().and_then(|record| {
             plan.fixes
@@ -433,6 +440,38 @@ pub fn turn(from: f64, to: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fly_by_reversal_sequences_without_crossing_the_incoming_extension() {
+        let mut fixes = vec![
+            RouteFix {
+                latitude: 0.0,
+                ..Default::default()
+            },
+            RouteFix {
+                latitude: 0.1,
+                path_terminator: "TF".into(),
+                ..Default::default()
+            },
+            RouteFix {
+                latitude: 0.0,
+                path_terminator: "TF".into(),
+                ..Default::default()
+            },
+        ];
+        let mut telemetry = Telemetry {
+            latitude: 0.09,
+            ground_track_degrees: Some(180.0),
+            heading_degrees: 180.0,
+            ..Default::default()
+        };
+        assert!(leg(&fixes, 1, &telemetry).unwrap().along < 1.0);
+        assert!(fix_passed_on_outbound(&fixes, 1, &telemetry));
+        telemetry.ground_track_degrees = Some(0.0);
+        assert!(!fix_passed_on_outbound(&fixes, 1, &telemetry));
+        telemetry.ground_track_degrees = Some(180.0);
+        fixes[1].fly_over = true;
+        assert!(!fix_passed_on_outbound(&fixes, 1, &telemetry));
+    }
     #[test]
     fn established_star_progress_does_not_guess_arcs_or_shortcuts() {
         let mut fixes = [(0.0, 0.0), (0.0, 0.2), (0.2, 0.2)]
@@ -637,7 +676,7 @@ mod tests {
         };
         assert!(leg(&fixes, 1, &telemetry).is_none());
         assert!(fix_passed_on_outbound(&fixes, 1, &telemetry));
-        for terminator in ["CF", "AF", "RF"] {
+        for terminator in ["TF", "DF", "CF", "AF", "RF"] {
             let mut endpoint = fixes.clone();
             endpoint[1].path_terminator = terminator.into();
             assert!(fix_passed_on_outbound(&endpoint, 1, &telemetry));
@@ -674,16 +713,46 @@ mod tests {
     }
     #[test]
     fn approach_equal_glideslope_fields_preserve_intercept_restrictions() {
-        let mut plan = FlightPlan { approach: "I35RY".into(), arrival_runway: "35R".into(),
-            fixes: vec![RouteFix {identifier:"CI3RY".into(),..Default::default()}, RouteFix {identifier:"FI3RY".into(),..Default::default()}], ..Default::default() };
+        let mut plan = FlightPlan {
+            approach: "I35RY".into(),
+            arrival_runway: "35R".into(),
+            fixes: vec![
+                RouteFix {
+                    identifier: "CI3RY".into(),
+                    ..Default::default()
+                },
+                RouteFix {
+                    identifier: "FI3RY".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
         let text = "APPCH:010,I,I35RY, ,CI3RY,LI,P,C,E  I, ,   ,IF, ,MLP,LI,P,I,      ,1660,0145,    ,    ,J,04000,04000,     , ,   ,    ;\nAPPCH:020,I,I35RY, ,FI3RY,LI,P,C,E  F, ,   ,CF, ,MLP,LI,P,I,      ,1660,0125,3460,0020,H,04000,04000,     ,-,170,    ;";
-        let text = format!("{text}\nAPPCH:030,I,I35RY, ,RW35R,LI,P,G,G  M, ,   ,CF, ,MLP,LI,P,I,      ,1660,0023,3460,0102, ,00748,     ,     , ,   ,-300,   , , , , , ,0,D,S;\nAPPCH:040,I,I35RY, ,RW35R,LI,P,G,G M , ,   ,FA, ,SRN,LI,D, ,      ,2585,0121,3460,    ,+,01450,     ,     , ,   ,    ,   , , , , , ,0,D,S;");
+        let text = format!(
+            "{text}\nAPPCH:030,I,I35RY, ,RW35R,LI,P,G,G  M, ,   ,CF, ,MLP,LI,P,I,      ,1660,0023,3460,0102, ,00748,     ,     , ,   ,-300,   , , , , , ,0,D,S;\nAPPCH:040,I,I35RY, ,RW35R,LI,P,G,G M , ,   ,FA, ,SRN,LI,D, ,      ,2585,0121,3460,    ,+,01450,     ,     , ,   ,    ,   , , , , , ,0,D,S;"
+        );
         load_constraints(&mut plan, "APPCH", &text);
-        for fix in &plan.fixes { assert_eq!(fix.minimum_altitude_feet,Some(4000)); assert_eq!(fix.maximum_altitude_feet,Some(4000)); }
+        for fix in &plan.fixes {
+            assert_eq!(fix.minimum_altitude_feet, Some(4000));
+            assert_eq!(fix.maximum_altitude_feet, Some(4000));
+        }
         let mut uncertain = plan.clone();
-        for fix in &mut uncertain.fixes {fix.minimum_altitude_feet=None;fix.maximum_altitude_feet=None;}
-        load_constraints(&mut uncertain,"APPCH", &text.replace("04000,04000","04000,03000"));
-        assert!(uncertain.fixes.iter().all(|fix|fix.maximum_altitude_feet.is_none()));
+        for fix in &mut uncertain.fixes {
+            fix.minimum_altitude_feet = None;
+            fix.maximum_altitude_feet = None;
+        }
+        load_constraints(
+            &mut uncertain,
+            "APPCH",
+            &text.replace("04000,04000", "04000,03000"),
+        );
+        assert!(
+            uncertain
+                .fixes
+                .iter()
+                .all(|fix| fix.maximum_altitude_feet.is_none())
+        );
     }
 
     #[test]

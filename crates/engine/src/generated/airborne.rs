@@ -4,6 +4,140 @@ use openatc_core::traffic::{
     trajectory::{self, Envelope, Fix},
 };
 
+/// Aircraft-specific published inputs. They are not a flyable trajectory or a clearance.
+#[derive(Clone)]
+pub(super) struct Decoded {
+    pub candidate: usize,
+    pub departure: Vec<Fix>,
+    pub arrival: Vec<Fix>,
+    pub approach: Vec<Fix>,
+}
+
+pub(super) struct Request<'a> {
+    pub candidate: usize,
+    pub terminal: &'a super::routing::Terminal,
+    pub rotation: Waypoint,
+    pub origin: &'a openatc_core::airport::Airport,
+    pub destination: &'a openatc_core::airport::Airport,
+    pub points: &'a openatc_core::traffic::coordinates::Points,
+    pub departure_weather: &'a super::environment::Environment,
+    pub arrival_weather: &'a super::environment::Environment,
+    pub aircraft: &'a openatc_core::traffic::profiles::Aircraft,
+    pub handling: &'a openatc_core::traffic::animation::Handling,
+    pub intercept_limit_nm: f64,
+    pub departure_floor_feet: f64,
+    pub arrival_floor_feet: f64,
+}
+
+/// Decode the selected fleet's actual SID, STAR and approach on the preparation worker.
+pub(super) fn resolve(input: Request<'_>) -> Result<Decoded, String> {
+    use openatc_core::traffic::resolved::{self, Context};
+    if !input.departure_weather.fresh() || !input.arrival_weather.fresh() {
+        return Err("Terminal planning needs fresh weather at both airports".into());
+    }
+    if ![input.departure_floor_feet, input.arrival_floor_feet]
+        .iter()
+        .all(|height| height.is_finite() && (-3000.0..=20000.0).contains(height))
+    {
+        return Err("Terminal planning has an invalid aerodrome vertical bound".into());
+    }
+    if !input.aircraft.rnav {
+        return Err("Generated terminal planning needs supported navigation equipment".into());
+    }
+    let departure_ceiling = input
+        .departure_weather
+        .atmosphere
+        .geometric(input.aircraft.ceiling, true)?;
+    let arrival_ceiling = input
+        .arrival_weather
+        .atmosphere
+        .geometric(input.aircraft.ceiling, true)?;
+    let floor = f64::from(input.terminal.enroute_minimum_feet);
+    if floor <= 0.0
+        || input.departure_weather.atmosphere.geometric(floor, false)? > departure_ceiling
+        || input.arrival_weather.atmosphere.geometric(floor, false)? > arrival_ceiling
+    {
+        return Err("Terminal connection exceeds this aircraft's ceiling".into());
+    }
+    let context =
+        |airport, weather: &super::environment::Environment, floor, ceiling, speed| Context {
+            airport,
+            points: input.points,
+            atmosphere: weather.atmosphere,
+            variation: weather.variation,
+            wind_from: weather.wind_from,
+            wind_knots: weather.wind_knots,
+            indicated_knots: speed,
+            maximum_intercept_nm: input.intercept_limit_nm,
+            climb_fpm: input.aircraft.climb_fpm,
+            minimum_feet: floor,
+            maximum_feet: ceiling,
+            preferred_feet: ceiling,
+        };
+    let departure = resolved::boundary_crossings(
+        input.rotation,
+        &input.terminal.departure,
+        &context(
+            input.origin,
+            input.departure_weather,
+            input.departure_floor_feet,
+            departure_ceiling,
+            input
+                .handling
+                .rotation_knots
+                .max(input.aircraft.approach_knots),
+        ),
+    )?;
+    let end = departure.last().ok_or("Resolved departure is empty")?;
+    if openatc_core::arrival::distance_nm(end.coordinate, input.terminal.enroute_from) >= 0.001 {
+        return Err("Resolved SID does not reach its selected enroute connection".into());
+    }
+    let arrival_context = context(
+        input.destination,
+        input.arrival_weather,
+        input.arrival_floor_feet,
+        arrival_ceiling,
+        input.aircraft.approach_knots,
+    );
+    let arrival = resolved::boundary_crossings(
+        Waypoint {
+            latitude: input.terminal.enroute_to[0],
+            longitude: input.terminal.enroute_to[1],
+            altitude_feet: arrival_ceiling,
+        },
+        &input.terminal.arrival,
+        &arrival_context,
+    )?;
+    let entry = arrival.last().ok_or("Resolved arrival is empty")?;
+    let approach = resolved::boundary_crossings(
+        Waypoint {
+            latitude: entry.coordinate[0],
+            longitude: entry.coordinate[1],
+            altitude_feet: entry.preferred_feet,
+        },
+        &input.terminal.approach,
+        &arrival_context,
+    )?;
+    let first = approach.first().ok_or("Resolved approach is empty")?;
+    if openatc_core::arrival::distance_nm(entry.coordinate, first.coordinate) >= 0.001 {
+        return Err("Resolved STAR and approach no longer share their published entry".into());
+    }
+    if departure.len() + arrival.len() + approach.len() + 1 > 128 {
+        return Err(
+            "Aircraft terminal crossings exceed the combined flight planning budget".into(),
+        );
+    }
+    if !input.departure_weather.fresh() || !input.arrival_weather.fresh() {
+        return Err("Terminal weather expired during preparation".into());
+    }
+    Ok(Decoded {
+        candidate: input.candidate,
+        departure,
+        arrival,
+        approach,
+    })
+}
+
 pub(super) struct Section {
     pub stage: Stage,
     pub crossings: Vec<Fix>,
@@ -93,8 +227,14 @@ fn merge(previous: &mut Fix, next: &Fix) -> Result<(), String> {
     }
     // Do not discard a minimum-speed restriction by selecting the slower of two joins.
     // A speed change at the same point needs an upstream, aircraft-specific deceleration plan.
-    if (previous.ground_knots - next.ground_knots).abs() > 1e-6 {
-        return Err("Coincident flight sections need a joint airspeed solution".into());
+    match (previous.airspeed, next.airspeed) {
+        (Some(a), Some(b)) if a == b => {}
+        (None, None) if (previous.ground_knots - next.ground_knots).abs() <= 1e-6 => {}
+        _ => {
+            return Err(
+                "Coincident flight sections have incompatible airspeed or weather inputs".into(),
+            );
+        }
     }
     previous.minimum_feet = minimum;
     previous.maximum_feet = maximum;
@@ -107,6 +247,140 @@ fn merge(previous: &mut Fix, next: &Fix) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fleet_terminal_inputs_keep_restrictions_and_lower_runway_thresholds() {
+        use openatc_core::{
+            airport::{Airport, Runway},
+            state::Point,
+            traffic::{coordinates::Points, procedures::Catalogue},
+        };
+        let leg = |kind: &str, runway: &str, altitude: &str| {
+            let mut fields = vec![""; 38];
+            fields[0] = "010";
+            fields[1] = "1";
+            fields[2] = "TEST";
+            fields[11] = kind;
+            fields[20] = "0000";
+            fields[22] = " ";
+            fields[23] = altitude;
+            let mut leg = Catalogue::parse(&format!("SID:{};", fields.join(",")))
+                .unwrap()
+                .0
+                .into_values()
+                .next()
+                .unwrap()
+                .remove(0);
+            leg.identifier = format!("RW{runway}");
+            leg.section = "P".into();
+            leg.subsection = "G".into();
+            leg
+        };
+        let origin = Airport {
+            icao: "ORIG".into(),
+            runways: vec![Runway {
+                first_name: "09".into(),
+                second_name: "27".into(),
+                width: 45.0,
+                first: Point {
+                    north: 1000.0,
+                    ..Default::default()
+                },
+                second: Point {
+                    north: 1500.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let destination = Airport {
+            icao: "DEST".into(),
+            reference_latitude: 1.0,
+            elevation_feet: 100.0,
+            ..origin.clone()
+        };
+        let weather = |airport: &Airport| {
+            super::super::environment::Environment::from_sample(airport,&(
+            serde_json::json!({"airport":airport.icao,"latitude":airport.reference_latitude,"longitude":airport.reference_longitude,
+                "sampleAltitudeFeet":airport.elevation_feet,"pressureHpa":1013.25,"temperatureC":15.0,
+                "magneticVariationDegrees":0.0,"windDegrees":0.0,"windKnots":0.0}),std::time::Instant::now())).unwrap()
+        };
+        let departure_weather = weather(&origin);
+        let arrival_weather = weather(&destination);
+        let departure = leg("TF", "09", "01000");
+        let arrival = leg("IF", "09", "04000");
+        let final_fix = leg("TF", "27", "00050");
+        let points = Points::default();
+        let terminal = super::super::routing::Terminal {
+            enroute_from: Points::runway(&departure, &origin).unwrap().coordinate,
+            enroute_to: Points::runway(&arrival, &destination).unwrap().coordinate,
+            enroute_minimum_feet: 1000,
+            departure_name: "TEST".into(),
+            departure_transition: String::new(),
+            departure: vec![departure],
+            arrival_name: "TEST".into(),
+            arrival_transition: String::new(),
+            arrival: vec![arrival.clone()],
+            approach_name: "TEST".into(),
+            approach_transition: String::new(),
+            approach: vec![arrival, final_fix],
+            missed: vec![],
+        };
+        let aircraft = openatc_core::traffic::profiles::aircraft("C172")
+            .unwrap()
+            .clone();
+        let handling = &openatc_core::traffic::animation::builtin().unwrap()
+            [&openatc_core::traffic::animation::Kind::Piston];
+        let request = |aircraft, terminal, floor| Request {
+            candidate: 0,
+            terminal,
+            rotation: Waypoint {
+                latitude: 0.0,
+                longitude: 0.0,
+                altitude_feet: 0.0,
+            },
+            origin: &origin,
+            destination: &destination,
+            points: &points,
+            departure_weather: &departure_weather,
+            arrival_weather: &arrival_weather,
+            aircraft,
+            handling,
+            intercept_limit_nm: 20.0,
+            departure_floor_feet: 0.0,
+            arrival_floor_feet: floor,
+        };
+        assert!(
+            resolve(request(&aircraft, &terminal, destination.elevation_feet)).is_err(),
+            "Airport maximum elevation is above this runway's approach crossing"
+        );
+        let decoded = resolve(request(&aircraft, &terminal, 0.0)).unwrap();
+        let expected = arrival_weather.atmosphere.geometric(4000.0, false).unwrap();
+        assert_eq!(decoded.arrival.last().unwrap().maximum_feet, expected);
+        assert_eq!(decoded.approach.first().unwrap().maximum_feet, expected);
+        assert_eq!(
+            decoded
+                .approach
+                .last()
+                .unwrap()
+                .airspeed
+                .unwrap()
+                .indicated_knots,
+            aircraft.approach_knots
+        );
+        let mut too_low = aircraft.clone();
+        too_low.ceiling = 500.0;
+        assert!(
+            resolve(request(&too_low, &terminal, 0.0))
+                .err()
+                .unwrap()
+                .contains("ceiling")
+        );
+        let mut unsupported = terminal.clone();
+        unsupported.departure[0].terminator = "RF".into();
+        assert!(resolve(request(&aircraft, &unsupported, 0.0)).is_err());
+    }
 
     fn inputs() -> (Waypoint, Vec<Section>, Envelope) {
         let start = Waypoint {
@@ -125,6 +399,7 @@ mod tests {
             |(stage, latitude, minimum_feet, maximum_feet, preferred_feet)| Section {
                 stage,
                 crossings: vec![Fix {
+                    airspeed: None,
                     coordinate: [latitude, 0.0],
                     arrival_heading: Some(0.0),
                     minimum_feet,
@@ -229,6 +504,30 @@ mod tests {
         assert!(compile(start, 0.0, 0.0, sections, &envelope, |_, _| true).is_err());
     }
 
+    #[test]
+    fn compatible_ias_survives_a_lower_star_approach_join() {
+        use openatc_core::traffic::{air::Atmosphere, trajectory::Airspeed};
+        let (start, mut sections, envelope) = inputs();
+        let speed = Airspeed {
+            indicated_knots: 120.0,
+            atmosphere: Atmosphere::surface(1013.25, 15.0, 0.0).unwrap(),
+            wind_from: 0.0,
+            wind_knots: 10.0,
+        };
+        sections[2].crossings[0].airspeed = Some(speed);
+        sections[2].crossings[0].ground_knots = speed.ground_knots(1000.0, 0.0).unwrap();
+        let mut entry = sections[2].crossings[0].clone();
+        entry.maximum_feet = 500.0;
+        entry.preferred_feet = 500.0;
+        entry.ground_knots = speed.ground_knots(500.0, 0.0).unwrap();
+        sections[3].crossings.insert(0, entry);
+        let path = compile(start, 0.0, 0.0, sections, &envelope, |a, b| {
+            a.longitude.abs() < 0.001 && b.longitude.abs() < 0.001
+        })
+        .unwrap();
+        assert_eq!(path[2].points.last().unwrap().altitude_feet, 500.0);
+        assert!((path[2].knots - speed.ground_knots(500.0, 0.0).unwrap()).abs() < 0.01);
+    }
     #[test]
     fn unprotected_or_incomplete_flights_do_not_create_movement() {
         let (start, sections, envelope) = inputs();

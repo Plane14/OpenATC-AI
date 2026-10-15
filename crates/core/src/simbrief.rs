@@ -83,6 +83,13 @@ fn navlog_fixes(document: &serde_json::Value) -> Result<Vec<RouteFix>, String> {
     let mut route = Vec::new();
     if let Some(items) = fixes.as_array() {
         for fix in items {
+            // Computed climb/descent markers are planning annotations, not
+            // waypoints to which the aircraft must navigate.
+            if string_value(fix, "type", "") == "ltlg"
+                && ["TOC", "TOD"].contains(&string_value(fix, "ident", "").as_str())
+            {
+                continue;
+            }
             if string_value(fix, "pos_lat", "").is_empty()
                 || string_value(fix, "pos_long", "").is_empty()
             {
@@ -203,6 +210,25 @@ pub fn parse_simbrief(document: &serde_json::Value) -> Result<FlightPlan, String
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn computed_vertical_markers_are_not_route_waypoints() {
+        let document = serde_json::json!({"navlog":{"fix":[
+            {"ident":"TOC","type":"ltlg","pos_lat":"45.0","pos_long":"8.0"},
+            {"ident":"TOD","type":"ltlg","pos_lat":"45.1","pos_long":"8.0"},
+            {"ident":"INLER","type":"wpt","pos_lat":"45.2","pos_long":"8.0"},
+            {"ident":"TOD","type":"wpt","pos_lat":"45.3","pos_long":"8.0"},
+            {"ident":"45N008E","type":"ltlg","pos_lat":"45.4","pos_long":"8.0"}
+        ]}});
+        let fixes = navlog_fixes(&document).unwrap();
+        assert_eq!(
+            fixes
+                .iter()
+                .map(|fix| fix.identifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["INLER", "TOD", "45N008E"]
+        );
+    }
 
     fn fixtures() -> serde_json::Value {
         let path =

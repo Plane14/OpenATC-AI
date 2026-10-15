@@ -844,7 +844,10 @@ mod tests {
         assert_ne!(revised["information"], result["information"]);
         let state = shared.read().await;
         assert_eq!(state.session.transcript.len(), count);
-        assert_eq!(state.session.transcript.last().unwrap().text, revised["text"].as_str().unwrap());
+        assert_eq!(
+            state.session.transcript.last().unwrap().text,
+            revised["text"].as_str().unwrap()
+        );
         drop(state);
         assert_eq!(result["airport"], "TEST");
         assert!(result["text"].as_str().is_some_and(|text| !text.is_empty()));

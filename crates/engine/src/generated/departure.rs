@@ -35,11 +35,12 @@ pub(super) fn plan(
     hold: Waypoint,
     aircraft: &openatc_core::traffic::profiles::Aircraft,
     handling: &animation::Handling,
-    rotation_ground_knots: f64,
+    weather: &super::environment::Environment,
+    surface: &super::runway::Surface,
     policy: &Operations,
 ) -> Result<Surface, String> {
-    if !(35.0..=230.0).contains(&rotation_ground_knots) {
-        return Err("Departure rotation ground speed is unresolved".into());
+    if !surface.matches(airport, runway_name) {
+        return Err("Departure surface belongs to another runway".into());
     }
     let runway = airport
         .runways
@@ -81,12 +82,34 @@ pub(super) fn plan(
     let entry_along = (entry.east - start.east) * u[0] + (entry.north - start.north) * u[1];
     let aligned = entry_along + (handling.taxi_turn_radius_meters * 2.0).max(aircraft.length * 2.0);
     let remaining = length - aligned;
-    let speed = rotation_ground_knots * 0.514444;
-    let rotation_time = (handling.rotation_pitch_degrees / handling.pitch_rate_degrees_sec
-        - 0.1 * rotation_ground_knots / handling.acceleration_knots_sec)
-        .max(0.0);
-    let roll =
-        speed.powi(2) / (2.0 * handling.acceleration_knots_sec * 0.514444) + speed * rotation_time;
+    let roll_at = |knots: f64| {
+        let speed = knots * 0.514444;
+        let rotation_time = (handling.rotation_pitch_degrees / handling.pitch_rate_degrees_sec
+            - 0.1 * knots / handling.acceleration_knots_sec)
+            .max(0.0);
+        speed.powi(2) / (2.0 * handling.acceleration_knots_sec * 0.514444) + speed * rotation_time
+    };
+    let mut rotation_ground_knots = weather.runway_speed(
+        airport,
+        runway_name,
+        handling.rotation_knots,
+        surface.height(surface.point(aligned)),
+    )?;
+    let mut converged = false;
+    for _ in 0..12 {
+        let height = surface.height(surface.point(aligned + roll_at(rotation_ground_knots)));
+        let next = weather.runway_speed(airport, runway_name, handling.rotation_knots, height)?;
+        if (next - rotation_ground_knots).abs() < 0.001 {
+            rotation_ground_knots = next;
+            converged = true;
+            break;
+        }
+        rotation_ground_knots = next;
+    }
+    if !converged || !(35.0..=230.0).contains(&rotation_ground_knots) {
+        return Err("Departure rotation ground speed is unresolved".into());
+    }
+    let roll = roll_at(rotation_ground_knots);
     if !remaining.is_finite()
         || entry_along < 0.0
         || remaining < aircraft.runway
@@ -148,13 +171,10 @@ pub(super) fn plan(
         Waypoint {
             latitude: coordinate[0],
             longitude: coordinate[1],
-            altitude_feet: airport.elevation_feet,
+            altitude_feet: surface.height(point),
         }
     };
-    let resource = format!(
-        "RUNWAY/{}/{}/{}",
-        airport.icao, runway.first_name, runway.second_name
-    );
+    let resource = surface.resource.clone();
     let mut protected = BTreeSet::from([resource.clone()]);
     for sample in &rounded {
         protected.extend(cells(
@@ -195,16 +215,40 @@ pub(super) fn plan(
             }
         }
     }
+    let mut lineup: Vec<_> = rounded
+        .iter()
+        .map(|sample| waypoint(sample.point))
+        .collect();
+    let mut distances = vec![0.0];
+    for pair in lineup.windows(2) {
+        distances.push(
+            distances.last().unwrap()
+                + openatc_core::arrival::distance_nm(
+                    [pair[0].latitude, pair[0].longitude],
+                    [pair[1].latitude, pair[1].longitude],
+                ),
+        );
+    }
+    let distance = *distances.last().ok_or("Runway entry has no samples")?;
+    if distance <= 0.0 {
+        return Err("Runway entry has no length".into());
+    }
+    let aligned_height = surface.height(point(aligned));
+    // Taxi nodes have no surveyed heights. Preserve the hold datum and join the
+    // selected runway surface gradually; native terrain placement remains separate.
+    for (sample, along) in lineup.iter_mut().zip(distances) {
+        sample.altitude_feet =
+            hold.altitude_feet + (aligned_height - hold.altitude_feet) * along / distance;
+    }
+    lineup[0] = hold;
+    *lineup.last_mut().unwrap() = waypoint(point(aligned));
     let surface = Surface {
         rotation,
         remaining_meters: remaining,
         segments: vec![
             Segment {
                 stage: Stage::LineUp,
-                points: rounded
-                    .iter()
-                    .map(|sample| waypoint(sample.point))
-                    .collect(),
+                points: lineup,
                 knots: handling.taxi_turn_knots,
                 resources: protected.into_iter().collect(),
                 dwell_seconds: 0.0,

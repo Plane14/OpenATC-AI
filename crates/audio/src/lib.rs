@@ -591,7 +591,9 @@ impl Speech {
                     self.context = context.0 as *mut MaContext;
                     context.0 = 0;
                     self.warming = None;
-                    if self.context.is_null() { self.warming_failed_at = Some(std::time::Instant::now()); }
+                    if self.context.is_null() {
+                        self.warming_failed_at = Some(std::time::Instant::now());
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.warming = None;
@@ -601,7 +603,12 @@ impl Speech {
             }
             return !self.context.is_null();
         }
-        if self.warming_failed_at.is_some_and(|at| at.elapsed().as_secs() < 5) { return false; }
+        if self
+            .warming_failed_at
+            .is_some_and(|at| at.elapsed().as_secs() < 5)
+        {
+            return false;
+        }
         let (sender, receiver) = std::sync::mpsc::channel();
         self.warming = Some(receiver);
         self.track_job(std::thread::spawn(move || {
@@ -680,7 +687,9 @@ impl Speech {
                 cache.insert(key, Some(Arc::new(frames)));
             } else {
                 cache.remove(&key);
-                if let Ok(mut status) = status.lock() { *status = format!("Callout {key} synthesis failed; retry pending"); }
+                if let Ok(mut status) = status.lock() {
+                    *status = format!("Callout {key} synthesis failed; retry pending");
+                }
                 if let Ok(mut retry) = retry.lock() {
                     retry.insert(key, std::time::Instant::now());
                 }
@@ -731,7 +740,11 @@ impl Speech {
                 volume.clamp(0.0, 1.0),
                 &cancelled,
             );
-            if let Err(error) = result && let Ok(mut status) = status.lock() { *status = format!("Callout output failed: {error}"); }
+            if let Err(error) = result
+                && let Ok(mut status) = status.lock()
+            {
+                *status = format!("Callout output failed: {error}");
+            }
             playing.store(false, Ordering::SeqCst);
             busy.store(false, Ordering::SeqCst);
         }));

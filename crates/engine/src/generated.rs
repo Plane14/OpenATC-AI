@@ -16,12 +16,14 @@ use std::{
 };
 mod airborne;
 mod departure;
+mod display;
 mod environment;
 mod flight;
 mod landing;
 mod policy;
 mod radio;
 mod routing;
+mod runway;
 pub use radio::tick as radio_tick;
 
 #[derive(Default, Clone)]
@@ -30,6 +32,7 @@ pub struct Runtime {
     preparation_job: Option<u64>,
     retry: Option<Instant>,
     frames: Vec<GeneratedTraffic>,
+    visible: BTreeSet<u32>,
     world: openatc_core::traffic::motion::World,
     pub(crate) airport: Option<Arc<Airport>>,
     pub(crate) destination: Option<Arc<Airport>>,
@@ -38,6 +41,9 @@ pub struct Runtime {
     terminal_points: Option<Arc<openatc_core::traffic::coordinates::Points>>,
     published_holds: Option<Arc<openatc_core::traffic::holding::published::Catalogue>>,
     nominal_departures: BTreeMap<u32, Arc<departure::Surface>>,
+    decoded_terminals: BTreeMap<u32, Arc<airborne::Decoded>>,
+    nominal_arrivals: BTreeMap<u32, Arc<landing::Arrival>>,
+    spoken_callsigns: BTreeMap<String, String>,
     movement: BTreeMap<u32, animation::Handling>,
     previous_time: Option<f64>,
     epoch: Option<u64>,
@@ -63,6 +69,78 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Expand only whole flight identities; TCAS and target addressing keep their short codes.
+    pub(crate) fn spoken_text(&self, text: &str) -> String {
+        let mut output = String::with_capacity(text.len());
+        for part in text.split_inclusive(|c: char| !c.is_ascii_alphanumeric()) {
+            let word = part.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+            output.push_str(self.spoken_callsigns.get(word).map_or(word, String::as_str));
+            output.push_str(&part[word.len()..]);
+        }
+        output
+    }
+    fn crossing_blocked(&self, id: u32, index: usize, targets: &[TrafficTarget]) -> bool {
+        let segment = self
+            .flights
+            .get(&id)
+            .filter(|_| self.active_flights.contains(&id))
+            .and_then(|flight| flight.route.segment(index))
+            .or_else(|| self.world.current_segment(id));
+        let Some(segment) = segment else {
+            return true;
+        };
+        if segment.stage != openatc_core::traffic::motion::Stage::Crossing {
+            return false;
+        }
+        let airport = self
+            .orders
+            .get(&id)
+            .and_then(|orders| orders.iter().find(|(segment, _)| *segment == index))
+            .and_then(|(_, order)| self.surface_airport(&order.airport))
+            .or_else(|| {
+                self.flights
+                    .get(&id)
+                    .and_then(|flight| flight.clearances.get(&index))
+                    .and_then(|clearance| self.surface_airport(&clearance.station.airport))
+            });
+        let (Some(airport), Some(policy)) = (airport, self.policy.as_ref()) else {
+            return true;
+        };
+        let mut runways = airport
+            .runways
+            .iter()
+            .filter(|runway| {
+                segment.resources.contains(&format!(
+                    "RUNWAY/{}/{}/{}",
+                    airport.icao, runway.first_name, runway.second_name
+                ))
+            })
+            .peekable();
+        if runways.peek().is_none() {
+            return true;
+        }
+        let seconds = segment
+            .points
+            .windows(2)
+            .map(|pair| {
+                openatc_core::arrival::distance_nm(
+                    [pair[0].latitude, pair[0].longitude],
+                    [pair[1].latitude, pair[1].longitude],
+                ) * 1852.0
+            })
+            .sum::<f64>()
+            / (segment.knots.max(1.0) * 0.514444)
+            + policy.runway_clearance_buffer_seconds;
+        runways.any(|runway| {
+            openatc_core::holding::blocked_during(
+                airport,
+                &runway.first_name,
+                targets.iter().filter(|target| target.id != id),
+                seconds,
+            )
+            .is_some()
+        })
+    }
     fn surface_airport(&self, id: &str) -> Option<&Airport> {
         self.airport
             .iter()
@@ -144,6 +222,9 @@ struct Scene {
     terminal_points: Option<Arc<openatc_core::traffic::coordinates::Points>>,
     published_holds: Option<Arc<openatc_core::traffic::holding::published::Catalogue>>,
     nominal_departures: BTreeMap<u32, Arc<departure::Surface>>,
+    decoded_terminals: BTreeMap<u32, Arc<airborne::Decoded>>,
+    nominal_arrivals: BTreeMap<u32, Arc<landing::Arrival>>,
+    spoken_callsigns: BTreeMap<String, String>,
     terminal_routes: Vec<routing::Terminal>,
     environments: BTreeMap<String, environment::Environment>,
     policy: Operations,
@@ -173,6 +254,12 @@ struct Operations {
     pushback_max_meters: f64,
     flight_clearance_lead_seconds: f64,
     terminal_candidate_limit: usize,
+    terminal_intercept_limit_nm: f64,
+    runway_slope_limit_percent: f64,
+    visible_aircraft_limit: usize,
+    display_enter_nm: f64,
+    display_leave_nm: f64,
+    display_replacement_margin_nm: f64,
     surface_monitor_radius_nm: f64,
     gate_connector_meters: f64,
     gate_connector_detour_meters: f64,
@@ -193,7 +280,13 @@ fn parse_operations(text: &str) -> Result<Operations, String> {
     let policy: Operations = value
         .try_into()
         .map_err(|error: toml::de::Error| error.to_string())?;
-    if !(1..=32).contains(&policy.terminal_candidate_limit)
+    if !(1..=63).contains(&policy.visible_aircraft_limit)
+        || !(5.0..=100.0).contains(&policy.display_enter_nm)
+        || !(policy.display_enter_nm..=150.0).contains(&policy.display_leave_nm)
+        || !(0.0..=10.0).contains(&policy.display_replacement_margin_nm)
+        || !(1..=32).contains(&policy.terminal_candidate_limit)
+        || !(1.0..=100.0).contains(&policy.terminal_intercept_limit_nm)
+        || !(0.1..=10.0).contains(&policy.runway_slope_limit_percent)
         || !(1.0..=50.0).contains(&policy.surface_monitor_radius_nm)
         || !(1.0..=350.0).contains(&policy.gate_connector_meters)
         || !(0.0..=500.0).contains(&policy.gate_connector_detour_meters)
@@ -788,7 +881,35 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
         }
         _ => Vec::new(),
     };
+    let mut terminal_surfaces = BTreeMap::new();
+    for (airport, name) in [
+        (&input.origin, &input.runway),
+        (&input.destination, &input.arrival_runway),
+    ] {
+        let surface = (|| {
+            let data = openatc_core::arrival::ArrivalAirport::load(
+                &input.simulator_root,
+                airport.clone(),
+            )?;
+            runway::Surface::new(
+                airport,
+                name,
+                &data.thresholds,
+                policy.runway_slope_limit_percent,
+            )
+        })();
+        match surface {
+            Ok(surface) => {
+                terminal_surfaces.insert(airport.icao.clone(), surface);
+            }
+            Err(error) => warnings.push(format!("{} runway {name}: {error}", airport.icao)),
+        }
+    }
     let mut nominal_departures = BTreeMap::new();
+    let mut decoded_terminals = BTreeMap::new();
+    let mut nominal_arrivals = BTreeMap::new();
+    let mut spoken_callsigns = BTreeMap::new();
+    let mut reserved_arrival_stands = BTreeSet::new();
     for (category, count) in classes.into_iter().zip(input.counts) {
         for _ in 0..count.min(63) {
             if result.len() >= 63 {
@@ -919,16 +1040,140 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
                             handling[&kind].braking_knots_sec,
                         );
                         movement.insert(id, handling[&kind].clone());
-                        match departure::plan(
-                            &input.origin,
-                            &input.runway,
-                            hold,
-                            aircraft,
-                            &handling[&kind],
-                            handling[&kind].rotation_knots,
-                            &policy,
-                        ) {
+                        let departure_surface = (|| {
+                            let environment = environments
+                                .get(&input.origin.icao)
+                                .ok_or("Departure surface needs fresh airport weather")?;
+                            let surface = terminal_surfaces
+                                .get(&input.origin.icao)
+                                .ok_or("Departure runway surface is unavailable")?;
+                            departure::plan(
+                                &input.origin,
+                                &input.runway,
+                                hold,
+                                aircraft,
+                                &handling[&kind],
+                                environment,
+                                surface,
+                                &policy,
+                            )
+                        })();
+                        match departure_surface {
                             Ok(surface) => {
+                                let decoded = (|| {
+                                    let points = terminal_points
+                                        .as_ref()
+                                        .ok_or("Terminal coordinates are unavailable".to_owned())?;
+                                    let departure_weather = environments
+                                        .get(&input.origin.icao)
+                                        .ok_or("Departure weather is unavailable".to_owned())?;
+                                    let arrival_weather = environments
+                                        .get(&input.destination.icao)
+                                        .ok_or("Arrival weather is unavailable".to_owned())?;
+                                    let departure_surface =
+                                        terminal_surfaces.get(&input.origin.icao).ok_or(
+                                            "Departure runway surface is unavailable".to_owned(),
+                                        )?;
+                                    let arrival_surface =
+                                        terminal_surfaces.get(&input.destination.icao).ok_or(
+                                            "Arrival runway surface is unavailable".to_owned(),
+                                        )?;
+                                    let departure_floor_feet = input.origin.elevation_feet.min(
+                                        departure_weather.atmosphere.geometric(
+                                            departure_surface.height(
+                                                departure_surface
+                                                    .point(departure_surface.threshold),
+                                            ),
+                                            false,
+                                        )?,
+                                    );
+                                    let arrival_floor_feet = input.destination.elevation_feet.min(
+                                        arrival_weather.atmosphere.geometric(
+                                            arrival_surface.height(
+                                                arrival_surface.point(arrival_surface.threshold),
+                                            ),
+                                            false,
+                                        )?,
+                                    );
+                                    let mut reason =
+                                        "No terminal candidate is available".to_owned();
+                                    for (candidate, terminal) in terminal_routes.iter().enumerate()
+                                    {
+                                        match airborne::resolve(airborne::Request {
+                                            candidate,
+                                            terminal,
+                                            rotation: surface.rotation,
+                                            origin: &input.origin,
+                                            destination: &input.destination,
+                                            points,
+                                            departure_weather,
+                                            arrival_weather,
+                                            aircraft,
+                                            handling: &handling[&kind],
+                                            intercept_limit_nm: policy.terminal_intercept_limit_nm,
+                                            departure_floor_feet,
+                                            arrival_floor_feet,
+                                        }) {
+                                            Ok(decoded) => return Ok(decoded),
+                                            Err(error) => reason = error,
+                                        }
+                                    }
+                                    Err(reason)
+                                })();
+                                match decoded {
+                                    Ok(decoded) => {
+                                        let arrival = (|| {
+                                            let surface = terminal_surfaces
+                                                .get(&input.destination.icao)
+                                                .ok_or("Arrival runway surface is unavailable")?;
+                                            let crossing = decoded
+                                                .approach
+                                                .last()
+                                                .ok_or("Approach has no threshold crossing")?;
+                                            let angle = terminal_routes[decoded.candidate]
+                                                .approach
+                                                .last()
+                                                .and_then(|leg| leg.vertical_angle_degrees)
+                                                .ok_or(
+                                                    "Approach has no published final descent angle",
+                                                )?;
+                                            landing::prepare(landing::Request {
+                                                airport: &input.destination,
+                                                surface,
+                                                crossing: openatc_core::traffic::motion::Waypoint {
+                                                    latitude: crossing.coordinate[0],
+                                                    longitude: crossing.coordinate[1],
+                                                    altitude_feet: crossing.preferred_feet,
+                                                },
+                                                angle_degrees: angle,
+                                                airspeed: crossing
+                                                    .airspeed
+                                                    .ok_or("Approach airspeed is unresolved")?,
+                                                aircraft,
+                                                handling: &handling[&kind],
+                                                policy: &policy,
+                                                observed: &input.observed,
+                                                reserved: &reserved_arrival_stands,
+                                            })
+                                        })();
+                                        match arrival {
+                                            Ok(arrival) => {
+                                                reserved_arrival_stands
+                                                    .insert(arrival.parking.stand.clone());
+                                                nominal_arrivals.insert(id, Arc::new(arrival));
+                                            }
+                                            Err(error) => warnings.push(format!(
+                                                "{} / {}: arrival geometry: {error}",
+                                                input.origin.icao, stand.name
+                                            )),
+                                        }
+                                        decoded_terminals.insert(id, Arc::new(decoded));
+                                    }
+                                    Err(error) => warnings.push(format!(
+                                        "{} / {}: terminal inputs: {error}",
+                                        input.origin.icao, stand.name
+                                    )),
+                                }
                                 nominal_departures.insert(id, Arc::new(surface));
                             }
                             Err(error) => warnings.push(format!(
@@ -951,6 +1196,15 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
                     ));
                     fixed_gear.remove(&id);
                     continue;
+                }
+                if !choice.operator.is_empty()
+                    && !choice.spoken_operator.trim().is_empty()
+                    && let Some(number) = callsign.strip_prefix(&choice.operator)
+                {
+                    spoken_callsigns.insert(
+                        callsign.clone(),
+                        format!("{} {number}", choice.spoken_operator),
+                    );
                 }
                 result.push(GeneratedTraffic {
                     vertical_speed_fpm: 0.0,
@@ -985,6 +1239,11 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
             .next()
             .unwrap_or_else(|| "No eligible generated aircraft".into()));
     }
+    if !decoded_terminals.is_empty() && environments.values().any(|weather| !weather.fresh()) {
+        decoded_terminals.clear();
+        nominal_arrivals.clear();
+        warnings.push("Terminal weather expired before scene preparation completed".into());
+    }
     for airport in [&input.origin, &input.destination] {
         if !environments.contains_key(&airport.icao) {
             warnings.push(format!(
@@ -1004,6 +1263,9 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
         terminal_points,
         published_holds,
         nominal_departures,
+        decoded_terminals,
+        nominal_arrivals,
+        spoken_callsigns,
         terminal_routes,
         environments,
         policy,
@@ -1152,14 +1414,17 @@ pub async fn prepare(shared: Shared) {
     match result {
         Ok(scene) => {
             state.generated.status = format!(
-                "{} generated surface aircraft prepared; {} terminal candidates retained; full airborne planning is still under development",
+                "{} generated surface aircraft prepared; {} terminal candidates, {} aircraft-specific terminal inputs, {} joined arrivals; full airborne planning is still under development",
                 scene.frames.len(),
-                scene.terminal_routes.len()
+                scene.terminal_routes.len(),
+                scene.decoded_terminals.len(),
+                scene.nominal_arrivals.len()
             );
             state.generated.terminal_routes = scene.terminal_routes;
             state.generated.environments = scene.environments;
             state.generated.key = key;
             state.generated.frames = scene.frames;
+            state.generated.visible.clear();
             state.generated.world = scene.world;
             state.generated.movement = scene.movement;
             state.generated.airport = Some(Arc::new(scene.airport));
@@ -1169,6 +1434,9 @@ pub async fn prepare(shared: Shared) {
             state.generated.terminal_points = scene.terminal_points;
             state.generated.published_holds = scene.published_holds;
             state.generated.nominal_departures = scene.nominal_departures;
+            state.generated.decoded_terminals = scene.decoded_terminals;
+            state.generated.nominal_arrivals = scene.nominal_arrivals;
+            state.generated.spoken_callsigns = scene.spoken_callsigns;
             state.generated.policy = Some(scene.policy);
             state.generated.fixed_gear = scene.fixed_gear;
             state.generated.channels = scene.channels;
@@ -1190,43 +1458,94 @@ fn external_surface_cells(
         return BTreeSet::new();
     };
     let mut blocked = BTreeSet::new();
-    let mut add = |latitude, longitude, wingspan: Option<f64>| {
+    let mut add = |target: &TrafficTarget| {
         for airport in runtime.airport.iter().chain(runtime.destination.iter()) {
             if openatc_core::arrival::distance_nm(
                 [airport.reference_latitude, airport.reference_longitude],
-                [latitude, longitude],
+                [target.latitude, target.longitude],
             ) > policy.surface_monitor_radius_nm
             {
                 continue;
             }
             blocked.extend(cells(
                 airport,
-                openatc_core::airport::airport_point(airport, latitude, longitude),
-                wingspan.unwrap_or(80.0) / 2.0,
+                openatc_core::airport::airport_point(airport, target.latitude, target.longitude),
+                target.wingspan_meters.unwrap_or(80.0) / 2.0,
                 policy.conflict_cell_meters,
             ));
+            // Runway phases reserve the runway itself, not only its taxi conflict cells.
+            for runway in &airport.runways {
+                if openatc_core::holding::blocked_targets(
+                    airport,
+                    &runway.first_name,
+                    std::iter::once(target),
+                )
+                .is_some()
+                {
+                    blocked.insert(format!(
+                        "RUNWAY/{}/{}/{}",
+                        airport.icao, runway.first_name, runway.second_name
+                    ));
+                }
+            }
         }
     };
     if telemetry.on_ground {
-        add(
-            telemetry.latitude,
-            telemetry.longitude,
-            telemetry.wingspan_meters,
-        );
+        add(&TrafficTarget {
+            id: 0,
+            aircraft: telemetry.aircraft_icao.clone(),
+            latitude: telemetry.latitude,
+            longitude: telemetry.longitude,
+            altitude_feet: telemetry.altitude_feet,
+            track_degrees: telemetry.heading_degrees,
+            on_ground: true,
+            wingspan_meters: telemetry.wingspan_meters,
+            ..Default::default()
+        });
     }
     if let Some(observed) = &telemetry.traffic {
         for target in observed
             .iter()
             .filter(|target| target.on_ground && !runtime.movement.contains_key(&target.id))
         {
-            add(target.latitude, target.longitude, target.wingspan_meters);
+            add(target);
         }
     }
     blocked
 }
 
+fn observed_targets(
+    runtime: &Runtime,
+    telemetry: &openatc_core::state::Telemetry,
+) -> Vec<TrafficTarget> {
+    let ids: BTreeSet<_> = runtime.frames.iter().map(|frame| frame.target.id).collect();
+    let mut targets: Vec<_> = telemetry
+        .traffic
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .take(63)
+        .filter(|target| !ids.contains(&target.id))
+        .cloned()
+        .collect();
+    targets.extend(runtime.frames.iter().map(|frame| frame.target.clone()));
+    targets.push(TrafficTarget {
+        id: 0,
+        aircraft: telemetry.aircraft_icao.clone(),
+        latitude: telemetry.latitude,
+        longitude: telemetry.longitude,
+        altitude_feet: telemetry.altitude_feet,
+        track_degrees: telemetry.heading_degrees,
+        on_ground: telemetry.on_ground,
+        ground_speed_knots: Some(telemetry.ground_speed_knots),
+        wingspan_meters: telemetry.wingspan_meters,
+        ..Default::default()
+    });
+    targets
+}
+
 fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) {
-    if let (Some(_airport), Some(seconds), Some(policy)) = (
+    if let (Some(_airport), Some(seconds), Some(_policy)) = (
         &runtime.airport,
         telemetry.simulation_seconds,
         &runtime.policy,
@@ -1236,35 +1555,20 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) {
             .world
             .recheck_surface(&blocked, telemetry.traffic.is_some());
         if telemetry.traffic.is_some() {
-            let ids: BTreeSet<_> = runtime.frames.iter().map(|frame| frame.target.id).collect();
-            let mut targets: Vec<_> = telemetry
-                .traffic
-                .as_ref()
-                .unwrap()
-                .iter()
-                .take(63)
-                .filter(|target| !ids.contains(&target.id))
-                .cloned()
-                .collect();
-            targets.extend(runtime.frames.iter().map(|frame| frame.target.clone()));
-            targets.push(TrafficTarget {
-                id: 0,
-                aircraft: telemetry.aircraft_icao.clone(),
-                latitude: telemetry.latitude,
-                longitude: telemetry.longitude,
-                altitude_feet: telemetry.altitude_feet,
-                track_degrees: telemetry.heading_degrees,
-                on_ground: telemetry.on_ground,
-                ground_speed_knots: Some(telemetry.ground_speed_knots),
-                wingspan_meters: telemetry.wingspan_meters,
-                ..Default::default()
-            });
+            let targets = observed_targets(runtime, telemetry);
             let generation = runtime.world.generation();
             for pose in runtime.world.snapshot() {
                 if pose.recovering {
                     continue;
                 }
                 if pose.awaiting_clearance {
+                    // Complete flights carry their own clearances after legacy ground orders are removed.
+                    if runtime.active_flights.contains(&pose.id)
+                        && pose.stage != openatc_core::traffic::motion::Stage::Turnaround
+                        && !runtime.approved_orders.contains(&(pose.id, pose.segment))
+                    {
+                        continue;
+                    }
                     if !matches!(
                         pose.stage,
                         openatc_core::traffic::motion::Stage::Parked
@@ -1282,57 +1586,18 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) {
                     {
                         continue;
                     }
-                    let crossing_blocked =
-                        runtime
-                            .world
-                            .current_segment(pose.id)
-                            .is_some_and(|segment| {
-                                let Some(airport) = runtime
-                                    .orders
-                                    .get(&pose.id)
-                                    .and_then(|orders| {
-                                        orders.iter().find(|(index, _)| *index == pose.segment)
-                                    })
-                                    .and_then(|(_, order)| runtime.surface_airport(&order.airport))
-                                else {
-                                    return segment.stage
-                                        == openatc_core::traffic::motion::Stage::Crossing;
-                                };
-                                segment.stage == openatc_core::traffic::motion::Stage::Crossing
-                                    && airport.runways.iter().any(|runway| {
-                                        segment.resources.contains(&format!(
-                                            "RUNWAY/{}/{}/{}",
-                                            airport.icao, runway.first_name, runway.second_name
-                                        )) && openatc_core::holding::blocked_during(
-                                            airport,
-                                            &runway.first_name,
-                                            targets.iter().filter(|target| target.id != pose.id),
-                                            segment
-                                                .points
-                                                .windows(2)
-                                                .map(|pair| {
-                                                    openatc_core::arrival::distance_nm(
-                                                        [pair[0].latitude, pair[0].longitude],
-                                                        [pair[1].latitude, pair[1].longitude],
-                                                    ) * 1852.0
-                                                })
-                                                .sum::<f64>()
-                                                / (segment.knots.max(1.0) * 0.514444)
-                                                + policy.runway_clearance_buffer_seconds,
-                                        )
-                                        .is_some()
-                                    })
-                            });
-                    if crossing_blocked {
+                    if runtime.crossing_blocked(pose.id, pose.segment, &targets) {
                         continue;
                     }
                     runtime
                         .world
                         .authorise(generation, pose.id, pose.segment, &blocked);
                 }
-                runtime
-                    .world
-                    .reserve_next_taxi(generation, pose.id, &blocked);
+                if !runtime.active_flights.contains(&pose.id) {
+                    runtime
+                        .world
+                        .reserve_next_taxi(generation, pose.id, &blocked);
+                }
                 if runtime.active_flights.contains(&pose.id)
                     && runtime
                         .approved_orders
@@ -1443,10 +1708,21 @@ pub fn step(state: &mut EngineState) {
         state.session.generated_traffic_diagnostics.clear();
         return;
     }
-    state
-        .session
-        .generated_traffic
-        .clone_from(&state.generated.frames);
+    let visible = state
+        .generated
+        .policy
+        .as_ref()
+        .map(|policy| {
+            display::select(
+                &state.generated.frames,
+                &state.session.telemetry,
+                &state.generated.visible,
+                policy,
+            )
+        })
+        .unwrap_or_default();
+    state.generated.visible = visible.iter().map(|frame| frame.target.id).collect();
+    state.session.generated_traffic = visible;
     state
         .session
         .generated_animation_channels
@@ -1664,6 +1940,7 @@ mod tests {
     #[tokio::test]
     async fn reset_while_worker_is_queued_does_not_block_or_replace_the_new_scene() {
         let mut engine = crate::test_state();
+        engine.session.telemetry.position_valid = true;
         engine.settings.generated_traffic = true;
         let frame = |id| GeneratedTraffic {
             vertical_speed_fpm: 0.0,
@@ -1710,6 +1987,8 @@ mod tests {
             let mut engine = shared.write().await;
             engine.session_generation += 1;
             engine.generated = Runtime::default();
+            engine.generated.policy =
+                Some(parse_operations(include_str!("../../../traffic/operations.toml")).unwrap());
             engine.generated.epoch = Some(engine.session_generation);
             engine.generated.key = "new".into();
             engine.generated.frames = vec![frame(2)];
@@ -1736,11 +2015,12 @@ mod tests {
     #[ignore = "requires installed scenery and Bluebell"]
     fn installed_nice_scene_has_verified_departure_routes() {
         let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
+        let profiles = Arc::new(Profiles::builtin().unwrap());
         let scene = prepare_scene(Preparation {
             simulator_root: root.clone(),
             origin: airport(&root, "LFMN").unwrap(),
             destination: airport(&root, "LIMC").unwrap(),
-            profiles: Arc::new(Profiles::builtin().unwrap()),
+            profiles: profiles.clone(),
             models: Arc::new(
                 Catalogue::scan(
                     &std::path::Path::new(&root).join("Resources/plugins/OpenATC/Resources/CSL"),
@@ -1754,7 +2034,12 @@ mod tests {
             runway: "04R".into(),
             arrival_runway: "35R".into(),
             config: std::path::PathBuf::new(),
-            weather: BTreeMap::new(),
+            weather: ["LFMN","LIMC"].into_iter().map(|id| {
+                let airport=airport(&root,id).unwrap();
+                (id.into(),(serde_json::json!({"airport":id,"latitude":airport.reference_latitude,"longitude":airport.reference_longitude,
+                    "sampleAltitudeFeet":airport.elevation_feet,"pressureHpa":1013.25,"temperatureC":15.0,
+                    "magneticVariationDegrees":0.0,"windDegrees":0.0,"windKnots":0.0}),Instant::now()))
+            }).collect(),
         })
         .unwrap();
         assert!(!scene.frames.is_empty(), "No compatible installed aircraft");
@@ -1790,6 +2075,134 @@ mod tests {
                 .any(|leg| leg.altitude_limits().unwrap() == (Some(4000), None)
                     && leg.speed_knots == Some(190.0))
         );
+        assert!(
+            !scene.decoded_terminals.is_empty(),
+            "No aircraft-specific production terminal inputs: {:?}",
+            scene.warnings
+        );
+        assert!(
+            scene.decoded_terminals.keys().any(|id| profiles
+                .aircraft_for(
+                    &scene
+                        .frames
+                        .iter()
+                        .find(|frame| frame.target.id == *id)
+                        .unwrap()
+                        .target
+                        .aircraft
+                )
+                .unwrap()
+                .propeller),
+            "No aircraft-specific turboprop terminal inputs"
+        );
+        assert!(
+            !scene.nominal_arrivals.is_empty(),
+            "No threshold-to-parking arrivals: {:?}",
+            scene.warnings
+        );
+        for propeller in [false, true] {
+            assert!(
+                scene.nominal_arrivals.keys().any(|id| profiles
+                    .aircraft_for(
+                        &scene
+                            .frames
+                            .iter()
+                            .find(|frame| frame.target.id == *id)
+                            .unwrap()
+                            .target
+                            .aircraft
+                    )
+                    .unwrap()
+                    .propeller
+                    == propeller),
+                "No joined arrival for propeller={propeller}: {:?}",
+                scene.warnings
+            );
+        }
+        assert!(!scene.spoken_callsigns.is_empty());
+        for (short, spoken) in &scene.spoken_callsigns {
+            assert!(
+                scene
+                    .frames
+                    .iter()
+                    .any(|frame| frame.target.callsign == *short)
+            );
+            let number = &short[3..];
+            assert!(number.bytes().all(|digit| digit.is_ascii_digit()));
+            assert!(spoken.ends_with(&format!(" {number}")));
+            assert!(
+                profiles
+                    .airlines
+                    .values()
+                    .any(|airline| short.starts_with(&airline.operator)
+                        && spoken == &format!("{} {number}", airline.callsign))
+            );
+        }
+        let mut stands = BTreeSet::new();
+        for (id, arrival) in &scene.nominal_arrivals {
+            assert!(
+                stands.insert(arrival.parking.stand.clone()),
+                "Two nominal arrivals selected the same gate"
+            );
+            let crossing = scene.decoded_terminals[id].approach.last().unwrap();
+            assert_eq!(
+                arrival.flare.points[0].altitude_feet,
+                crossing.preferred_feet
+            );
+            assert_eq!(
+                arrival.flare.points.last(),
+                arrival.parking.exit.rollout[0].points.first()
+            );
+            assert_eq!(
+                arrival.parking.exit.rollout.last().unwrap().points.last(),
+                arrival
+                    .parking
+                    .surface
+                    .route
+                    .segment(0)
+                    .unwrap()
+                    .points
+                    .first()
+            );
+        }
+        for (id, decoded) in &scene.decoded_terminals {
+            let frame = scene
+                .frames
+                .iter()
+                .find(|frame| frame.target.id == *id)
+                .unwrap();
+            let aircraft = profiles.aircraft_for(&frame.target.aircraft).unwrap();
+            let terminal = &scene.terminal_routes[decoded.candidate];
+            assert_eq!(
+                decoded.departure[0].airspeed.unwrap().atmosphere,
+                scene.environments["LFMN"].atmosphere
+            );
+            assert_eq!(
+                decoded.approach[0].airspeed.unwrap().atmosphere,
+                scene.environments["LIMC"].atmosphere
+            );
+            assert!(f64::from(terminal.enroute_minimum_feet) <= aircraft.ceiling);
+            assert_eq!(
+                decoded.departure.last().unwrap().coordinate,
+                terminal.enroute_from
+            );
+            assert_eq!(
+                decoded.arrival.last().unwrap().coordinate,
+                decoded.approach.first().unwrap().coordinate
+            );
+            assert!(
+                decoded
+                    .departure
+                    .iter()
+                    .chain(&decoded.arrival)
+                    .chain(&decoded.approach)
+                    .all(|fix| fix.airspeed.is_some() && fix.minimum_feet <= fix.maximum_feet)
+            );
+        }
+        let threshold_data =
+            openatc_core::arrival::ArrivalAirport::load(&root, scene.airport.clone()).unwrap();
+        let runway_surface =
+            runway::Surface::new(&scene.airport, "04R", &threshold_data.thresholds, 2.0).unwrap();
         for (id, surface) in &scene.nominal_departures {
             assert!(scene.movement.contains_key(id));
             assert_eq!(
@@ -1801,6 +2214,87 @@ mod tests {
                 openatc_core::traffic::motion::Stage::Takeoff
             );
             assert!(surface.rotation.altitude_feet < 100.0);
+            let rotation_point = openatc_core::airport::airport_point(
+                &scene.airport,
+                surface.rotation.latitude,
+                surface.rotation.longitude,
+            );
+            assert!(
+                (surface.rotation.altitude_feet - runway_surface.height(rotation_point)).abs()
+                    < 1e-8
+            );
+            assert_eq!(
+                surface.segments[0].points.last(),
+                surface.segments[1].points.first()
+            );
+            assert_eq!(
+                surface.segments[0].points[0].altitude_feet,
+                scene.airport.elevation_feet
+            );
+            let knots = scene.environments["LFMN"]
+                .runway_speed(
+                    &scene.airport,
+                    "04R",
+                    scene.movement[id].rotation_knots,
+                    surface.rotation.altitude_feet,
+                )
+                .unwrap();
+            assert!((surface.segments[1].knots - knots).abs() < 0.001);
+        }
+        // Exercise a visibly sloping nominal runway without changing the licensed scenery.
+        let (id, original) = scene.nominal_departures.first_key_value().unwrap();
+        let frame = scene
+            .frames
+            .iter()
+            .find(|frame| frame.target.id == *id)
+            .unwrap();
+        let aircraft = profiles.aircraft_for(&frame.target.aircraft).unwrap();
+        let runway = scene
+            .airport
+            .runways
+            .iter()
+            .find(|r| r.first_name == "04R" || r.second_name == "04R")
+            .unwrap();
+        let heights = vec![
+            openatc_core::arrival::Threshold {
+                runway: runway.first_name.clone(),
+                elevation_feet: 0.0,
+            },
+            openatc_core::arrival::Threshold {
+                runway: runway.second_name.clone(),
+                elevation_feet: 50.0,
+            },
+        ];
+        let slope = runway::Surface::new(&scene.airport, "04R", &heights, 2.0).unwrap();
+        let policy = parse_operations(include_str!("../../../traffic/operations.toml")).unwrap();
+        let planned = departure::plan(
+            &scene.airport,
+            "04R",
+            original.segments[0].points[0],
+            aircraft,
+            &scene.movement[id],
+            &scene.environments["LFMN"],
+            &slope,
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(
+            planned.segments[0].points[0],
+            original.segments[0].points[0]
+        );
+        assert_eq!(
+            planned.segments[0].points.last(),
+            planned.segments[1].points.first()
+        );
+        let roll = &planned.segments[1].points;
+        assert!((roll[0].altitude_feet - roll[1].altitude_feet).abs() > 1.0);
+        for point in roll {
+            let local = openatc_core::airport::airport_point(
+                &scene.airport,
+                point.latitude,
+                point.longitude,
+            );
+            assert!((point.altitude_feet - slope.height(local)).abs() < 1e-8);
         }
         assert!(
             scene

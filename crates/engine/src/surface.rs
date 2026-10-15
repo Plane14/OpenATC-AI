@@ -29,8 +29,10 @@ impl Drop for CrossingNotice {
                 let mut state = shared.write().await;
                 let same_flight = state.session_generation == generation;
                 let route = &mut state.session.taxi_clearance;
-                if same_flight && route.sequence == sequence
-                    && route.holding_channel == channel && route.stage() == SurfaceStage::AtHold
+                if same_flight
+                    && route.sequence == sequence
+                    && route.holding_channel == channel
+                    && route.stage() == SurfaceStage::AtHold
                     && !route.waiting_for_traffic
                 {
                     route.holding_channel = 0;
@@ -56,6 +58,9 @@ pub async fn post_telemetry(
         radio,
     ) = {
         let mut state = shared.write().await;
+        if crate::debug_jump::waiting(&mut state) {
+            return Json(json!({"accepted":true})).into_response();
+        }
         if let Err(error) = update_flight_phase(&mut state.session, &telemetry) {
             return bad_request(&error);
         }
@@ -321,7 +326,10 @@ pub async fn post_telemetry(
         )
     };
     let _notice = (automatic_intent == "cross_runway").then(|| CrossingNotice {
-        shared: shared.clone(), generation, sequence: route_sequence, channel,
+        shared: shared.clone(),
+        generation,
+        sequence: route_sequence,
+        channel,
     });
     // Normal station-role and runway checks still govern this automatic request.
     let response = super::routes::atc_request(
@@ -416,52 +424,119 @@ mod tests {
     #[tokio::test]
     async fn cancelled_crossing_notice_retries_without_erasing_a_new_route_or_traffic_hold() {
         for protected in 0..3 {
-            let mut state=fixture();
-            state.session.taxi_clearance.guidance_complete=true;
-            state.session.taxi_clearance.holding_channel=121400;
-            let shared=std::sync::Arc::new(tokio::sync::RwLock::new(state));
-            let copy=shared.clone();
-            let (ready,waiting)=tokio::sync::oneshot::channel();
-            let task=tokio::spawn(async move {
-                let _notice=CrossingNotice{shared:copy,generation:0,sequence:42,channel:121400};
-                let _=ready.send(());
+            let mut state = fixture();
+            state.session.taxi_clearance.guidance_complete = true;
+            state.session.taxi_clearance.holding_channel = 121400;
+            let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+            let copy = shared.clone();
+            let (ready, waiting) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _notice = CrossingNotice {
+                    shared: copy,
+                    generation: 0,
+                    sequence: 42,
+                    channel: 121400,
+                };
+                let _ = ready.send(());
                 std::future::pending::<()>().await;
             });
             waiting.await.unwrap();
-            if protected==1 {shared.write().await.session.taxi_clearance.sequence=43;}
-            if protected==2 {shared.write().await.session.taxi_clearance.waiting_for_traffic=true;}
-            task.abort(); let _=task.await;
-            for _ in 0..10 {tokio::task::yield_now().await;}
-            assert_eq!(shared.read().await.session.taxi_clearance.holding_channel,if protected==0 {0}else{121400});
+            if protected == 1 {
+                shared.write().await.session.taxi_clearance.sequence = 43;
+            }
+            if protected == 2 {
+                shared
+                    .write()
+                    .await
+                    .session
+                    .taxi_clearance
+                    .waiting_for_traffic = true;
+            }
+            task.abort();
+            let _ = task.await;
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                shared.read().await.session.taxi_clearance.holding_channel,
+                if protected == 0 { 0 } else { 121400 }
+            );
         }
     }
 
     #[tokio::test]
     #[ignore = "requires installed X-Plane scenery"]
     async fn nice_reported_04l_hold_issues_crossing_without_voice_discovery_or_scanning() {
-        let root=std::env::var("OPENATC_SIM_ROOT").unwrap();
-        let airport=openatc_core::airport::load_airport_from_simulator(&root,"LFMN",&|p|std::path::Path::new(p).is_file(),&|p|std::fs::read_to_string(p).map_err(|e|e.to_string())).unwrap();
-        let mut state=fixture();
-        state.settings.simulator_root=root.clone();state.station_root=root;
-        state.settings.ai_enabled=false;state.settings.llm_phrase_variety=false;
-        state.settings.congestion=openatc_settings::Congestion::Busy;
-        state.settings.tts_url="http://127.0.0.1:1".into();
-        state.session.plan.departure="LFMN".into();state.session.plan.runway="04R".into();state.session.plan.aircraft="A20N".into();
-        let t=Telemetry{latitude:43.652637,longitude:7.203133,com1_khz:121705,ground_speed_knots:0.0,traffic:Some(vec![]),..telemetry()};
-        state.session.taxi_clearance=openatc_core::airport::calculate_taxi_route(&airport,&Telemetry{latitude:43.655753,longitude:7.202489,..t.clone()},"04R",false,'C').unwrap();
-        assert_eq!(state.session.taxi_clearance.hold_short_runway,"04L");
-        state.session.taxi_clearance.approved=true;state.session.taxi_clearance.pending_readback=false;state.session.taxi_clearance.sequence=19;
-        state.stations=openatc_core::stations::from_airport(&airport);state.airport=Some(airport);
-        let shared=std::sync::Arc::new(tokio::sync::RwLock::new(state));
-        tokio::time::timeout(std::time::Duration::from_secs(2),post_telemetry(AxumState(shared.clone()),Json(t.clone()))).await.expect("Automatic crossing must not wait on voice discovery or artificial congestion");
-        let state=shared.read().await;
-        assert_eq!(state.session.taxi_clearance.crossing_runway,"04L");
+        let root = std::env::var("OPENATC_SIM_ROOT").unwrap();
+        let airport = openatc_core::airport::load_airport_from_simulator(
+            &root,
+            "LFMN",
+            &|p| std::path::Path::new(p).is_file(),
+            &|p| std::fs::read_to_string(p).map_err(|e| e.to_string()),
+        )
+        .unwrap();
+        let mut state = fixture();
+        state.settings.simulator_root = root.clone();
+        state.station_root = root;
+        state.settings.ai_enabled = false;
+        state.settings.llm_phrase_variety = false;
+        state.settings.congestion = openatc_settings::Congestion::Busy;
+        state.settings.tts_url = "http://127.0.0.1:1".into();
+        state.session.plan.departure = "LFMN".into();
+        state.session.plan.runway = "04R".into();
+        state.session.plan.aircraft = "A20N".into();
+        let t = Telemetry {
+            latitude: 43.652637,
+            longitude: 7.203133,
+            com1_khz: 121705,
+            ground_speed_knots: 0.0,
+            traffic: Some(vec![]),
+            ..telemetry()
+        };
+        state.session.taxi_clearance = openatc_core::airport::calculate_taxi_route(
+            &airport,
+            &Telemetry {
+                latitude: 43.655753,
+                longitude: 7.202489,
+                ..t.clone()
+            },
+            "04R",
+            false,
+            'C',
+        )
+        .unwrap();
+        assert_eq!(state.session.taxi_clearance.hold_short_runway, "04L");
+        state.session.taxi_clearance.approved = true;
+        state.session.taxi_clearance.pending_readback = false;
+        state.session.taxi_clearance.sequence = 19;
+        state.stations = openatc_core::stations::from_airport(&airport);
+        state.airport = Some(airport);
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            post_telemetry(AxumState(shared.clone()), Json(t.clone())),
+        )
+        .await
+        .expect("Automatic crossing must not wait on voice discovery or artificial congestion");
+        let state = shared.read().await;
+        assert_eq!(state.session.taxi_clearance.crossing_runway, "04L");
         assert!(state.session.taxi_clearance.pending_readback);
-        assert!(state.session.transcript.iter().any(|entry|entry.text.contains("04L")&&entry.text.to_lowercase().contains("cross")));
+        assert!(
+            state
+                .session
+                .transcript
+                .iter()
+                .any(|entry| entry.text.contains("04L")
+                    && entry.text.to_lowercase().contains("cross"))
+        );
         drop(state);
-        let count=shared.read().await.session.transcript.len();
-        post_telemetry(AxumState(shared.clone()),Json(t)).await;
-        assert_eq!(shared.read().await.session.transcript.len(),count,"Wait for crossing readback before another instruction");
+        let count = shared.read().await.session.transcript.len();
+        post_telemetry(AxumState(shared.clone()), Json(t)).await;
+        assert_eq!(
+            shared.read().await.session.transcript.len(),
+            count,
+            "Wait for crossing readback before another instruction"
+        );
     }
 
     #[tokio::test]

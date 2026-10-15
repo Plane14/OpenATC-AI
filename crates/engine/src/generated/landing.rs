@@ -8,6 +8,89 @@ pub(super) struct Exit {
     pub vacated: Waypoint,
 }
 
+pub(super) struct Arrival {
+    pub flare: Segment,
+    pub parking: Parking,
+}
+pub(super) struct Request<'a> {
+    pub airport: &'a Airport,
+    pub surface: &'a super::runway::Surface,
+    pub crossing: Waypoint,
+    pub angle_degrees: f64,
+    pub airspeed: openatc_core::traffic::trajectory::Airspeed,
+    pub aircraft: &'a openatc_core::traffic::profiles::Aircraft,
+    pub handling: &'a animation::Handling,
+    pub policy: &'a Operations,
+    pub observed: &'a [TrafficTarget],
+    pub reserved: &'a BTreeSet<String>,
+}
+pub(super) fn prepare(input: Request<'_>) -> Result<Arrival, String> {
+    let knots = input
+        .airspeed
+        .ground_knots(input.crossing.altitude_feet, input.surface.heading())?;
+    let flare = input.surface.flare(
+        input.airport,
+        input.crossing,
+        input.angle_degrees,
+        knots,
+        input.handling,
+        input.policy.surface_sample_meters,
+    )?;
+    let touchdown = *flare.points.last().ok_or("Flare has no touchdown")?;
+    let exit = plan(
+        input.airport,
+        &input.surface.runway,
+        touchdown,
+        knots,
+        input.aircraft,
+        input.handling,
+        input.policy,
+        input.surface,
+    )?;
+    let parking = parking(
+        input.airport,
+        exit,
+        input.aircraft,
+        input.handling,
+        input.policy,
+        input.observed,
+        input.reserved,
+    )?;
+    let mut segments = vec![flare.clone()];
+    segments.extend(parking.exit.rollout.clone());
+    segments.extend((0..512).map_while(|index| parking.surface.route.segment(index).cloned()));
+    // One compilation verifies all joins and rate limits before this arrival is retained.
+    openatc_core::traffic::motion::Route::compile(
+        segments,
+        input.aircraft.climb_fpm,
+        input.aircraft.descent_fpm,
+    )?;
+    Ok(Arrival { flare, parking })
+}
+
+fn clear_of_runways(
+    airport: &Airport,
+    from: Point,
+    to: Point,
+    aircraft: &openatc_core::traffic::profiles::Aircraft,
+) -> bool {
+    let from = position(airport, from);
+    let to = position(airport, to);
+    !openatc_core::airport::aircraft_on_runway_for(
+        airport,
+        &openatc_core::state::Telemetry {
+            latitude: to[0],
+            longitude: to[1],
+            heading_degrees: openatc_core::arrival::bearing(from, to),
+            position_valid: true,
+            on_ground: true,
+            wingspan_meters: Some(aircraft.wingspan),
+            ..Default::default()
+        },
+        aircraft,
+    )
+}
+
 pub(super) fn plan(
     airport: &Airport,
     runway_name: &str,
@@ -16,6 +99,7 @@ pub(super) fn plan(
     aircraft: &openatc_core::traffic::profiles::Aircraft,
     handling: &animation::Handling,
     policy: &Operations,
+    surface: &super::runway::Surface,
 ) -> Result<Exit, String> {
     let runway = airport
         .runways
@@ -28,7 +112,8 @@ pub(super) fn plan(
         (runway.second, runway.first)
     };
     let length = (end.east - start.east).hypot(end.north - start.north);
-    if length < aircraft.runway
+    if !surface.matches(airport, runway_name)
+        || length - surface.threshold < aircraft.runway
         || !(35.0..=230.0).contains(&touchdown_knots)
         || handling.braking_knots_sec <= 0.0
     {
@@ -45,7 +130,7 @@ pub(super) fn plan(
     if along < 0.0
         || along >= length
         || across.abs() > 2.0
-        || (touchdown.altitude_feet - airport.elevation_feet).abs() > 5.0
+        || (touchdown.altitude_feet - surface.height(local)).abs() > 5.0
     {
         return Err("Touchdown is not aligned with the nominal runway surface".into());
     }
@@ -94,15 +179,8 @@ pub(super) fn plan(
                     break;
                 }
                 let point = nodes[&node];
-                let geographic = position(airport, point);
-                let clear = !openatc_core::airport::within_runway(airport, &point)
-                    && openatc_core::traffic::runway_position(
-                        airport,
-                        runway_name,
-                        geographic[0],
-                        geographic[1],
-                    )
-                    .is_some_and(|(_, across, _, _)| across.abs() > runway.width / 2.0 + envelope);
+                let previous = nodes[&visited[visited.len() - 2]];
+                let clear = clear_of_runways(airport, previous, point, aircraft);
                 if clear {
                     candidates.push((at, visited.iter().map(|id| nodes[id]).collect::<Vec<_>>()));
                     break;
@@ -179,12 +257,23 @@ pub(super) fn plan(
         let Ok(turn) = result else {
             continue;
         };
+        // Rounded exits must end beyond the same holding line used by live radio reports.
+        if turn.len() < 2
+            || !clear_of_runways(
+                airport,
+                turn[turn.len() - 2].point,
+                turn.last().unwrap().point,
+                aircraft,
+            )
+        {
+            continue;
+        }
         let waypoint = |point: Point| {
             let geographic = position(airport, point);
             Waypoint {
                 latitude: geographic[0],
                 longitude: geographic[1],
-                altitude_feet: airport.elevation_feet,
+                altitude_feet: surface.height(point),
             }
         };
         let mut points = vec![waypoint(turn_start)];
@@ -236,6 +325,51 @@ pub(super) fn plan(
 mod tests {
     use super::*;
     #[test]
+    fn runway_exit_extends_beyond_the_holding_line_with_the_whole_aircraft() {
+        let point = |east, north| Point {
+            east,
+            north,
+            height: 0.0,
+        };
+        let airport = Airport {
+            runways: vec![openatc_core::airport::Runway {
+                first_name: "09".into(),
+                second_name: "27".into(),
+                width: 45.0,
+                first: point(0.0, 0.0),
+                second: point(2000.0, 0.0),
+                ..Default::default()
+            }],
+            taxi_hold_lines: vec![[point(700.0, 90.0), point(1300.0, 90.0)]],
+            ..Default::default()
+        };
+        let mut aircraft = openatc_core::traffic::profiles::aircraft("C172")
+            .unwrap()
+            .clone();
+        aircraft.length = 20.0;
+        aircraft.wingspan = 12.0;
+        // The centre and wings are outside the pavement, but the holding line is ahead.
+        assert!(!clear_of_runways(
+            &airport,
+            point(1000.0, 50.0),
+            point(1000.0, 60.0),
+            &aircraft
+        ));
+        assert!(!clear_of_runways(
+            &airport,
+            point(1000.0, 90.0),
+            point(1000.0, 100.0),
+            &aircraft
+        ));
+        assert!(clear_of_runways(
+            &airport,
+            point(1000.0, 110.0),
+            point(1000.0, 120.0),
+            &aircraft
+        ));
+    }
+
+    #[test]
     #[ignore = "requires installed airport scenery"]
     fn piston_arrival_uses_a_connected_propeller_stand() {
         let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
@@ -261,11 +395,19 @@ mod tests {
             north: runway.first.north + (runway.second.north - runway.first.north) * 150.0 / length,
             height: 0.0,
         };
+        let data = openatc_core::arrival::ArrivalAirport::load(&root, airport.clone()).unwrap();
+        let surface = super::super::runway::Surface::new(
+            &airport,
+            &runway.first_name,
+            &data.thresholds,
+            policy.runway_slope_limit_percent,
+        )
+        .unwrap();
         let position = position(&airport, point);
         let touchdown = Waypoint {
             latitude: position[0],
             longitude: position[1],
-            altitude_feet: airport.elevation_feet,
+            altitude_feet: surface.height(point),
         };
         let exit = plan(
             &airport,
@@ -275,6 +417,7 @@ mod tests {
             aircraft,
             handling,
             &policy,
+            &surface,
         )
         .unwrap();
         let arrival = parking(
@@ -327,16 +470,39 @@ mod tests {
             north: first.north + (second.north - first.north) * 300.0 / length,
             height: 0.0,
         };
+        let data = openatc_core::arrival::ArrivalAirport::load(&root, airport.clone()).unwrap();
+        let surface = super::super::runway::Surface::new(
+            &airport,
+            "04L",
+            &data.thresholds,
+            policy.runway_slope_limit_percent,
+        )
+        .unwrap();
         let geographic = position(&airport, point);
         let touchdown = Waypoint {
             latitude: geographic[0],
             longitude: geographic[1],
-            altitude_feet: airport.elevation_feet,
+            altitude_feet: surface.height(point),
         };
         let exit = plan(
-            &airport, "04L", touchdown, 140.0, aircraft, handling, &policy,
+            &airport, "04L", touchdown, 140.0, aircraft, handling, &policy, &surface,
         )
         .unwrap();
+        let end = &exit.rollout.last().unwrap().points;
+        assert!(clear_of_runways(
+            &airport,
+            openatc_core::airport::airport_point(
+                &airport,
+                end[end.len() - 2].latitude,
+                end[end.len() - 2].longitude
+            ),
+            openatc_core::airport::airport_point(
+                &airport,
+                exit.vacated.latitude,
+                exit.vacated.longitude
+            ),
+            aircraft,
+        ));
         assert_eq!(exit.rollout.len(), 2);
         assert_eq!(exit.rollout[1].knots, handling.taxi_turn_knots);
         assert!(!openatc_core::airport::within_runway(
@@ -498,9 +664,13 @@ pub(super) fn parking(
             .total_cmp(&distance(right))
             .then_with(|| left.name.cmp(&right.name))
     });
+    let nominal_airport = Airport {
+        elevation_feet: exit.vacated.altitude_feet,
+        ..airport.clone()
+    };
     for stand in candidates.into_iter().take(32) {
         let result = super::ground_route(
-            airport,
+            &nominal_airport,
             from,
             heading,
             false,

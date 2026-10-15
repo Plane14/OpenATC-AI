@@ -23,6 +23,10 @@ pub enum Kind {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Handling {
+    /// Nominal roundout start above the local runway surface.
+    pub flare_height_feet: f64,
+    /// Nominal sink rate relative to the runway at contact.
+    pub touchdown_sink_fpm: f64,
     /// Nose-up rotation target at the nominal liftoff speed.
     pub rotation_pitch_degrees: f64,
     /// Nominal angle of attack added to the climb flight-path angle.
@@ -35,7 +39,7 @@ pub struct Handling {
     pub taxi_turn_knots: f64,
     /// Preferred centreline turn radius.
     pub taxi_turn_radius_meters: f64,
-    /// Nominal rotation speed; individual flight planning may override it.
+    /// Nominal indicated rotation speed; convert to TAS/ground speed before scheduling a roll.
     pub rotation_knots: f64,
     /// Maximum commanded increase in speed per second.
     pub acceleration_knots_sec: f64,
@@ -83,14 +87,41 @@ pub fn parse(text: &str) -> Result<BTreeMap<Kind, Handling>, String> {
     if text.len() > 65536 {
         return Err("Handling catalogue exceeds 64 KiB".into());
     }
-    let file: File = toml::from_str(text).map_err(|error| error.to_string())?;
+    let mut value: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
+    let defaults: toml::Value = toml::from_str(include_str!("../../../../traffic/handling.toml"))
+        .map_err(|error| error.to_string())?;
+    if let Some(handling) = value
+        .get_mut("handling")
+        .and_then(toml::Value::as_table_mut)
+    {
+        for (kind, fields) in handling {
+            if let Some(fields) = fields.as_table_mut() {
+                for key in ["flare_height_feet", "touchdown_sink_fpm"] {
+                    if let Some(default) = defaults
+                        .get("handling")
+                        .and_then(|table| table.get(kind))
+                        .and_then(|table| table.get(key))
+                    {
+                        fields
+                            .entry(key.to_owned())
+                            .or_insert_with(|| default.clone());
+                    }
+                }
+            }
+        }
+    }
+    let file: File = value
+        .try_into()
+        .map_err(|error: toml::de::Error| error.to_string())?;
     if file.version != 1 || file.handling.len() != 5 {
         return Err("Handling catalogue requires version 1 and all five envelopes".into());
     }
     let bounded =
         |value: f64, low: f64, high: f64| value.is_finite() && (low..=high).contains(&value);
     for h in file.handling.values() {
-        if !bounded(h.taxi_knots, 3.0, 25.0)
+        if !bounded(h.flare_height_feet, 5.0, 60.0)
+            || !bounded(h.touchdown_sink_fpm, 30.0, 300.0)
+            || !bounded(h.taxi_knots, 3.0, 25.0)
             || !bounded(h.rotation_pitch_degrees, 3.0, 15.0)
             || !bounded(h.climb_pitch_bias_degrees, 0.0, 5.0)
             || !bounded(h.approach_pitch_bias_degrees, 0.0, 8.0)
@@ -309,6 +340,25 @@ impl Animation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_handling_profiles_inherit_editable_flare_defaults() {
+        let source = include_str!("../../../../traffic/handling.toml");
+        let legacy = source
+            .lines()
+            .filter(|line| {
+                !line.starts_with("flare_height_feet") && !line.starts_with("touchdown_sink_fpm")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let handling = parse(&legacy).unwrap();
+        assert_eq!(handling[&Kind::Piston].flare_height_feet, 10.0);
+        assert_eq!(handling[&Kind::HeavyJet].flare_height_feet, 40.0);
+        assert!(
+            parse(&source.replacen("flare_height_feet = 10.0", "flare_height_feet = 0.0", 1))
+                .is_err()
+        );
+    }
+
     #[test]
     fn pushback_reverses_wheels_and_steering_for_the_same_body_turn() {
         let handling = builtin().unwrap();

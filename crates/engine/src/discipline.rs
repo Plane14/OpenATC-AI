@@ -597,36 +597,87 @@ mod tests {
     #[test]
     #[ignore = "requires installed X-Plane scenery"]
     fn nice_reported_taxi_position_geometry() {
-        let root=std::env::var("OPENATC_SIM_ROOT").unwrap();
-        let airport=openatc_core::airport::load_airport_from_simulator(&root,"LFMN",&|p|std::path::Path::new(p).is_file(),&|p|std::fs::read_to_string(p).map_err(|e|e.to_string())).unwrap();
-        for (latitude,longitude) in [(43.652675,7.205204),(43.655753,7.202489)] {
-            let point=airport_point(&airport,latitude,longitude);
+        let root = std::env::var("OPENATC_SIM_ROOT").unwrap();
+        let airport = openatc_core::airport::load_airport_from_simulator(
+            &root,
+            "LFMN",
+            &|p| std::path::Path::new(p).is_file(),
+            &|p| std::fs::read_to_string(p).map_err(|e| e.to_string()),
+        )
+        .unwrap();
+        for (latitude, longitude) in [(43.652675, 7.205204), (43.655753, 7.202489)] {
+            let point = airport_point(&airport, latitude, longitude);
             for runway in &airport.runways {
-                let dx=runway.second.east-runway.first.east;let dn=runway.second.north-runway.first.north;
-                let cross=((point.east-runway.first.east)*dn-(point.north-runway.first.north)*dx).abs()/dx.hypot(dn);
-                eprintln!("{latitude},{longitude}: {}/{} offset={cross:.1}m half-width={:.1}m on_pavement={}",runway.first_name,runway.second_name,runway.width/2.0,on_pavement(runway,point));
+                let dx = runway.second.east - runway.first.east;
+                let dn = runway.second.north - runway.first.north;
+                let cross = ((point.east - runway.first.east) * dn
+                    - (point.north - runway.first.north) * dx)
+                    .abs()
+                    / dx.hypot(dn);
+                eprintln!(
+                    "{latitude},{longitude}: {}/{} offset={cross:.1}m half-width={:.1}m on_pavement={}",
+                    runway.first_name,
+                    runway.second_name,
+                    runway.width / 2.0,
+                    on_pavement(runway, point)
+                );
             }
-            let t=openatc_core::state::Telemetry{latitude,longitude,on_ground:true,position_valid:true,..Default::default()};
-            let route=openatc_core::airport::calculate_taxi_route(&airport,&t,"04R",false,'C');
-            eprintln!("Taxi result: {:?}",route.as_ref().map(|route|(&route.instructions,&route.hold_short_runway)));
+            let t = openatc_core::state::Telemetry {
+                latitude,
+                longitude,
+                on_ground: true,
+                position_valid: true,
+                ..Default::default()
+            };
+            let route =
+                openatc_core::airport::calculate_taxi_route(&airport, &t, "04R", false, 'C');
+            eprintln!(
+                "Taxi result: {:?}",
+                route
+                    .as_ref()
+                    .map(|route| (&route.instructions, &route.hold_short_runway))
+            );
             if longitude > 7.205 {
-                assert_eq!(openatc_core::airport::runway_at_point(&airport,&point).unwrap().first_name,"04L");
+                assert_eq!(
+                    openatc_core::airport::runway_at_point(&airport, &point)
+                        .unwrap()
+                        .first_name,
+                    "04L"
+                );
                 assert!(route.is_err());
             } else {
-                assert!(openatc_core::airport::runway_at_point(&airport,&point).is_none());
-                assert_eq!(route.unwrap().hold_short_runway,"04L");
+                assert!(openatc_core::airport::runway_at_point(&airport, &point).is_none());
+                assert_eq!(route.unwrap().hold_short_runway, "04L");
             }
         }
-        let mut s=state();
-        s.session.plan.departure="LFMN".into();s.session.plan.runway="04R".into();s.session.phase=PhaseCode::Pushback;
-        s.session.telemetry.latitude=43.652675;s.session.telemetry.longitude=7.205204;s.session.telemetry.on_ground=true;
-        let request=openatc_core::state::Request{intent:"taxi".into(),..Default::default()};
-        let realism=Default::default();let tag=SpeechTag::default();
-        let region=openatc_core::regions::region_for(&s.regions,"LFMN");
-        let ctx=openatc_core::apply::RequestContext{squawk:"1234",runway_taxi_authorized:false,request:&request,airport:Some(&airport),atc_tag:&tag,pilot_tag:&tag,realism:&realism,units:openatc_core::UnitSystem::Imperial,region:&region};
-        let outcome=openatc_core::apply::apply_request(&mut s.session,&ctx);
+        let mut s = state();
+        s.session.plan.departure = "LFMN".into();
+        s.session.plan.runway = "04R".into();
+        s.session.phase = PhaseCode::Pushback;
+        s.session.telemetry.latitude = 43.652675;
+        s.session.telemetry.longitude = 7.205204;
+        s.session.telemetry.on_ground = true;
+        let request = openatc_core::state::Request {
+            intent: "taxi".into(),
+            ..Default::default()
+        };
+        let realism = Default::default();
+        let tag = SpeechTag::default();
+        let region = openatc_core::regions::region_for(&s.regions, "LFMN");
+        let ctx = openatc_core::apply::RequestContext {
+            squawk: "1234",
+            runway_taxi_authorized: false,
+            request: &request,
+            airport: Some(&airport),
+            atc_tag: &tag,
+            pilot_tag: &tag,
+            realism: &realism,
+            units: openatc_core::UnitSystem::Imperial,
+            region: &region,
+        };
+        let outcome = openatc_core::apply::apply_request(&mut s.session, &ctx);
         assert!(!outcome.accepted);
-        assert!(outcome.message.contains("04L/22R"),"{}",outcome.message);
+        assert!(outcome.message.contains("04L/22R"), "{}", outcome.message);
         assert!(!outcome.message.to_lowercase().contains("backtrack"));
     }
 

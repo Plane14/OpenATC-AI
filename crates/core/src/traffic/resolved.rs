@@ -291,6 +291,12 @@ fn decode(
             } else if retain_boundary {
                 indicated_speeds.push(indicated);
                 result.push(Fix {
+                    airspeed: Some(super::trajectory::Airspeed {
+                        indicated_knots: indicated,
+                        atmosphere: c.atmosphere,
+                        wind_from: c.wind_from,
+                        wind_knots: c.wind_knots,
+                    }),
                     coordinate,
                     arrival_heading,
                     minimum_feet,
@@ -307,6 +313,12 @@ fn decode(
         }
         indicated_speeds.push(indicated);
         result.push(Fix {
+            airspeed: Some(super::trajectory::Airspeed {
+                indicated_knots: indicated,
+                atmosphere: c.atmosphere,
+                wind_from: c.wind_from,
+                wind_knots: c.wind_knots,
+            }),
             coordinate,
             arrival_heading,
             minimum_feet,

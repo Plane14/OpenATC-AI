@@ -9,6 +9,32 @@ use crate::{
     state::Point,
 };
 
+/// Retain the IAS requirement when vertical scheduling changes a crossing level.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Airspeed {
+    /// Indicated speed chosen within the published limits.
+    pub indicated_knots: f64,
+    /// Sampled airport pressure/temperature reference.
+    pub atmosphere: super::air::Atmosphere,
+    /// True direction from which the planning wind blows.
+    pub wind_from: f64,
+    /// Planning wind speed in knots.
+    pub wind_knots: f64,
+}
+impl Airspeed {
+    /// Resolve movement speed after the crossing height and track are known.
+    pub fn ground_knots(&self, geometric_feet: f64, track: f64) -> Result<f64, String> {
+        super::air::wind(
+            self.atmosphere
+                .true_knots(self.indicated_knots, geometric_feet)?,
+            track,
+            self.wind_from,
+            self.wind_knots,
+        )
+        .map(|(ground, _)| ground)
+    }
+}
+
 /// A resolved crossing after decoding its published leg and pressure reference.
 #[derive(Clone)]
 pub struct Fix {
@@ -24,6 +50,8 @@ pub struct Fix {
     pub preferred_feet: f64,
     /// Ground speed after applying the aircraft envelope, wind and published IAS limit.
     pub ground_knots: f64,
+    /// Original IAS and weather; None explicitly represents a fixed ground-speed path.
+    pub airspeed: Option<Airspeed>,
     /// Published turn direction, when specified.
     pub required_turn: Option<curves::Turn>,
 }
@@ -57,6 +85,59 @@ pub struct Leg {
 /// Build heading-continuous fly-over connectors; every sample needs corridor protection.
 /// This does not grant flight or turn an unresolved procedure into a direct clearance.
 pub fn compile(
+    start: Waypoint,
+    heading_degrees: f64,
+    fixes: &[Fix],
+    final_heading_degrees: f64,
+    envelope: &Envelope,
+    protected: impl Fn(Waypoint, Waypoint) -> bool,
+) -> Result<Vec<Leg>, String> {
+    if fixes.is_empty() || fixes.len() > 128 {
+        return Err("Generated airborne crossing budget is invalid".into());
+    }
+    let mut scheduled = fixes.to_vec();
+    // A changed level changes TAS, turn radius and time available to climb or
+    // descend. Rebuild all three together; never publish an unconverged path.
+    for _ in 0..12 {
+        let legs = compile_once(
+            start,
+            heading_degrees,
+            &scheduled,
+            final_heading_degrees,
+            envelope,
+            &protected,
+        )?;
+        let mut settled = true;
+        for (fix, leg) in scheduled.iter_mut().zip(&legs) {
+            let Some(airspeed) = fix.airspeed else {
+                continue;
+            };
+            let end = leg
+                .points
+                .last()
+                .ok_or("Airborne crossing has no endpoint")?;
+            let before = leg
+                .points
+                .iter()
+                .rev()
+                .nth(1)
+                .ok_or("Airborne crossing has no incoming track")?;
+            let track = bearing(
+                [before.latitude, before.longitude],
+                [end.latitude, end.longitude],
+            );
+            let ground = airspeed.ground_knots(end.altitude_feet, track)?;
+            settled &= (ground - fix.ground_knots).abs() < 0.01;
+            fix.ground_knots = ground;
+        }
+        if settled {
+            return Ok(legs);
+        }
+    }
+    Err("Joint altitude and airspeed planning did not converge".into())
+}
+
+fn compile_once(
     start: Waypoint,
     heading_degrees: f64,
     fixes: &[Fix],
@@ -217,6 +298,106 @@ mod tests {
     use super::*;
 
     #[test]
+    fn solved_levels_preserve_piston_turboprop_and_jet_indicated_speeds() {
+        let atmosphere = super::super::air::Atmosphere::surface(1013.25, 15.0, 0.0).unwrap();
+        let start = Waypoint {
+            latitude: 44.0,
+            longitude: 8.0,
+            altitude_feet: 18000.0,
+        };
+        for (indicated, climb, descent) in [
+            (65.0, 650.0, 500.0),
+            (110.0, 1500.0, 1200.0),
+            (170.0, 2500.0, 1000.0),
+        ] {
+            let airspeed = Airspeed {
+                indicated_knots: indicated,
+                atmosphere,
+                wind_from: 280.0,
+                wind_knots: 12.0,
+            };
+            let fixes = [
+                Fix {
+                    coordinate: [44.3, 8.0],
+                    arrival_heading: Some(0.0),
+                    minimum_feet: 0.0,
+                    maximum_feet: 18000.0,
+                    preferred_feet: 18000.0,
+                    ground_knots: airspeed.ground_knots(18000.0, 0.0).unwrap(),
+                    airspeed: Some(airspeed),
+                    required_turn: None,
+                },
+                Fix {
+                    coordinate: [44.3, 8.08],
+                    arrival_heading: Some(90.0),
+                    minimum_feet: 12000.0,
+                    maximum_feet: 12000.0,
+                    preferred_feet: 12000.0,
+                    ground_knots: airspeed.ground_knots(12000.0, 90.0).unwrap(),
+                    airspeed: Some(airspeed),
+                    required_turn: None,
+                },
+            ];
+            let envelope = Envelope {
+                bank_degrees: 20.0,
+                turn_rate_degrees_sec: 3.0,
+                climb_fpm: climb,
+                descent_fpm: descent,
+                spacing_meters: 150.0,
+                maximum_detour_meters: 20000.0,
+            };
+            let fixed_speed = compile_once(start, 0.0, &fixes, 90.0, &envelope, |a, b| {
+                a.altitude_feet >= 10000.0 && b.altitude_feet >= 10000.0
+            })
+            .unwrap();
+            let end = fixed_speed[0].points.last().unwrap();
+            let before = fixed_speed[0].points.iter().rev().nth(1).unwrap();
+            let required = airspeed
+                .ground_knots(
+                    end.altitude_feet,
+                    bearing(
+                        [before.latitude, before.longitude],
+                        [end.latitude, end.longitude],
+                    ),
+                )
+                .unwrap();
+            assert!(
+                (fixed_speed[0].ground_knots - required).abs() > 1.0,
+                "Preferred-level speed must reproduce the old IAS mismatch"
+            );
+            let legs = compile(start, 0.0, &fixes, 90.0, &envelope, |a, b| {
+                a.altitude_feet >= 10000.0 && b.altitude_feet >= 10000.0
+            })
+            .unwrap();
+            assert!(
+                legs[0].points.last().unwrap().altitude_feet < 17900.0,
+                "{indicated}: downstream limit must force earlier descent"
+            );
+            assert!(
+                (legs[0].ground_knots - fixes[0].ground_knots).abs() > 1.0,
+                "Fixed preferred-level ground speed must change"
+            );
+            for leg in &legs {
+                let end = leg.points.last().unwrap();
+                let before = leg.points.iter().rev().nth(1).unwrap();
+                let expected = airspeed
+                    .ground_knots(
+                        end.altitude_feet,
+                        bearing(
+                            [before.latitude, before.longitude],
+                            [end.latitude, end.longitude],
+                        ),
+                    )
+                    .unwrap();
+                assert!(
+                    (leg.ground_knots - expected).abs() < 0.011,
+                    "{indicated}: IAS changed when the vertical solution changed"
+                );
+            }
+            assert!(compile(start, 0.0, &fixes, 90.0, &envelope, |_, _| false).is_err());
+        }
+    }
+    #[test]
     fn crossing_ceiling_shapes_a_continuous_turning_descent() {
         let start = Waypoint {
             latitude: 44.0,
@@ -225,6 +406,7 @@ mod tests {
         };
         let fixes = [
             Fix {
+                airspeed: None,
                 coordinate: [44.2, 8.0],
                 arrival_heading: None,
                 minimum_feet: 0.0,
@@ -234,6 +416,7 @@ mod tests {
                 required_turn: None,
             },
             Fix {
+                airspeed: None,
                 coordinate: [44.2, 8.1],
                 arrival_heading: None,
                 minimum_feet: 12000.0,

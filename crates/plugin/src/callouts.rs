@@ -140,7 +140,12 @@ impl Runtime {
             settings.tts_model,
             settings.copilot_voice,
             settings.copilot_speed * settings.tts_speed,
-            [p.v1_text.as_str(), p.vr_text.as_str(), p.v2_text.as_str(), p.v1_vr_text.as_deref().unwrap_or("")]
+            [
+                p.v1_text.as_str(),
+                p.vr_text.as_str(),
+                p.v2_text.as_str(),
+                p.v1_vr_text.as_deref().unwrap_or("")
+            ]
         );
         if self.voice_key != key {
             self.audio.clear_preloaded();
@@ -172,8 +177,18 @@ impl Runtime {
                     settings.copilot_speed * settings.tts_speed,
                 );
             }
-            if let Some(text) = p.v1_vr_text.as_ref().filter(|text| !text.is_empty() && text.len() < 64) {
-                self.audio.preload("3", &interface.engine.endpoint(), text, &settings.copilot_voice, settings.copilot_speed * settings.tts_speed);
+            if let Some(text) = p
+                .v1_vr_text
+                .as_ref()
+                .filter(|text| !text.is_empty() && text.len() < 64)
+            {
+                self.audio.preload(
+                    "3",
+                    &interface.engine.endpoint(),
+                    text,
+                    &settings.copilot_voice,
+                    settings.copilot_speed * settings.tts_speed,
+                );
             }
         }
         let speeds: Vec<_> =
@@ -188,7 +203,8 @@ impl Runtime {
                 })
                 .collect();
         let speeds: [Option<f64>; 3] = speeds.try_into().unwrap_or([None; 3]);
-        let valid = [(0, 1), (1, 2), (0, 2)].iter()
+        let valid = [(0, 1), (1, 2), (0, 2)]
+            .iter()
             .all(|(a, b)| speeds[*a].zip(speeds[*b]).is_none_or(|(a, b)| a <= b));
         let status = format!(
             "V-speeds {:?}; cached {:?}; phase {:?}; ordered {valid}; fired {:?}; {}",
@@ -235,18 +251,26 @@ impl Runtime {
         if !self.audio.busy() {
             self.playing = None;
         }
-        let rotation_clip = rotation_clip(&crossed, p.v1_vr_text.as_ref().is_some_and(|text| !text.is_empty() && text.len() < 64));
+        let rotation_clip = rotation_clip(
+            &crossed,
+            p.v1_vr_text
+                .as_ref()
+                .is_some_and(|text| !text.is_empty() && text.len() < 64),
+        );
         let combined = rotation_clip == 3;
         for i in crossed {
             self.fired[i] = true;
-            if combined && i == 0 { continue; }
+            if combined && i == 0 {
+                continue;
+            }
             if i == 1 {
                 // Rotate takes precedence over V1; V2 waits briefly for rotation to finish.
                 self.pending.retain(|(call, _)| *call != 0);
                 if self.playing != Some(1) && self.audio.busy() {
                     self.audio.stop_speech();
                 }
-                self.pending.push_front((rotation_clip, std::time::Instant::now()));
+                self.pending
+                    .push_front((rotation_clip, std::time::Instant::now()));
             } else {
                 self.pending.push_back((i, std::time::Instant::now()));
             }
@@ -266,22 +290,48 @@ impl Runtime {
             self.pending.pop_front();
             self.playing = Some(i);
             let entries = log_entries(p, speeds, i);
-            interface.engine.post("/crew/callout", serde_json::json!({"entries":entries,"callsign":state.plan.callsign}));
+            interface.engine.post(
+                "/crew/callout",
+                serde_json::json!({"entries":entries,"callsign":state.plan.callsign}),
+            );
         }
     }
 }
-fn log_entries(policy: &Policy, speeds: [Option<f64>;3], clip: usize) -> Vec<String> {
-    let bundled: toml::Value = toml::from_str(include_str!("../../../aircraft/callouts.toml")).expect("bundled callout policy");
-    let template = policy.log_template.as_deref().unwrap_or_else(|| bundled["log_template"].as_str().unwrap());
-    let indices: &[usize] = if clip == 3 { &[0,1] } else { std::slice::from_ref(&clip) };
-    indices.iter().filter_map(|index| {
-        let speed = speeds.get(*index).copied().flatten()?;
-        let label = policy.log_labels.get(*index).map(String::as_str).unwrap_or_else(|| bundled["log_labels"][*index].as_str().unwrap());
-        Some(template.replace("{callout}", label).replace("{speed}",&format!("{speed:.0}")))
-    }).collect()
+fn log_entries(policy: &Policy, speeds: [Option<f64>; 3], clip: usize) -> Vec<String> {
+    let bundled: toml::Value = toml::from_str(include_str!("../../../aircraft/callouts.toml"))
+        .expect("bundled callout policy");
+    let template = policy
+        .log_template
+        .as_deref()
+        .unwrap_or_else(|| bundled["log_template"].as_str().unwrap());
+    let indices: &[usize] = if clip == 3 {
+        &[0, 1]
+    } else {
+        std::slice::from_ref(&clip)
+    };
+    indices
+        .iter()
+        .filter_map(|index| {
+            let speed = speeds.get(*index).copied().flatten()?;
+            let label = policy
+                .log_labels
+                .get(*index)
+                .map(String::as_str)
+                .unwrap_or_else(|| bundled["log_labels"][*index].as_str().unwrap());
+            Some(
+                template
+                    .replace("{callout}", label)
+                    .replace("{speed}", &format!("{speed:.0}")),
+            )
+        })
+        .collect()
 }
 fn rotation_clip(crossed: &[usize], combined_available: bool) -> usize {
-    if combined_available && crossed.contains(&0) && crossed.contains(&1) { 3 } else { 1 }
+    if combined_available && crossed.contains(&0) && crossed.contains(&1) {
+        3
+    } else {
+        1
+    }
 }
 fn crossings(
     previous: Option<f64>,
@@ -306,37 +356,60 @@ fn crossings(
 mod tests {
     #[test]
     fn speed_policy_excludes_toliss_display_pointers_and_retains_stock_bugs() {
-        let policy: super::Policy = toml::from_str(include_str!("../../../aircraft/callouts.toml")).unwrap();
-        assert_eq!(policy.v1_refs[0],"toliss_airbus/performance/V1");
-        assert_eq!(policy.vr_refs[0],"toliss_airbus/performance/VR");
-        assert_eq!(policy.v2_refs[0],"toliss_airbus/performance/V2");
+        let policy: super::Policy =
+            toml::from_str(include_str!("../../../aircraft/callouts.toml")).unwrap();
+        assert_eq!(policy.v1_refs[0], "toliss_airbus/performance/V1");
+        assert_eq!(policy.vr_refs[0], "toliss_airbus/performance/VR");
+        assert_eq!(policy.v2_refs[0], "toliss_airbus/performance/V2");
         assert!(!policy.v1_refs.iter().any(|name| name == "AirbusFBW/V1"));
         assert!(!policy.vr_refs.iter().any(|name| name == "AirbusFBW/VR"));
-        for (index, refs) in [&policy.v1_refs,&policy.vr_refs,&policy.v2_refs].into_iter().enumerate() {
-            assert!(refs.contains(&format!("sim/cockpit2/gauges/actuators/airspeed_bugs[{index}]")));
+        for (index, refs) in [&policy.v1_refs, &policy.vr_refs, &policy.v2_refs]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(refs.contains(&format!(
+                "sim/cockpit2/gauges/actuators/airspeed_bugs[{index}]"
+            )));
         }
-        assert_eq!(super::crossings(Some(123.0),125.0,[Some(124.0),None,None],[false;3]),vec![0]);
+        assert_eq!(
+            super::crossings(Some(123.0), 125.0, [Some(124.0), None, None], [false; 3]),
+            vec![0]
+        );
     }
     #[test]
     fn reported_speeds_and_equal_rotation_keep_their_calls() {
         let speeds = [Some(127.0), Some(146.0), Some(148.0)];
         let mut fired = [false; 3];
-        for (previous, current, expected) in [(126.0,127.0,0),(145.0,146.0,1),(147.0,148.0,2)] {
+        for (previous, current, expected) in
+            [(126.0, 127.0, 0), (145.0, 146.0, 1), (147.0, 148.0, 2)]
+        {
             let crossed = super::crossings(Some(previous), current, speeds, fired);
             assert_eq!(crossed, vec![expected]);
             fired[expected] = true;
         }
-        assert!(super::crossings(Some(148.0),149.0,speeds,fired).is_empty());
-        let crossed = super::crossings(Some(145.0),146.0,[Some(146.0),Some(146.0),Some(148.0)],[false;3]);
-        assert_eq!(crossed, vec![0,1]);
-        assert_eq!(super::rotation_clip(&crossed,true),3);
-        assert_eq!(super::rotation_clip(&[1],true),1);
-        assert_eq!(super::rotation_clip(&crossed,false),1);
-        let policy: super::Policy = toml::from_str(include_str!("../../../aircraft/callouts.toml")).unwrap();
-        assert_eq!(super::log_entries(&policy,speeds,0),vec!["V1 · 127 kt"]);
-        assert_eq!(super::log_entries(&policy,speeds,1),vec!["Rotate · 146 kt"]);
-        assert_eq!(super::log_entries(&policy,speeds,2),vec!["V2 · 148 kt"]);
-        assert_eq!(super::log_entries(&policy,[Some(146.0),Some(146.0),Some(148.0)],3),vec!["V1 · 146 kt","Rotate · 146 kt"]);
+        assert!(super::crossings(Some(148.0), 149.0, speeds, fired).is_empty());
+        let crossed = super::crossings(
+            Some(145.0),
+            146.0,
+            [Some(146.0), Some(146.0), Some(148.0)],
+            [false; 3],
+        );
+        assert_eq!(crossed, vec![0, 1]);
+        assert_eq!(super::rotation_clip(&crossed, true), 3);
+        assert_eq!(super::rotation_clip(&[1], true), 1);
+        assert_eq!(super::rotation_clip(&crossed, false), 1);
+        let policy: super::Policy =
+            toml::from_str(include_str!("../../../aircraft/callouts.toml")).unwrap();
+        assert_eq!(super::log_entries(&policy, speeds, 0), vec!["V1 · 127 kt"]);
+        assert_eq!(
+            super::log_entries(&policy, speeds, 1),
+            vec!["Rotate · 146 kt"]
+        );
+        assert_eq!(super::log_entries(&policy, speeds, 2), vec!["V2 · 148 kt"]);
+        assert_eq!(
+            super::log_entries(&policy, [Some(146.0), Some(146.0), Some(148.0)], 3),
+            vec!["V1 · 146 kt", "Rotate · 146 kt"]
+        );
     }
     #[test]
     fn close_speeds_fire_once_and_never_on_a_late_attach_or_rejected_takeoff() {

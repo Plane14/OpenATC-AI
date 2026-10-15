@@ -8,6 +8,7 @@ mod atc;
 pub mod catalog;
 pub mod compliance;
 pub mod crew;
+pub mod debug_jump;
 pub mod dialogue;
 pub mod escort;
 pub mod hazards;

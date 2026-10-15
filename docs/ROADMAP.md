@@ -1,6 +1,12 @@
+## Traffic integration checkpoint — 15 October 2026
+
+Production preparation now retains aircraft-specific continuous nominal threshold/flare/rollout/exit/free-stand taxi geometry and selected sloping runway departure datums. Nearby visual/TCAS publication follows the player with editable range/slot hysteresis, retaining distant movement state and separation observations. Source/replay and Linux builds pass; these latest changes are not installed. The production full-flight factory, protected airborne routes/recoveries/controllers, continuous credible-flight generation, complete mixed/GA VFR lifecycles and native acceptance remain open. Keep all detailed backlog below; generated traffic stays disabled by default. See TRAFFIC_PLAN and VALIDATION for precise evidence.
+
 # Remaining work
 
 Current priorities include IFR reliability and generated traffic, with bounded multicore execution on Linux, Windows and macOS. The items below distinguish completed foundations from planned work.
+
+Latest work order: finish the repeated IFR approach/descent/Tower defect and extend the existing developer flight-jump tool into repeatable route checkpoints; then complete generated traffic; then return to remaining AI conversation/pipeline quality. The jump menu now includes surface holds/runway start and source-tested SID/cruise/STAR/pre-approach checkpoints using native flight initialization and confirmed-position route synchronisation. Native ToLiss/default-aircraft acceptance remains open; final/landing are flown normally so the tool does not manufacture those permissions. Preserve this ordering and the complete backlog during handovers; native aircraft acceptance remains separate from replay results.
 
 The 0.2 interface, online OFP import, local navdata reader, stage controller, taxi graph, simulator airport-weather/ATIS reporting, audio settings and HTTP/TLS separation are implemented in source. Check `VALIDATION.md` before assuming runtime coverage.
 

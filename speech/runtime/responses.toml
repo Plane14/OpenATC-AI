@@ -298,8 +298,6 @@ say = [
   "Correct readback.",
   "Your readback is correct.",
   "Readback is correct.",
-  "Readback correct, stand by.",
-  "Correct readback, stand by.",
 ]
 
 [say_again_your_clearance_readback_check_the]
@@ -16711,12 +16709,44 @@ slots = ["callsign", "sid", "altitude"]
 say = ["{callsign}, climb via the {sid} departure, except maintain {altitude}.", "{callsign}, climb via SID, the {sid}, except maintain {altitude}."]
 
 [arrival_approach_clearance]
-slots = ["callsign", "approach", "runway"]
-say = ["{callsign}, cleared {approach} approach, runway {runway}.", "{callsign}, cleared for the {approach} approach to runway {runway}.", "{callsign}, cleared {approach} approach to runway {runway}.", "{callsign}, cleared for {approach}, runway {runway}."]
+slots = ["callsign", "approach"]
+say = ["{callsign}, cleared {approach} approach.", "{callsign}, cleared for the {approach} approach.", "{callsign}, cleared for {approach} approach.", "{callsign}, you are cleared for the {approach} approach."]
 
 [pilot_approach_clearance]
-slots = ["callsign", "approach", "runway"]
-say = ["Cleared {approach} approach, runway {runway}, {callsign}."]
+slots = ["callsign", "approach"]
+say = ["Cleared {approach} approach, {callsign}.", "{callsign}, cleared {approach} approach.", "Cleared for the {approach} approach, {callsign}."]
+
+[approach_label_ils]
+slots = ["variant", "runway"]
+say = ["ILS {variant} runway {runway}"]
+
+[approach_label_rnav]
+slots = ["variant", "runway"]
+say = ["RNAV {variant} runway {runway}"]
+
+[approach_label_localizer]
+slots = ["variant", "runway"]
+say = ["Localizer {variant} runway {runway}"]
+
+[approach_label_vor]
+slots = ["variant", "runway"]
+say = ["VOR {variant} runway {runway}"]
+
+[approach_label_ndb]
+slots = ["variant", "runway"]
+say = ["NDB {variant} runway {runway}"]
+
+[approach_variant_x]
+slots = []
+say = ["X-ray"]
+
+[approach_variant_y]
+slots = []
+say = ["Yankee"]
+
+[approach_variant_z]
+slots = []
+say = ["Zulu"]
 
 [arrival_go_around_blocked]
 slots = ["callsign"]

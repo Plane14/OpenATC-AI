@@ -54,8 +54,14 @@ impl Model {
             while !q.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        let (r, a, s, b, g, p) =
-                            (r.clone(), a.clone(), s.clone(), b.clone(), g.clone(), p.clone());
+                        let (r, a, s, b, g, p) = (
+                            r.clone(),
+                            a.clone(),
+                            s.clone(),
+                            b.clone(),
+                            g.clone(),
+                            p.clone(),
+                        );
                         thread::spawn(move || {
                             if let Err(e) = serve(stream, r, a, s, b, g, p) {
                                 eprintln!("Fake model: {e}");
@@ -94,8 +100,13 @@ impl Model {
             .into()
     }
     fn propose(&self, controls: Value) {
-        let reply = serde_json::from_str::<Value>(&self.answer.lock().unwrap()).ok().and_then(|value| value["reply"].as_str().map(str::to_owned)).unwrap_or_default();
-        *self.proposal.lock().unwrap() = Some(json!({"reply":reply,"actions":controls,"cross_check":false,"memory":""}).to_string());
+        let reply = serde_json::from_str::<Value>(&self.answer.lock().unwrap())
+            .ok()
+            .and_then(|value| value["reply"].as_str().map(str::to_owned))
+            .unwrap_or_default();
+        *self.proposal.lock().unwrap() = Some(
+            json!({"reply":reply,"actions":controls,"cross_check":false,"memory":""}).to_string(),
+        );
     }
     fn set(&self, value: Value) {
         *self.proposal.lock().unwrap() = None;
@@ -177,14 +188,33 @@ fn serve(
             json!({"intent":"taxi","altitudeFeet":0,"waypoint":""}).to_string()
         } else {
             let answer = answer.lock().unwrap().clone();
-            if let Some(properties)=request.pointer("/response_format/json_schema/schema/properties").and_then(Value::as_object)
-                && !properties.is_empty() && properties.values().all(|value|value["type"]=="boolean") {
-                Value::Object(properties.keys().map(|key|(key.clone(),json!(true))).collect()).to_string()
-            } else if request["messages"][0]["content"].as_str().unwrap_or("").contains("Allowed controls:") {
+            if let Some(properties) = request
+                .pointer("/response_format/json_schema/schema/properties")
+                .and_then(Value::as_object)
+                && !properties.is_empty()
+                && properties.values().all(|value| value["type"] == "boolean")
+            {
+                Value::Object(
+                    properties
+                        .keys()
+                        .map(|key| (key.clone(), json!(true)))
+                        .collect(),
+                )
+                .to_string()
+            } else if request["messages"][0]["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Allowed controls:")
+            {
                 proposal.lock().unwrap().clone().unwrap_or(answer)
             } else if let Ok(value) = serde_json::from_str::<Value>(&answer) {
-                value.get("reply").map(|reply| json!({"reply":reply}).to_string()).unwrap_or(answer)
-            } else { answer }
+                value
+                    .get("reply")
+                    .map(|reply| json!({"reply":reply}).to_string())
+                    .unwrap_or(answer)
+            } else {
+                answer
+            }
         };
         (
             200,

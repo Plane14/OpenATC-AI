@@ -696,7 +696,9 @@ fn descend(state: &mut EngineState, station: &Station) -> bool {
     if !matches!(
         state.session.phase,
         PhaseCode::Cruise | PhaseCode::Arrival | PhaseCode::Departure | PhaseCode::Approach
-    ) || state.flow.approach_cleared || state.flow.missed_approach {
+    ) || state.flow.approach_cleared
+        || state.flow.missed_approach
+    {
         return false;
     }
     let t = &state.session.telemetry;
@@ -957,7 +959,12 @@ mod tests {
     }
     #[test]
     fn published_entry_descent_is_not_specific_to_an_ils_or_airport() {
-        for (approach, runway, entry) in [("I09","09",3000),("R27Z","27",2500),("V18","18",4500),("L36","36",2000)] {
+        for (approach, runway, entry) in [
+            ("I09", "09", 3000),
+            ("R27Z", "27", 2500),
+            ("V18", "18", 4500),
+            ("L36", "36", 2000),
+        ] {
             let mut state = crate::test_state();
             state.session.phase = PhaseCode::Arrival;
             state.session.telemetry.on_ground = false;
@@ -965,15 +972,39 @@ mod tests {
             state.session.telemetry.altitude_feet = 6000.0;
             state.session.plan.approach = approach.into();
             state.session.plan.arrival_runway = runway.into();
-            state.session.plan.fixes = vec![openatc_core::state::RouteFix {longitude:-1.0,..Default::default()},openatc_core::state::RouteFix {
-                identifier:"ENTRY".into(),minimum_altitude_feet:Some(entry),maximum_altitude_feet:Some(entry),
-                constraint_source:format!("APPCH {approach} / installed CIFP"),path_terminator:"IF".into(),..Default::default()}];
-            state.session.clearance = Some(openatc_core::state::Clearance {altitude_feet:6000,acknowledged:true,..Default::default()});
-            let station = Station {service:"Approach".into(),..Default::default()};
-            assert!(descend(&mut state,&station),"{approach}");
-            assert_eq!(state.session.clearance.as_ref().unwrap().altitude_feet,entry);
+            state.session.plan.fixes = vec![
+                openatc_core::state::RouteFix {
+                    longitude: -1.0,
+                    ..Default::default()
+                },
+                openatc_core::state::RouteFix {
+                    identifier: "ENTRY".into(),
+                    minimum_altitude_feet: Some(entry),
+                    maximum_altitude_feet: Some(entry),
+                    constraint_source: format!("APPCH {approach} / installed CIFP"),
+                    path_terminator: "IF".into(),
+                    ..Default::default()
+                },
+            ];
+            state.session.clearance = Some(openatc_core::state::Clearance {
+                altitude_feet: 6000,
+                acknowledged: true,
+                ..Default::default()
+            });
+            let station = Station {
+                service: "Approach".into(),
+                ..Default::default()
+            };
+            assert!(descend(&mut state, &station), "{approach}");
+            assert_eq!(
+                state.session.clearance.as_ref().unwrap().altitude_feet,
+                entry
+            );
             state.flow.approach_cleared = true;
-            assert!(!descend(&mut state,&station),"A cleared {approach} must not reinstate its entry level");
+            assert!(
+                !descend(&mut state, &station),
+                "A cleared {approach} must not reinstate its entry level"
+            );
         }
     }
     #[test]
@@ -1158,30 +1189,83 @@ mod tests {
         let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
         let mut state = crate::test_state();
         state.session.plan = openatc_core::state::FlightPlan {
-            callsign:"C-GTLT".into(), departure:"LFMN".into(), destination:"LIMC".into(),
-            star:"DEVO3E".into(), approach:"I35RY".into(),arrival_runway:"35R".into(),
-            fixes:vec![openatc_core::state::RouteFix {identifier:"ANAKI".into(),latitude:44.201111111,longitude:8.725555556,..Default::default()},
-                openatc_core::state::RouteFix {identifier:"DEVOX".into(),latitude:44.696111111,longitude:8.746944444,..Default::default()},
-                openatc_core::state::RouteFix {identifier:"LIMC".into(),latitude:45.63,longitude:8.72,..Default::default()}],..Default::default()};
-        navigation::enrich(&mut state.session.plan,&root);
-        let intercept=state.session.plan.fixes.iter().position(|fix|fix.identifier=="CI3RY").expect("Published ILS entry must be expanded");
-        assert_eq!(state.session.plan.fixes[intercept].maximum_altitude_feet,Some(4000));
-        let entry=state.session.plan.fixes[intercept].clone();
-        state.flow.monitor.next_fix=intercept;
-        state.session.telemetry.latitude=entry.latitude-0.15;
-        state.session.telemetry.longitude=entry.longitude;
-        state.session.telemetry.on_ground=false;
-        state.session.telemetry.altitude_feet=5000.0;
-        state.session.phase=PhaseCode::Approach;
-        state.session.clearance=Some(openatc_core::state::Clearance{altitude_feet:5000,acknowledged:true,..Default::default()});
-        let station=Station{service:"Center".into(),..Default::default()};
-        tick(&mut state,&station);
-        assert_eq!(state.session.clearance.as_ref().unwrap().altitude_feet,4000);
+            callsign: "C-GTLT".into(),
+            departure: "LFMN".into(),
+            destination: "LIMC".into(),
+            star: "DEVO3E".into(),
+            approach: "I35RY".into(),
+            arrival_runway: "35R".into(),
+            fixes: vec![
+                openatc_core::state::RouteFix {
+                    identifier: "ANAKI".into(),
+                    latitude: 44.201111111,
+                    longitude: 8.725555556,
+                    ..Default::default()
+                },
+                openatc_core::state::RouteFix {
+                    identifier: "DEVOX".into(),
+                    latitude: 44.696111111,
+                    longitude: 8.746944444,
+                    ..Default::default()
+                },
+                openatc_core::state::RouteFix {
+                    identifier: "LIMC".into(),
+                    latitude: 45.63,
+                    longitude: 8.72,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        navigation::enrich(&mut state.session.plan, &root);
+        let intercept = state
+            .session
+            .plan
+            .fixes
+            .iter()
+            .position(|fix| fix.identifier == "CI3RY")
+            .expect("Published ILS entry must be expanded");
+        assert_eq!(
+            state.session.plan.fixes[intercept].maximum_altitude_feet,
+            Some(4000)
+        );
+        let entry = state.session.plan.fixes[intercept].clone();
+        state.flow.monitor.next_fix = intercept;
+        state.session.telemetry.latitude = entry.latitude - 0.15;
+        state.session.telemetry.longitude = entry.longitude;
+        state.session.telemetry.on_ground = false;
+        state.session.telemetry.altitude_feet = 5000.0;
+        state.session.phase = PhaseCode::Approach;
+        state.session.clearance = Some(openatc_core::state::Clearance {
+            altitude_feet: 5000,
+            acknowledged: true,
+            ..Default::default()
+        });
+        let station = Station {
+            service: "Center".into(),
+            ..Default::default()
+        };
+        tick(&mut state, &station);
+        assert_eq!(
+            state.session.clearance.as_ref().unwrap().altitude_feet,
+            4000
+        );
         assert!(!state.session.clearance.as_ref().unwrap().acknowledged);
-        assert!(state.session.transcript.last().unwrap().text.contains("CI3RY"));
-        state.session.clearance.as_mut().unwrap().altitude_feet=5000;
-        state.flow.approach_cleared=true;
-        assert!(!descend(&mut state,&station),"A cleared approach must not reassign its entry level");
+        assert!(
+            state
+                .session
+                .transcript
+                .last()
+                .unwrap()
+                .text
+                .contains("CI3RY")
+        );
+        state.session.clearance.as_mut().unwrap().altitude_feet = 5000;
+        state.flow.approach_cleared = true;
+        assert!(
+            !descend(&mut state, &station),
+            "A cleared approach must not reassign its entry level"
+        );
     }
 
     #[test]

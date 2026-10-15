@@ -64,6 +64,49 @@ mod tests {
         .unwrap();
         let (_, policy, _) = load(&directory).unwrap();
         assert_eq!(policy.surface_segment_meters, 30.0);
+        let source = include_str!("../../../../traffic/operations.toml");
+        let legacy = source.replace("terminal_intercept_limit_nm = 20.0", "");
+        assert_eq!(
+            parse_operations(&legacy)
+                .unwrap()
+                .terminal_intercept_limit_nm,
+            20.0
+        );
+        assert!(
+            parse_operations(&source.replace(
+                "terminal_intercept_limit_nm = 20.0",
+                "terminal_intercept_limit_nm = 0.0"
+            ))
+            .is_err()
+        );
+        let legacy = source
+            .lines()
+            .filter(|line| {
+                ![
+                    "visible_aircraft_limit",
+                    "display_enter_nm",
+                    "display_leave_nm",
+                    "display_replacement_margin_nm",
+                ]
+                .iter()
+                .any(|name| line.starts_with(name))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let defaults = parse_operations(&legacy).unwrap();
+        assert_eq!(defaults.visible_aircraft_limit, 63);
+        assert_eq!(defaults.display_enter_nm, 40.0);
+        for (from, to) in [
+            ("visible_aircraft_limit = 63", "visible_aircraft_limit = 64"),
+            ("display_enter_nm = 40.0", "display_enter_nm = nan"),
+            ("display_leave_nm = 50.0", "display_leave_nm = 39.0"),
+            (
+                "display_replacement_margin_nm = 2.0",
+                "display_replacement_margin_nm = -1.0",
+            ),
+        ] {
+            assert!(parse_operations(&source.replace(from, to)).is_err());
+        }
         std::fs::write(overrides.join("operations.toml"), "version = 999").unwrap();
         assert!(load(&directory).unwrap_err().contains("operations.toml"));
         std::fs::remove_dir_all(directory).unwrap();

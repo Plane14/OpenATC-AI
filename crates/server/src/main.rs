@@ -10,8 +10,8 @@
 
 mod compute;
 mod config;
-mod setup;
 mod json_mode;
+mod setup;
 mod synthesis;
 
 mod llm_config;
@@ -314,12 +314,28 @@ fn complete(
 ) -> Result<Completion, String> {
     let mut prompt = if native_template || template_override.is_some() {
         let template = match template_override {
-            Some(value) => llama_cpp_2::model::LlamaChatTemplate::new(value).map_err(|error| error.to_string())?,
-            None => model.chat_template(None).map_err(|error| format!("custom model chat template: {error:?}; set --chat-template explicitly"))?,
+            Some(value) => llama_cpp_2::model::LlamaChatTemplate::new(value)
+                .map_err(|error| error.to_string())?,
+            None => model.chat_template(None).map_err(|error| {
+                format!("custom model chat template: {error:?}; set --chat-template explicitly")
+            })?,
         };
-        let messages = messages.iter().map(|message| llama_cpp_2::model::LlamaChatMessage::new(message.role.clone(), message.content.clone()).map_err(|error| error.to_string())).collect::<Result<Vec<_>,_>>()?;
-        model.apply_chat_template(&template, &messages, true).map_err(|error| format!("chat template failed: {error:?}"))?
-    } else { chatml_prompt(messages) };
+        let messages = messages
+            .iter()
+            .map(|message| {
+                llama_cpp_2::model::LlamaChatMessage::new(
+                    message.role.clone(),
+                    message.content.clone(),
+                )
+                .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        model
+            .apply_chat_template(&template, &messages, true)
+            .map_err(|error| format!("chat template failed: {error:?}"))?
+    } else {
+        chatml_prompt(messages)
+    };
     if let Some(prefix) = assistant_prefix {
         prompt.push_str(prefix);
     } else if direct_reply && !native_template {
@@ -328,7 +344,11 @@ fn complete(
     let vocab = model.vocab();
     let tokens = vocab.tokenize(prompt.as_bytes(), true, true);
     if tokenize_only {
-        return Ok(Completion { text: String::new(), prompt_tokens: u32::try_from(tokens.len()).unwrap_or(u32::MAX), output_tokens: 0 });
+        return Ok(Completion {
+            text: String::new(),
+            prompt_tokens: u32::try_from(tokens.len()).unwrap_or(u32::MAX),
+            output_tokens: 0,
+        });
     }
     context.clear_kv_cache();
     let max_new = max_new.clamp(1, 1024) as usize;
@@ -367,8 +387,9 @@ fn complete(
         ])
     };
     let mut sampler = if json {
-        let grammar = LlamaSampler::grammar(model, custom_grammar.unwrap_or(json_mode::GRAMMAR), "root")
-            .map_err(|e| format!("JSON grammar: {e}"))?;
+        let grammar =
+            LlamaSampler::grammar(model, custom_grammar.unwrap_or(json_mode::GRAMMAR), "root")
+                .map_err(|e| format!("JSON grammar: {e}"))?;
         LlamaSampler::chain_simple([grammar, sampling])
     } else {
         sampling
@@ -465,7 +486,11 @@ fn inference_loop(
             if let Some(threads) = batch_threads {
                 params = params.with_n_threads_batch(threads);
             }
-            eprintln!("LLM context={size} generation_threads={} batch_threads={}", params.n_threads(), params.n_threads_batch());
+            eprintln!(
+                "LLM context={size} generation_threads={} batch_threads={}",
+                params.n_threads(),
+                params.n_threads_batch()
+            );
             match model.new_context(&backend, params) {
                 Ok(context) => {
                     if automatic
@@ -604,11 +629,25 @@ async fn chat_completions(
         request.model.clone()
     };
     let (reply_tx, reply_rx) = oneshot::channel();
-    let grammar = if let Some(schema) = request.response_format.as_ref().and_then(|format| format.pointer("/json_schema/schema")) {
+    let grammar = if let Some(schema) = request
+        .response_format
+        .as_ref()
+        .and_then(|format| format.pointer("/json_schema/schema"))
+    {
         let schema = schema.to_string();
-        if schema.len() > 32768 { return Err(api_error(StatusCode::BAD_REQUEST, "JSON schema exceeds 32 KiB".into())); }
-        Some(llama_cpp_2::json_schema_to_grammar(&schema).map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?)
-    } else { None };
+        if schema.len() > 32768 {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "JSON schema exceeds 32 KiB".into(),
+            ));
+        }
+        Some(
+            llama_cpp_2::json_schema_to_grammar(&schema)
+                .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?,
+        )
+    } else {
+        None
+    };
     let job = InferenceJob {
         tokenize_only: false,
         grammar,
@@ -662,20 +701,43 @@ async fn tokenize(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
-    if request.messages.is_empty() || request.messages.len() > 64
-        || request.messages.iter().map(|message| message.content.len()).sum::<usize>() > 262144 {
-        return Err(api_error(StatusCode::BAD_REQUEST, "Prompt must contain 1–64 messages and at most 256 KiB".into()));
+    if request.messages.is_empty()
+        || request.messages.len() > 64
+        || request
+            .messages
+            .iter()
+            .map(|message| message.content.len())
+            .sum::<usize>()
+            > 262144
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Prompt must contain 1–64 messages and at most 256 KiB".into(),
+        ));
     }
     let reserve = request.max_tokens.unwrap_or(512).clamp(1, 1024);
     let (reply, result) = oneshot::channel();
-    state.inference.jobs.send(InferenceJob {
-        tokenize_only: true, grammar: None, json: false, messages: request.messages,
-        temperature: 0.0, max_tokens: reserve, reply,
-    }).map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
-    let completion = result.await.map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?
+    state
+        .inference
+        .jobs
+        .send(InferenceJob {
+            tokenize_only: true,
+            grammar: None,
+            json: false,
+            messages: request.messages,
+            temperature: 0.0,
+            max_tokens: reserve,
+            reply,
+        })
+        .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    let completion = result
+        .await
+        .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?;
-    Ok(Json(serde_json::json!({"promptTokens":completion.prompt_tokens,"contextTokens":state.context_tokens,
-        "reservedOutputTokens":reserve,"fits":completion.prompt_tokens.saturating_add(reserve).saturating_add(8) < state.context_tokens})))
+    Ok(Json(
+        serde_json::json!({"promptTokens":completion.prompt_tokens,"contextTokens":state.context_tokens,
+        "reservedOutputTokens":reserve,"fits":completion.prompt_tokens.saturating_add(reserve).saturating_add(8) < state.context_tokens}),
+    ))
 }
 
 /// Liveness plus per-model file status (recorded at startup).
@@ -917,10 +979,17 @@ async fn ensure_models(
         .model
         .retain(|entry| !entry.path.starts_with("llm/") || entry.name == llm.manifest_name());
     if let Some(custom) = custom {
-        if custom.model.iter().any(|model| manifest.model.iter().any(|existing| !existing.path.starts_with("llm/") && existing.name == model.name)) {
+        if custom.model.iter().any(|model| {
+            manifest
+                .model
+                .iter()
+                .any(|existing| !existing.path.starts_with("llm/") && existing.name == model.name)
+        }) {
             return Err("Custom language model name collides with a speech model".into());
         }
-        manifest.model.retain(|entry| !entry.path.starts_with("llm/"));
+        manifest
+            .model
+            .retain(|entry| !entry.path.starts_with("llm/"));
         manifest.model.extend(custom.model);
     }
     let lock_path = root.join("models.lock.toml");
@@ -948,7 +1017,10 @@ async fn ensure_models(
 async fn main() -> Result<(), String> {
     let command_line: Vec<_> = std::env::args_os().collect();
     let initial = Args::parse_from(&command_line);
-    let config_path = initial.config.clone().unwrap_or_else(|| openatc_platform::state_dir().join("server.toml"));
+    let config_path = initial
+        .config
+        .clone()
+        .unwrap_or_else(|| openatc_platform::state_dir().join("server.toml"));
     if initial.configure_web {
         return setup::browser(&config_path, initial.settings_schema.as_deref()).await;
     }
@@ -960,11 +1032,15 @@ async fn main() -> Result<(), String> {
         setup::terminal(&config_path, initial.settings_schema.as_deref())?;
     }
     let args = match std::fs::read_to_string(&config_path) {
-        Ok(source) => Args::parse_from(config::arguments(&source, &command_line, &Args::command()).unwrap_or_else(|error| {
-            eprintln!("{}: {error}", config_path.display());
-            std::process::exit(2);
-        })),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && initial.config.is_none() => initial,
+        Ok(source) => Args::parse_from(
+            config::arguments(&source, &command_line, &Args::command()).unwrap_or_else(|error| {
+                eprintln!("{}: {error}", config_path.display());
+                std::process::exit(2);
+            }),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && initial.config.is_none() => {
+            initial
+        }
         Err(error) => {
             eprintln!("cannot read {}: {error}", config_path.display());
             std::process::exit(2);
@@ -973,8 +1049,15 @@ async fn main() -> Result<(), String> {
     let root = args.models_dir.clone().unwrap_or_else(models_dir);
     let custom = llm_config::configured_manifest(&args)?;
     let custom_template = custom.is_some();
-    let (root, manifest, status) = ensure_models(root, args.tts_provider, args.llm_model, custom).await?;
-    let model_name = manifest.model.iter().find(|entry| entry.path.starts_with("llm/")).ok_or("manifest has no language model")?.name.clone();
+    let (root, manifest, status) =
+        ensure_models(root, args.tts_provider, args.llm_model, custom).await?;
+    let model_name = manifest
+        .model
+        .iter()
+        .find(|entry| entry.path.starts_with("llm/"))
+        .ok_or("manifest has no language model")?
+        .name
+        .clone();
     let llm_path = resolve(
         &root,
         manifest

@@ -20,7 +20,8 @@ impl Crew<'_> {
         self.engine.post("crew/ack",json!({"sequence":task["sequence"],"aircraft":task["aircraft"],"success":success,"detail":"test simulator confirmation"}))
     }
     fn action(&mut self, role: &str, text: &str, control: &str, value: f64) -> Result<Value> {
-        self.model.propose(json!([{"control":control,"value":value}]));
+        self.model
+            .propose(json!([{"control":control,"value":value}]));
         let v = self.request(role, text)?;
         *self.model.proposal.lock().unwrap() = None;
         assert_eq!(v["result"]["pending"], true, "{v}");
@@ -40,10 +41,18 @@ impl Crew<'_> {
     }
     fn denied(&self, role: &str, text: &str) -> Result {
         *self.model.proposal.lock().unwrap() = None;
-        if !serde_json::from_str::<Value>(&self.model.answer.lock().unwrap()).is_ok_and(|answer| answer.get("actions").is_some()) {
-            let profile: openatc_core::crew::CrewProfile = serde_json::from_value(self.profile.clone())?;
+        if !serde_json::from_str::<Value>(&self.model.answer.lock().unwrap())
+            .is_ok_and(|answer| answer.get("actions").is_some())
+        {
+            let profile: openatc_core::crew::CrewProfile =
+                serde_json::from_value(self.profile.clone())?;
             if let Some(actions) = openatc_core::crew::parse_many(&profile, role, text) {
-                self.model.propose(json!(actions.into_iter().map(|(control,value)| json!({"control":control,"value":value})).collect::<Vec<_>>()));
+                self.model.propose(json!(
+                    actions
+                        .into_iter()
+                        .map(|(control, value)| json!({"control":control,"value":value}))
+                        .collect::<Vec<_>>()
+                ));
             }
         }
         let v = self.request(role, text)?;
@@ -337,7 +346,13 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         0.,
     )?;
     assert!(latest(&narrated["state"]).contains("coffee first"));
-    assert!(m.requests.lock().unwrap().iter().any(|request|request.to_string().contains("have a beer for me")));
+    assert!(
+        m.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.to_string().contains("have a beer for me"))
+    );
     m.set(json!({"reply":"External power disconnected and chocks removed, Captain. Ha, thanks! Enjoy your flight."}));
     m.propose(json!([{"control":"external_power","value":0},{"control":"chocks","value":0}]));
     let banter = c.request("ground", "disoconnect external power and chocks please kind sir, and have a beer for me after that! you deserve it haha")?;
@@ -388,7 +403,11 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     let done = c.ack(&task, true)?;
     assert_eq!(m.count(), before_ack);
     let spoken = latest(&done["state"]);
-    assert!(spoken.contains("50 percent") && spoken.contains("lobster") && spoken.contains("crew is cheerful"));
+    assert!(
+        spoken.contains("50 percent")
+            && spoken.contains("lobster")
+            && spoken.contains("crew is cheerful")
+    );
     m.set(json!({"reply":"I will bring you coffee and something to eat. Here is a quick joke for you.","actions":[],"cross_check":false,"memory":"Captain requested coffee and food."}));
     let refreshments = c.request("cabin", "do you have time to get me a coffee and sandwich? wehave alittle time before push back. also do you know a good joke?")?;
     accepted(&refreshments);
@@ -510,24 +529,40 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
 /// Exercise the installed model through an isolated engine and acknowledged control fixtures.
 pub(super) fn live_actors(e: &mut Engine) -> Result {
     let url = std::env::var("OPENATC_LIVE_AI_URL")?;
-    let model = std::env::var("OPENATC_LIVE_AI_MODEL").unwrap_or_else(|_| "qwen2.5-7b-instruct-q4_k_m".into());
+    let model = std::env::var("OPENATC_LIVE_AI_MODEL")
+        .unwrap_or_else(|_| "qwen2.5-7b-instruct-q4_k_m".into());
     let mut passenger_plan = plan();
     passenger_plan["passengers"] = json!(170);
     passenger_plan["estimatedMinutes"] = json!(43);
     e.post("plan", passenger_plan)?;
     e.settings(json!({"aiEnabled":true,"aiUrl":url,"aiModel":model,"llmPhraseVariety":true}))?;
-    e.tune(118100,json!({"onGround":true,"positionValid":true,"groundSpeedKnots":0}))?;
-    let catalogue: toml::Value = toml::from_str(&fs::read_to_string(repo().join("aircraft/toliss_a320.toml"))?)?;
+    e.tune(
+        118100,
+        json!({"onGround":true,"positionValid":true,"groundSpeedKnots":0}),
+    )?;
+    let catalogue: toml::Value = toml::from_str(&fs::read_to_string(
+        repo().join("aircraft/toliss_a320.toml"),
+    )?)?;
     let profile = serde_json::to_value(&catalogue["aircraft"]["crew"])?;
-    let available = profile["controls"].as_object().unwrap().keys().cloned().collect::<Vec<_>>();
-    let values = Arc::new(Mutex::new(json!({"external_power":1,"chocks":1,"slides":0,"cabin_brightness":100,"heading":0,"beacon":0})));
+    let available = profile["controls"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let values = Arc::new(Mutex::new(
+        json!({"external_power":1,"chocks":1,"slides":0,"cabin_brightness":100,"heading":0,"beacon":0}),
+    ));
     e.post("crew/observe",json!({"aircraft":"ToLiss neo","profile":profile,"values":values.lock().unwrap().clone(),"available":available}))?;
     let stopped = Arc::new(AtomicBool::new(false));
     let stop = stopped.clone();
     let samples = values.clone();
     let origin = e.url.clone();
     let observer = thread::spawn(move || {
-        let client = Client::builder().timeout(Duration::from_secs(2)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
         while !stop.load(Ordering::SeqCst) {
             let sample = samples.lock().unwrap().clone();
             let _ = client.post(format!("{origin}/crew/observe")).json(&json!({"aircraft":"ToLiss neo","profile":null,"values":sample,"available":available})).send();
@@ -535,47 +570,138 @@ pub(super) fn live_actors(e: &mut Engine) -> Result {
         }
     });
     let outcome = (|| -> Result {
-        let cases = if std::env::var("OPENATC_LIVE_ACTOR_SCENARIO").is_ok_and(|scenario|scenario == "closing") {
+        let cases = if std::env::var("OPENATC_LIVE_ACTOR_SCENARIO")
+            .is_ok_and(|scenario| scenario == "closing")
+        {
             vec![
-                ("cabin", "I have turned off the seatbelt sign. It won't be for long. Please keep an eye on passengers and let them use the bathroom if needed.",json!({})),
-                ("cabin", "No issues here.",json!({})),
-                ("cabin", "Not yet.",json!({})),
-                ("cabin", "A little busy here, can we catch up later?",json!({})),
-                ("cabin", "Thanks, talk later.",json!({})),
-                ("cabin", "I have a quiet moment now. How are you doing? Feel free to chat for a bit.",json!({})),
+                (
+                    "cabin",
+                    "I have turned off the seatbelt sign. It won't be for long. Please keep an eye on passengers and let them use the bathroom if needed.",
+                    json!({}),
+                ),
+                ("cabin", "No issues here.", json!({})),
+                ("cabin", "Not yet.", json!({})),
+                (
+                    "cabin",
+                    "A little busy here, can we catch up later?",
+                    json!({}),
+                ),
+                ("cabin", "Thanks, talk later.", json!({})),
+                (
+                    "cabin",
+                    "I have a quiet moment now. How are you doing? Feel free to chat for a bit.",
+                    json!({}),
+                ),
             ]
-        } else if std::env::var("OPENATC_LIVE_ACTOR_SCENARIO").is_ok_and(|scenario|scenario == "ground_context") {
+        } else if std::env::var("OPENATC_LIVE_ACTOR_SCENARIO")
+            .is_ok_and(|scenario| scenario == "ground_context")
+        {
             vec![
-                ("ground","Are you well?",json!({})),
-                ("ground","We're only flying for about forty-three minutes today. Can I ask the cabin crew for a snack once we're ready?",json!({})),
+                ("ground", "Are you well?", json!({})),
+                (
+                    "ground",
+                    "We're only flying for about forty-three minutes today. Can I ask the cabin crew for a snack once we're ready?",
+                    json!({}),
+                ),
             ]
-        } else {vec![
-            ("ground", "Hey buddy, long time no see! How is your family? Your kids must be getting tall. Can you disoconnect external power and remove those chocks, please? I'll be back in town soon and we should catch up over coffee. And tell me a joke while we wait!", json!({"external_power":0.0,"chocks":0.0})),
-            ("ground", "Ha, thanks! Is your family still enjoying living here? I'll be back in town next week, perhaps we can all catch up then.", json!({})),
-            ("cabin", "How are you and your family? I really enjoyed catching up last time. I'll be back in town soon! While we chat, can you arm the dorrs and corss chek them, turn off the cabin lights, and see if there is a spare sandwich for me? Also, do you have a good joke?", json!({"slides":1.0,"cabin_brightness":0.0})),
-            ("cabin", "I will be back in town soon and would love to catch up with your family again. Can I have a sandwich, and is there any spare lobster from first class? Maybe a meat pie too, a coffee and a snack. How are the passengers? Somewhere between the food and chatter, could you dim the cabin lights to 50%, please? Is the rest of the crew happy? And give me a good joke while we wait!", json!({"cabin_brightness":50.0})),
-            ("cabin", "That sounds lovely! What about the joke I asked for? And how are the passengers settling in?", json!({})),
-            ("copilot", "Mate, how is your family? We should catch up when I'm back in town. Somewhere in all this chatter, could you set heading two seven five and switch the beacon on, please? And give me your best terrible joke!", json!({"heading":275.0,"beacon":1.0})),
-            ("copilot", "Ha, very good. Remind me what heading I asked you to set? And would you like me to ask the attendant for sandwiches for both of us?", json!({})),
-            ("ground", "Let's catch up next Thursday at the Harbour Cafe. My dog's name is Miso. Just chatting, leave all the aircraft controls as they are. Tell me a different joke about our catch-up, not the one you told earlier.", json!({})),
-            ("ground", "What is my dog's name, and when and where did we agree to catch up? No need to change any controls.", json!({})),
-            ("cabin", "There is a football team celebrating their win in the cabin. My favourite snack is a meat pie with tomato sauce. Please keep those details in mind, leave the lights and doors alone, and tell me a fresh joke about the food rather than repeating your earlier joke.", json!({})),
-            ("cabin", "What snack did I say was my favourite, and who is celebrating in the cabin? Could you check whether there is a spare plate of first-class caviar for us too? Leave the controls alone.", json!({})),
-            ("copilot", "My sister's name is Nora and we are meeting in Hobart after this trip. Remember that for our chat. Don't adjust the heading or beacon. Tell me a different joke about our trip, rather than the one you told earlier.", json!({})),
-            ("copilot", "What is my sister's name, and where are we meeting? What heading did you set earlier? Just tell me; do not change it again.", json!({})),
-        ]};
+        } else {
+            vec![
+                (
+                    "ground",
+                    "Hey buddy, long time no see! How is your family? Your kids must be getting tall. Can you disoconnect external power and remove those chocks, please? I'll be back in town soon and we should catch up over coffee. And tell me a joke while we wait!",
+                    json!({"external_power":0.0,"chocks":0.0}),
+                ),
+                (
+                    "ground",
+                    "Ha, thanks! Is your family still enjoying living here? I'll be back in town next week, perhaps we can all catch up then.",
+                    json!({}),
+                ),
+                (
+                    "cabin",
+                    "How are you and your family? I really enjoyed catching up last time. I'll be back in town soon! While we chat, can you arm the dorrs and corss chek them, turn off the cabin lights, and see if there is a spare sandwich for me? Also, do you have a good joke?",
+                    json!({"slides":1.0,"cabin_brightness":0.0}),
+                ),
+                (
+                    "cabin",
+                    "I will be back in town soon and would love to catch up with your family again. Can I have a sandwich, and is there any spare lobster from first class? Maybe a meat pie too, a coffee and a snack. How are the passengers? Somewhere between the food and chatter, could you dim the cabin lights to 50%, please? Is the rest of the crew happy? And give me a good joke while we wait!",
+                    json!({"cabin_brightness":50.0}),
+                ),
+                (
+                    "cabin",
+                    "That sounds lovely! What about the joke I asked for? And how are the passengers settling in?",
+                    json!({}),
+                ),
+                (
+                    "copilot",
+                    "Mate, how is your family? We should catch up when I'm back in town. Somewhere in all this chatter, could you set heading two seven five and switch the beacon on, please? And give me your best terrible joke!",
+                    json!({"heading":275.0,"beacon":1.0}),
+                ),
+                (
+                    "copilot",
+                    "Ha, very good. Remind me what heading I asked you to set? And would you like me to ask the attendant for sandwiches for both of us?",
+                    json!({}),
+                ),
+                (
+                    "ground",
+                    "Let's catch up next Thursday at the Harbour Cafe. My dog's name is Miso. Just chatting, leave all the aircraft controls as they are. Tell me a different joke about our catch-up, not the one you told earlier.",
+                    json!({}),
+                ),
+                (
+                    "ground",
+                    "What is my dog's name, and when and where did we agree to catch up? No need to change any controls.",
+                    json!({}),
+                ),
+                (
+                    "cabin",
+                    "There is a football team celebrating their win in the cabin. My favourite snack is a meat pie with tomato sauce. Please keep those details in mind, leave the lights and doors alone, and tell me a fresh joke about the food rather than repeating your earlier joke.",
+                    json!({}),
+                ),
+                (
+                    "cabin",
+                    "What snack did I say was my favourite, and who is celebrating in the cabin? Could you check whether there is a spare plate of first-class caviar for us too? Leave the controls alone.",
+                    json!({}),
+                ),
+                (
+                    "copilot",
+                    "My sister's name is Nora and we are meeting in Hobart after this trip. Remember that for our chat. Don't adjust the heading or beacon. Tell me a different joke about our trip, rather than the one you told earlier.",
+                    json!({}),
+                ),
+                (
+                    "copilot",
+                    "What is my sister's name, and where are we meeting? What heading did you set earlier? Just tell me; do not change it again.",
+                    json!({}),
+                ),
+            ]
+        };
         let mut report = Vec::new();
         let mut failures = 0;
         for (role, text, expected) in cases {
-            if std::env::var("OPENATC_LIVE_ACTOR_ROLE").is_ok_and(|selected| selected != role) { continue; }
+            if std::env::var("OPENATC_LIVE_ACTOR_ROLE").is_ok_and(|selected| selected != role) {
+                continue;
+            }
             let started = Instant::now();
-            let mut response = e.post("request",json!({"role":role,"intent":"conversation","text":text}))?;
+            let mut response = e.post(
+                "request",
+                json!({"role":role,"intent":"conversation","text":text}),
+            )?;
             let actions = response["state"]["crewActions"].as_array().unwrap().clone();
-            let actual = actions.iter().map(|action|(action["control"].as_str().unwrap().to_owned(),action["value"].clone())).collect::<serde_json::Map<_,_>>();
-            let passed = Value::Object(actual.clone()) == expected && response["result"]["accepted"] == true;
-            if !passed { failures += 1; }
+            let actual = actions
+                .iter()
+                .map(|action| {
+                    (
+                        action["control"].as_str().unwrap().to_owned(),
+                        action["value"].clone(),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>();
+            let passed =
+                Value::Object(actual.clone()) == expected && response["result"]["accepted"] == true;
+            if !passed {
+                failures += 1;
+            }
             for action in &actions {
-                values.lock().unwrap()[action["control"].as_str().unwrap()] = action["value"].clone();
+                values.lock().unwrap()[action["control"].as_str().unwrap()] =
+                    action["value"].clone();
                 response = e.post("crew/ack",json!({"sequence":action["sequence"],"aircraft":action["aircraft"],"success":true,"detail":"verified fixture control value"}))?;
             }
             let reply = latest(&response["state"]);
@@ -583,15 +709,26 @@ pub(super) fn live_actors(e: &mut Engine) -> Result {
             report.push(json!({"role":role,"request":text,"expected":expected,"actions":actual,"passed":passed,"actionChecksPassed":passed,"conversationReview":"Pending manual review: coverage, continuity, repeated jokes, unsupported claims and control wording", "reply":reply,"seconds":started.elapsed().as_secs_f64()}));
         }
         let mut folder = repo().join(".ai/actor-validation");
-        if let Ok(scenario)=std::env::var("OPENATC_LIVE_ACTOR_SCENARIO")
-            && ["closing","ground_context"].contains(&scenario.as_str()) {folder=folder.join(scenario);}
+        if let Ok(scenario) = std::env::var("OPENATC_LIVE_ACTOR_SCENARIO")
+            && ["closing", "ground_context"].contains(&scenario.as_str())
+        {
+            folder = folder.join(scenario);
+        }
         fs::create_dir_all(&folder)?;
-        fs::write(folder.join("report.json"),serde_json::to_string_pretty(&report)?)?;
-        fs::copy(e.folder.path().join("engine.log"),folder.join("engine.log"))?;
-        if failures > 0 { return Err(format!("{failures} live actor action cases failed; inspect .ai/actor-validation/report.json").into()); }
+        fs::write(
+            folder.join("report.json"),
+            serde_json::to_string_pretty(&report)?,
+        )?;
+        fs::copy(
+            e.folder.path().join("engine.log"),
+            folder.join("engine.log"),
+        )?;
+        if failures > 0 {
+            return Err(format!("{failures} live actor action cases failed; inspect .ai/actor-validation/report.json").into());
+        }
         Ok(())
     })();
-    stopped.store(true,Ordering::SeqCst);
+    stopped.store(true, Ordering::SeqCst);
     observer.join().unwrap();
     outcome
 }

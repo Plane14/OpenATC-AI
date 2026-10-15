@@ -2,6 +2,8 @@
 version = 1
 
 [handling.piston]
+flare_height_feet = 10.0
+touchdown_sink_fpm = 120.0
 rotation_pitch_degrees = 7.0
 climb_pitch_bias_degrees = 2.0
 approach_pitch_bias_degrees = 2.0
@@ -27,6 +29,8 @@ wheel_radius_meters = 0.25
 propeller_rpm = 2200.0
 
 [handling.turboprop]
+flare_height_feet = 15.0
+touchdown_sink_fpm = 150.0
 rotation_pitch_degrees = 8.0
 climb_pitch_bias_degrees = 2.0
 approach_pitch_bias_degrees = 3.0
@@ -52,6 +56,8 @@ wheel_radius_meters = 0.4
 propeller_rpm = 1100.0
 
 [handling.regional_jet]
+flare_height_feet = 20.0
+touchdown_sink_fpm = 180.0
 rotation_pitch_degrees = 10.0
 climb_pitch_bias_degrees = 2.0
 approach_pitch_bias_degrees = 3.0
@@ -77,6 +83,8 @@ wheel_radius_meters = 0.45
 propeller_rpm = 0.0
 
 [handling.jet]
+flare_height_feet = 30.0
+touchdown_sink_fpm = 180.0
 rotation_pitch_degrees = 12.0
 climb_pitch_bias_degrees = 2.0
 approach_pitch_bias_degrees = 3.5
@@ -102,6 +110,8 @@ wheel_radius_meters = 0.55
 propeller_rpm = 0.0
 
 [handling.heavy_jet]
+flare_height_feet = 40.0
+touchdown_sink_fpm = 180.0
 rotation_pitch_degrees = 10.0
 climb_pitch_bias_degrees = 2.0
 approach_pitch_bias_degrees = 3.5

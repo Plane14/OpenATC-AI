@@ -115,6 +115,7 @@ states = { up = 0, down = 1 }
 
 [aircraft.crew.controls.cabin_brightness]
 label = "Cabin lights"
+instructions = "Operate cabin lighting through this brightness control only. Cabin lights on means brightness 100 percent; cabin lights off means brightness 0 percent. Preserve an explicitly requested percentage. Do not substitute a light switch, toggle command or a cockpit, dome, emergency or exterior light."
 role = "cabin"
 dataref = "AirbusFBW/cabinLightLevel_perc"
 min = 0

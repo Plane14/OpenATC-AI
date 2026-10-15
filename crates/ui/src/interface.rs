@@ -315,6 +315,10 @@ pub struct Interface {
     pub requested_frequency_radio: openatc_core::state::Radio,
     /// Debug-only simulator reposition request.
     pub requested_debug_jump: Option<String>,
+    /// Requested airborne true airspeed; zero preserves the current TAS.
+    pub debug_jump_speed: f32,
+    /// Suspend automatic speech/readbacks while a native checkpoint is loading.
+    pub debug_jump_busy: bool,
     /// True when the plugin (not desktop) hosts the panel.
     pub simulator_host: bool,
     /// Background opacity when faded.
@@ -501,6 +505,8 @@ impl Interface {
             requested_squawk: None,
             requested_frequency_radio: openatc_core::state::Radio::Com1,
             requested_debug_jump: None,
+            debug_jump_speed: 0.0,
+            debug_jump_busy: false,
             simulator_host: false,
             background_opacity: 0.96,
             confirm_reset: false,
@@ -546,8 +552,11 @@ impl Interface {
         if self.reset_pending {
             return;
         }
-        if request.role == "ground" && (self.engine.state().ground_interphone_disconnected || !self.engine.state().telemetry.on_ground) {
-            self.notice=openatc_core::dialogue::say("crew_ground_interphone_disconnected",&[]);
+        if request.role == "ground"
+            && (self.engine.state().ground_interphone_disconnected
+                || !self.engine.state().telemetry.on_ground)
+        {
+            self.notice = openatc_core::dialogue::say("crew_ground_interphone_disconnected", &[]);
             return;
         }
         if request.role != "copilot"
@@ -994,8 +1003,11 @@ impl Interface {
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
                 if silent {
-                    self.notice=reply.data["result"]["notice"].as_str().filter(|notice|!notice.is_empty())
-                        .unwrap_or("No answer — nobody on this frequency.").to_owned();
+                    self.notice = reply.data["result"]["notice"]
+                        .as_str()
+                        .filter(|notice| !notice.is_empty())
+                        .unwrap_or("No answer — nobody on this frequency.")
+                        .to_owned();
                 } else {
                     self.notice.clear();
                 }
@@ -1062,7 +1074,9 @@ impl Interface {
         }
         for entry in &state.transcript {
             if entry.sequence > self.last_speech_sequence {
-                if matches!(entry.speaker.as_str(), "ATIS" | "SYSTEM") || entry.delivery == "preloaded-callout" {
+                if matches!(entry.speaker.as_str(), "ATIS" | "SYSTEM")
+                    || entry.delivery == "preloaded-callout"
+                {
                     self.last_speech_sequence = entry.sequence;
                     continue;
                 }
@@ -1193,7 +1207,7 @@ impl Interface {
     /// Process replies and refresh voice, settings and flight data.
     pub fn tick(&mut self) {
         self.poll_replies();
-        if self.reset_pending {
+        if self.reset_pending || self.debug_jump_busy {
             return;
         }
         let now = now_seconds();
@@ -1679,6 +1693,8 @@ impl Interface {
         self.speech_queue.clear();
         self.ptt_armed = false;
         self.pending_clearance = None;
+        self.requested_debug_jump = None;
+        self.debug_jump_busy = false;
         self.requested_frequency_khz = None;
         self.flight_reset_generation = self.flight_reset_generation.wrapping_add(1);
         self.reset_pending = true;
@@ -1958,6 +1974,17 @@ impl Interface {
         }
     }
 
+    /// Discard speech belonging to a position before a developer jump.
+    pub fn cancel_jump_speech(&mut self) {
+        self.speech.stop_speech();
+        self.speech_com2.stop_speech();
+        self.speech_queue.clear();
+        self.auto_reply_pending = false;
+        self.copilot_reply_prepared = false;
+        self.last_copilot_reply_sequence = self.engine.state().next_sequence.saturating_sub(1);
+        self.last_speech_sequence = self.engine.state().next_sequence.saturating_sub(1);
+    }
+
     /// New flight, pin, compact and pop-out controls on the right.
     fn toolbar_right(&mut self, ui: &imgui::Ui, _scale: f32) {
         use widgets::{ToolbarIcon, icon_button};
@@ -1976,6 +2003,26 @@ impl Interface {
                     self.requested_debug_jump = Some("runway".into());
                     ui.close_current_popup();
                 }
+                ui.separator();
+                ui.text("Airborne checkpoints (pause for review)");
+                ui.text_wrapped("A powered aircraft and IFR clearance are required. These move the route monitor but do not grant approach or landing clearance.");
+                ui.input_float(
+                    "Air start speed kt (0 = current TAS)",
+                    &mut self.debug_jump_speed,
+                )
+                .build();
+                for (kind, label) in [
+                    ("sid", "Departure SID"),
+                    ("cruise", "Cruise"),
+                    ("star", "STAR entry"),
+                    ("approach", "20 NM before approach"),
+                ] {
+                    if ui.button(label) {
+                        self.requested_debug_jump = Some(kind.into());
+                        ui.close_current_popup();
+                    }
+                }
+                ui.text_wrapped("Review thrust, speed, gear/flaps, AP and the active FMS leg before resuming. Scenery may reload. Fly the landing normally; use Next holding point for an approved taxi-in route.");
             });
         }
         ui.same_line();

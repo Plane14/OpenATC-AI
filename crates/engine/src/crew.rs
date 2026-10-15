@@ -16,17 +16,51 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 /// Keep friendly questions unless the captain is closing or deferring the exchange.
-async fn pace_cabin_reply(client: &reqwest::Client, settings: &openatc_settings::Settings, prompt: &str, request: &str, reply: &str, previous_reply: &str) -> String {
-    if !reply.contains(['?', '？']) {return reply.to_owned();}
-    let schema=json!({"type":"object","additionalProperties":false,"required":["may_ask"],"properties":{"may_ask":{"type":"boolean"}}});
-    let context=json!({"previousCrewReply":previous_reply,"captainMessage":request,"proposedReply":reply}).to_string();
-    let decision=tokio::time::timeout(std::time::Duration::from_secs(3),crate::llm::structured_format::<BTreeMap<String,bool>>(client,&settings.ai_url,&settings.ai_model,0.0,prompt,&context,Some(schema))).await.ok().and_then(Result::ok);
-    if decision.as_ref().and_then(|decision|decision.get("may_ask")) != Some(&false) {return reply.to_owned();}
-    let question=reply.find(['?', '？']).unwrap();
-    let prefix=&reply[..question];
+async fn pace_cabin_reply(
+    client: &reqwest::Client,
+    settings: &openatc_settings::Settings,
+    prompt: &str,
+    request: &str,
+    reply: &str,
+    previous_reply: &str,
+) -> String {
+    if !reply.contains(['?', '？']) {
+        return reply.to_owned();
+    }
+    let schema = json!({"type":"object","additionalProperties":false,"required":["may_ask"],"properties":{"may_ask":{"type":"boolean"}}});
+    let context =
+        json!({"previousCrewReply":previous_reply,"captainMessage":request,"proposedReply":reply})
+            .to_string();
+    let decision = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        crate::llm::structured_format::<BTreeMap<String, bool>>(
+            client,
+            &settings.ai_url,
+            &settings.ai_model,
+            0.0,
+            prompt,
+            &context,
+            Some(schema),
+        ),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
+    if decision
+        .as_ref()
+        .and_then(|decision| decision.get("may_ask"))
+        != Some(&false)
+    {
+        return reply.to_owned();
+    }
+    let question = reply.find(['?', '？']).unwrap();
+    let prefix = &reply[..question];
     // The preceding complete statement can acknowledge the captain without another question.
-    prefix.rfind(['.','!','\n']).map(|end|prefix[..=end].trim()).filter(|text|!text.is_empty())
-        .map_or_else(||say("crew_conversation_pause_ack",&[]),str::to_owned)
+    prefix
+        .rfind(['.', '!', '\n'])
+        .map(|end| prefix[..=end].trim())
+        .filter(|text| !text.is_empty())
+        .map_or_else(|| say("crew_conversation_pause_ack", &[]), str::to_owned)
 }
 
 pub struct Batch {
@@ -38,7 +72,7 @@ pub struct Batch {
 
 pub struct CrewSession {
     pub memories: BTreeMap<String, String>,
-    pub ground_taxi_origin: Option<[f64;2]>,
+    pub ground_taxi_origin: Option<[f64; 2]>,
     pub aircraft: String,
     pub profile: CrewProfile,
     pub values: BTreeMap<String, f64>,
@@ -75,16 +109,28 @@ pub struct Observation {
     pub available: Vec<String>,
 }
 #[derive(Deserialize)]
-pub struct CalloutLog { entries: Vec<String>, callsign: String }
+pub struct CalloutLog {
+    entries: Vec<String>,
+    callsign: String,
+}
 /// Record clips already played by the cockpit's independent callout channel.
-pub async fn callout_log(AxumState(shared): AxumState<Shared>, Json(input): Json<CalloutLog>) -> Response {
+pub async fn callout_log(
+    AxumState(shared): AxumState<Shared>,
+    Json(input): Json<CalloutLog>,
+) -> Response {
     let mut state = shared.write().await;
-    if input.callsign != state.session.plan.callsign || input.entries.is_empty() || input.entries.len() > 2
-        || input.entries.iter().any(|text| text.is_empty() || text.len() > 128) {
+    if input.callsign != state.session.plan.callsign
+        || input.entries.is_empty()
+        || input.entries.len() > 2
+        || input
+            .entries
+            .iter()
+            .any(|text| text.is_empty() || text.len() > 128)
+    {
         return Json(json!({"accepted":false})).into_response();
     }
     for text in input.entries {
-        add_transmission(&mut state.session,"COPILOT",&text,&SpeechTag::default());
+        add_transmission(&mut state.session, "COPILOT", &text, &SpeechTag::default());
         if let Some(entry) = state.session.transcript.last_mut() {
             entry.delivery = "preloaded-callout".into();
             entry.information_only = true;
@@ -313,8 +359,16 @@ pub async fn acknowledge(AxumState(shared): AxumState<Shared>, Json(ack): Json<A
             if ["chocks", "external_power", "high_pressure_air"].contains(&action.control.as_str())
             {
                 say(&key, &[])
-            } else if !openatc_core::dialogue::phrases(&format!("crew_completed_{}_value",action.control)).is_empty() {
-                say(&format!("crew_completed_{}_value",action.control),&[("value",action.value.to_string())])
+            } else if !openatc_core::dialogue::phrases(&format!(
+                "crew_completed_{}_value",
+                action.control
+            ))
+            .is_empty()
+            {
+                say(
+                    &format!("crew_completed_{}_value", action.control),
+                    &[("value", action.value.to_string())],
+                )
             } else if action.control == "slides" || action.control == "pushback_start" {
                 say(template, &[]).trim_end_matches('.').to_owned()
             } else {
@@ -336,7 +390,9 @@ pub async fn acknowledge(AxumState(shared): AxumState<Shared>, Json(ack): Json<A
             return next_item(&mut s);
         }
     } else {
-        if let Some(batch)=s.crew.batch.as_mut() {batch.failed=true;}
+        if let Some(batch) = s.crew.batch.as_mut() {
+            batch.failed = true;
+        }
         eprintln!("Crew action {} failed: {}", action.control, ack.detail);
         if let Some(batch) = s.crew.batch.as_mut() {
             batch
@@ -365,9 +421,17 @@ pub(crate) async fn narrate(
     fallback: &str,
     protected: &[String],
 ) -> String {
-    compose(shared,role,request,fallback,protected,&[],false).await
+    compose(shared, role, request, fallback, protected, &[], false).await
 }
-async fn compose(shared:&Shared,role:&str,request:&str,fallback:&str,protected:&[String],points:&[String],social_only:bool) -> String {
+async fn compose(
+    shared: &Shared,
+    role: &str,
+    request: &str,
+    fallback: &str,
+    protected: &[String],
+    points: &[String],
+    social_only: bool,
+) -> String {
     let s = shared.read().await;
     if !s.settings.ai_enabled || s.settings.ai_model.is_empty() {
         return fallback.to_owned();
@@ -396,10 +460,29 @@ async fn compose(shared:&Shared,role:&str,request:&str,fallback:&str,protected:&
         .into_iter()
         .flat_map(|example| example.say.iter().take(2).cloned().collect::<Vec<_>>())
         .collect::<Vec<_>>();
-    let mut readings=s.session.crew_controls.iter().filter(|control|control.role==role).collect::<Vec<_>>();
-    readings.sort_by_key(|control|s.crew.profile.controls.get(&control.id).is_some_and(|profile|profile.momentary));
+    let mut readings = s
+        .session
+        .crew_controls
+        .iter()
+        .filter(|control| control.role == role)
+        .collect::<Vec<_>>();
+    readings.sort_by_key(|control| {
+        s.crew
+            .profile
+            .controls
+            .get(&control.id)
+            .is_some_and(|profile| profile.momentary)
+    });
     let controls=readings.into_iter().take(24).map(|control|json!({"id":control.id,"available":control.available,"value":s.crew.values.get(&control.id)})).collect::<Vec<_>>();
-    let humour_allowed = !s.cabin.preparing_for_turbulence && s.session.taxi_clearance.crossing_runway.is_empty() && !matches!(s.session.phase,openatc_core::state::PhaseCode::Departure|openatc_core::state::PhaseCode::Approach|openatc_core::state::PhaseCode::Landed) && s.session.mission.incident.is_empty();
+    let humour_allowed = !s.cabin.preparing_for_turbulence
+        && s.session.taxi_clearance.crossing_runway.is_empty()
+        && !matches!(
+            s.session.phase,
+            openatc_core::state::PhaseCode::Departure
+                | openatc_core::state::PhaseCode::Approach
+                | openatc_core::state::PhaseCode::Landed
+        )
+        && s.session.mission.incident.is_empty();
     let mut context=json!({"phase":s.session.phase,"onGround":s.session.telemetry.on_ground,"groundSpeedKnots":s.session.telemetry.ground_speed_knots,
         "departure":s.session.plan.departure,"destination":s.session.plan.destination,"cabin":s.cabin,"controls":if social_only{Vec::new()}else{controls},
         "missionIncident":s.session.mission.incident,"conversationNotes":s.crew.memories.get(role),
@@ -413,11 +496,15 @@ async fn compose(shared:&Shared,role:&str,request:&str,fallback:&str,protected:&
         &[
             role_prompt.as_str(),
             personality.as_str(),
-            if social_only {s.prompts.guidance.get("crew_social_only")} else {&s.prompts.crew_response},
+            if social_only {
+                s.prompts.guidance.get("crew_social_only")
+            } else {
+                &s.prompts.crew_response
+            },
         ]
         .join("\n"),
         s.prompts.guidance.get("examples"),
-        if social_only {&[]} else {&examples},
+        if social_only { &[] } else { &examples },
         &context,
     );
     let generation = s.session_generation;
@@ -427,7 +514,13 @@ async fn compose(shared:&Shared,role:&str,request:&str,fallback:&str,protected:&
     let language_path = s.config_dir.join("cabin/response-policy.toml");
     drop(s);
     let language = openatc_core::crew::request::ReplyPolicy::load(&language_path).ok();
-    let user = if !social_only && points.is_empty() && protected.is_empty() { request.to_owned() } else if social_only { json!({"captainMessage":points.join(" "),"conversationPoints":points}).to_string() } else { json!({"conversationContext":if points.is_empty() && protected.is_empty(){Some(request)}else{None},"confirmedResult":if protected.is_empty(){serde_json::Value::Null}else{json!(fallback)},"conversationPoints":points}).to_string() };
+    let user = if !social_only && points.is_empty() && protected.is_empty() {
+        request.to_owned()
+    } else if social_only {
+        json!({"captainMessage":points.join(" "),"conversationPoints":points}).to_string()
+    } else {
+        json!({"conversationContext":if points.is_empty() && protected.is_empty(){Some(request)}else{None},"confirmedResult":if protected.is_empty(){serde_json::Value::Null}else{json!(fallback)},"conversationPoints":points}).to_string()
+    };
     if crate::llm::prompt_fits(&client, &settings.ai_url, &system, &user).await == Some(false) {
         eprintln!("Crew response exceeds the configured context; retaining verified outcomes");
         return fallback.to_owned();
@@ -436,28 +529,55 @@ async fn compose(shared:&Shared,role:&str,request:&str,fallback:&str,protected:&
     let response = if social_only {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct SocialReply { answers: Vec<String>, #[serde(default)] memory: String }
+        struct SocialReply {
+            answers: Vec<String>,
+            #[serde(default)]
+            memory: String,
+        }
         let schema = json!({"type":"object","additionalProperties":false,"required":["answers","memory"],
             "properties":{"memory":{"type":"string","maxLength":700},"answers":{"type":"array","minItems":points.len(),"maxItems":points.len(),
                 "items":{"type":"string"}}}});
-        crate::llm::structured_format::<SocialReply>(&client,&settings.ai_url,&settings.ai_model,
-            if settings.llm_phrase_variety {0.6} else {0.2},&system,&user,Some(schema)).await
-            .and_then(|reply| {
-                if reply.answers.len() != points.len() || reply.answers.iter().any(|answer| answer.trim().is_empty()) {
-                    return Err(crate::llm::StructuredError::Invalid("Incomplete conversational answers".into()));
-                }
-                social_memory = reply.memory;
-                Ok(reply.answers.join(" "))
-            }).map_err(|error|error.to_string())
-    } else { crate::llm::narration(
-        &client,
-        &settings.ai_url,
-        &settings.ai_model,
-        if settings.llm_phrase_variety {0.6} else {0.2},
-        &system,
-        &user,
-    )
-    .await };
+        crate::llm::structured_format::<SocialReply>(
+            &client,
+            &settings.ai_url,
+            &settings.ai_model,
+            if settings.llm_phrase_variety {
+                0.6
+            } else {
+                0.2
+            },
+            &system,
+            &user,
+            Some(schema),
+        )
+        .await
+        .and_then(|reply| {
+            if reply.answers.len() != points.len()
+                || reply.answers.iter().any(|answer| answer.trim().is_empty())
+            {
+                return Err(crate::llm::StructuredError::Invalid(
+                    "Incomplete conversational answers".into(),
+                ));
+            }
+            social_memory = reply.memory;
+            Ok(reply.answers.join(" "))
+        })
+        .map_err(|error| error.to_string())
+    } else {
+        crate::llm::narration(
+            &client,
+            &settings.ai_url,
+            &settings.ai_model,
+            if settings.llm_phrase_variety {
+                0.6
+            } else {
+                0.2
+            },
+            &system,
+            &user,
+        )
+        .await
+    };
     let Ok(reply) = response else {
         eprintln!(
             "Crew response could not be composed: {}",
@@ -465,12 +585,18 @@ async fn compose(shared:&Shared,role:&str,request:&str,fallback:&str,protected:&
         );
         return fallback.to_owned();
     };
-    if (if social_only { crate::llm::spoken(&reply).is_ok() && reply.len() <= 3000 } else { valid_narration(&reply, fallback, protected) })
-        && language
-            .as_ref()
-            .is_some_and(|language| language.narration_allowed(&reply))
+    if (if social_only {
+        crate::llm::spoken(&reply).is_ok() && reply.len() <= 3000
+    } else {
+        valid_narration(&reply, fallback, protected)
+    }) && language
+        .as_ref()
+        .is_some_and(|language| language.narration_allowed(&reply))
     {
-        if !social_memory.is_empty() && social_memory.len() <= 700 && crate::llm::spoken(&social_memory).is_ok() {
+        if !social_memory.is_empty()
+            && social_memory.len() <= 700
+            && crate::llm::spoken(&social_memory).is_ok()
+        {
             let mut state = shared.write().await;
             if state.session_generation == generation && state.crew.aircraft == aircraft {
                 state.crew.memories.insert(role.to_owned(), social_memory);
@@ -556,8 +682,16 @@ fn batch_reply(_s: &mut crate::EngineState, batch: Batch) -> String {
             )
         };
         text = if !batch.held_reply.trim().is_empty() && !batch.failed {
-            say("crew_batch_with_conversation", &[("items",items.trim_end_matches('.').to_owned()),("reply",batch.held_reply)])
-        } else {say("crew_batch_complete", &[("items",items)])};
+            say(
+                "crew_batch_with_conversation",
+                &[
+                    ("items", items.trim_end_matches('.').to_owned()),
+                    ("reply", batch.held_reply),
+                ],
+            )
+        } else {
+            say("crew_batch_complete", &[("items", items)])
+        };
         if !text.ends_with(['.', '?', '!']) {
             text.push('.');
         }
@@ -577,24 +711,52 @@ fn cross_check(s: &crate::EngineState) -> &'static str {
 /// The ramp headset is available during stand work and pushback, not during taxi or flight.
 pub fn update_ground_connection(state: &mut crate::EngineState) {
     use openatc_core::state::PhaseCode;
-    let t=&state.session.telemetry;
-    if !t.on_ground {state.session.ground_interphone_disconnected=true;}
-    if t.on_ground && (!t.position_valid || t.paused) {return;}
-    let (knots,meters)=state.cabin.ground_disconnect_limits();
-    if t.on_ground && state.session.phase == PhaseCode::Finished && t.ground_speed_knots < knots
-        && state.session.taxi_clearance.to_parking && state.session.taxi_clearance.guidance_complete {
-        state.session.ground_interphone_disconnected=false;
-        state.crew.ground_taxi_origin=None;
-    } else if matches!(state.session.phase,PhaseCode::Taxi|PhaseCode::TaxiIn|PhaseCode::Departure) {
-        let origin=*state.crew.ground_taxi_origin.get_or_insert([t.latitude,t.longitude]);
-        if t.ground_speed_knots >= knots && openatc_core::arrival::distance_nm(origin,[t.latitude,t.longitude])*1852.0 >= meters {
-            state.session.ground_interphone_disconnected=true;
+    let t = &state.session.telemetry;
+    if !t.on_ground {
+        state.session.ground_interphone_disconnected = true;
+    }
+    if t.on_ground && (!t.position_valid || t.paused) {
+        return;
+    }
+    let (knots, meters) = state.cabin.ground_disconnect_limits();
+    if t.on_ground
+        && state.session.phase == PhaseCode::Finished
+        && t.ground_speed_knots < knots
+        && state.session.taxi_clearance.to_parking
+        && state.session.taxi_clearance.guidance_complete
+    {
+        state.session.ground_interphone_disconnected = false;
+        state.crew.ground_taxi_origin = None;
+    } else if matches!(
+        state.session.phase,
+        PhaseCode::Taxi | PhaseCode::TaxiIn | PhaseCode::Departure
+    ) {
+        let origin = *state
+            .crew
+            .ground_taxi_origin
+            .get_or_insert([t.latitude, t.longitude]);
+        if t.ground_speed_knots >= knots
+            && openatc_core::arrival::distance_nm(origin, [t.latitude, t.longitude]) * 1852.0
+                >= meters
+        {
+            state.session.ground_interphone_disconnected = true;
         }
-    } else {state.crew.ground_taxi_origin=None;}
-    if state.session.ground_interphone_disconnected && state.session.crew_actions.iter().any(|action|action.role == "ground") {
-        state.session.crew_actions.retain(|action|action.role != "ground");
-        state.crew.batch=None;
-        state.crew.pushback=None;
+    } else {
+        state.crew.ground_taxi_origin = None;
+    }
+    if state.session.ground_interphone_disconnected
+        && state
+            .session
+            .crew_actions
+            .iter()
+            .any(|action| action.role == "ground")
+    {
+        state
+            .session
+            .crew_actions
+            .retain(|action| action.role != "ground");
+        state.crew.batch = None;
+        state.crew.pushback = None;
     }
 }
 
@@ -632,50 +794,113 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         let interpretation_context = s.prompts.guidance.get("crew_interpret_context").to_owned();
         let authority_prompt = s.prompts.guidance.get("crew_control_authority").to_owned();
         let pacing_prompt = s.prompts.guidance.get("crew_follow_up").to_owned();
-        let previous_cabin_reply = s.session.transcript.iter().rev().find(|entry|entry.speaker == "ATTENDANT").map(|entry|entry.text.chars().take(512).collect::<String>()).unwrap_or_default();
-        let role_prompt = match role { "ground" => &s.prompts.ground, "cabin" => &s.prompts.cabin, _ => &s.prompts.copilot_chat };
-        let personality = match role { "ground" => &s.settings.ground_personality, "cabin" => &s.settings.attendant_personality, _ => &s.settings.copilot_personality };
-        let role_guidance = s.prompts.guidance.get(&format!("crew_actions_{role}")).to_owned();
-        let instructions = format!("{}\n{}\n{}",crate::support::fill_prompt(role_prompt,&s.session.plan.callsign),personality,
-            s.prompts.crew_actions.replace("{{role}}", role));
+        let previous_cabin_reply = s
+            .session
+            .transcript
+            .iter()
+            .rev()
+            .find(|entry| entry.speaker == "ATTENDANT")
+            .map(|entry| entry.text.chars().take(512).collect::<String>())
+            .unwrap_or_default();
+        let role_prompt = match role {
+            "ground" => &s.prompts.ground,
+            "cabin" => &s.prompts.cabin,
+            _ => &s.prompts.copilot_chat,
+        };
+        let personality = match role {
+            "ground" => &s.settings.ground_personality,
+            "cabin" => &s.settings.attendant_personality,
+            _ => &s.settings.copilot_personality,
+        };
+        let role_guidance = s
+            .prompts
+            .guidance
+            .get(&format!("crew_actions_{role}"))
+            .to_owned();
+        let instructions = format!(
+            "{}\n{}\n{}",
+            crate::support::fill_prompt(role_prompt, &s.session.plan.callsign),
+            personality,
+            s.prompts.crew_actions.replace("{{role}}", role)
+        );
         let query = request.text.to_lowercase();
-        let words: Vec<_> = query.split(|character: char| !character.is_alphanumeric()).filter(|word| word.len() >= 3).collect();
-        let mut candidates: Vec<_> = profile.controls.iter().filter(|(_, control)| control.role == role).collect();
+        let words: Vec<_> = query
+            .split(|character: char| !character.is_alphanumeric())
+            .filter(|word| word.len() >= 3)
+            .collect();
+        let mut candidates: Vec<_> = profile
+            .controls
+            .iter()
+            .filter(|(_, control)| control.role == role)
+            .collect();
         candidates.sort_by_key(|(id, control)| {
             let label = format!("{id} {}", control.label).to_lowercase();
-            (control.momentary, std::cmp::Reverse(words.iter().filter(|word| label.contains(**word)).count()))
+            (
+                control.momentary,
+                std::cmp::Reverse(words.iter().filter(|word| label.contains(**word)).count()),
+            )
         });
         let mut allowed: Vec<_> = candidates.into_iter().take(64)
-            .map(|(id,c)| json!({"control":id,"label":c.label,"min":c.min,"max":c.max,"on":c.on,"off":c.off,"states":c.states,"value":s.crew.values.get(id),"momentary":c.momentary})).collect();
-        let humour_allowed = !s.cabin.preparing_for_turbulence && s.session.taxi_clearance.crossing_runway.is_empty()
-            && !matches!(s.session.phase,openatc_core::state::PhaseCode::Departure|openatc_core::state::PhaseCode::Approach|openatc_core::state::PhaseCode::Landed)
+            .map(|(id,c)| {
+                let mut control = json!({"control":id,"label":c.label,"min":c.min,"max":c.max,"on":c.on,"off":c.off,"states":c.states,"value":s.crew.values.get(id),"momentary":c.momentary});
+                if !c.instructions.is_empty() { control["instructions"] = json!(c.instructions); }
+                control
+            }).collect();
+        let humour_allowed = !s.cabin.preparing_for_turbulence
+            && s.session.taxi_clearance.crossing_runway.is_empty()
+            && !matches!(
+                s.session.phase,
+                openatc_core::state::PhaseCode::Departure
+                    | openatc_core::state::PhaseCode::Approach
+                    | openatc_core::state::PhaseCode::Landed
+            )
             && s.session.mission.incident.is_empty();
         let facts = json!({"recipient":role,"onGround":s.session.telemetry.on_ground,"phase":format!("{:?}",s.session.phase),
             "passengers":s.session.plan.passengers,"conversationNotes":s.crew.memories.get(role),"humourAllowed":humour_allowed,
             "flight":{"departure":s.session.plan.departure,"destination":s.session.plan.destination,"estimatedMinutes":(s.session.plan.estimated_minutes.is_finite() && s.session.plan.estimated_minutes>0.0).then_some(s.session.plan.estimated_minutes)}});
-        let mut prompt = format!("{instructions}\n{}\n{role_guidance}", interpretation_context.replace("{{controls}}", &json!(allowed).to_string()).replace("{{facts}}", &facts.to_string()));
+        let mut prompt = format!(
+            "{instructions}\n{}\n{role_guidance}",
+            interpretation_context
+                .replace("{{controls}}", &json!(allowed).to_string())
+                .replace("{{facts}}", &facts.to_string())
+        );
         drop(s);
-        while crate::llm::prompt_fits(&client, &settings.ai_url, &prompt, &request.text).await == Some(false) {
+        while crate::llm::prompt_fits(&client, &settings.ai_url, &prompt, &request.text).await
+            == Some(false)
+        {
             if allowed.len() > 8 {
                 allowed.truncate(allowed.len() / 2);
             } else {
                 let mut state = shared.write().await;
                 return Some(reply(&mut state, role, "crew_action_clarify", &[], false));
             }
-            prompt = format!("{instructions}\n{}\n{role_guidance}", interpretation_context.replace("{{controls}}", &json!(allowed).to_string()).replace("{{facts}}", &facts.to_string()));
+            prompt = format!(
+                "{instructions}\n{}\n{role_guidance}",
+                interpretation_context
+                    .replace("{{controls}}", &json!(allowed).to_string())
+                    .replace("{{facts}}", &facts.to_string())
+            );
         }
-        let control_schema = if allowed.is_empty() { json!({"type":"string"}) } else {json!({"type":"string","enum":allowed.iter().filter_map(|control|control["control"].as_str()).collect::<Vec<_>>()})};
+        let control_schema = if allowed.is_empty() {
+            json!({"type":"string"})
+        } else {
+            json!({"type":"string","enum":allowed.iter().filter_map(|control|control["control"].as_str()).collect::<Vec<_>>()})
+        };
         let schema = json!({"type":"object","additionalProperties":false,
-            "required":["actions","cross_check","conversation_reply","memory"],"properties":{
-                "cross_check":{"type":"boolean"},"conversation_reply":{"type":"string"},"memory":{"type":"string","maxLength":700},
-                "actions":{"type":"array","maxItems":8,"items":{"type":"object","additionalProperties":false,"required":["control","value"],
-                    "properties":{"control":control_schema,"value":{"type":"number"}}}}
-            }});
+        "required":["actions","cross_check","conversation_reply","memory"],"properties":{
+            "cross_check":{"type":"boolean"},"conversation_reply":{"type":"string"},"memory":{"type":"string","maxLength":700},
+            "actions":{"type":"array","maxItems":8,"items":{"type":"object","additionalProperties":false,"required":["control","value"],
+                "properties":{"control":control_schema,"value":{"type":"number"}}}}
+        }});
         let intent = crate::llm::structured_format::<openatc_core::crew::request::Intent>(
             &client,
             &settings.ai_url,
             &settings.ai_model,
-            if settings.llm_phrase_variety {0.6} else {0.2},
+            if settings.llm_phrase_variety {
+                0.6
+            } else {
+                0.2
+            },
             &prompt,
             &request.text,
             Some(schema),
@@ -684,11 +909,25 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         .inspect_err(|error| eprintln!("Crew interpretation failed for {role}: {error}"))
         .ok()
         .map(|mut intent| {
-            intent.actions.extend(std::mem::take(&mut intent.control_targets).into_iter().filter_map(|(control,value)|value.map(|value|openatc_core::crew::request::ControlAction{control,value})));
+            intent.actions.extend(
+                std::mem::take(&mut intent.control_targets)
+                    .into_iter()
+                    .filter_map(|(control, value)| {
+                        value.map(|value| openatc_core::crew::request::ControlAction {
+                            control,
+                            value,
+                        })
+                    }),
+            );
             // Repeating an identical proposal must not discard the rest of a mixed request.
             let mut unique = Vec::new();
             for action in std::mem::take(&mut intent.actions) {
-                if !unique.iter().any(|previous: &openatc_core::crew::request::ControlAction| previous.control == action.control && previous.value == action.value) {
+                if !unique
+                    .iter()
+                    .any(|previous: &openatc_core::crew::request::ControlAction| {
+                        previous.control == action.control && previous.value == action.value
+                    })
+                {
                     unique.push(action);
                 }
             }
@@ -697,42 +936,96 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
             intent
         });
 
-        let mut intent=intent;
-        if role == "cabin" && let Some(intent)=intent.as_mut() {
-            intent.reply=pace_cabin_reply(&client,&settings,&pacing_prompt,&request.text,&intent.reply,&previous_cabin_reply).await;
+        let mut intent = intent;
+        if role == "cabin"
+            && let Some(intent) = intent.as_mut()
+        {
+            intent.reply = pace_cabin_reply(
+                &client,
+                &settings,
+                &pacing_prompt,
+                &request.text,
+                &intent.reply,
+                &previous_cabin_reply,
+            )
+            .await;
         }
-        if std::env::var_os("OPENATC_ACTOR_TRACE").is_some() { eprintln!("Crew interpretation: {:?}", intent); }
-        let intent = intent.filter(|intent| intent.valid_controls(&profile, role)
-            && intent.conversation_points.len() <= 16
-            && intent.conversation_points.iter().map(String::len).sum::<usize>() <= 8192);
+        if std::env::var_os("OPENATC_ACTOR_TRACE").is_some() {
+            eprintln!("Crew interpretation: {:?}", intent);
+        }
+        let intent = intent.filter(|intent| {
+            intent.valid_controls(&profile, role)
+                && intent.conversation_points.len() <= 16
+                && intent
+                    .conversation_points
+                    .iter()
+                    .map(String::len)
+                    .sum::<usize>()
+                    <= 8192
+        });
         let mut vetoed = false;
         let intent = if let Some(mut intent) = intent {
             if !intent.actions.is_empty() || intent.cross_check {
                 let mut targets = intent.actions.iter().map(|action|(action.control.clone(),json!({"label":profile.controls[&action.control].label,"value":action.value}))).collect::<serde_json::Map<_,_>>();
-                if intent.cross_check {targets.insert("@cross_check".into(),json!("Verify cabin door/slide arming indications"));}
-                let properties=targets.keys().map(|id|(id.clone(),json!({"type":"boolean"}))).collect::<serde_json::Map<_,_>>();
-                let schema=json!({"type":"object","additionalProperties":false,"required":targets.keys().collect::<Vec<_>>(),"properties":properties});
-                let current=json!({"currentRequest":request.text,"targets":targets}).to_string();
-                match crate::llm::structured_format::<BTreeMap<String,bool>>(&client,&settings.ai_url,&settings.ai_model,0.0,&authority_prompt,&current,Some(schema)).await {
-                    Ok(approved) => {
-                        vetoed = intent.actions.iter().any(|action|approved.get(&action.control)!=Some(&true)) || (intent.cross_check && approved.get("@cross_check")!=Some(&true));
-                        intent.actions.retain(|action|approved.get(&action.control)==Some(&true));
-                        intent.cross_check &= approved.get("@cross_check")==Some(&true);
-                        // Repeating an identical proposal must not discard the rest of a mixed request.
-            let mut unique = Vec::new();
-            for action in std::mem::take(&mut intent.actions) {
-                if !unique.iter().any(|previous: &openatc_core::crew::request::ControlAction| previous.control == action.control && previous.value == action.value) {
-                    unique.push(action);
+                if intent.cross_check {
+                    targets.insert(
+                        "@cross_check".into(),
+                        json!("Verify cabin door/slide arming indications"),
+                    );
                 }
-            }
-            intent.actions = unique;
-            intent.conversation_only = intent.actions.is_empty() && !intent.cross_check;
+                let properties = targets
+                    .keys()
+                    .map(|id| (id.clone(), json!({"type":"boolean"})))
+                    .collect::<serde_json::Map<_, _>>();
+                let schema = json!({"type":"object","additionalProperties":false,"required":targets.keys().collect::<Vec<_>>(),"properties":properties});
+                let current = json!({"currentRequest":request.text,"targets":targets}).to_string();
+                match crate::llm::structured_format::<BTreeMap<String, bool>>(
+                    &client,
+                    &settings.ai_url,
+                    &settings.ai_model,
+                    0.0,
+                    &authority_prompt,
+                    &current,
+                    Some(schema),
+                )
+                .await
+                {
+                    Ok(approved) => {
+                        vetoed = intent
+                            .actions
+                            .iter()
+                            .any(|action| approved.get(&action.control) != Some(&true))
+                            || (intent.cross_check && approved.get("@cross_check") != Some(&true));
+                        intent
+                            .actions
+                            .retain(|action| approved.get(&action.control) == Some(&true));
+                        intent.cross_check &= approved.get("@cross_check") == Some(&true);
+                        // Repeating an identical proposal must not discard the rest of a mixed request.
+                        let mut unique = Vec::new();
+                        for action in std::mem::take(&mut intent.actions) {
+                            if !unique.iter().any(
+                                |previous: &openatc_core::crew::request::ControlAction| {
+                                    previous.control == action.control
+                                        && previous.value == action.value
+                                },
+                            ) {
+                                unique.push(action);
+                            }
+                        }
+                        intent.actions = unique;
+                        intent.conversation_only = intent.actions.is_empty() && !intent.cross_check;
                     }
-                    Err(error) => {eprintln!("Crew control request could not be checked: {error}");let mut state=shared.write().await;return Some(reply(&mut state,role,"crew_action_clarify",&[],false));}
+                    Err(error) => {
+                        eprintln!("Crew control request could not be checked: {error}");
+                        let mut state = shared.write().await;
+                        return Some(reply(&mut state, role, "crew_action_clarify", &[], false));
+                    }
                 }
             }
             Some(intent)
-        } else {None};
+        } else {
+            None
+        };
         s = shared.write().await;
         update_ground_connection(&mut s);
         if role == "ground" && s.session.ground_interphone_disconnected {
@@ -747,13 +1040,21 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         if intent.actions.is_empty() && !intent.cross_check {
             if vetoed || intent.reply.trim().is_empty() {
                 drop(s);
-                intent.reply=compose(shared,role,&request.text,&intent.reply,&[],&[],false).await;
-                s=shared.write().await;
-                if s.session_generation != generation || s.crew.aircraft != aircraft {return Some(reply(&mut s,role,"crew_action_clarify",&[],false));}
+                intent.reply =
+                    compose(shared, role, &request.text, &intent.reply, &[], &[], false).await;
+                s = shared.write().await;
+                if s.session_generation != generation || s.crew.aircraft != aircraft {
+                    return Some(reply(&mut s, role, "crew_action_clarify", &[], false));
+                }
             }
-        if !intent.memory.is_empty() && intent.memory.chars().count() <= 700 && crate::llm::spoken(&intent.memory).is_ok() {
-            s.crew.memories.insert(role.to_owned(), intent.memory.clone());
-        }
+            if !intent.memory.is_empty()
+                && intent.memory.chars().count() <= 700
+                && crate::llm::spoken(&intent.memory).is_ok()
+            {
+                s.crew
+                    .memories
+                    .insert(role.to_owned(), intent.memory.clone());
+            }
             if crate::llm::spoken(&intent.reply).is_ok() && intent.reply.len() <= 3000 {
                 speak(&mut s, role, &intent.reply);
                 return Some(Json(json!({"result":{"accepted":true,"message":intent.reply},"state":snapshot(&s.session,&s.settings)})).into_response());
@@ -762,14 +1063,28 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         }
         if intent.reply.trim().is_empty() && !intent.conversation_points.is_empty() {
             drop(s);
-            intent.reply = compose(shared, role, &request.text, &intent.reply, &[], &intent.conversation_points, true).await;
+            intent.reply = compose(
+                shared,
+                role,
+                &request.text,
+                &intent.reply,
+                &[],
+                &intent.conversation_points,
+                true,
+            )
+            .await;
             s = shared.write().await;
             if s.session_generation != generation || s.crew.aircraft != aircraft {
                 return Some(reply(&mut s, role, "crew_action_clarify", &[], false));
             }
         }
-        if !intent.memory.is_empty() && intent.memory.chars().count() <= 700 && crate::llm::spoken(&intent.memory).is_ok() {
-            s.crew.memories.insert(role.to_owned(), intent.memory.clone());
+        if !intent.memory.is_empty()
+            && intent.memory.chars().count() <= 700
+            && crate::llm::spoken(&intent.memory).is_ok()
+        {
+            s.crew
+                .memories
+                .insert(role.to_owned(), intent.memory.clone());
         }
         Some(intent)
     } else {
@@ -1017,7 +1332,8 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
             reply(&mut s, role, "crew_action_failed", &[("item", item)], false)
         });
     }
-    if !using_ai && (text.contains("don't ") || text.contains("do not ") || text.contains("never ")) {
+    if !using_ai && (text.contains("don't ") || text.contains("do not ") || text.contains("never "))
+    {
         return Some(reply(&mut s, role, "crew_no_action", &[], true));
     }
     let generation = s.session_generation;
@@ -1177,8 +1493,11 @@ mod conversation_routing_tests {
                 Json(json!({"choices":[{"message":{"content":json!({"reply":"I'll take care of both. Coffee when you're back sounds good!","actions":[{"control":"external_power","value":0},{"control":"chocks","value":0}],"cross_check":false,"memory":"Captain would like to catch up after the flight."}).to_string()}}]}))
             }))).await.unwrap();
         });
-        let catalogue: toml::Value = toml::from_str(include_str!("../../../aircraft/toliss_a320.toml")).unwrap();
-        let profile: CrewProfile = serde_json::from_value(serde_json::to_value(&catalogue["aircraft"]["crew"]).unwrap()).unwrap();
+        let catalogue: toml::Value =
+            toml::from_str(include_str!("../../../aircraft/toliss_a320.toml")).unwrap();
+        let profile: CrewProfile =
+            serde_json::from_value(serde_json::to_value(&catalogue["aircraft"]["crew"]).unwrap())
+                .unwrap();
         let available = profile.controls.keys().cloned().collect::<Vec<_>>();
         let mut state = crate::test_state();
         state.settings.ai_enabled = true;
@@ -1187,18 +1506,48 @@ mod conversation_routing_tests {
         state.session.telemetry.position_valid = true;
         state.session.telemetry.on_ground = true;
         let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
-        observe(AxumState(shared.clone()), Json(Observation {aircraft:"test".into(),profile:Some(profile),values:BTreeMap::new(),available:available.clone()})).await;
+        observe(
+            AxumState(shared.clone()),
+            Json(Observation {
+                aircraft: "test".into(),
+                profile: Some(profile),
+                values: BTreeMap::new(),
+                available: available.clone(),
+            }),
+        )
+        .await;
         let observed = shared.clone();
         let sampling = tokio::spawn(async move {
             loop {
-                observe(AxumState(observed.clone()), Json(Observation {aircraft:"test".into(),profile:None,values:BTreeMap::new(),available:available.clone()})).await;
+                observe(
+                    AxumState(observed.clone()),
+                    Json(Observation {
+                        aircraft: "test".into(),
+                        profile: None,
+                        values: BTreeMap::new(),
+                        available: available.clone(),
+                    }),
+                )
+                .await;
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         });
-        let response = request(&shared, &Request {role:"ground".into(),intent:"conversation".into(),text:"Hey buddy, disconnect external power and remove chocks. Coffee when I return?".into(),..Default::default()}).await.unwrap();
+        let response = request(
+            &shared,
+            &Request {
+                role: "ground".into(),
+                intent: "conversation".into(),
+                text:
+                    "Hey buddy, disconnect external power and remove chocks. Coffee when I return?"
+                        .into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         assert!(response.status().is_success());
         let state = shared.read().await;
-        assert_eq!(state.session.crew_actions.len(),2);
+        assert_eq!(state.session.crew_actions.len(), 2);
         assert!(state.session.transcript[0].text.contains("Hey buddy"));
         sampling.abort();
         server.abort();
@@ -1208,59 +1557,92 @@ mod conversation_routing_tests {
     async fn a_controls_wait_reply_keeps_the_captains_request_in_the_log() {
         let shared = std::sync::Arc::new(tokio::sync::RwLock::new(crate::test_state()));
         let text = "disconnect external power and remove chocks please";
-        let response = request(&shared, &Request {role:"ground".into(),intent:"conversation".into(),text:text.into(),..Default::default()}).await.unwrap();
+        let response = request(
+            &shared,
+            &Request {
+                role: "ground".into(),
+                intent: "conversation".into(),
+                text: text.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         assert!(response.status().is_success());
         let state = shared.read().await;
-        assert_eq!(state.session.transcript.len(),2);
-        assert_eq!(state.session.transcript[0].text,text);
-        assert_eq!(state.session.transcript[1].speaker,"GROUND");
+        assert_eq!(state.session.transcript.len(), 2);
+        assert_eq!(state.session.transcript[0].text, text);
+        assert_eq!(state.session.transcript[1].speaker, "GROUND");
         assert!(state.session.crew_actions.is_empty());
     }
-
 
     #[tokio::test]
     async fn ramp_interphone_disconnects_for_actual_taxi_and_flight_not_pushback_permission() {
         use openatc_core::state::PhaseCode;
-        let mut state=crate::test_state();
-        state.session.telemetry.position_valid=true;
-        state.session.telemetry.on_ground=true;
-        state.session.phase=PhaseCode::Pushback;
-        state.session.telemetry.ground_speed_knots=3.0;
+        let mut state = crate::test_state();
+        state.session.telemetry.position_valid = true;
+        state.session.telemetry.on_ground = true;
+        state.session.phase = PhaseCode::Pushback;
+        state.session.telemetry.ground_speed_knots = 3.0;
         update_ground_connection(&mut state);
         assert!(!state.session.ground_interphone_disconnected);
-        state.session.phase=PhaseCode::Taxi;
-        state.session.telemetry.ground_speed_knots=0.0;
+        state.session.phase = PhaseCode::Taxi;
+        state.session.telemetry.ground_speed_knots = 0.0;
         update_ground_connection(&mut state);
-        assert!(!state.session.ground_interphone_disconnected,"Taxi permission at the gate is not observed taxi movement");
-        state.session.telemetry.latitude+=0.0001;
-        state.session.telemetry.ground_speed_knots=2.0;
+        assert!(
+            !state.session.ground_interphone_disconnected,
+            "Taxi permission at the gate is not observed taxi movement"
+        );
+        state.session.telemetry.latitude += 0.0001;
+        state.session.telemetry.ground_speed_knots = 2.0;
         update_ground_connection(&mut state);
         assert!(state.session.ground_interphone_disconnected);
-        state.session.telemetry.ground_speed_knots=0.0;
+        state.session.telemetry.ground_speed_knots = 0.0;
         update_ground_connection(&mut state);
-        assert!(state.session.ground_interphone_disconnected,"Stopping at a hold does not reconnect a ramp headset");
-        state.session.phase=PhaseCode::Cruise;state.session.telemetry.on_ground=false;
-        state.settings.ai_enabled=true;
-        let shared=std::sync::Arc::new(tokio::sync::RwLock::new(state));
-        let response=request(&shared,&Request{role:"ground".into(),intent:"conversation".into(),text:"Are you well?".into(),..Default::default()}).await.unwrap();
-        let body=axum::body::to_bytes(response.into_body(),65536).await.unwrap();
-        let response:serde_json::Value=serde_json::from_slice(&body).unwrap();
-        assert_eq!(response["result"]["silent"],true);
-        assert!(shared.read().await.session.transcript.is_empty(),"Disconnected ramp staff must not speak from the air");
-        let mut state=shared.write().await;
-        state.session.phase=PhaseCode::Finished;state.session.telemetry.on_ground=true;
-        state.session.taxi_clearance.to_parking=true;state.session.taxi_clearance.guidance_complete=true;
+        assert!(
+            state.session.ground_interphone_disconnected,
+            "Stopping at a hold does not reconnect a ramp headset"
+        );
+        state.session.phase = PhaseCode::Cruise;
+        state.session.telemetry.on_ground = false;
+        state.settings.ai_enabled = true;
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+        let response = request(
+            &shared,
+            &Request {
+                role: "ground".into(),
+                intent: "conversation".into(),
+                text: "Are you well?".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["result"]["silent"], true);
+        assert!(
+            shared.read().await.session.transcript.is_empty(),
+            "Disconnected ramp staff must not speak from the air"
+        );
+        let mut state = shared.write().await;
+        state.session.phase = PhaseCode::Finished;
+        state.session.telemetry.on_ground = true;
+        state.session.taxi_clearance.to_parking = true;
+        state.session.taxi_clearance.guidance_complete = true;
         update_ground_connection(&mut state);
         assert!(!state.session.ground_interphone_disconnected);
     }
 
     #[tokio::test]
     async fn pacing_preserves_invited_questions_but_closes_a_deferral() {
-        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address=listener.local_addr().unwrap();
-        let allowed=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let decision=allowed.clone();
-        let server=tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let allowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let decision = allowed.clone();
+        let server = tokio::spawn(async move {
             axum::serve(listener,Router::new().route("/v1/chat/completions",post(move |Json(body):Json<serde_json::Value>| {
                 let decision=decision.clone();async move {
                     assert!(body["messages"][1]["content"].as_str().unwrap().contains("previousCrewReply"));
@@ -1268,12 +1650,28 @@ mod conversation_routing_tests {
                 }
             }))).await.unwrap();
         });
-        let mut settings=openatc_settings::Settings::default();settings.ai_url=format!("http://{address}");settings.ai_model="test".into();
-        let client=reqwest::Client::new();
-        let text="Understood, Captain. I'll leave you to it. How is the flight going?";
-        assert_eq!(pace_cabin_reply(&client,&settings,"pacing","Not yet",text,"Would you like a coffee?").await,"Understood, Captain. I'll leave you to it.");
-        allowed.store(true,std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(pace_cabin_reply(&client,&settings,"pacing","Let's chat",text,"").await,text);
+        let mut settings = openatc_settings::Settings::default();
+        settings.ai_url = format!("http://{address}");
+        settings.ai_model = "test".into();
+        let client = reqwest::Client::new();
+        let text = "Understood, Captain. I'll leave you to it. How is the flight going?";
+        assert_eq!(
+            pace_cabin_reply(
+                &client,
+                &settings,
+                "pacing",
+                "Not yet",
+                text,
+                "Would you like a coffee?"
+            )
+            .await,
+            "Understood, Captain. I'll leave you to it."
+        );
+        allowed.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            pace_cabin_reply(&client, &settings, "pacing", "Let's chat", text, "").await,
+            text
+        );
         server.abort();
     }
 
@@ -1374,7 +1772,10 @@ mod conversation_routing_tests {
         assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 6);
         let state = shared.read().await;
         for role in ["cabin", "copilot", "ground"] {
-            assert_eq!(state.crew.memories.get(role).unwrap(), "Captain enjoys biscuit jokes.");
+            assert_eq!(
+                state.crew.memories.get(role).unwrap(),
+                "Captain enjoys biscuit jokes."
+            );
         }
         server.abort();
     }
@@ -1388,10 +1789,25 @@ mod callout_log_tests {
         let state = crate::test_state();
         let callsign = state.session.plan.callsign.clone();
         let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
-        callout_log(AxumState(shared.clone()), Json(CalloutLog { callsign, entries: vec!["V1 · 127 kt".into(),"Rotate · 146 kt".into()] })).await;
+        callout_log(
+            AxumState(shared.clone()),
+            Json(CalloutLog {
+                callsign,
+                entries: vec!["V1 · 127 kt".into(), "Rotate · 146 kt".into()],
+            }),
+        )
+        .await;
         let state = shared.read().await;
-        assert_eq!(state.session.transcript.len(),2);
-        assert!(state.session.transcript.iter().all(|entry| entry.speaker == "COPILOT" && entry.delivery == "preloaded-callout" && !entry.is_controller_instruction()));
+        assert_eq!(state.session.transcript.len(), 2);
+        assert!(
+            state
+                .session
+                .transcript
+                .iter()
+                .all(|entry| entry.speaker == "COPILOT"
+                    && entry.delivery == "preloaded-callout"
+                    && !entry.is_controller_instruction())
+        );
         assert!(state.session.crew_actions.is_empty());
     }
 }

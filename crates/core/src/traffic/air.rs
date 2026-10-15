@@ -8,7 +8,7 @@ const GRAVITY: f64 = 9.80665;
 const LAPSE: f64 = 0.0065;
 
 /// A dry two-layer atmosphere calibrated to an airport observation.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Atmosphere {
     pressure_hpa: f64,
     sea_kelvin: f64,

@@ -49,6 +49,37 @@ impl Environment {
         }
         Ok(environment)
     }
+    /// Convert an indicated runway speed into movement speed using fresh local weather.
+    pub fn runway_speed(
+        &self,
+        airport: &Airport,
+        runway_name: &str,
+        indicated_knots: f64,
+        geometric_feet: f64,
+    ) -> Result<f64, String> {
+        if !self.fresh() {
+            return Err("Airport planning weather expired before runway scheduling".into());
+        }
+        let runway = airport
+            .runways
+            .iter()
+            .find(|runway| runway.first_name == runway_name || runway.second_name == runway_name)
+            .ok_or("Runway speed needs a known runway end")?;
+        let (a, b) = if runway.first_name == runway_name {
+            (runway.first, runway.second)
+        } else {
+            (runway.second, runway.first)
+        };
+        let heading = (b.east - a.east)
+            .atan2(b.north - a.north)
+            .to_degrees()
+            .rem_euclid(360.0);
+        let true_knots = self
+            .atmosphere
+            .true_knots(indicated_knots, geometric_feet)?;
+        openatc_core::traffic::air::wind(true_knots, heading, self.wind_from, self.wind_knots)
+            .map(|(ground, _)| ground)
+    }
     pub fn fresh(&self) -> bool {
         self.observed.elapsed() < Duration::from_secs(45)
     }
@@ -57,6 +88,51 @@ impl Environment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runway_roll_speeds_use_density_wind_and_the_selected_end() {
+        let airport = Airport {
+            elevation_feet: 5000.0,
+            runways: vec![openatc_core::airport::Runway {
+                first_name: "04".into(),
+                second_name: "22".into(),
+                first: Point::default(),
+                second: Point {
+                    north: 3000.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut weather = Environment {
+            atmosphere: Atmosphere::surface(1013.25, 25.0, 5000.0).unwrap(),
+            variation: 0.0,
+            wind_from: 0.0,
+            wind_knots: 20.0,
+            observed: Instant::now(),
+        };
+        for indicated in [60.0, 110.0, 150.0] {
+            let head = weather
+                .runway_speed(&airport, "04", indicated, 5000.0)
+                .unwrap();
+            let tail = weather
+                .runway_speed(&airport, "22", indicated, 5000.0)
+                .unwrap();
+            assert!((tail - head - 40.0).abs() < 1e-6);
+            assert!(
+                (head + tail) / 2.0 > indicated,
+                "Density must change TAS at this warm elevated airport"
+            );
+        }
+        assert!(
+            weather.runway_speed(&airport, "04", 150.0, 6000.0).unwrap()
+                > weather.runway_speed(&airport, "04", 150.0, 5000.0).unwrap(),
+            "Density conversion must use the runway height, not the airport maximum"
+        );
+        assert!(weather.runway_speed(&airport, "99", 150.0, 5000.0).is_err());
+        weather.observed = Instant::now() - Duration::from_secs(46);
+        assert!(weather.runway_speed(&airport, "04", 150.0, 5000.0).is_err());
+    }
     #[test]
     fn planner_requires_current_weather_at_the_correct_airport() {
         let airport = Airport {

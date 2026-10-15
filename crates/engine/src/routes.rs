@@ -276,8 +276,12 @@ pub async fn debug_cancel_actions(AxumState(shared): AxumState<Shared>) -> Respo
         ));
     }
     state.session_generation = state.session_generation.wrapping_add(1);
+    state.pending_copilot_reply = None;
+    state.debug_jump = None;
     state.session.crew_actions.clear();
     state.crew.batch = None;
+    state.crew.pushback = None;
+    state.crew.checklist = None;
     state.crew.memories.clear();
     state.crew.ground_taxi_origin = None;
     state.request_memory.cancel_pending();
@@ -335,6 +339,7 @@ pub async fn session_reset(AxumState(state): AxumState<Shared>) -> Json<Value> {
 }
 
 fn reset_flight(state: &mut crate::EngineState) {
+    state.debug_jump = None;
     state.session_generation = state.session_generation.wrapping_add(1);
     state.pending_copilot_reply = None;
     state.generated = Default::default();
@@ -433,13 +438,24 @@ pub async fn post_plan(
             });
             let policy = super::instructions::VerticalPolicy::load(&config)?;
             let selected_approach = if plan.approach.is_empty() && policy.select_runway_ils {
-                profile.as_ref().and_then(|profile| profile.default_ils(&plan.arrival_runway))
-            } else { None };
+                profile
+                    .as_ref()
+                    .and_then(|profile| profile.default_ils(&plan.arrival_runway))
+            } else {
+                None
+            };
             if let Some(approach) = &selected_approach {
                 plan.approach.clone_from(approach);
             }
             openatc_core::navigation::enrich(&mut plan, &root);
-            Ok::<_, String>((plan, airport, mora, profile, policy, selected_approach.is_some()))
+            Ok::<_, String>((
+                plan,
+                airport,
+                mora,
+                profile,
+                policy,
+                selected_approach.is_some(),
+            ))
         })
         .await;
     let Ok(Ok((plan, arrival_airport, mora, profile, policy, selected_approach))) = loaded else {
@@ -893,13 +909,14 @@ fn tts_voice(body: &Value, settings: &Settings, speaker: &str) -> (String, Strin
 }
 
 fn speech_effects(settings: &Settings, speaker: &str, received_radio: bool) -> Value {
-    let enabled = settings.radio_effects && match speaker {
-        "copilot" => false,
-        "pilot" => received_radio,
-        "cabin" => settings.radio_fx_cabin,
-        "ground" => settings.radio_fx_ground,
-        _ => true,
-    };
+    let enabled = settings.radio_effects
+        && match speaker {
+            "copilot" => false,
+            "pilot" => received_radio,
+            "cabin" => settings.radio_fx_cabin,
+            "ground" => settings.radio_fx_ground,
+            _ => true,
+        };
     json!({
         "hiss": if enabled { settings.radio_hiss } else { 0.0 },
         "crackle": if enabled { settings.radio_crackle } else { 0.0 },
@@ -991,8 +1008,13 @@ pub async fn post_speak(AxumState(state): AxumState<Shared>, Json(body): Json<Va
     } else {
         (settings.tts_speed * speed).clamp(0.5, 2.0)
     };
-    let effects = speech_effects(&settings, &speaker,
-        body.get("receivedRadio").and_then(Value::as_bool).unwrap_or(false));
+    let effects = speech_effects(
+        &settings,
+        &speaker,
+        body.get("receivedRadio")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    );
     let (callsign, airports) = {
         let current = state.read().await;
         let mut airports = Vec::new();
@@ -1983,6 +2005,11 @@ pub(crate) async fn atc_request(
     if !request.controller_initiated {
         let _ = refresh_voices(shared, false).await;
     }
+    if super::debug_jump::waiting(&mut *shared.write().await) {
+        return bad_request(
+            "A developer checkpoint is loading; wait for native positioning to finish.",
+        );
+    }
     let generation = shared.read().await.session_generation;
     if !request.controller_initiated && settings.congestion != Congestion::Off {
         let millis = if settings.congestion == Congestion::Busy {
@@ -2054,8 +2081,16 @@ pub(crate) async fn atc_request(
             _ => receiving.airport.clone(),
         };
         let cached = if request.controller_initiated {
-            shared.read().await.airport.as_ref().filter(|airport| airport.icao == id).cloned()
-        } else { None };
+            shared
+                .read()
+                .await
+                .airport
+                .as_ref()
+                .filter(|airport| airport.icao == id)
+                .cloned()
+        } else {
+            None
+        };
         let workers = shared.read().await.workers.clone();
         if let Some(airport) = cached {
             operational_airport = Some(airport);
@@ -2086,7 +2121,8 @@ pub(crate) async fn atc_request(
         ));
     }
 
-    if request.controller_initiated && request.intent == "cross_runway"
+    if request.controller_initiated
+        && request.intent == "cross_runway"
         && (state.session.taxi_clearance.sequence != request.clearance_sequence
             || state.session.taxi_clearance.stage() != openatc_core::state::SurfaceStage::AtHold)
     {
@@ -2479,7 +2515,7 @@ pub(crate) async fn atc_request(
             .session
             .clearance
             .as_ref()
-            .is_some_and(|c| c.acknowledged)
+            .is_some_and(|c| c.acknowledged && c.readback_scope.is_empty())
         && receiving.service == "Clearance"
         && let Some(ground) =
             openatc_core::stations::nearby(&state.stations, &state.session.telemetry)
@@ -2885,23 +2921,23 @@ mod chatter_tests {
         settings.radio_crackle = 0.3;
         settings.radio_static = 0.2;
         let clean = json!({"hiss":0.0,"crackle":0.0,"static":0.0,"bandpass":false});
-        for (speaker, received_radio) in [("pilot",false),("copilot",false),("copilot",true)] {
-            assert_eq!(speech_effects(&settings,speaker,received_radio),clean);
+        for (speaker, received_radio) in [("pilot", false), ("copilot", false), ("copilot", true)] {
+            assert_eq!(speech_effects(&settings, speaker, received_radio), clean);
         }
-        for (speaker, received_radio) in [("atc",false),("pilot",true)] {
-            let effects = speech_effects(&settings,speaker,received_radio);
-            assert_eq!(effects["bandpass"],true);
+        for (speaker, received_radio) in [("atc", false), ("pilot", true)] {
+            let effects = speech_effects(&settings, speaker, received_radio);
+            assert_eq!(effects["bandpass"], true);
             assert!(effects["hiss"].as_f64().unwrap() > 0.0);
             assert!(effects["crackle"].as_f64().unwrap() > 0.0);
             assert!(effects["static"].as_f64().unwrap() > 0.0);
         }
         settings.radio_fx_cabin = false;
         settings.radio_fx_ground = false;
-        assert_eq!(speech_effects(&settings,"cabin",false),clean);
-        assert_eq!(speech_effects(&settings,"ground",false),clean);
+        assert_eq!(speech_effects(&settings, "cabin", false), clean);
+        assert_eq!(speech_effects(&settings, "ground", false), clean);
         settings.radio_effects = false;
-        assert_eq!(speech_effects(&settings,"atc",true),clean);
-        assert_eq!(speech_effects(&settings,"pilot",true),clean);
+        assert_eq!(speech_effects(&settings, "atc", true), clean);
+        assert_eq!(speech_effects(&settings, "pilot", true), clean);
     }
     #[tokio::test]
     async fn planned_airports_get_weather_before_a_radio_handoff() {

@@ -358,6 +358,35 @@ fn apply_simple(state: &mut State, ctx: &RequestContext<'_>) -> Option<RequestOu
     None
 }
 
+/// Finish a verified readback without inventing another controller instruction.
+fn accepted_readback(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome {
+    if let Some(entry) = state.transcript.iter_mut().find(|entry| {
+        entry.sequence == ctx.request.clearance_sequence && entry.is_controller_instruction()
+    }) {
+        entry.pilot_reply.clear();
+    }
+    if state.telemetry.on_ground
+        && state.phase == PhaseCode::Clearance
+        && state
+            .clearance
+            .as_ref()
+            .is_some_and(|clearance| clearance.readback_scope.is_empty())
+    {
+        // Delivery may close the initial clearance with an acknowledgement and
+        // a Ground contact instruction. Routine readbacks end with the pilot.
+        return reply(
+            state,
+            ctx,
+            true,
+            crate::dialogue::say("readback_correct_for_recorded_altitude_and_route", &[]),
+        );
+    }
+    RequestOutcome {
+        accepted: true,
+        message: String::new(),
+    }
+}
+
 /// Readback handling, strict or lenient depending on the realism toggles.
 fn apply_readback(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome {
     if (ctx.request.readback_kind == "taxi" && !state.taxi_clearance.pending_readback)
@@ -399,30 +428,7 @@ fn apply_readback(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome
         } else {
             PhaseCode::Taxi
         };
-        // A correct crossing readback activates monitoring without another radio call.
-        if !state.taxi_clearance.crossing_runway.is_empty() {
-            return RequestOutcome {
-                accepted: true,
-                message: String::new(),
-            };
-        }
-        return reply(
-            state,
-            ctx,
-            true,
-            crate::dialogue::say(
-                if state.taxi_clearance.runway_taxi {
-                    "runway_taxi_readback_correct"
-                } else if state.taxi_clearance.to_parking
-                    && state.taxi_clearance.hold_short_runway.is_empty()
-                {
-                    "parking_taxi_readback_correct"
-                } else {
-                    "taxi_readback_correct_follow_the_approved_route"
-                },
-                &[],
-            ),
-        );
+        return accepted_readback(state, ctx);
     }
     let request = ctx.request;
     let Some(clearance) = &state.clearance else {
@@ -450,12 +456,7 @@ fn apply_readback(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome
             if let Some(clearance) = state.clearance.as_mut() {
                 clearance.acknowledged = true;
             }
-            return reply(
-                state,
-                ctx,
-                true,
-                crate::dialogue::say("readback_correct_for_recorded_altitude_and_route", &[]),
-            );
+            return accepted_readback(state, ctx);
         }
         return reply(
             state,
@@ -467,12 +468,7 @@ fn apply_readback(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome
     if let Some(clearance) = state.clearance.as_mut() {
         clearance.acknowledged = true;
     }
-    reply(
-        state,
-        ctx,
-        true,
-        crate::dialogue::say("readback_correct_for_recorded_altitude_and_route", &[]),
-    )
+    accepted_readback(state, ctx)
 }
 
 /// IFR clearance issue, both flavors.
@@ -617,10 +613,25 @@ fn apply_taxi(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome {
         state.plan.runway.clone()
     };
     let prefix = if state.demo { "DEMO: " } else { "" };
-    if !ctx.runway_taxi_authorized && matches!(request.intent.as_str(), "taxi" | "gate")
-        && let Some(runway) = super::airport::runway_at_point(airport, &airport_point(airport, position.latitude, position.longitude))
+    if !ctx.runway_taxi_authorized
+        && matches!(request.intent.as_str(), "taxi" | "gate")
+        && let Some(runway) = super::airport::runway_at_point(
+            airport,
+            &airport_point(airport, position.latitude, position.longitude),
+        )
     {
-        return reply(state, ctx, false, crate::dialogue::say("ground_taxi_position_on_runway", &[("runway", format!("{}/{}", runway.first_name, runway.second_name))]));
+        return reply(
+            state,
+            ctx,
+            false,
+            crate::dialogue::say(
+                "ground_taxi_position_on_runway",
+                &[(
+                    "runway",
+                    format!("{}/{}", runway.first_name, runway.second_name),
+                )],
+            ),
+        );
     }
     let normal = if request.intent == "gate" {
         let mut found = None;
@@ -1363,6 +1374,88 @@ mod tests {
     use super::super::state::{Clearance, Point, State, Telemetry};
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn routine_readbacks_finish_silently_but_errors_still_need_correction() {
+        let tag = SpeechTag::default();
+        let region = Region::default();
+        for (phase, on_ground, taxi) in [
+            (PhaseCode::Departure, false, false),
+            (PhaseCode::Cruise, false, false),
+            (PhaseCode::Arrival, false, false),
+            (PhaseCode::Approach, false, false),
+            (PhaseCode::Taxi, true, true),
+            (PhaseCode::TaxiIn, true, true),
+            (PhaseCode::Clearance, true, false),
+        ] {
+            let mut state = State {
+                phase,
+                ..Default::default()
+            };
+            state.telemetry.on_ground = on_ground;
+            state.clearance = Some(Clearance {
+                altitude_feet: 6000,
+                route: "ROUTE".into(),
+                sequence: 7,
+                ..Default::default()
+            });
+            if phase == PhaseCode::Clearance {
+                state.clearance.as_mut().unwrap().readback_scope = "runway".into();
+            }
+            state.taxi_clearance.pending_readback = taxi;
+            state.taxi_clearance.sequence = 7;
+            state.taxi_clearance.instructions = "ROUTE".into();
+            state.taxi_clearance.to_parking = phase == PhaseCode::TaxiIn;
+            state.transcript.push(
+                serde_json::from_value(
+                    serde_json::json!({"speaker":"ATC","sequence":7,"pilotReply":"Pending reply"}),
+                )
+                .unwrap(),
+            );
+            let mut request = Request {
+                intent: "readback".into(),
+                clearance_sequence: 7,
+                altitude_feet: 6000,
+                waypoint: "WRONG".into(),
+                ..Default::default()
+            };
+            let realism = Realism::default();
+            let outcome = |state: &mut State, request: &Request| {
+                apply_readback(
+                    state,
+                    &RequestContext {
+                        squawk: "1234",
+                        request,
+                        runway_taxi_authorized: false,
+                        airport: None,
+                        atc_tag: &tag,
+                        pilot_tag: &tag,
+                        realism: &realism,
+                        units: UnitSystem::Imperial,
+                        region: &region,
+                    },
+                )
+            };
+            let rejected = outcome(&mut state, &request);
+            assert!(!rejected.accepted);
+            assert!(!rejected.message.is_empty());
+            assert!(!state.clearance.as_ref().unwrap().acknowledged);
+            assert_eq!(state.taxi_clearance.pending_readback, taxi);
+            let before = state.transcript.len();
+            request.waypoint = "ROUTE".into();
+            let accepted = outcome(&mut state, &request);
+            assert!(accepted.accepted);
+            assert!(accepted.message.is_empty(), "{phase:?}");
+            assert_eq!(state.transcript.len(), before, "{phase:?}");
+            assert!(state.transcript[0].pilot_reply.is_empty());
+            if taxi {
+                assert!(state.taxi_clearance.approved);
+                assert!(!state.taxi_clearance.pending_readback);
+            } else {
+                assert!(state.clearance.as_ref().unwrap().acknowledged);
+            }
+        }
+    }
 
     fn fixtures() -> serde_json::Value {
         let path =

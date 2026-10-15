@@ -23,3 +23,15 @@ gate_connector_detour_meters = 250.0
 
 # Maximum retained terminal combinations for the airborne planner.
 terminal_candidate_limit = 16
+
+# Maximum published heading-to-course intercept considered during terminal decoding.
+terminal_intercept_limit_nm = 20.0
+
+# Supported slope for the nominal published-threshold runway surface.
+runway_slope_limit_percent = 2.0
+
+# Visual/TCAS selection only; distant flight state remains in the movement world.
+visible_aircraft_limit = 63
+display_enter_nm = 40.0
+display_leave_nm = 50.0
+display_replacement_margin_nm = 2.0

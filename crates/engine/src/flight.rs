@@ -1338,20 +1338,27 @@ fn approach_runway(name: &str) -> Option<&str> {
 }
 /// Turn a published procedure identifier into a readable approach name.
 fn approach_label(name: &str) -> String {
-    let (prefix, suffix) = name.split_at(name.char_indices().nth(1).map_or(name.len(), |(i, _)| i));
-    if suffix.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        let kind = match prefix {
-            "I" => "ILS",
-            "R" => "RNAV",
-            "L" => "Localizer",
-            "V" => "VOR",
-            "N" => "NDB",
-            _ => return name.into(),
-        };
-        format!("{kind} runway {suffix}")
-    } else {
-        name.into()
-    }
+    let Some(runway) = approach_runway(name) else {
+        return name.into();
+    };
+    let template = match name.as_bytes()[0] {
+        b'I' => "approach_label_ils",
+        b'R' => "approach_label_rnav",
+        b'L' => "approach_label_localizer",
+        b'V' => "approach_label_vor",
+        b'N' => "approach_label_ndb",
+        _ => return name.into(),
+    };
+    let variant = match &name[runway.len() + 1..] {
+        "X" => say("approach_variant_x", &[]),
+        "Y" => say("approach_variant_y", &[]),
+        "Z" => say("approach_variant_z", &[]),
+        _ => String::new(),
+    };
+    say(template, &[("runway", runway.into()), ("variant", variant)])
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -1408,6 +1415,17 @@ mod ownership_tests {
             .unwrap()
             .into_inner();
         assert_eq!(state.session.plan.approach, "I35RY");
+        for kind in ["sid", "cruise", "star", "approach"] {
+            let checkpoint = openatc_core::debug_jump::route(&state.session.plan, kind)
+                .unwrap_or_else(|error| panic!("{kind}: {error}"));
+            eprintln!(
+                "Checkpoint {kind}: next {} at {:.0} ft ({:.5}, {:.5})",
+                state.session.plan.fixes[checkpoint.next_fix].identifier,
+                checkpoint.altitude_feet,
+                checkpoint.latitude,
+                checkpoint.longitude
+            );
+        }
         let fixes = state.session.plan.fixes.clone();
         let ci = fixes
             .iter()
@@ -1468,16 +1486,70 @@ mod ownership_tests {
                 last.pilot_reply.clear();
             }
         };
+        let mut checkpoint_fixes = fixes[..=fi].to_vec();
+        if std::env::var("OPENATC_TEST_CHECKPOINT").as_deref() == Ok("approach") {
+            state.settings.dev_mode = true;
+            state.session.telemetry.engines_running = true;
+            let checkpoint =
+                openatc_core::debug_jump::route(&state.session.plan, "approach").unwrap();
+            let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+            assert!(
+                crate::debug_jump::prepare(
+                    axum::extract::State(shared.clone()),
+                    axum::Json(json!({"kind":"approach"}))
+                )
+                .await
+                .status()
+                .is_success()
+            );
+            let token = shared.read().await.session_generation;
+            let mut observed = shared.read().await.session.telemetry.clone();
+            observed.latitude = checkpoint.latitude;
+            observed.longitude = checkpoint.longitude;
+            observed.altitude_feet = checkpoint.altitude_feet;
+            observed.indicated_altitude_feet = Some(checkpoint.altitude_feet);
+            observed.paused = true;
+            assert!(
+                crate::debug_jump::finish(
+                    axum::extract::State(shared.clone()),
+                    axum::Json(json!({"token":token,"moved":true,"telemetry":observed}))
+                )
+                .await
+                .status()
+                .is_success()
+            );
+            state = std::sync::Arc::try_unwrap(shared)
+                .ok()
+                .unwrap()
+                .into_inner();
+            assert!(!state.flow.approach_cleared && !state.flow.landing_cleared);
+            state.session.telemetry.paused = false;
+            checkpoint_fixes = vec![openatc_core::state::RouteFix {
+                latitude: checkpoint.latitude,
+                longitude: checkpoint.longitude,
+                ..Default::default()
+            }];
+            checkpoint_fixes.extend_from_slice(&fixes[checkpoint.next_fix..=fi]);
+        }
         let mut entry_distance = None;
         // Advance every imported/expanded leg in small steps. No next-fix or
         // arrival-phase injection can hide an import or sequencing failure.
-        for pair in fixes[..=fi].windows(2) {
+        let fly_by = std::env::var_os("OPENATC_TEST_EXACT_FIXES").is_none();
+        let flown = checkpoint_fixes
+            .iter()
+            .filter(|fix| !fly_by || !["TOC", "TOD"].contains(&fix.identifier.as_str()))
+            .collect::<Vec<_>>();
+        for pair in flown.windows(2) {
             let a = [pair[0].latitude, pair[0].longitude];
             let b = [pair[1].latitude, pair[1].longitude];
             let distance = openatc_core::arrival::distance_nm(a, b);
             let steps = (distance * 4.0).ceil().max(1.0) as usize;
             let course = openatc_core::arrival::bearing(a, b);
             for step in 1..=steps {
+                let travelled = distance * step as f64 / steps as f64;
+                if fly_by && (travelled < 0.5 || travelled > distance - 0.5) {
+                    continue;
+                }
                 let position = openatc_core::arrival::destination(
                     a,
                     course,
@@ -1504,6 +1576,13 @@ mod ownership_tests {
                     ));
                 }
                 acknowledge(&mut state);
+            }
+            if pair[1].identifier == "MC420" {
+                assert_eq!(
+                    state.session.clearance.as_ref().unwrap().altitude_feet,
+                    4000,
+                    "The screenshot's MC420 position must already have the ILS entry descent"
+                );
             }
         }
         assert!(
@@ -1558,7 +1637,8 @@ mod ownership_tests {
                 .session
                 .transcript
                 .iter()
-                .any(|entry| entry.text.contains("expect") && entry.text.contains("35RY"))
+                .any(|entry| entry.text.contains("expect")
+                    && entry.text.contains("ILS Yankee runway 35R"))
         );
         eprintln!(
             "Entry descent issued {:.1} NM before CI3RY",
@@ -2029,7 +2109,28 @@ mod ownership_tests {
     fn approach_identifiers_are_spoken_as_approach_names() {
         assert_eq!(approach_label("I19R"), "ILS runway 19R");
         assert_eq!(approach_label("R27"), "RNAV runway 27");
+        assert_eq!(approach_label("I35RY"), "ILS Yankee runway 35R");
+        assert_eq!(approach_label("I35RZ"), "ILS Zulu runway 35R");
+        assert_eq!(approach_label("R09LX"), "RNAV X-ray runway 09L");
+        assert_eq!(approach_label("L18Y"), "Localizer Yankee runway 18");
+        assert_eq!(approach_label("V04"), "VOR runway 04");
+        assert_eq!(approach_label("N22Z"), "NDB Zulu runway 22");
+        assert_eq!(approach_label("not a procedure"), "not a procedure");
         assert_eq!(approach_label(""), "");
+        let slots = [
+            ("callsign", "C-GTLT".into()),
+            ("approach", approach_label("I35RY")),
+        ];
+        for template in [
+            "arrival_expect_approach",
+            "arrival_approach_clearance",
+            "pilot_approach_clearance",
+        ] {
+            let text = say(template, &slots);
+            assert!(text.contains("ILS Yankee runway 35R"), "{text}");
+            assert_eq!(text.matches("35R").count(), 1, "{text}");
+            assert!(!text.contains("35RY"), "{text}");
+        }
     }
 
     #[test]

@@ -55,13 +55,30 @@ fn load(config: &Config) -> Result<(Engine, Status), String> {
         Engine::Kitten(e) => (DeviceStatus::new(e.device().0, e.device().1), e.voices()),
     };
     #[derive(serde::Deserialize)]
-    struct Warmup { text: String }
-    let warmup: Warmup = toml::from_str(include_str!("../../../server/warmup.toml")).map_err(|error| error.to_string())?;
-    if warmup.text.trim().is_empty() || warmup.text.len() > 128 { return Err("Invalid speech warmup text".into()); }
-    let voice = voices.as_array().and_then(|voices| voices.first()).and_then(|voice| voice.as_str().or_else(|| voice.get("id").and_then(serde_json::Value::as_str))).ok_or("Speech provider has no voices")?;
+    struct Warmup {
+        text: String,
+    }
+    let warmup: Warmup = toml::from_str(include_str!("../../../server/warmup.toml"))
+        .map_err(|error| error.to_string())?;
+    if warmup.text.trim().is_empty() || warmup.text.len() > 128 {
+        return Err("Invalid speech warmup text".into());
+    }
+    let voice = voices
+        .as_array()
+        .and_then(|voices| voices.first())
+        .and_then(|voice| {
+            voice
+                .as_str()
+                .or_else(|| voice.get("id").and_then(serde_json::Value::as_str))
+        })
+        .ok_or("Speech provider has no voices")?;
     match &mut engine {
-        Engine::Kokoro(engine) => { engine.synthesize(&warmup.text, voice, 1.0, 0.0, 0.0)?; }
-        Engine::Kitten(engine) => { engine.synthesize(&warmup.text, voice, 1.0, 0.0, 0.0)?; }
+        Engine::Kokoro(engine) => {
+            engine.synthesize(&warmup.text, voice, 1.0, 0.0, 0.0)?;
+        }
+        Engine::Kitten(engine) => {
+            engine.synthesize(&warmup.text, voice, 1.0, 0.0, 0.0)?;
+        }
     }
     Ok((
         engine,

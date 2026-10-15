@@ -13,6 +13,9 @@ fn one() -> f64 {
 pub struct Control {
     /// Name shown in the controls list.
     pub label: String,
+    /// Aircraft-specific interpretation guidance supplied with this control.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
     /// Crew member allowed to operate this control.
     pub role: String,
     /// Writable simulator dataref.
@@ -569,6 +572,27 @@ mod tests {
         assert_eq!(
             parse(&profile, "cabin", "cabin brightness 50 percent"),
             Some(("cabin_brightness".into(), 50.0))
+        );
+        let lights = &profile.controls["cabin_brightness"];
+        assert_eq!(lights.dataref, "AirbusFBW/cabinLightLevel_perc");
+        assert!(lights.on_command.is_empty() && lights.off_command.is_empty());
+        assert!(!lights.instructions.is_empty());
+        for (text, value) in [
+            ("turn cabin lights on", 100.0),
+            ("turn cabin lights off", 0.0),
+            ("set cabin lights to 20 percent", 20.0),
+            ("turn cabin lights on to 50 percent", 50.0),
+        ] {
+            assert_eq!(
+                parse(&profile, "cabin", text),
+                Some(("cabin_brightness".into(), value))
+            );
+        }
+        assert!(
+            standard_profile()
+                .controls
+                .values()
+                .all(|control| control.instructions.is_empty())
         );
         assert_eq!(
             parse(&profile, "ground", "remove chocks"),

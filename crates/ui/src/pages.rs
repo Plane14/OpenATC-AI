@@ -590,6 +590,7 @@ fn transcript_badge(
                 format!("ATC - {name}")
             }
         }
+        _ if entry.position == "Traffic" => format!("TFC · {}", entry.speaker),
         _ => "YOU".to_owned(),
     }
 }
@@ -3736,6 +3737,32 @@ mod tests {
             ),
             "ATIS"
         );
+    }
+
+    #[test]
+    fn traffic_pilot_badges_preserve_identity_instead_of_showing_you() {
+        let mut entry = openatc_core::state::Transmission {
+            speaker: "SIA1975".into(),
+            text: "Taxi via Alpha, Singapore one nine seven five.".into(),
+            position: "Traffic".into(),
+            background: true,
+            radio: Some(openatc_core::state::Radio::Com1),
+            sequence: 1,
+            voice: String::new(),
+            delivery: "standard".into(),
+            speed: 1.0,
+            pilot_reply: String::new(),
+            urgent: false,
+            information_only: false,
+        };
+        let entry = &mut entry;
+        let airport = openatc_core::airport::Airport::default();
+        assert_eq!(transcript_badge(entry, &airport, 118700), "TFC · SIA1975");
+        entry.speaker = "F-GABC".into();
+        assert_eq!(transcript_badge(entry, &airport, 118700), "TFC · F-GABC");
+        entry.position.clear();
+        entry.background = false;
+        assert_eq!(transcript_badge(entry, &airport, 118700), "YOU");
     }
 
     #[test]

@@ -720,7 +720,7 @@ impl World {
         if generation != self.generation {
             return false;
         }
-        let Some(aircraft) = self.aircraft.get_mut(&id) else {
+        let Some(aircraft) = self.aircraft.get(&id) else {
             return false;
         };
         if aircraft.segment != segment || aircraft.complete {
@@ -730,15 +730,53 @@ impl World {
         if !matches!(stage, Stage::TaxiOut | Stage::TaxiIn | Stage::Pushback) {
             return self.reserve(generation, id, segment, blocked);
         }
-        let mut end = segment;
-        let mut resources = BTreeSet::new();
-        for (index, next) in aircraft.route.segments.iter().enumerate().skip(segment) {
-            if next.stage != stage {
-                break;
-            }
-            end = index;
-            resources.extend(next.resources.iter().cloned());
+        let end = aircraft
+            .route
+            .segments
+            .iter()
+            .enumerate()
+            .skip(segment)
+            .take_while(|(_, next)| next.stage == stage)
+            .map(|(index, _)| index)
+            .last()
+            .unwrap();
+        self.reserve_surface_until(generation, id, segment, end, blocked)
+    }
+
+    /// Protect only the contiguous surface movements covered by one clearance, without moving.
+    pub fn reserve_surface_until(
+        &mut self,
+        generation: u64,
+        id: u32,
+        segment: usize,
+        end: usize,
+        blocked: &BTreeSet<String>,
+    ) -> bool {
+        if generation != self.generation {
+            return false;
         }
+        let Some(aircraft) = self.aircraft.get_mut(&id) else {
+            return false;
+        };
+        if aircraft.segment != segment
+            || aircraft.complete
+            || end < segment
+            || end >= aircraft.route.segments.len()
+        {
+            return false;
+        }
+        let stage = aircraft.route.segments[segment].stage;
+        if !matches!(stage, Stage::TaxiOut | Stage::TaxiIn | Stage::Pushback)
+            || aircraft.route.segments[segment..=end]
+                .iter()
+                .any(|next| next.stage != stage)
+        {
+            return false;
+        }
+        let resources: BTreeSet<_> = aircraft.route.segments[segment..=end]
+            .iter()
+            .flat_map(|next| next.resources.iter().cloned())
+            .collect();
         if resources.iter().any(|resource| {
             blocked.contains(resource)
                 || self.owners.get(resource).is_some_and(|owner| *owner != id)
@@ -1100,6 +1138,52 @@ mod tests {
             .unwrap(),
         )
     }
+    #[test]
+    fn bounded_surface_reservation_protects_the_clearance_without_granting_it() {
+        let segment = |index, resource: &str| Segment {
+            stage: Stage::TaxiIn,
+            points: vec![
+                point(f64::from(index) * 100.0, 0.0),
+                point(f64::from(index + 1) * 100.0, 0.0),
+            ],
+            knots: 10.0,
+            resources: vec![resource.to_owned()],
+            dwell_seconds: 0.0,
+        };
+        let route = std::sync::Arc::new(
+            Route::compile(
+                vec![segment(0, "A"), segment(1, "B"), segment(2, "C")],
+                1000.0,
+                1000.0,
+            )
+            .unwrap(),
+        );
+        let mut world = World::default();
+        assert!(world.insert(0, 1, route));
+        assert!(!world.reserve_surface_until(0, 1, 0, 3, &BTreeSet::new()));
+        assert!(world.reserve_surface_until(0, 1, 0, 1, &BTreeSet::new()));
+        assert!(world.snapshot()[0].awaiting_clearance);
+        for (id, resource, expected) in [(2, "C", true), (3, "B", false)] {
+            let route = std::sync::Arc::new(
+                Route::compile(vec![segment(0, resource)], 1000.0, 1000.0).unwrap(),
+            );
+            assert!(world.insert(0, id, route));
+            assert_eq!(
+                world.reserve(0, id, 0, &BTreeSet::new()),
+                expected,
+                "Reservation extended beyond, or lost part of, its clearance"
+            );
+        }
+        let before = world.snapshot()[0].position;
+        world.advance(0.0, false);
+        world.advance(10.0, false);
+        assert_eq!(
+            world.snapshot()[0].position,
+            before,
+            "A reservation moved an aircraft before readback"
+        );
+    }
+
     #[test]
     fn taxi_corridor_waits_before_entering_a_shared_lane() {
         let route = |start: &str| {

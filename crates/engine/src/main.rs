@@ -3,6 +3,7 @@
 mod cabin;
 mod context;
 mod crew;
+mod debug_jump;
 mod discipline;
 mod flight;
 mod generated;
@@ -65,6 +66,8 @@ pub struct EngineState {
     pub request_memory: memory::RequestMemory,
     /// Invalidates work started before a new-flight reset.
     pub session_generation: u64,
+    /// Prepared developer checkpoint awaiting native positioning.
+    pub debug_jump: Option<debug_jump::Pending>,
     /// Prepared crew radio exchange and its owning flight generation.
     pub pending_copilot_reply: Option<routes::PreparedReply>,
     /// Previous phrase choices and transmitted wording.
@@ -361,6 +364,7 @@ async fn main() {
         traffic_profiles,
         generated: Default::default(),
         session_generation: 0,
+        debug_jump: None,
         pending_copilot_reply: None,
         phrase_history: radio::PhraseHistory::load(&config_dir),
         crew: crew::CrewSession::default(),
@@ -418,6 +422,8 @@ async fn main() {
         .route("/atc/offer", post(initiative::answer))
         .route("/simulator/root", post(routes::post_simulator_root))
         .route("/debug/cancel-actions", post(routes::debug_cancel_actions))
+        .route("/debug/jump/prepare", post(debug_jump::prepare))
+        .route("/debug/jump/finish", post(debug_jump::finish))
         .route("/crew/observe", post(crew::observe))
         .route("/crew/ack", post(crew::acknowledge))
         .route("/crew/callout", post(crew::callout_log))
@@ -483,6 +489,7 @@ fn test_state() -> EngineState {
         traffic_profiles: Default::default(),
         generated: Default::default(),
         session_generation: 0,
+        debug_jump: None,
         pending_copilot_reply: None,
         phrase_history: radio::PhraseHistory::load(&config_dir),
         crew: crew::CrewSession::default(),

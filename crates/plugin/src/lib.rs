@@ -62,6 +62,8 @@ struct Shared {
     holding_marker: taxi::GroundGuidance,
     follow_me: follow_me::FollowMe,
     debug_cancel_pending: bool,
+    debug_air_pending: Option<(&'static str, std::time::Instant)>,
+    debug_air_target: Option<(openatc_core::debug_jump::Checkpoint, u64)>,
     arrival_sampler: arrival::TerrainSampler,
     weather_sampler: weather::Sampler,
 }
@@ -414,6 +416,7 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let debug_cancel_pending = locked.debug_cancel_pending;
+    let debug_air_pending = locked.debug_air_pending;
     let receives_atis = locked
         .interface
         .as_ref()
@@ -503,6 +506,10 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
             callouts.update(&mut xpapi.data, &aircraft, interface, t);
         }
     }
+    let reset_changed = locked
+        .interface
+        .as_ref()
+        .is_some_and(|i| i.flight_reset_generation != locked.last_reset_generation);
     let Some(interface) = locked.interface.as_mut() else {
         return;
     };
@@ -538,11 +545,131 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
         interface.engine.telemetry(telemetry.clone());
     }
     let state = interface.engine.state();
+    if (debug_air_pending.is_some() || debug_cancel_pending)
+        && (reset_changed || interface.reset_pending)
+    {
+        interface.debug_jump_busy = false;
+        locked.debug_air_pending = None;
+        locked.debug_air_target = None;
+        locked.debug_cancel_pending = false;
+        return;
+    }
+    if let Some((path, started)) = debug_air_pending {
+        if path == "/debug/jump/observe" {
+            let arrived = locked.debug_air_target.as_ref().is_some_and(|(target, _)| {
+                telemetry
+                    .as_ref()
+                    .is_some_and(|t| debug_jump::arrived(target, t))
+            });
+            if arrived || started.elapsed().as_secs() > 150 {
+                // Drop the shared borrow before accessing the interface again.
+                let token = locked
+                    .debug_air_target
+                    .take()
+                    .map(|(_, token)| token)
+                    .unwrap_or(0);
+                let interface = locked.interface.as_mut().unwrap();
+                interface.engine.post(
+                    "/debug/jump/finish",
+                    serde_json::json!({"token":token,"moved":arrived,"telemetry":telemetry}),
+                );
+                interface.notice = if arrived {
+                    "Checkpoint reached; paused. Review speed, thrust, gear/flaps, AP and active FMS leg. Select the appropriate controller and check in before resuming.".into()
+                } else {
+                    "Native initialization did not reach the checkpoint. ATC state was not moved; review aircraft position before resuming.".into()
+                };
+                interface.cancel_jump_speech();
+                locked.debug_air_pending = Some(("/debug/jump/finish", std::time::Instant::now()));
+            }
+        } else if let Some(reply) = interface.engine.take_reply(path) {
+            if !reply.success {
+                interface.debug_jump_busy = false;
+                interface.notice = format!(
+                    "Checkpoint failed: {}. Review the aircraft and ATC state before resuming.",
+                    reply.error
+                );
+                locked.debug_air_pending = None;
+            } else if path == "/debug/jump/prepare" {
+                let target = serde_json::from_value::<openatc_core::debug_jump::Checkpoint>(
+                    reply.data["target"].clone(),
+                );
+                match target {
+                    Ok(target) => {
+                        let speed = f64::from(interface.debug_jump_speed);
+                        let token = reply.data["token"].as_u64().unwrap_or(0);
+                        // Scenery initialization may call plugin/window callbacks.
+                        // Do not hold the UI mutex across the SDK load.
+                        drop(locked);
+                        let result = debug_jump::airborne(&target, speed);
+                        let mut locked = shared
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let Some(interface) = locked.interface.as_mut() else {
+                            return;
+                        };
+                        match result {
+                            Ok(()) => {
+                                interface.cancel_jump_speech();
+                                interface.notice = "Loading checkpoint; waiting for paused native aircraft position…".into();
+                                locked.debug_air_target = Some((target, token));
+                                locked.debug_air_pending =
+                                    Some(("/debug/jump/observe", std::time::Instant::now()));
+                                locked.crew = crew::Runtime::default();
+                                locked.callouts.reset();
+                                locked.follow_me = follow_me::FollowMe::new();
+                            }
+                            Err(error) => {
+                                interface.engine.post(
+                                    "/debug/jump/finish",
+                                    serde_json::json!({"token":token,"moved":false}),
+                                );
+                                interface.notice = error;
+                                locked.debug_air_pending =
+                                    Some(("/debug/jump/finish", std::time::Instant::now()));
+                            }
+                        }
+                        return;
+                    }
+                    Err(error) => {
+                        interface.engine.post(
+                            "/debug/jump/finish",
+                            serde_json::json!({"token":reply.data["token"],"moved":false}),
+                        );
+                        interface.notice = error.to_string();
+                        locked.debug_air_pending =
+                            Some(("/debug/jump/finish", std::time::Instant::now()));
+                    }
+                }
+            } else {
+                interface.debug_jump_busy = false;
+                locked.debug_air_pending = None;
+            }
+        } else if started.elapsed().as_secs() > 35 {
+            interface.debug_jump_busy = false;
+            interface.notice = "Checkpoint response timed out. Keep the aircraft paused and review its position and ATC state.".into();
+            locked.debug_air_pending = None;
+        }
+        return;
+    }
     if let Some(kind) = interface
         .requested_debug_jump
         .take()
         .filter(|_| interface.settings.dev_mode)
     {
+        if !["hold", "runway"].contains(&kind.as_str()) {
+            if !interface.debug_jump_speed.is_finite() || interface.debug_jump_speed < 0.0 {
+                interface.notice = "Checkpoint speed must be zero or a positive TAS.".into();
+                return;
+            }
+            interface.debug_jump_busy = true;
+            interface.cancel_jump_speech();
+            interface
+                .engine
+                .post("/debug/jump/prepare", serde_json::json!({"kind":kind}));
+            interface.notice = "Preparing route checkpoint…".into();
+            locked.debug_air_pending = Some(("/debug/jump/prepare", std::time::Instant::now()));
+            return;
+        }
         let result = debug_jump::reposition(&kind, &state, &interface.airport);
         let pending = result.is_ok();
         if pending {
@@ -554,9 +681,12 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
             |e| e,
             |()| "Debug jump complete; parking brake set. ATC permissions remain unchanged.".into(),
         );
-        locked.crew = crew::Runtime::default();
-        locked.callouts.reset();
-        locked.follow_me = follow_me::FollowMe::new();
+        if pending {
+            interface.cancel_jump_speech();
+            locked.crew = crew::Runtime::default();
+            locked.callouts.reset();
+            locked.follow_me = follow_me::FollowMe::new();
+        }
         locked.debug_cancel_pending = pending;
         return;
     }
@@ -566,6 +696,7 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
                 interface.notice = reply.error;
             }
             locked.debug_cancel_pending = false;
+            locked.debug_air_pending = None;
         }
         return;
     }
@@ -643,6 +774,8 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     if generation != locked.last_reset_generation {
         locked.last_reset_generation = generation;
         locked.debug_cancel_pending = false;
+        locked.debug_air_pending = None;
+        locked.debug_air_target = None;
         locked.crew = crew::Runtime::default();
         locked.last_frequency_sequence = 0;
         locked.last_state_sequence = 0;
@@ -726,6 +859,8 @@ impl Plugin for OpenAtc {
             holding_marker: taxi::GroundGuidance::new_holding_marker(),
             follow_me: follow_me::FollowMe::new(),
             debug_cancel_pending: false,
+            debug_air_pending: None,
+            debug_air_target: None,
             arrival_sampler: arrival::TerrainSampler::new(),
             weather_sampler: weather::Sampler::default(),
         }));

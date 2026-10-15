@@ -50,6 +50,19 @@ fn reply(e: &mut Engine) -> Result {
         result["result"]["accepted"] == true,
         &format!("Readback refused: {}", result["result"]),
     )?;
+    if before["phase"] != 1
+        && (before["taxiClearance"]["pendingReadback"] == true
+            || before["clearance"]["acknowledged"] == false)
+    {
+        require(
+            result["result"]["message"] == "",
+            "Routine readback generated another controller acknowledgement",
+        )?;
+        require(
+            recorded.len() == count(&prepared),
+            "Routine readback added a controller transmission",
+        )?;
+    }
     e.telemetry["radioBusy"] = json!(false);
     Ok(())
 }

@@ -119,12 +119,22 @@ impl EngineClient {
                 )
             };
             if let Some(observation) = observation {
-                let _ = openatc_http::post_json_cancelled(endpoint, "/crew/observe", &observation,
-                    Duration::from_secs(2), cancelled);
+                let _ = openatc_http::post_json_cancelled(
+                    endpoint,
+                    "/crew/observe",
+                    &observation,
+                    Duration::from_secs(2),
+                    cancelled,
+                );
             }
             if let Some(ack) = ack {
-                let _ = openatc_http::post_json_cancelled(endpoint, "/crew/ack", &ack,
-                    Duration::from_secs(2), cancelled);
+                let _ = openatc_http::post_json_cancelled(
+                    endpoint,
+                    "/crew/ack",
+                    &ack,
+                    Duration::from_secs(2),
+                    cancelled,
+                );
             }
             let sent_telemetry = telemetry.is_some();
             let telemetry_result = if let Some(telemetry) = telemetry {
@@ -393,12 +403,17 @@ impl EngineClient {
         }
         if path == "/crew/observe" {
             // Observations must stay fresh while a conversational command awaits inference.
-            if body.get("profile").is_some_and(|profile| !profile.is_null()) {
+            if body
+                .get("profile")
+                .is_some_and(|profile| !profile.is_null())
+            {
                 guard.latest_crew_observation = Some(body);
             } else if let Some(previous) = guard.latest_crew_observation.as_mut() {
                 let profile = previous.get("profile").cloned();
                 *previous = body;
-                if let Some(profile) = profile { previous["profile"] = profile; }
+                if let Some(profile) = profile {
+                    previous["profile"] = profile;
+                }
             } else {
                 guard.latest_crew_observation = Some(body);
             }
@@ -635,11 +650,13 @@ mod tests {
                     seen_tx.send(t.altitude_feet).unwrap();
                 }
                 if path == "/crew/ack" {
-                    let ack: Json = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+                    let ack: Json =
+                        serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
                     ack_tx.send(ack).unwrap();
                 }
                 if path == "/crew/observe" {
-                    let observation: Json = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+                    let observation: Json =
+                        serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
                     crew_tx.send(observation).unwrap();
                 }
                 let body = if path == "/state" {
@@ -658,14 +675,26 @@ mod tests {
         let client = EngineClient::new(&origin);
         client.post("/request", Json::Null);
         held_rx.recv_timeout(Duration::from_secs(3)).unwrap();
-        client.post("/crew/observe", serde_json::json!({"aircraft":"test","profile":{"controls":{}},"values":{"chocks":1}}));
+        client.post(
+            "/crew/observe",
+            serde_json::json!({"aircraft":"test","profile":{"controls":{}},"values":{"chocks":1}}),
+        );
         let observed = crew_rx.recv_timeout(Duration::from_secs(3)).unwrap();
         assert_eq!(observed["values"]["chocks"], 1);
         assert!(observed["profile"].is_object());
-        client.post("/crew/observe", serde_json::json!({"aircraft":"test","profile":null,"values":{"chocks":0}}));
-        assert_eq!(crew_rx.recv_timeout(Duration::from_secs(3)).unwrap()["values"]["chocks"], 0);
+        client.post(
+            "/crew/observe",
+            serde_json::json!({"aircraft":"test","profile":null,"values":{"chocks":0}}),
+        );
+        assert_eq!(
+            crew_rx.recv_timeout(Duration::from_secs(3)).unwrap()["values"]["chocks"],
+            0
+        );
         client.post("/crew/ack", serde_json::json!({"sequence":42,"ok":true}));
-        assert_eq!(ack_rx.recv_timeout(Duration::from_secs(3)).unwrap()["sequence"], 42);
+        assert_eq!(
+            ack_rx.recv_timeout(Duration::from_secs(3)).unwrap()["sequence"],
+            42
+        );
         let before = client.state();
         let mut reset = State::default();
         reset.plan.departure = "NEW".into();

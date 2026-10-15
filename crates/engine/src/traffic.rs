@@ -690,10 +690,12 @@ pub fn unable(
 }
 
 fn transmit(state: &mut EngineState, callsign: &str, voice: &str, text: &str) {
+    let spoken_text = state.generated.spoken_text(text);
+    let spoken_callsign = state.generated.spoken_text(callsign);
     add_transmission(
         &mut state.session,
-        callsign,
-        text,
+        &spoken_callsign,
+        &spoken_text,
         &SpeechTag {
             position: "Traffic".into(),
             voice: voice.into(),
