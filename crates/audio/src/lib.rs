@@ -148,6 +148,8 @@ pub struct SpeakRequest<'a> {
     pub engine_endpoint: &'a str,
     /// Role index (0 ATC, 1 copilot, 2 pilot, 3 cabin, 4 ground).
     pub role: i32,
+    /// Another aircraft heard over the radio, rather than a cockpit voice.
+    pub received_radio: bool,
     /// Playback volume.
     pub volume: f32,
     /// Voice id.
@@ -566,6 +568,7 @@ impl Speech {
         let mut body = serde_json::json!({
             "text": request.text,
             "speaker": speaker,
+            "receivedRadio": request.received_radio,
             "delivery": request.delivery,
             "urgent": request.urgent,
         });

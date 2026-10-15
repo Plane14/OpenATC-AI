@@ -620,6 +620,8 @@ When reporting a flight issue, include the conversation export, aircraft/profile
 
 COM1 and COM2 use independent speech playback so a broadcast on one radio does not block the other. Each ATC log shows its own radio traffic; crew interphone messages remain in the primary conversation. ATIS repeats audibly while each station and radio retain one current bulletin in the log. Weather or runway updates replace that bulletin in place rather than adding another row.
 
+The captain and copilot are heard directly in the cockpit, so their speech and takeoff callouts bypass radio hiss, crackle, static and bandpass filtering. Received controllers, ATIS and other aircraft retain the configured radio effects. Cabin and ground interphone effects follow their separate settings.
+
 Click an underlined squawk in the clearance summary or conversation to select that code. ToLiss AUTO/ON switches to ON while the transponder/TCAS mode selector stays unchanged. Bindings are editable in `aircraft/transponder.toml`. Nice requires an active transponder before pushback or taxi; selecting a code alone does not complete that procedure.
 
 Default aircraft use the standard X-Plane squawk dataref. Aircraft-specific digit bindings apply only when the complete custom control group is available; setting a code preserves the default aircraft’s transponder mode. Custom controls and the standard fallback are editable in `aircraft/transponder.toml`.

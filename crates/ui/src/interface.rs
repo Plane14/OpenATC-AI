@@ -1181,6 +1181,7 @@ impl Interface {
             text: &entry.text,
             engine_endpoint: &endpoint,
             role,
+            received_radio: entry.background,
             volume,
             voice: &entry.voice,
             speed: entry.speed,

@@ -892,6 +892,22 @@ fn tts_voice(body: &Value, settings: &Settings, speaker: &str) -> (String, Strin
     (voice, delivery, speed)
 }
 
+fn speech_effects(settings: &Settings, speaker: &str, received_radio: bool) -> Value {
+    let enabled = settings.radio_effects && match speaker {
+        "copilot" => false,
+        "pilot" => received_radio,
+        "cabin" => settings.radio_fx_cabin,
+        "ground" => settings.radio_fx_ground,
+        _ => true,
+    };
+    json!({
+        "hiss": if enabled { settings.radio_hiss } else { 0.0 },
+        "crackle": if enabled { settings.radio_crackle } else { 0.0 },
+        "static": if enabled { settings.radio_static } else { 0.0 },
+        "bandpass": enabled && settings.radio_bandpass,
+    })
+}
+
 pub async fn post_speak(AxumState(state): AxumState<Shared>, Json(body): Json<Value>) -> Response {
     let Some(text) = body.get("text").and_then(Value::as_str) else {
         return bad_request(openatc_core::dialogue::say(
@@ -975,21 +991,8 @@ pub async fn post_speak(AxumState(state): AxumState<Shared>, Json(body): Json<Va
     } else {
         (settings.tts_speed * speed).clamp(0.5, 2.0)
     };
-    let effects_on = settings.radio_effects
-        && (speaker != "cabin" || settings.radio_fx_cabin)
-        && (speaker != "ground" || settings.radio_fx_ground);
-    let hiss = if effects_on { settings.radio_hiss } else { 0.0 };
-    let crackle = if effects_on {
-        settings.radio_crackle
-    } else {
-        0.0
-    };
-    let static_ = if effects_on {
-        settings.radio_static
-    } else {
-        0.0
-    };
-    let bandpass = effects_on && settings.radio_bandpass;
+    let effects = speech_effects(&settings, &speaker,
+        body.get("receivedRadio").and_then(Value::as_bool).unwrap_or(false));
     let (callsign, airports) = {
         let current = state.read().await;
         let mut airports = Vec::new();
@@ -1021,7 +1024,7 @@ pub async fn post_speak(AxumState(state): AxumState<Shared>, Json(body): Json<Va
         "speed": speed,
         "sentence_pause": sentence_pause,
         "clause_pause": clause_pause,
-        "effects": {"hiss": hiss, "crackle": crackle, "static": static_, "bandpass": bandpass},
+        "effects": effects,
     });
     let mut call = client.post(format!("{}/v1/audio/speech", settings.tts_url));
     if let Ok(key) = std::env::var("OPENATC_TTS_KEY") {
@@ -2873,6 +2876,33 @@ fn clearance_rejection(
 #[cfg(test)]
 mod chatter_tests {
     use super::*;
+    #[test]
+    fn cockpit_voices_are_clean_while_received_radio_keeps_effects() {
+        let mut settings = Settings::default();
+        settings.radio_effects = true;
+        settings.radio_bandpass = true;
+        settings.radio_hiss = 0.4;
+        settings.radio_crackle = 0.3;
+        settings.radio_static = 0.2;
+        let clean = json!({"hiss":0.0,"crackle":0.0,"static":0.0,"bandpass":false});
+        for (speaker, received_radio) in [("pilot",false),("copilot",false),("copilot",true)] {
+            assert_eq!(speech_effects(&settings,speaker,received_radio),clean);
+        }
+        for (speaker, received_radio) in [("atc",false),("pilot",true)] {
+            let effects = speech_effects(&settings,speaker,received_radio);
+            assert_eq!(effects["bandpass"],true);
+            assert!(effects["hiss"].as_f64().unwrap() > 0.0);
+            assert!(effects["crackle"].as_f64().unwrap() > 0.0);
+            assert!(effects["static"].as_f64().unwrap() > 0.0);
+        }
+        settings.radio_fx_cabin = false;
+        settings.radio_fx_ground = false;
+        assert_eq!(speech_effects(&settings,"cabin",false),clean);
+        assert_eq!(speech_effects(&settings,"ground",false),clean);
+        settings.radio_effects = false;
+        assert_eq!(speech_effects(&settings,"atc",true),clean);
+        assert_eq!(speech_effects(&settings,"pilot",true),clean);
+    }
     #[tokio::test]
     async fn planned_airports_get_weather_before_a_radio_handoff() {
         let mut state = crate::test_state();
