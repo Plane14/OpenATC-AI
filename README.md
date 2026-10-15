@@ -303,6 +303,8 @@ This is not a complete FMS procedure interpreter: curved/unnamed/vector legs, ai
 
 ### 6. Approach, touchdown and taxi to parking
 
+Selected approach entry/final fixes are expanded from installed CIFP alongside the SID and STAR, with missed-approach legs kept out of the landing route. Equal published glide-slope altitude fields retain their exact intercept restriction. Descent planning continues when telemetry enters the Approach phase until an approach clearance is actually issued; phase alone is not clearance. Once cleared and established on final within the approach-path tolerance, level monitoring permits the final descent instead of reinstating the earlier interception altitude. Off-final deviations remain monitored.
+
 Approach permission and landing permission are separate. Follow the selected arrival/approach and controller instructions. When transferred to Tower, check in; a continue-approach instruction is not a landing clearance. Tower's landing decision also depends on available runway traffic information.
 
 Touchdown is detected from simulator telemetry. The arrival controller requests that you vacate the runway. Ground handoff follows observed runway exit, not the first on-ground sample. A combined Tower/Ground station can retain you on the same frequency.

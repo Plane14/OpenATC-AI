@@ -116,25 +116,27 @@ fn procedure_order(
     transition: &str,
     text: &str,
 ) -> Option<std::collections::BTreeMap<(String, String, u16), usize>> {
-    if !["SID", "STAR"].contains(&kind) {
+    if !["SID", "STAR", "APPCH"].contains(&kind) {
         return None;
     }
     let catalogue = crate::traffic::procedures::Catalogue::parse(text).ok()?;
     let parts = if kind == "SID" {
         catalogue.departure(name, runway, transition)
-    } else {
+    } else if kind == "STAR" {
         catalogue.arrival(name, runway, transition)
+    } else {
+        catalogue.approach(name, transition).map(|approach| vec![approach.transition, approach.landing])
     };
     let Ok(parts) = parts else {
         return Some(Default::default());
     };
     let mut order = std::collections::BTreeMap::new();
     let mut index = 0;
-    for part in parts {
+    for part in parts.into_iter().filter(|part| !part.is_empty()) {
         let (key, _) = catalogue
             .0
             .iter()
-            .find(|(_, legs)| std::ptr::eq(legs.as_slice(), part))?;
+            .find(|(_, legs)| legs.as_ptr() == part.as_ptr())?;
         for leg in part {
             order.insert(
                 (key.route_type.clone(), key.transition.clone(), leg.sequence),
@@ -207,6 +209,7 @@ pub fn load_constraints(plan: &mut FlightPlan, kind: &str, text: &str) {
                 Some(first.unwrap().min(second.unwrap())),
                 Some(first.unwrap().max(second.unwrap())),
             ),
+            "H" | "J" if first.is_some() && first == second => (first, first),
             " " | "" => (first, first),
             _ => (None, None),
         };
@@ -280,7 +283,7 @@ pub fn enrich(plan: &mut FlightPlan, root: &str) {
             format!("{root}/Resources/default data/CIFP/{id}.dat")
         };
         if let Ok(text) = std::fs::read_to_string(path) {
-            if ["SID", "STAR"].contains(&kind) {
+            if ["SID", "STAR", "APPCH"].contains(&kind) {
                 let fix_path = [
                     format!("{root}/Custom Data/earth_fix.dat"),
                     format!("{root}/Resources/default data/earth_fix.dat"),
@@ -303,8 +306,10 @@ pub fn enrich(plan: &mut FlightPlan, root: &str) {
 fn expand_terminal(plan: &mut FlightPlan, kind: &str, procedure: &str, fixes: &str) {
     let (name, runway, transition) = if kind == "SID" {
         (&plan.sid, &plan.runway, &plan.sid_transition)
-    } else {
+    } else if kind == "STAR" {
         (&plan.star, &plan.arrival_runway, &plan.star_transition)
+    } else {
+        (&plan.approach, &plan.arrival_runway, &String::new())
     };
     if name.is_empty() || plan.fixes.is_empty() {
         return;
@@ -373,6 +378,8 @@ fn expand_terminal(plan: &mut FlightPlan, kind: &str, procedure: &str, fixes: &s
             .iter()
             .position(|fix| fix.identifier == plan.departure)
             .map_or(1, |index| index + 1)
+    } else if kind == "APPCH" {
+        plan.fixes.iter().position(|fix| fix.identifier == plan.destination).unwrap_or(plan.fixes.len())
     } else {
         let Some(anchor) = records.first().and_then(|record| {
             plan.fixes
@@ -665,6 +672,20 @@ mod tests {
             }
         ));
     }
+    #[test]
+    fn approach_equal_glideslope_fields_preserve_intercept_restrictions() {
+        let mut plan = FlightPlan { approach: "I35RY".into(), arrival_runway: "35R".into(),
+            fixes: vec![RouteFix {identifier:"CI3RY".into(),..Default::default()}, RouteFix {identifier:"FI3RY".into(),..Default::default()}], ..Default::default() };
+        let text = "APPCH:010,I,I35RY, ,CI3RY,LI,P,C,E  I, ,   ,IF, ,MLP,LI,P,I,      ,1660,0145,    ,    ,J,04000,04000,     , ,   ,    ;\nAPPCH:020,I,I35RY, ,FI3RY,LI,P,C,E  F, ,   ,CF, ,MLP,LI,P,I,      ,1660,0125,3460,0020,H,04000,04000,     ,-,170,    ;";
+        let text = format!("{text}\nAPPCH:030,I,I35RY, ,RW35R,LI,P,G,G  M, ,   ,CF, ,MLP,LI,P,I,      ,1660,0023,3460,0102, ,00748,     ,     , ,   ,-300,   , , , , , ,0,D,S;\nAPPCH:040,I,I35RY, ,RW35R,LI,P,G,G M , ,   ,FA, ,SRN,LI,D, ,      ,2585,0121,3460,    ,+,01450,     ,     , ,   ,    ,   , , , , , ,0,D,S;");
+        load_constraints(&mut plan, "APPCH", &text);
+        for fix in &plan.fixes { assert_eq!(fix.minimum_altitude_feet,Some(4000)); assert_eq!(fix.maximum_altitude_feet,Some(4000)); }
+        let mut uncertain = plan.clone();
+        for fix in &mut uncertain.fixes {fix.minimum_altitude_feet=None;fix.maximum_altitude_feet=None;}
+        load_constraints(&mut uncertain,"APPCH", &text.replace("04000,04000","04000,03000"));
+        assert!(uncertain.fixes.iter().all(|fix|fix.maximum_altitude_feet.is_none()));
+    }
+
     #[test]
     fn planned_altitude_is_not_a_restriction_and_other_runways_are_excluded() {
         let mut p = FlightPlan {

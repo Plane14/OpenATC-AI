@@ -23,7 +23,7 @@ pub struct FlightFlow {
     pub(crate) approach_cleared: bool,
     pub(crate) landing_cleared: bool,
     pub(crate) takeoff_cleared: bool,
-    missed_approach: bool,
+    pub(crate) missed_approach: bool,
     pub(crate) vacate_reported: bool,
     warning: openatc_core::compliance::WarningCount,
     clearance_sequence: u32,
@@ -259,15 +259,15 @@ pub fn tick(state: &mut EngineState) {
     if crate::instructions::awaiting_reply(state, &current) {
         return;
     }
+    if arrival_tick(state, &current) {
+        return;
+    }
     let before = state.session.next_sequence;
     compliance(state, &current);
     if state.session.next_sequence != before {
         return;
     }
     if state.session.clearance_cancelled {
-        return;
-    }
-    if arrival_tick(state, &current) {
         return;
     }
     if state.session.phase == PhaseCode::Landed
@@ -749,6 +749,21 @@ fn compliance(state: &mut EngineState, station: &Station) {
     let Some(clearance) = state.session.clearance.as_ref().filter(|c| c.acknowledged) else {
         return;
     };
+    // Once cleared and established on final, the approach path replaces the entry level.
+    if state.flow.approach_cleared && !state.flow.missed_approach
+        && let Some(distance) = final_position(state).filter(|distance| *distance <= 15.0)
+        && let Some(airport) = state.arrival_airport.as_ref()
+    {
+        let glide = state.arrival_profile.as_ref()
+            .and_then(|profile| openatc_core::arrival::target(profile, &state.session.plan.arrival_runway, &state.session.plan.approach))
+            .and_then(|target| target.glide_degrees).unwrap_or(3.0);
+        let path = airport.elevation_feet + openatc_core::arrival::gradient(glide) * distance;
+        if (state.session.telemetry.altitude_feet - path).abs() <= 500.0 {
+            state.flow.warning.resolved();
+            state.flow.last_correction = None;
+            return;
+        }
+    }
     let sequence = clearance.sequence;
     let target = f64::from(clearance.altitude_feet);
     let t = &state.session.telemetry;
@@ -1083,7 +1098,7 @@ fn protect_final(state: &mut EngineState, current: &Station) -> bool {
 }
 
 fn arrival_tick(state: &mut EngineState, current: &Station) -> bool {
-    if state.flow.missed_approach {
+    if state.flow.missed_approach || state.session.clearance_cancelled {
         return false;
     }
     if matches!(
@@ -1466,6 +1481,24 @@ mod ownership_tests {
             ..Default::default()
         };
         (state, approach, tower)
+    }
+
+    #[test]
+    fn cleared_final_descent_does_not_reinstate_old_level() {
+        let (mut state, approach, _) = arrival_state();
+        state.settings.enforce_clearance_constraints=true;
+        state.session.telemetry.latitude=-0.1;
+        state.session.clearance=Some(openatc_core::state::Clearance {altitude_feet:5000,acknowledged:true,sequence:1,..Default::default()});
+        assert!(arrival_tick(&mut state,&approach));
+        state.flow.clearance_sequence=1;
+        state.flow.last_correction=Some(std::time::Instant::now()-std::time::Duration::from_secs(31));
+        let before=state.session.transcript.len();
+        compliance(&mut state,&approach);
+        assert_eq!(state.session.transcript.len(),before);
+        state.session.telemetry.longitude=0.02;
+        state.flow.last_correction=Some(std::time::Instant::now()-std::time::Duration::from_secs(31));
+        compliance(&mut state,&approach);
+        assert_eq!(state.session.transcript.len(),before+1,"An off-final aircraft still needs level compliance");
     }
 
     #[test]
