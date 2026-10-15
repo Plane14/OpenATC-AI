@@ -302,16 +302,32 @@ fn run(e: &mut Engine, steps: &mut Vec<Value>, variant: &str) -> Result {
     handoff(e, 123100, 123200, json!({"longitude":1.98}))?;
     record(e, steps, "Center-to-Center boundary handoff")?;
     ticks(e, 123200, json!({"longitude":3.0}), 1)?;
-    ticks(e, 123200, json!({"longitude":3.25}), 2)?;
+    ticks(
+        e,
+        123200,
+        json!({"longitude":3.25,"groundSpeedKnots":400,"indicatedSpeedKnots":290}),
+        2,
+    )?;
     let descent = e.state()?;
     require(
         descent["clearance"]["altitudeFeet"] == 2500
             && descent["clearance"]["acknowledged"] == false
-            && latest(&descent).contains("RESTR"),
+            && latest(&descent).contains("RESTR")
+            && latest(&descent).contains("180")
+            && descent["clearance"]["readbackSpeed"]["knots"] == 180.0,
         "No proactive descent clearance before the imported STAR ceiling",
     )?;
     reply(e)?;
-    ticks(e, 123200, json!({"verticalSpeedFpm":-700}), 2)?;
+    require(
+        latest(&e.state()?).contains("180"),
+        "Copilot omitted the speed from its compound descent readback",
+    )?;
+    ticks(
+        e,
+        123200,
+        json!({"verticalSpeedFpm":-700,"groundSpeedKnots":200,"indicatedSpeedKnots":180}),
+        2,
+    )?;
     record(
         e,
         steps,
@@ -343,7 +359,48 @@ fn run(e: &mut Engine, steps: &mut Vec<Value>, variant: &str) -> Result {
         latest(&e.state()?).contains("cleared to land"),
         "Tower did not issue landing clearance after check-in",
     )?;
-    reply(e)?;
+    // Tower may now answer check-in with landing permission, which checkin()
+    // reads back immediately. A later standalone grant still needs one reply.
+    let landing = e.state()?;
+    if landing["transcript"].as_array().unwrap().last().unwrap()["pilotReply"]
+        .as_str()
+        .is_some_and(|reply| !reply.is_empty())
+    {
+        reply(e)?;
+    }
+    let landing = e.state()?;
+    let transcript = landing["transcript"].as_array().unwrap();
+    let grants = transcript
+        .iter()
+        .filter(|entry| {
+            entry["speaker"] == "ATC"
+                && entry["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("cleared to land"))
+        })
+        .count();
+    let readbacks = transcript
+        .iter()
+        .filter(|entry| {
+            entry["speaker"] == "COPILOT"
+                && entry["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("cleared to land"))
+        })
+        .count();
+    require(
+        grants == 1 && readbacks == 1,
+        "Landing clearance and readback must each occur exactly once",
+    )?;
+    require(
+        !transcript.iter().any(|entry| {
+            entry["speaker"] == "COPILOT"
+                && entry["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("Arrival Tower") && text.contains("climb"))
+        }),
+        "Final Tower check-in claimed a climb back to the intercept altitude",
+    )?;
     record(
         e,
         steps,

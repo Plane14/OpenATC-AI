@@ -106,29 +106,6 @@ impl WindowState {
         actions: openatc_ui::interface::WindowActions,
     ) {
         unsafe {
-            if let Some([left, top, right, bottom]) = actions.restore_bounds
-                && [left, top, right, bottom]
-                    .iter()
-                    .all(|value| (-100000..=100000).contains(value))
-                && right - left >= 442
-                && top - bottom >= 153
-                && right - left <= 4800
-                && top - bottom <= 3200
-            {
-                let (mut screen_left, mut screen_top, mut screen_right, mut screen_bottom) =
-                    (0, 0, 0, 0);
-                xplane_sys::XPLMGetScreenBoundsGlobal(
-                    &mut screen_left,
-                    &mut screen_top,
-                    &mut screen_right,
-                    &mut screen_bottom,
-                );
-                let width = (right - left).min((screen_right - screen_left).max(442));
-                let height = (top - bottom).min((screen_top - screen_bottom).max(153));
-                let left = left.clamp(screen_left, (screen_right - width).max(screen_left));
-                let top = top.clamp((screen_bottom + height).min(screen_top), screen_top);
-                xplane_sys::XPLMSetWindowGeometry(window, left, top, left + width, top - height);
-            }
             if actions.close {
                 xplane_sys::XPLMTakeKeyboardFocus(std::ptr::null_mut());
                 xplane_sys::XPLMSetWindowIsVisible(window, 0);
@@ -167,6 +144,42 @@ impl WindowState {
                     4800,
                     3200,
                 );
+            }
+            // Apply the current scale's limits before restoring saved bounds.
+            // Otherwise the SDK can clamp a smaller saved window to startup limits.
+            if let Some([left, top, right, bottom]) = actions.restore_bounds
+                && !popped_out
+                && [left, top, right, bottom]
+                    .iter()
+                    .all(|value| (-100000..=100000).contains(value))
+                && right - left >= 442
+                && top - bottom >= 153
+                && right - left <= 4800
+                && top - bottom <= 3200
+            {
+                let (mut screen_left, mut screen_top, mut screen_right, mut screen_bottom) =
+                    (0, 0, 0, 0);
+                xplane_sys::XPLMGetScreenBoundsGlobal(
+                    &mut screen_left,
+                    &mut screen_top,
+                    &mut screen_right,
+                    &mut screen_bottom,
+                );
+                let width = (right - left).min((screen_right - screen_left).max(442));
+                let height = (top - bottom).min((screen_top - screen_bottom).max(153));
+                let left = left.clamp(screen_left, (screen_right - width).max(screen_left));
+                let top = top.clamp((screen_bottom + height).min(screen_top), screen_top);
+                xplane_sys::XPLMSetWindowGeometry(window, left, top, left + width, top - height);
+                xplane_sys::XPLMGetWindowGeometry(
+                    window,
+                    &raw mut os_bounds[0],
+                    &raw mut os_bounds[1],
+                    &raw mut os_bounds[2],
+                    &raw mut os_bounds[3],
+                );
+            }
+            if actions.restore_bounds.is_some() && !popped_out {
+                [left, top, right, bottom] = os_bounds;
             }
             if actions.toggle_pop_out {
                 if popped_out {

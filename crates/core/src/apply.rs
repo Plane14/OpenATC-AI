@@ -447,6 +447,14 @@ fn apply_readback(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome
             crate::dialogue::say("no_pending_clearance_to_acknowledge", &[]),
         );
     }
+    if !crate::readback::matches_clearance_speed(&request.text, clearance) {
+        return reply(
+            state,
+            ctx,
+            false,
+            crate::dialogue::say("readback_error_speed_restriction", &[]),
+        );
+    }
     if request.clearance_sequence != clearance.sequence
         || request.altitude_feet != clearance.altitude_feet
         || request.waypoint != clearance.route
@@ -1375,6 +1383,63 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[test]
+    fn structured_compound_readback_cannot_omit_speed_even_with_lenient_settings() {
+        let tag = SpeechTag::default();
+        let region = Region::default();
+        for strict in [true, false] {
+            let mut state = State {
+                phase: PhaseCode::Arrival,
+                ..Default::default()
+            };
+            state.clearance = Some(Clearance {
+                altitude_feet: 6000,
+                route: "ROUTE".into(),
+                sequence: 7,
+                readback_scope: "altitude".into(),
+                readback_speed: Some(crate::state::SpeedReadback {
+                    sequence: 7,
+                    fix: "DEVOX".into(),
+                    knots: 250.0,
+                    exact: false,
+                }),
+                ..Default::default()
+            });
+            let realism = Realism {
+                strict_readbacks: strict,
+                ..Default::default()
+            };
+            let mut request = Request {
+                intent: "readback".into(),
+                clearance_sequence: 7,
+                altitude_feet: 6000,
+                waypoint: "ROUTE".into(),
+                text: "Descending to 6000 feet, TEST.".into(),
+                ..Default::default()
+            };
+            let apply = |state: &mut State, request: &Request| {
+                apply_readback(
+                    state,
+                    &RequestContext {
+                        squawk: "1234",
+                        request,
+                        runway_taxi_authorized: false,
+                        airport: None,
+                        atc_tag: &tag,
+                        pilot_tag: &tag,
+                        realism: &realism,
+                        units: UnitSystem::Imperial,
+                        region: &region,
+                    },
+                )
+            };
+            assert!(!apply(&mut state, &request).accepted);
+            assert!(!state.clearance.as_ref().unwrap().acknowledged);
+            request.text = "Descending to 6000 feet, 250 knots or less at DEVOX, TEST.".into();
+            assert!(apply(&mut state, &request).accepted);
+            assert!(state.clearance.as_ref().unwrap().acknowledged);
+        }
+    }
     #[test]
     fn routine_readbacks_finish_silently_but_errors_still_need_correction() {
         let tag = SpeechTag::default();

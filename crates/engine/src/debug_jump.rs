@@ -213,6 +213,7 @@ mod tests {
             runway: "04R".into(),
             squawk: "1234".into(),
             readback_scope: String::new(),
+            readback_speed: None,
             acknowledged: true,
             sequence: 1,
             frequency_khz: 118675,

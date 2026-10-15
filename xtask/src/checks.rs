@@ -285,6 +285,8 @@ impl Engine {
                 if !altitude.is_empty() {
                     fields[22] = "-";
                     fields[23] = altitude;
+                    fields[26] = "-";
+                    fields[27] = "180";
                 }
                 procedure.push_str(&format!("STAR:{}\n", fields.join(",")));
             }

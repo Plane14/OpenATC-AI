@@ -611,21 +611,21 @@ pub fn tick(state: &mut EngineState, station: &Station) {
     climb(state, station);
 }
 
-fn published_speed_reminder(state: &mut EngineState, station: &Station) -> bool {
+fn published_speed_notice(state: &EngineState) -> Option<(usize, f64, bool)> {
     if !matches!(
         state.session.phase,
         PhaseCode::Arrival | PhaseCode::Approach
     ) || state.flow.monitor.heading.is_some()
         || state.flow.monitor.speed.is_some()
     {
-        return false;
+        return None;
     }
     let t = &state.session.telemetry;
     let Some(ias) = t
         .indicated_speed_knots
         .filter(|v| v.is_finite() && *v > 0.0)
     else {
-        return false;
+        return None;
     };
     let next = state.flow.monitor.next_fix.max(1);
     let fixes = &state.session.plan.fixes;
@@ -639,7 +639,7 @@ fn published_speed_reminder(state: &mut EngineState, station: &Station) -> bool 
         },
         |leg| leg.cross_track_nm > 2.0,
     ) {
-        return false;
+        return None;
     }
     let mut point = [t.latitude, t.longitude];
     let mut distance = 0.0;
@@ -662,36 +662,45 @@ fn published_speed_reminder(state: &mut EngineState, station: &Station) -> bool 
         let lead = (t.ground_speed_knots.max(ias) * seconds / 3600.0)
             .clamp(policy.speed_notice_min_nm, policy.speed_notice_max_nm);
         if distance > lead || state.flow.monitor.speed_reminder == Some((index, limit)) {
-            return false;
+            return None;
         }
         let exact = fix.minimum_speed_knots == Some(limit);
-        let slots = [
-            ("callsign", state.session.plan.callsign.clone()),
-            ("fix", fix.identifier.clone()),
-            ("speed", format!("{limit:.0}")),
-        ];
-        let text = say(
-            if exact {
-                "published_speed_exact_reminder"
-            } else {
-                "published_speed_maximum_reminder"
-            },
-            &slots,
-        );
-        let pilot = say(
-            if exact {
-                "pilot_published_speed_exact"
-            } else {
-                "pilot_published_speed_maximum"
-            },
-            &slots,
-        );
-        state.flow.monitor.speed_reminder = Some((index, limit));
-        transmit(state, station, text, Some(pilot));
-        return true;
+        return Some((index, limit, exact));
     }
-    false
+    None
 }
+
+fn published_speed_reminder(state: &mut EngineState, station: &Station) -> bool {
+    let Some((index, limit, exact)) = published_speed_notice(state) else {
+        return false;
+    };
+    let fix = &state.session.plan.fixes[index];
+    let slots = [
+        ("callsign", state.session.plan.callsign.clone()),
+        ("fix", fix.identifier.clone()),
+        ("speed", format!("{limit:.0}")),
+    ];
+    let text = say(
+        if exact {
+            "published_speed_exact_reminder"
+        } else {
+            "published_speed_maximum_reminder"
+        },
+        &slots,
+    );
+    let pilot = say(
+        if exact {
+            "pilot_published_speed_exact"
+        } else {
+            "pilot_published_speed_maximum"
+        },
+        &slots,
+    );
+    state.flow.monitor.speed_reminder = Some((index, limit));
+    transmit(state, station, text, Some(pilot));
+    true
+}
+
 fn correct(state: &mut EngineState, station: &Station, text: String, pilot: Option<String>) {
     if !state.settings.enforce_clearance_constraints {
         state.flow.monitor.warning.resolved();
@@ -793,6 +802,39 @@ fn climb(state: &mut EngineState, station: &Station) {
     );
 }
 
+fn transmit_descent(state: &mut EngineState, station: &Station, mut text: String, target: i32) {
+    state.session.phase = PhaseCode::Arrival;
+    let notice = published_speed_notice(state);
+    let speed = notice.map(|(index, limit, exact)| {
+        let fix = state.session.plan.fixes[index].identifier.clone();
+        let slots = [("fix", fix.clone()), ("speed", format!("{limit:.0}"))];
+        text.push(' ');
+        text.push_str(&say(
+            if exact {
+                "published_speed_exact_continuation"
+            } else {
+                "published_speed_maximum_continuation"
+            },
+            &slots,
+        ));
+        state.flow.monitor.speed_reminder = Some((index, limit));
+        openatc_core::state::SpeedReadback {
+            sequence: state.session.next_sequence,
+            fix,
+            knots: limit,
+            exact,
+        }
+    });
+    let clearance = state.session.clearance.as_mut().unwrap();
+    clearance.altitude_feet = target;
+    clearance.sequence = state.session.next_sequence;
+    clearance.readback_scope = "altitude".into();
+    clearance.readback_speed = speed;
+    clearance.acknowledged = false;
+    let pilot = openatc_core::readback::descent_reply(clearance, &state.session.plan.callsign);
+    transmit(state, station, text, Some(pilot));
+}
+
 fn descend(state: &mut EngineState, station: &Station) -> bool {
     if !matches!(
         state.session.phase,
@@ -859,18 +901,7 @@ fn descend(state: &mut EngineState, station: &Station) -> bool {
     );
     text.push(' ');
     text.push_str(&crossing);
-    let c = state.session.clearance.as_mut().unwrap();
-    c.altitude_feet = target;
-    c.sequence = state.session.next_sequence;
-    c.readback_scope = "altitude".into();
-    c.acknowledged = false;
-    state.session.phase = PhaseCode::Arrival;
-    transmit(
-        state,
-        station,
-        text,
-        Some(say("pilot_continue_descent", &slots)),
-    );
+    transmit_descent(state, station, text, target);
     true
 }
 
@@ -985,18 +1016,7 @@ fn destination_descent(state: &mut EngineState, station: &Station) -> bool {
         text.push(' ');
         text.push_str(&say(phrase, &[("pressure", value)]));
     }
-    let clearance = state.session.clearance.as_mut().unwrap();
-    clearance.altitude_feet = target;
-    clearance.sequence = state.session.next_sequence;
-    clearance.readback_scope = "altitude".into();
-    clearance.acknowledged = false;
-    state.session.phase = PhaseCode::Arrival;
-    transmit(
-        state,
-        station,
-        text,
-        Some(say("pilot_continue_descent", &slots)),
-    );
+    transmit_descent(state, station, text, target);
     true
 }
 
@@ -1090,6 +1110,69 @@ mod tests {
                 .text
                 .contains("or less")
         );
+    }
+    #[test]
+    fn descent_combines_due_speed_with_one_complete_readback() {
+        for exact in [false, true] {
+            let (mut state, mut station) = speed_fixture();
+            station.name = "Test Center".into();
+            state.session.clearance.as_mut().unwrap().altitude_feet = 12000;
+            state.session.plan.fixes[1].maximum_altitude_feet = Some(6000);
+            state.session.plan.fixes[1].minimum_speed_knots = exact.then_some(250.0);
+            assert!(descend(&mut state, &station));
+            assert_eq!(state.session.transcript.len(), 1);
+            let entry = state.session.transcript.last().unwrap();
+            for value in ["6000", "250", "LIMIT"] {
+                assert!(entry.text.contains(value), "{}", entry.text);
+                assert!(entry.pilot_reply.contains(value), "{}", entry.pilot_reply);
+            }
+            let clearance = state.session.clearance.as_ref().unwrap();
+            assert_eq!(
+                clearance.readback_speed.as_ref().unwrap().sequence,
+                clearance.sequence
+            );
+            let reply = openatc_core::readback::auto_reply(&state.session).unwrap();
+            assert_eq!(reply.clearance_sequence, clearance.sequence);
+            assert!(openatc_core::readback::matches_clearance_speed(
+                &reply.text,
+                clearance
+            ));
+            assert!(!clearance.acknowledged);
+            assert!(!published_speed_reminder(&mut state, &station));
+            assert_eq!(state.session.transcript.len(), 1);
+        }
+    }
+    #[test]
+    fn descent_does_not_append_speed_when_vectoring_assigned_speed_or_missing_ias() {
+        for reason in 0..3 {
+            let (mut state, station) = speed_fixture();
+            state.session.clearance.as_mut().unwrap().altitude_feet = 12000;
+            state.session.plan.fixes[1].maximum_altitude_feet = Some(6000);
+            match reason {
+                0 => state.flow.monitor.heading = Some(270.0),
+                1 => state.flow.monitor.speed = Some(280.0),
+                _ => state.session.telemetry.indicated_speed_knots = None,
+            }
+            assert!(descend(&mut state, &station));
+            assert!(
+                state
+                    .session
+                    .clearance
+                    .as_ref()
+                    .unwrap()
+                    .readback_speed
+                    .is_none()
+            );
+            assert!(
+                !state
+                    .session
+                    .transcript
+                    .last()
+                    .unwrap()
+                    .pilot_reply
+                    .contains("250")
+            );
+        }
     }
     #[test]
     fn successive_descent_readbacks_keep_direction_altitude_and_sequence() {

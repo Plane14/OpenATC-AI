@@ -82,28 +82,188 @@ fn altitude(text: &str, expected: i32) -> bool {
     }
     false
 }
+fn speed_component(clearance: &crate::state::Clearance) -> Option<&crate::state::SpeedReadback> {
+    clearance.readback_speed.as_ref().filter(|speed| {
+        clearance.readback_scope == "altitude" && speed.sequence == clearance.sequence
+    })
+}
+
+fn spoken_speeds(words: &[String]) -> Vec<(f64, bool)> {
+    words
+        .iter()
+        .enumerate()
+        .filter(|(_, unit)| matches!(unit.as_str(), "knots" | "knot" | "kt" | "kts"))
+        .filter_map(|(end, _)| {
+            let mut start = end;
+            while start > 0 && word(&words[start - 1]).chars().all(|c| c.is_ascii_digit()) {
+                start -= 1;
+            }
+            let value = words[start..end]
+                .iter()
+                .map(|s| word(s))
+                .collect::<String>()
+                .parse::<f64>()
+                .ok()?;
+            let qualifier = |slice: &[String]| {
+                slice
+                    .iter()
+                    .any(|word| matches!(word.as_str(), "maximum" | "max"))
+                    || slice.windows(2).any(|pair| {
+                        matches!(
+                            (pair[0].as_str(), pair[1].as_str()),
+                            ("or", "less" | "below") | ("not", "above")
+                        )
+                    })
+            };
+            let maximum = qualifier(&words[start.saturating_sub(2)..start])
+                || qualifier(&words[end + 1..(end + 3).min(words.len())]);
+            Some((value, maximum))
+        })
+        .collect()
+}
+fn named_identifier(words: &[String], fix: &str) -> bool {
+    !fix.is_empty()
+        && (0..words.len()).any(|start| {
+            let mut identifier = String::new();
+            for token in &words[start..] {
+                identifier.push_str(token);
+                if identifier == fix {
+                    return true;
+                }
+                if identifier.len() >= fix.len() {
+                    break;
+                }
+            }
+            false
+        })
+}
+
+/// Check the speed component even when a readback supplied structured altitude fields.
+pub fn matches_clearance_speed(text: &str, clearance: &crate::state::Clearance) -> bool {
+    let Some(speed) = speed_component(clearance) else {
+        return true;
+    };
+    let words = tokens(text);
+    let values = spoken_speeds(&words);
+    values.len() == 1
+        && (values[0].0 - speed.knots).abs() < 0.01
+        && values[0].1 != speed.exact
+        && named_identifier(
+            &words
+                .iter()
+                .map(|token| word(token).to_owned())
+                .collect::<Vec<_>>(),
+            &compact(&speed.fix),
+        )
+}
+
+/// Build a descent readback from the same level and speed facts as the instruction.
+pub fn descent_reply(clearance: &crate::state::Clearance, callsign: &str) -> String {
+    let altitude = crate::altitude_text(
+        f64::from(clearance.altitude_feet),
+        crate::UnitSystem::Imperial,
+        true,
+    );
+    let Some(speed) = speed_component(clearance) else {
+        return crate::dialogue::say(
+            "pilot_continue_descent",
+            &[("callsign", callsign.to_owned()), ("altitude", altitude)],
+        );
+    };
+    crate::dialogue::say(
+        if speed.exact {
+            "pilot_descent_speed_exact"
+        } else {
+            "pilot_descent_speed_maximum"
+        },
+        &[
+            ("callsign", callsign.to_owned()),
+            ("altitude", altitude),
+            ("fix", speed.fix.clone()),
+            ("speed", format!("{:.0}", speed.knots)),
+        ],
+    )
+}
+
 /// Check identifiers, numeric values and safety words in a short instruction reply.
 pub fn matches_pilot_reply(actual: &str, expected: &str, callsign: &str) -> bool {
     let normalize = |text: &str| {
-        tokens(text)
-            .into_iter()
-            .map(|token| {
-                if token.len() > 1 && token[..token.len() - 1].chars().all(|c| c.is_ascii_digit()) {
-                    let suffix = match token.chars().last().unwrap() {
-                        'l' => "left",
-                        'r' => "right",
-                        'c' => "centre",
-                        _ => "",
-                    };
-                    if !suffix.is_empty() {
-                        return format!("{}{suffix}", &token[..token.len() - 1]);
+        let words = tokens(text);
+        let mut normalized = String::new();
+        let mut index = 0;
+        while index < words.len() {
+            let token = &words[index];
+            if word(token).chars().all(|c| c.is_ascii_digit()) {
+                let mut value = 0u64;
+                let mut run = String::new();
+                let mut multiplied = false;
+                while index < words.len() {
+                    let token = &words[index];
+                    if word(token).chars().all(|c| c.is_ascii_digit()) {
+                        run.push_str(word(token));
+                    } else if matches!(token.as_str(), "hundred" | "thousand") {
+                        value = value.saturating_add(
+                            run.parse::<u64>()
+                                .unwrap_or(0)
+                                .saturating_mul(if token == "thousand" { 1000 } else { 100 }),
+                        );
+                        run.clear();
+                        multiplied = true;
+                    } else {
+                        break;
                     }
+                    index += 1;
                 }
-                word(&token).to_owned()
-            })
-            .collect::<String>()
+                if multiplied {
+                    normalized.push_str(
+                        &value
+                            .saturating_add(run.parse::<u64>().unwrap_or(0))
+                            .to_string(),
+                    );
+                } else {
+                    normalized.push_str(&run);
+                }
+                continue;
+            }
+            if token.len() > 1 && token[..token.len() - 1].chars().all(|c| c.is_ascii_digit()) {
+                let suffix = match token.chars().last().unwrap() {
+                    'l' => "left",
+                    'r' => "right",
+                    'c' => "centre",
+                    _ => "",
+                };
+                if !suffix.is_empty() {
+                    normalized.push_str(&token[..token.len() - 1]);
+                    normalized.push_str(suffix);
+                    index += 1;
+                    continue;
+                }
+            }
+            normalized.push_str(word(token));
+            index += 1;
+        }
+        normalized
     };
-    let check_identifiers = expected.to_lowercase().contains("direct")
+    let direction = |text: &str| {
+        let words = tokens(text);
+        (
+            words
+                .iter()
+                .any(|word| matches!(word.as_str(), "climb" | "climbing" | "ascend" | "ascending")),
+            words
+                .iter()
+                .any(|word| matches!(word.as_str(), "descend" | "descending" | "descent")),
+        )
+    };
+    if direction(actual) != direction(expected) {
+        return false;
+    }
+    let expected_speeds = spoken_speeds(&tokens(expected));
+    if !expected_speeds.is_empty() && spoken_speeds(&tokens(actual)) != expected_speeds {
+        return false;
+    }
+    let check_identifiers = !expected_speeds.is_empty()
+        || expected.to_lowercase().contains("direct")
         || expected.to_lowercase().contains("approach")
         || expected.to_lowercase().contains("expect");
     let identifiers: Vec<_> = expected
@@ -118,6 +278,10 @@ pub fn matches_pilot_reply(actual: &str, expected: &str, callsign: &str) -> bool
         })
         .map(normalize)
         .collect();
+    let actual_identifiers = tokens(actual)
+        .iter()
+        .map(|token| normalize(token))
+        .collect::<Vec<_>>();
     let actual = normalize(actual);
     let expected = normalize(expected);
     if !actual.contains(&compact(callsign)) {
@@ -143,7 +307,10 @@ pub fn matches_pilot_reply(actual: &str, expected: &str, callsign: &str) -> bool
     if numbers(&actual) != numbers(&expected) {
         return false;
     }
-    !check_identifiers || identifiers.iter().all(|id| actual.contains(id))
+    !check_identifiers
+        || identifiers
+            .iter()
+            .all(|id| named_identifier(&actual_identifiers, id))
 }
 
 /// Recognize pending spoken readbacks before general conversation classification.
@@ -259,6 +426,12 @@ pub fn prepare(state: &State, request: &mut Request) {
                     missing.push(crate::dialogue::say("readback_field_runway", &[]))
                 }
                 _ => {}
+            }
+            if !matches_clearance_speed(&request.text, c) {
+                missing.push(crate::dialogue::say(
+                    "readback_field_speed_restriction",
+                    &[],
+                ));
             }
             request.clearance_sequence = c.sequence;
             request.altitude_feet = c.altitude_feet;
@@ -422,6 +595,8 @@ pub fn auto_reply(state: &State) -> Option<Request> {
             && !last.pilot_reply.is_empty()
         {
             last.pilot_reply.clone()
+        } else if speed_component(clearance).is_some() {
+            descent_reply(clearance, &state.plan.callsign)
         } else if !clearance.readback_scope.is_empty() {
             crate::dialogue::say(
                 &format!("pilot_{}_amendment", clearance.readback_scope),
@@ -482,11 +657,17 @@ pub fn checkin_text(state: &State, station: &str) -> String {
         .clearance
         .as_ref()
         .map_or(state.plan.initial_altitude_feet, |c| c.altitude_feet);
+    let difference = f64::from(target) - state.telemetry.reported_altitude_feet();
     let climb = if !state.telemetry.on_ground
-        && f64::from(target) > state.telemetry.reported_altitude_feet() + 100.0
+        && state.phase != crate::state::PhaseCode::Approach
+        && difference.abs() > 100.0
     {
         crate::dialogue::say(
-            "pilot_checkin_climbing",
+            if difference > 0.0 {
+                "pilot_checkin_climbing"
+            } else {
+                "pilot_checkin_descending"
+            },
             &[(
                 "altitude",
                 crate::altitude_text(f64::from(target), crate::UnitSystem::Imperial, true),
@@ -513,6 +694,144 @@ pub fn checkin_text(state: &State, station: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn final_checkin_does_not_claim_a_climb_back_to_the_intercept_level() {
+        let mut state = State::default();
+        state.plan.callsign = "TEST".into();
+        state.telemetry.on_ground = false;
+        state.telemetry.altitude_feet = 2000.0;
+        state.telemetry.indicated_altitude_feet = Some(2000.0);
+        state.clearance = Some(crate::state::Clearance {
+            altitude_feet: 2500,
+            ..Default::default()
+        });
+        state.phase = crate::state::PhaseCode::Approach;
+        let text = checkin_text(&state, "Tower");
+        assert!(
+            text.contains("2000") && !text.to_lowercase().contains("climb"),
+            "{text}"
+        );
+        state.phase = crate::state::PhaseCode::Departure;
+        assert!(
+            checkin_text(&state, "Departure")
+                .to_lowercase()
+                .contains("climb")
+        );
+        state.phase = crate::state::PhaseCode::Arrival;
+        state.telemetry.indicated_altitude_feet = Some(5000.0);
+        assert!(
+            checkin_text(&state, "Approach")
+                .to_lowercase()
+                .contains("descen")
+        );
+    }
+    #[test]
+    fn compound_descent_readbacks_keep_both_values_fix_limit_and_sequence() {
+        let mut state = State::default();
+        state.plan.callsign = "TEST".into();
+        state.clearance = Some(crate::state::Clearance {
+            altitude_feet: 6000,
+            sequence: 9,
+            readback_scope: "altitude".into(),
+            readback_speed: Some(crate::state::SpeedReadback {
+                sequence: 9,
+                fix: "DEVOX".into(),
+                knots: 250.0,
+                exact: false,
+            }),
+            ..Default::default()
+        });
+        let clearance = state.clearance.as_ref().unwrap();
+        for text in [
+            "Descending to 6000 feet, TEST.",
+            "Descending to 6000 feet, 240 knots or less at DEVOX, TEST.",
+            "Descending to 6000 feet, 250 knots or less at DEVOX1, TEST.",
+            "Descending to 6000 feet, 250 knots at DEVOX, TEST.",
+        ] {
+            assert!(!matches_clearance_speed(text, clearance), "{text}");
+            let mut request = Request {
+                text: text.into(),
+                ..Default::default()
+            };
+            prepare(&state, &mut request);
+            assert!(request.waypoint.starts_with("READBACK ERROR:"), "{text}");
+        }
+        let valid = "Descending to six thousand feet, two five zero knots or less at Delta Echo Victor Oscar Xray, TEST.";
+        assert!(matches_clearance_speed(valid, clearance));
+        let mut request = Request {
+            text: valid.into(),
+            ..Default::default()
+        };
+        prepare(&state, &mut request);
+        assert_eq!(request.clearance_sequence, 9);
+        assert!(!request.waypoint.starts_with("READBACK ERROR:"));
+        crate::apply::add_transmission(
+            &mut state,
+            "ATC",
+            "Earlier instruction",
+            &crate::state::SpeechTag {
+                position: "Center".into(),
+                ..Default::default()
+            },
+        );
+        let pilot = auto_reply(&state).unwrap();
+        assert!(
+            pilot.text.contains("6000")
+                && pilot.text.contains("250")
+                && pilot.text.contains("DEVOX")
+        );
+        assert!(matches_clearance_speed(
+            &pilot.text,
+            state.clearance.as_ref().unwrap()
+        ));
+        state
+            .clearance
+            .as_mut()
+            .unwrap()
+            .readback_speed
+            .as_mut()
+            .unwrap()
+            .exact = true;
+        assert!(!matches_clearance_speed(
+            valid,
+            state.clearance.as_ref().unwrap()
+        ));
+        assert!(matches_clearance_speed(
+            "250 knots at DEVOX",
+            state.clearance.as_ref().unwrap()
+        ));
+        assert!(
+            matches_clearance_speed(
+                "Cross DEVOX at or below 6000 feet, 250 knots, TEST.",
+                state.clearance.as_ref().unwrap()
+            ),
+            "The altitude's maximum qualifier must not change an exact speed"
+        );
+        let expected = "Descending to 6000 feet, 250 knots or less at DEVOX, TEST.";
+        assert!(matches_pilot_reply(
+            "Descend to six thousand feet, two five zero knots maximum at Delta Echo Victor Oscar Xray, TEST.",
+            expected,
+            "TEST"
+        ));
+        for invalid in [
+            "Climbing to 6000 feet, 250 knots or less at DEVOX, TEST.",
+            "Maintain 6000 feet, 250 knots or less at DEVOX, TEST.",
+            "Descending to 6000 feet, 250 knots or less at DEVOXY, TEST.",
+            "Descending to 6000 feet, 250 knots at DEVOX, TEST.",
+            "Descending to 6000 feet, 240 knots or less at DEVOX, TEST.",
+        ] {
+            assert!(!matches_pilot_reply(invalid, expected, "TEST"), "{invalid}");
+        }
+
+        state.clearance.as_mut().unwrap().sequence = 10;
+        assert!(
+            matches_clearance_speed(
+                "Descending to 5000 feet, TEST.",
+                state.clearance.as_ref().unwrap()
+            ),
+            "A newer instruction must not inherit stale speed readback facts"
+        );
+    }
     #[test]
     fn altitude_reply_uses_only_the_current_instruction_sequence() {
         let mut state = State::default();

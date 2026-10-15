@@ -17613,3 +17613,31 @@ say = ["{speed} knots or less at {fix}, {callsign}.", "Cross {fix} at {speed} kn
 [pilot_published_speed_exact]
 slots = ["callsign", "fix", "speed"]
 say = ["{speed} knots at {fix}, {callsign}.", "Cross {fix} at {speed} knots, {callsign}."]
+
+[published_speed_maximum_continuation]
+slots = ["fix", "speed"]
+say = ["Cross {fix} at {speed} knots or less.", "Make your speed {speed} knots or less by {fix}.", "At {fix}, {speed} knots or less.", "Reduce to {speed} knots or less by {fix}."]
+
+[published_speed_exact_continuation]
+slots = ["fix", "speed"]
+say = ["Cross {fix} at {speed} knots.", "Make your speed {speed} knots by {fix}.", "At {fix}, {speed} knots.", "Adjust speed to cross {fix} at {speed} knots."]
+
+[pilot_descent_speed_maximum]
+slots = ["callsign", "altitude", "fix", "speed"]
+say = ["Descending to {altitude}, {speed} knots or less at {fix}, {callsign}.", "Descend to {altitude}, cross {fix} at {speed} knots or less, {callsign}.", "Continuing descent to {altitude}, {speed} knots maximum at {fix}, {callsign}.", "Descending to {altitude}, reducing to {speed} knots or less by {fix}, {callsign}."]
+
+[pilot_descent_speed_exact]
+slots = ["callsign", "altitude", "fix", "speed"]
+say = ["Descending to {altitude}, {speed} knots at {fix}, {callsign}.", "Descend to {altitude}, cross {fix} at {speed} knots, {callsign}.", "Continuing descent to {altitude}, crossing {fix} at {speed} knots, {callsign}.", "Descending to {altitude}, making {speed} knots by {fix}, {callsign}."]
+
+[readback_field_speed_restriction]
+slots = []
+say = ["speed and crossing fix", "the crossing speed restriction", "speed restriction and fix", "the assigned crossing speed and fix"]
+
+[readback_error_speed_restriction]
+slots = []
+say = ["Say again your readback, including the crossing speed restriction.", "Check your readback. Include the crossing fix and speed restriction.", "Read back the crossing speed and fix as well as the assigned level.", "Say again the complete readback, including the speed restriction and fix."]
+
+[pilot_checkin_descending]
+slots = ["altitude"]
+say = ["descending to {altitude}", "continuing descent to {altitude}", "descending for {altitude}", "on descent to {altitude}"]

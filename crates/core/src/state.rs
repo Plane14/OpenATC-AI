@@ -459,6 +459,20 @@ fn default_speed() -> f32 {
     1.0
 }
 
+/// Published speed restriction repeated with a level instruction.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeedReadback {
+    /// Clearance that carries this restriction.
+    pub sequence: u32,
+    /// Published crossing fix.
+    pub fix: String,
+    /// Indicated speed in knots.
+    pub knots: f64,
+    /// The published speed is exact rather than a maximum.
+    pub exact: bool,
+}
+
 /// Active ATC clearance.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -480,6 +494,8 @@ pub struct Clearance {
     pub squawk: String,
     /// Fields changed by the latest amendment: altitude, direct or runway.
     pub readback_scope: String,
+    /// Speed component of the same instruction, tied to its clearance sequence.
+    pub readback_speed: Option<SpeedReadback>,
     /// Pilot read it back.
     #[serde(default)]
     pub acknowledged: bool,
