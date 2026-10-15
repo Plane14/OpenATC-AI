@@ -188,7 +188,45 @@ fn serve(
             json!({"intent":"taxi","altitudeFeet":0,"waypoint":""}).to_string()
         } else {
             let answer = answer.lock().unwrap().clone();
-            if let Some(properties) = request
+            if request
+                .pointer("/response_format/json_schema/schema/properties/points")
+                .is_some()
+            {
+                let points = proposal
+                    .lock()
+                    .unwrap()
+                    .as_deref()
+                    .and_then(|proposal| serde_json::from_str::<Value>(proposal).ok())
+                    .and_then(|proposal| proposal.get("conversation_points").cloned())
+                    .unwrap_or_else(|| json!([]));
+                json!({"points":points}).to_string()
+            } else if let Some(properties) = request
+                .pointer("/response_format/json_schema/schema/properties")
+                .and_then(Value::as_object)
+                && !properties.is_empty()
+                && properties
+                    .values()
+                    .all(|value| value.pointer("/properties/evidence").is_some())
+            {
+                let context: Value = serde_json::from_str(
+                    request["messages"].as_array().unwrap().last().unwrap()["content"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .unwrap();
+                Value::Object(
+                    properties
+                        .keys()
+                        .map(|key| {
+                            (
+                                key.clone(),
+                                json!({"evidence":context["captainMessage"],"requested":true}),
+                            )
+                        })
+                        .collect(),
+                )
+                .to_string()
+            } else if let Some(properties) = request
                 .pointer("/response_format/json_schema/schema/properties")
                 .and_then(Value::as_object)
                 && !properties.is_empty()

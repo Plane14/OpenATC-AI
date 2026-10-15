@@ -17641,3 +17641,7 @@ say = ["Say again your readback, including the crossing speed restriction.", "Ch
 [pilot_checkin_descending]
 slots = ["altitude"]
 say = ["descending to {altitude}", "continuing descent to {altitude}", "descending for {altitude}", "on descent to {altitude}"]
+
+[crew_conversation_unavailable]
+slots = []
+say = ["Crew conversation is unavailable. Please try again."]

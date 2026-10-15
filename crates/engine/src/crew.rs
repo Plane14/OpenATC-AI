@@ -15,6 +15,26 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ControlAuthority {
+    evidence: String,
+    requested: bool,
+}
+impl ControlAuthority {
+    fn matches(&self, request: &str) -> bool {
+        let normalize = |text: &str| {
+            text.to_lowercase()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        self.requested
+            && !self.evidence.trim().is_empty()
+            && normalize(request).contains(&normalize(&self.evidence))
+    }
+}
+
 /// Retain only questions needed to clarify the current operation.
 async fn pace_crew_reply(
     client: &reqwest::Client,
@@ -24,6 +44,31 @@ async fn pace_crew_reply(
     reply: &str,
     previous_reply: &str,
 ) -> String {
+    pace_crew_reply_with_joke(
+        client,
+        settings,
+        prompt,
+        request,
+        reply,
+        previous_reply,
+        None,
+    )
+    .await
+}
+
+async fn pace_crew_reply_with_joke(
+    client: &reqwest::Client,
+    settings: &openatc_settings::Settings,
+    prompt: &str,
+    request: &str,
+    reply: &str,
+    previous_reply: &str,
+    joke: Option<&str>,
+) -> String {
+    let cleaned = openatc_core::dialogue::speech_text(reply);
+    let reply = cleaned.as_str();
+    let normalized_joke = joke.map(openatc_core::dialogue::speech_text);
+    let joke = normalized_joke.as_deref();
     if !reply.contains(['?', '？']) {
         return reply.to_owned();
     }
@@ -40,6 +85,22 @@ async fn pace_crew_reply(
                 index + reply[index..].chars().next().unwrap().len_utf8()
             });
         let end = question + reply[question..].chars().next().unwrap().len_utf8();
+        if joke.filter(|joke| !joke.is_empty()).is_some_and(|joke| {
+            reply.find(joke).is_some_and(|offset| {
+                if question < offset || question >= offset + joke.len() {
+                    return false;
+                }
+                let after = &joke
+                    [question - offset + reply[question..].chars().next().unwrap().len_utf8()..];
+                let end = after
+                    .find(['.', '!', '?', '？', '\n'])
+                    .unwrap_or(after.len());
+                !after[end..].starts_with(['?', '？'])
+                    && after[..end].split_whitespace().count() >= 2
+            })
+        }) {
+            continue;
+        }
         let context = json!({"previousCrewReply":previous_reply,"captainMessage":request,
             "proposedReply":&reply[start..end],"fullReply":reply})
         .to_string();
@@ -78,12 +139,12 @@ async fn pace_crew_reply(
 pub struct Batch {
     outcomes: Vec<String>,
     held_reply: String,
-    failed: bool,
     started: std::time::Instant,
 }
 
 pub struct CrewSession {
-    pub memories: BTreeMap<String, String>,
+    pub revision: u64,
+    pub social: crate::memory::SocialMemory,
     pub ground_taxi_origin: Option<[f64; 2]>,
     pub aircraft: String,
     pub profile: CrewProfile,
@@ -97,7 +158,8 @@ pub struct CrewSession {
 impl Default for CrewSession {
     fn default() -> Self {
         Self {
-            memories: BTreeMap::new(),
+            revision: 0,
+            social: crate::memory::SocialMemory::default(),
             ground_taxi_origin: None,
             aircraft: String::new(),
             profile: CrewProfile::default(),
@@ -157,8 +219,9 @@ pub async fn observe(
     let mut s = shared.write().await;
     let profile = input.profile.unwrap_or_else(|| s.crew.profile.clone());
     if s.crew.aircraft != input.aircraft || s.crew.profile != profile {
-        s.crew.memories.clear();
-        s.request_memory.cancel_pending();
+        s.crew.revision = s.crew.revision.wrapping_add(1);
+        s.crew.social.clear();
+        s.request_memory.forget_crew();
         s.crew.checklist = None;
         s.crew.batch = None;
         s.session.crew_actions.clear();
@@ -185,7 +248,6 @@ pub async fn observe(
     {
         let actions = std::mem::take(&mut s.session.crew_actions);
         if let Some(mut batch) = s.crew.batch.take() {
-            batch.failed = true;
             for action in &actions {
                 s.request_memory.confirm(action.sequence, false);
                 let item = say(&format!("crew_control_{}", action.control), &[]);
@@ -195,6 +257,7 @@ pub async fn observe(
             }
             if let Some(action) = actions.first() {
                 let text = batch_reply(&mut s, batch);
+                s.request_memory.reply_for_action(action.sequence, &text);
                 speak(&mut s, &action.role, &text);
             }
         }
@@ -398,6 +461,7 @@ pub async fn acknowledge(AxumState(shared): AxumState<Shared>, Json(ack): Json<A
         if let Some(batch) = s.crew.batch.as_mut() {
             batch.outcomes.push(text);
         } else {
+            s.request_memory.reply_for_action(action.sequence, &text);
             speak(&mut s, &action.role, &text);
         }
         if let Some((_, index, true)) = s.crew.checklist.as_mut() {
@@ -405,9 +469,6 @@ pub async fn acknowledge(AxumState(shared): AxumState<Shared>, Json(ack): Json<A
             return next_item(&mut s);
         }
     } else {
-        if let Some(batch) = s.crew.batch.as_mut() {
-            batch.failed = true;
-        }
         eprintln!("Crew action {} failed: {}", action.control, ack.detail);
         if let Some(batch) = s.crew.batch.as_mut() {
             batch
@@ -417,6 +478,7 @@ pub async fn acknowledge(AxumState(shared): AxumState<Shared>, Json(ack): Json<A
             s.session.crew_actions.clear();
             s.crew.checklist = None;
             let text = say("crew_action_failed", &[("item", label)]);
+            s.request_memory.reply_for_action(action.sequence, &text);
             speak(&mut s, &action.role, &text);
         }
     }
@@ -424,6 +486,7 @@ pub async fn acknowledge(AxumState(shared): AxumState<Shared>, Json(ack): Json<A
         && let Some(batch) = s.crew.batch.take()
     {
         let text = batch_reply(&mut s, batch);
+        s.request_memory.reply_for_action(action.sequence, &text);
         speak(&mut s, &action.role, &text);
     }
     Json(json!({"accepted":true,"state":snapshot(&s.session,&s.settings)})).into_response()
@@ -436,16 +499,424 @@ pub(crate) async fn narrate(
     fallback: &str,
     protected: &[String],
 ) -> String {
-    compose(shared, role, request, fallback, protected, &[], false).await
+    compose(shared, role, request, fallback, protected).await
 }
+fn crew_humour_allowed(state: &crate::EngineState) -> bool {
+    !state.cabin.preparing_for_turbulence
+        && state.session.taxi_clearance.crossing_runway.is_empty()
+        && !matches!(
+            state.session.phase,
+            openatc_core::state::PhaseCode::Departure
+                | openatc_core::state::PhaseCode::Approach
+                | openatc_core::state::PhaseCode::Landed
+        )
+        && state.session.mission.incident.is_empty()
+}
+
+fn flight_situation(state: &crate::EngineState) -> &str {
+    let key = if !state.session.telemetry.on_ground {
+        "crew_situation_airborne"
+    } else if matches!(
+        state.session.phase,
+        openatc_core::state::PhaseCode::Landed
+            | openatc_core::state::PhaseCode::TaxiIn
+            | openatc_core::state::PhaseCode::Finished
+    ) {
+        "crew_situation_after_landing"
+    } else {
+        "crew_situation_before_departure"
+    };
+    state.prompts.guidance.get(key)
+}
+
+async fn converse(shared: &Shared, role: &str, request: &str, points: &[String]) -> Option<String> {
+    let state = shared.read().await;
+    let role_prompt = match role {
+        "ground" => &state.prompts.ground,
+        "cabin" => &state.prompts.cabin,
+        _ => &state.prompts.copilot_chat,
+    };
+    let personality = match role {
+        "ground" => &state.settings.ground_personality,
+        "cabin" => &state.settings.attendant_personality,
+        _ => &state.settings.copilot_personality,
+    };
+    let instructions = [
+        crate::support::fill_prompt(role_prompt, &state.session.plan.callsign),
+        personality.clone(),
+        state
+            .prompts
+            .guidance
+            .get("crew_conversation_rules")
+            .to_owned(),
+        state.prompts.guidance.get("crew_dialogue").to_owned(),
+    ]
+    .join("\n");
+    let request_context = state.request_memory.context(role);
+    let recent_records = request_context["recentRequests"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|record| {
+            record["request"]
+                .as_str()
+                .is_some_and(|text| text != request)
+        })
+        .take(6)
+        .collect::<Vec<_>>();
+    let recent = recent_records
+        .iter()
+        .filter_map(|record| record["request"].as_str())
+        .map(|text| text.chars().take(600).collect::<String>())
+        .collect::<Vec<_>>();
+    let mut history = recent_records.iter().rev().flat_map(|record| {
+        let mut exchange=vec![json!({"role":"user","content":record["request"].as_str().unwrap_or_default().chars().take(600).collect::<String>()})];
+        if let Some(reply)=record["reply"].as_str().filter(|reply|!reply.is_empty()) {
+            exchange.push(json!({"role":"assistant","content":reply.chars().take(600).collect::<String>()}));
+        }
+        exchange
+    }).collect::<Vec<_>>();
+    let mut sources = recent.clone();
+    sources.push(request.to_owned());
+    let fresh = state
+        .crew
+        .observed_at
+        .is_some_and(|at| at.elapsed().as_secs() < 5);
+    let words = request
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| word.chars().count() > 2)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut readings = state
+        .session
+        .crew_controls
+        .iter()
+        .filter(|control| control.role == role)
+        .filter(|control| {
+            !state
+                .crew
+                .profile
+                .controls
+                .get(&control.id)
+                .is_some_and(|control| control.momentary)
+        })
+        .collect::<Vec<_>>();
+    readings.sort_by_key(|control| {
+        std::cmp::Reverse(
+            words
+                .iter()
+                .filter(|word| {
+                    format!("{} {}", control.id, control.label)
+                        .to_lowercase()
+                        .contains(word.as_str())
+                })
+                .count(),
+        )
+    });
+    let controls = readings.into_iter().filter(|_|points.is_empty()).filter(|control|words.iter().any(|word|format!("{} {}",control.id,control.label).to_lowercase().contains(word.as_str())))
+        .take(16)
+        .map(|control|json!({"control":control.id,"label":control.label,"value":if fresh{state.crew.values.get(&control.id)}else{None}}))
+        .collect::<Vec<_>>();
+    let humour_allowed = crew_humour_allowed(&state);
+    let mut facts = json!({"role":role,"humourAllowed":humour_allowed,"phase":format!("{:?}",state.session.phase),"onGround":state.session.telemetry.on_ground,
+        "currentSituation":flight_situation(&state),
+        "passengers":state.session.plan.passengers,"groundSpeedKnots":state.session.telemetry.ground_speed_knots,
+        "departure":state.session.plan.departure,"destination":state.session.plan.destination,
+        "estimatedMinutes":(state.session.plan.estimated_minutes.is_finite() && state.session.plan.estimated_minutes>0.0).then_some(state.session.plan.estimated_minutes),
+        "durationNote":if state.session.plan.estimated_minutes.is_finite() && state.session.plan.estimated_minutes>0.0 {""} else {state.prompts.guidance.get("crew_duration_unknown")},
+        "recentCaptainMessagesNewestFirst":[],"social":state.crew.social.context(role,request),
+        "observedControls":controls,"controlsFresh":fresh});
+    facts["social"]["recentCrewRepliesNewestFirst"] = json!([]);
+    facts["social"]["recentJokesNewestFirst"] = json!([]);
+    let generation = state.session_generation;
+    let revision = state.crew.revision;
+    let aircraft = state.crew.aircraft.clone();
+    let client = state.client.clone();
+    let settings = state.settings.clone();
+    let language_path = state.config_dir.join("cabin/response-policy.toml");
+    let pacing = state.prompts.guidance.get("crew_follow_up").to_owned();
+    let previous = state
+        .session
+        .transcript
+        .iter()
+        .rev()
+        .find(|entry| entry.speaker == speaker(role))
+        .map(|entry| entry.text.clone())
+        .unwrap_or_default();
+    drop(state);
+    let language = openatc_core::crew::request::ReplyPolicy::load(&language_path).ok()?;
+    let spoken_request = if points.is_empty() {
+        request.to_owned()
+    } else {
+        points.join(" ")
+    };
+    let mut prompt = format!("{instructions}\n{}", facts);
+    while crate::llm::prompt_fits_history(
+        &client,
+        &settings.ai_url,
+        &prompt,
+        &spoken_request,
+        &history,
+    )
+    .await
+        == Some(false)
+    {
+        let replies = facts["social"]["recentCrewRepliesNewestFirst"]
+            .as_array_mut()
+            .unwrap();
+        if !history.is_empty() {
+            let count = history
+                .iter()
+                .skip(1)
+                .position(|message| message["role"] == "user")
+                .map_or(history.len(), |index| index + 1);
+            history.drain(..count);
+        } else if !replies.is_empty() {
+            replies.pop();
+        } else if facts["social"]["recentJokesNewestFirst"]
+            .as_array()
+            .is_some_and(|jokes| !jokes.is_empty())
+        {
+            facts["social"]["recentJokesNewestFirst"]
+                .as_array_mut()
+                .unwrap()
+                .pop();
+        } else if facts["recentCaptainMessagesNewestFirst"]
+            .as_array()
+            .is_some_and(|recent| recent.len() > 1)
+        {
+            facts["recentCaptainMessagesNewestFirst"]
+                .as_array_mut()
+                .unwrap()
+                .pop();
+        } else if facts["social"]["captainQuotesNewestFirst"]
+            .as_array()
+            .is_some_and(|quotes| quotes.len() > 1)
+        {
+            facts["social"]["captainQuotesNewestFirst"]
+                .as_array_mut()
+                .unwrap()
+                .pop();
+        } else {
+            return None;
+        }
+        prompt = format!("{instructions}\n{}", facts);
+    }
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Dialogue {
+        reply: String,
+        #[serde(default)]
+        joke: String,
+        #[serde(default)]
+        remember: Vec<String>,
+    }
+    let schema = json!({"type":"object","additionalProperties":false,"required":["reply","joke"],
+        "properties":{"reply":{"type":"string"},"joke":{"type":"string"}}});
+    let mut result = None;
+    let mut preserved_reply = None;
+    for attempt in 0..2 {
+        // The retry includes the rejected draft and must fit the same server context.
+        if attempt > 0
+            && crate::llm::prompt_fits_history(
+                &client,
+                &settings.ai_url,
+                &prompt,
+                &spoken_request,
+                &history,
+            )
+            .await
+                == Some(false)
+        {
+            return None;
+        }
+        let mut candidate = match crate::llm::structured_history::<Dialogue>(
+            &client,
+            &settings.ai_url,
+            &settings.ai_model,
+            if settings.llm_phrase_variety {
+                0.6
+            } else {
+                0.2
+            },
+            &prompt,
+            &spoken_request,
+            &history,
+            Some(schema.clone()),
+        )
+        .await
+        {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                eprintln!("Crew dialogue failed: {error}");
+                return None;
+            }
+        };
+        if std::env::var_os("OPENATC_ACTOR_TRACE").is_some() {
+            eprintln!("Crew dialogue: {:?}", candidate);
+        }
+        if !humour_allowed {
+            candidate.joke.clear();
+        }
+        for sentence in conversation_sentences(&candidate.joke) {
+            candidate.reply = candidate.reply.replace(sentence, "");
+        }
+        candidate.reply = candidate.reply.trim().to_owned();
+        if !candidate.reply.trim().is_empty() {
+            crate::llm::spoken(&candidate.reply).ok()?;
+        }
+        if !candidate.joke.trim().is_empty() {
+            crate::llm::spoken(&candidate.joke).ok()?;
+        }
+        if !language.narration_allowed(&candidate.reply)
+            || !language.narration_allowed(&candidate.joke)
+        {
+            return None;
+        }
+        let repeated = !candidate.joke.is_empty()
+            && shared
+                .read()
+                .await
+                .crew
+                .social
+                .repeated_joke(&candidate.joke);
+        if repeated && attempt == 0 {
+            preserved_reply = Some(candidate.reply.clone());
+            let state = shared.read().await;
+            prompt.push_str("\n");
+            prompt.push_str(state.prompts.guidance.get("crew_dialogue_retry"));
+            prompt.push_str(
+                &json!({"rejectedJoke":candidate.joke,"retainReply":candidate.reply}).to_string(),
+            );
+            continue;
+        }
+        if repeated {
+            candidate.joke.clear();
+        }
+        if let Some(reply) = preserved_reply.take() {
+            candidate.reply = reply;
+        }
+        result = Some(candidate);
+        break;
+    }
+    let result = result?;
+    let complete =
+        openatc_core::dialogue::speech_text(&format!("{} {}", result.reply, result.joke));
+    crate::llm::spoken(&complete).ok()?;
+    let joke = (!result.joke.is_empty()).then_some(result.joke.as_str());
+    let reply = pace_crew_reply_with_joke(
+        &client, &settings, &pacing, request, &complete, &previous, joke,
+    )
+    .await;
+    {
+        let state = shared.read().await;
+        if state.session_generation != generation
+            || state.crew.aircraft != aircraft
+            || state.crew.revision != revision
+        {
+            return None;
+        }
+    }
+    crate::llm::spoken(&reply).ok()?;
+    let mut state = shared.write().await;
+    if state.session_generation != generation
+        || state.crew.aircraft != aircraft
+        || state.crew.revision != revision
+    {
+        return None;
+    }
+    // Retain original captain wording, never generated summaries of personal facts.
+    let quoted_message = if points.is_empty() {
+        request.to_owned()
+    } else {
+        points.join(" ")
+    };
+    let quotes = conversation_sentences(&quoted_message)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    state.crew.social.remember(role, &sources, &quotes);
+    state.crew.social.remember(role, &sources, &result.remember);
+    state.crew.social.record_reply(role, &reply);
+    state.crew.social.record_joke(&result.joke);
+    Some(reply)
+}
+
+async fn conversation_points(shared: &Shared, role: &str, request: &str) -> Option<Vec<String>> {
+    let state = shared.read().await;
+    let prompt = state
+        .prompts
+        .guidance
+        .get("crew_dialogue_points")
+        .to_owned();
+    let settings = state.settings.clone();
+    let client = state.client.clone();
+    drop(state);
+    let user = json!({"role":role,"captainMessage":request}).to_string();
+    if crate::llm::prompt_fits(&client, &settings.ai_url, &prompt, &user).await == Some(false) {
+        return None;
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Points {
+        points: Vec<String>,
+        #[serde(default, rename = "operational")]
+        _operational: Vec<String>,
+    }
+    let schema = json!({"type":"object","additionalProperties":false,"required":["points","operational"],"properties":{
+        "points":{"type":"array","maxItems":16,"items":{"type":"string"}},
+        "operational":{"type":"array","maxItems":16,"items":{"type":"string"}}}});
+    let points = crate::llm::structured_format::<Points>(
+        &client,
+        &settings.ai_url,
+        &settings.ai_model,
+        0.0,
+        &prompt,
+        &user,
+        Some(schema),
+    )
+    .await
+    .ok()?;
+    if std::env::var_os("OPENATC_ACTOR_TRACE").is_some() {
+        eprintln!("Crew conversational excerpts: {:?}", points.points);
+    }
+    let source = request.to_lowercase();
+    Some(
+        points
+            .points
+            .into_iter()
+            .filter(|point| !point.trim().is_empty() && source.contains(&point.to_lowercase()))
+            .collect(),
+    )
+}
+
+fn conversation_sentences(text: &str) -> Vec<&str> {
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    for (index, character) in text.char_indices() {
+        let end = index + character.len_utf8();
+        if matches!(character, '.' | '!' | '?')
+            && text[end..].chars().next().is_none_or(char::is_whitespace)
+        {
+            if !text[start..end].trim().is_empty() {
+                sentences.push(text[start..end].trim());
+            }
+            start = end;
+        }
+    }
+    if !text[start..].trim().is_empty() {
+        sentences.push(text[start..].trim());
+    }
+    sentences
+}
+
 async fn compose(
     shared: &Shared,
     role: &str,
     request: &str,
     fallback: &str,
     protected: &[String],
-    points: &[String],
-    social_only: bool,
 ) -> String {
     let s = shared.read().await;
     if !s.settings.ai_enabled || s.settings.ai_model.is_empty() {
@@ -489,39 +960,22 @@ async fn compose(
             .is_some_and(|profile| profile.momentary)
     });
     let controls=readings.into_iter().take(24).map(|control|json!({"id":control.id,"available":control.available,"value":s.crew.values.get(&control.id)})).collect::<Vec<_>>();
-    let humour_allowed = !s.cabin.preparing_for_turbulence
-        && s.session.taxi_clearance.crossing_runway.is_empty()
-        && !matches!(
-            s.session.phase,
-            openatc_core::state::PhaseCode::Departure
-                | openatc_core::state::PhaseCode::Approach
-                | openatc_core::state::PhaseCode::Landed
-        )
-        && s.session.mission.incident.is_empty();
-    let mut context=json!({"phase":s.session.phase,"onGround":s.session.telemetry.on_ground,"groundSpeedKnots":s.session.telemetry.ground_speed_knots,
-        "departure":s.session.plan.departure,"destination":s.session.plan.destination,"cabin":s.cabin,"controls":if social_only{Vec::new()}else{controls},
-        "missionIncident":s.session.mission.incident,"conversationNotes":s.crew.memories.get(role),
-        "humourAllowed":humour_allowed}).to_string();
-    if social_only {
-        context = json!({"phase":s.session.phase,"onGround":s.session.telemetry.on_ground,
-            "groundSpeedKnots":s.session.telemetry.ground_speed_knots,"departure":s.session.plan.departure,"destination":s.session.plan.destination,
-            "passengers":s.session.plan.passengers,"humourAllowed":humour_allowed,
-            "conversationNotes":s.crew.memories.get(role),"continuity":"Use the notes for facts about prior conversation; answer the current message, never recite an earlier reply"}).to_string();
-    }
+    let context=json!({"phase":format!("{:?}",s.session.phase),"onGround":s.session.telemetry.on_ground,"currentSituation":flight_situation(&s),"groundSpeedKnots":s.session.telemetry.ground_speed_knots,
+        "departure":s.session.plan.departure,"destination":s.session.plan.destination,
+        "estimatedMinutes":(s.session.plan.estimated_minutes.is_finite() && s.session.plan.estimated_minutes>0.0).then_some(s.session.plan.estimated_minutes),
+        "durationNote":if s.session.plan.estimated_minutes.is_finite() && s.session.plan.estimated_minutes>0.0 {""} else {s.prompts.guidance.get("crew_duration_unknown")},
+        "cabin":s.cabin,"controls":controls,
+        "missionIncident":s.session.mission.incident,"humourAllowed":crew_humour_allowed(&s)}).to_string();
     let system = crate::llm::prompt(
         &[
             role_prompt.as_str(),
             personality.as_str(),
             s.prompts.guidance.get("crew_conversation_rules"),
-            if social_only {
-                s.prompts.guidance.get("crew_social_only")
-            } else {
-                &s.prompts.crew_response
-            },
+            &s.prompts.crew_response,
         ]
         .join("\n"),
         s.prompts.guidance.get("examples"),
-        if social_only { &[] } else { &examples },
+        &examples,
         &context,
     );
     let pacing_prompt = s.prompts.guidance.get("crew_follow_up").to_owned();
@@ -540,70 +994,28 @@ async fn compose(
     let language_path = s.config_dir.join("cabin/response-policy.toml");
     drop(s);
     let language = openatc_core::crew::request::ReplyPolicy::load(&language_path).ok();
-    let user = if !social_only && points.is_empty() && protected.is_empty() {
+    let user = if protected.is_empty() {
         request.to_owned()
-    } else if social_only {
-        json!({"captainMessage":points.join(" "),"conversationPoints":points}).to_string()
     } else {
-        json!({"conversationContext":if points.is_empty() && protected.is_empty(){Some(request)}else{None},"confirmedResult":if protected.is_empty(){serde_json::Value::Null}else{json!(fallback)},"conversationPoints":points}).to_string()
+        json!({"confirmedResult":fallback}).to_string()
     };
     if crate::llm::prompt_fits(&client, &settings.ai_url, &system, &user).await == Some(false) {
         eprintln!("Crew response exceeds the configured context; retaining verified outcomes");
         return fallback.to_owned();
     }
-    let mut social_memory = String::new();
-    let response = if social_only {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct SocialReply {
-            answers: Vec<String>,
-            #[serde(default)]
-            memory: String,
-        }
-        let schema = json!({"type":"object","additionalProperties":false,"required":["answers","memory"],
-            "properties":{"memory":{"type":"string","maxLength":700},"answers":{"type":"array","minItems":points.len(),"maxItems":points.len(),
-                "items":{"type":"string"}}}});
-        crate::llm::structured_format::<SocialReply>(
-            &client,
-            &settings.ai_url,
-            &settings.ai_model,
-            if settings.llm_phrase_variety {
-                0.6
-            } else {
-                0.2
-            },
-            &system,
-            &user,
-            Some(schema),
-        )
-        .await
-        .and_then(|reply| {
-            if reply.answers.len() != points.len()
-                || reply.answers.iter().any(|answer| answer.trim().is_empty())
-            {
-                return Err(crate::llm::StructuredError::Invalid(
-                    "Incomplete conversational answers".into(),
-                ));
-            }
-            social_memory = reply.memory;
-            Ok(reply.answers.join(" "))
-        })
-        .map_err(|error| error.to_string())
-    } else {
-        crate::llm::narration(
-            &client,
-            &settings.ai_url,
-            &settings.ai_model,
-            if settings.llm_phrase_variety {
-                0.6
-            } else {
-                0.2
-            },
-            &system,
-            &user,
-        )
-        .await
-    };
+    let response = crate::llm::narration(
+        &client,
+        &settings.ai_url,
+        &settings.ai_model,
+        if settings.llm_phrase_variety {
+            0.6
+        } else {
+            0.2
+        },
+        &system,
+        &user,
+    )
+    .await;
     let Ok(reply) = response else {
         eprintln!(
             "Crew response could not be composed: {}",
@@ -620,22 +1032,14 @@ async fn compose(
         &previous_reply,
     )
     .await;
-    if (if social_only {
-        crate::llm::spoken(&reply).is_ok() && reply.len() <= 3000
-    } else {
-        valid_narration(&reply, fallback, protected)
-    }) && language
-        .as_ref()
-        .is_some_and(|language| language.narration_allowed(&reply))
+    if valid_narration(&reply, fallback, protected)
+        && language
+            .as_ref()
+            .is_some_and(|policy| policy.narration_allowed(&reply))
     {
-        if !social_memory.is_empty()
-            && social_memory.len() <= 700
-            && crate::llm::spoken(&social_memory).is_ok()
-        {
-            let mut state = shared.write().await;
-            if state.session_generation == generation && state.crew.aircraft == aircraft {
-                state.crew.memories.insert(role.to_owned(), social_memory);
-            }
+        let state = shared.read().await;
+        if state.session_generation != generation || state.crew.aircraft != aircraft {
+            return fallback.to_owned();
         }
         reply.trim().to_owned()
     } else {
@@ -716,7 +1120,7 @@ fn batch_reply(_s: &mut crate::EngineState, batch: Batch) -> String {
                 &[("first", rest.join(", ")), ("last", last.clone())],
             )
         };
-        text = if !batch.held_reply.trim().is_empty() && !batch.failed {
+        text = if !batch.held_reply.trim().is_empty() {
             say(
                 "crew_batch_with_conversation",
                 &[
@@ -823,43 +1227,19 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
     let profile = s.crew.profile.clone();
     let parsed = if s.settings.ai_enabled && !s.settings.ai_model.is_empty() {
         let generation = s.session_generation;
+        let revision = s.crew.revision;
         let aircraft = s.crew.aircraft.clone();
         let settings = s.settings.clone();
         let client = s.client.clone();
         let interpretation_context = s.prompts.guidance.get("crew_interpret_context").to_owned();
         let authority_prompt = s.prompts.guidance.get("crew_control_extract").to_owned();
         let proposal_prompt = s.prompts.guidance.get("crew_control_authority").to_owned();
-        let pacing_prompt = s.prompts.guidance.get("crew_follow_up").to_owned();
-        let previous_crew_reply = s
-            .session
-            .transcript
-            .iter()
-            .rev()
-            .find(|entry| entry.speaker == speaker(role))
-            .map(|entry| entry.text.chars().take(512).collect::<String>())
-            .unwrap_or_default();
-        let role_prompt = match role {
-            "ground" => &s.prompts.ground,
-            "cabin" => &s.prompts.cabin,
-            _ => &s.prompts.copilot_chat,
-        };
-        let personality = match role {
-            "ground" => &s.settings.ground_personality,
-            "cabin" => &s.settings.attendant_personality,
-            _ => &s.settings.copilot_personality,
-        };
         let role_guidance = s
             .prompts
             .guidance
             .get(&format!("crew_actions_{role}"))
             .to_owned();
-        let instructions = format!(
-            "{}\n{}\n{}\n{}",
-            crate::support::fill_prompt(role_prompt, &s.session.plan.callsign),
-            personality,
-            s.prompts.crew_actions.replace("{{role}}", role),
-            s.prompts.guidance.get("crew_conversation_rules")
-        );
+        let instructions = s.prompts.crew_actions.replace("{{role}}", role);
         let query = request.text.to_lowercase();
         let words: Vec<_> = query
             .split(|character: char| !character.is_alphanumeric())
@@ -892,18 +1272,9 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                     | openatc_core::state::PhaseCode::Landed
             )
             && s.session.mission.incident.is_empty();
-        let recent_messages = s.request_memory.context(role)["recentRequests"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|record| record["request"].as_str())
-            .filter(|text| *text != request.text)
-            .take(3)
-            .map(|text| text.chars().take(400).collect::<String>())
-            .collect::<Vec<_>>();
-        let mut facts = json!({"recipient":role,"onGround":s.session.telemetry.on_ground,"phase":format!("{:?}",s.session.phase),
-            "passengers":s.session.plan.passengers,"conversationNotes":s.crew.memories.get(role),"recentCaptainMessages":recent_messages,"humourAllowed":humour_allowed,
-            "flight":{"departure":s.session.plan.departure,"destination":s.session.plan.destination,"estimatedMinutes":(s.session.plan.estimated_minutes.is_finite() && s.session.plan.estimated_minutes>0.0).then_some(s.session.plan.estimated_minutes)}});
+        let facts = json!({"recipient":role,"onGround":s.session.telemetry.on_ground,"phase":format!("{:?}",s.session.phase),
+            "passengers":s.session.plan.passengers,"humourAllowed":humour_allowed,
+            "flight":{"departure":s.session.plan.departure,"destination":s.session.plan.destination}});
         let mut prompt = format!(
             "{instructions}\n{}\n{role_guidance}",
             interpretation_context
@@ -914,14 +1285,7 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         while crate::llm::prompt_fits(&client, &settings.ai_url, &prompt, &request.text).await
             == Some(false)
         {
-            if !facts["conversationNotes"].is_null() {
-                facts["conversationNotes"] = serde_json::Value::Null;
-            } else if facts["recentCaptainMessages"]
-                .as_array()
-                .is_some_and(|messages| !messages.is_empty())
-            {
-                facts["recentCaptainMessages"].as_array_mut().unwrap().pop();
-            } else if allowed.len() > 8 {
+            if allowed.len() > 8 {
                 allowed.truncate(allowed.len() / 2);
             } else {
                 let mut state = shared.write().await;
@@ -940,8 +1304,8 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
             json!({"type":"string","enum":allowed.iter().filter_map(|control|control["control"].as_str()).collect::<Vec<_>>()})
         };
         let schema = json!({"type":"object","additionalProperties":false,
-        "required":["actions","cross_check","conversation_reply","memory"],"properties":{
-            "cross_check":{"type":"boolean"},"conversation_reply":{"type":"string"},"memory":{"type":"string","maxLength":700},
+        "required":["actions","cross_check"],"properties":{
+            "cross_check":{"type":"boolean"},
             "actions":{"type":"array","maxItems":8,"items":{"type":"object","additionalProperties":false,"required":["control","value"],
                 "properties":{"control":control_schema,"value":{"type":"number"}}}}
         }});
@@ -985,22 +1349,13 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                 }
             }
             intent.actions = unique;
+            intent
+                .conversation_points
+                .retain(|point| !point.trim().is_empty() && request.text.contains(point.as_str()));
             intent.conversation_only = intent.actions.is_empty() && !intent.cross_check;
             intent
         });
 
-        let mut intent = intent;
-        if let Some(intent) = intent.as_mut() {
-            intent.reply = pace_crew_reply(
-                &client,
-                &settings,
-                &pacing_prompt,
-                &request.text,
-                &intent.reply,
-                &previous_crew_reply,
-            )
-            .await;
-        }
         if std::env::var_os("OPENATC_ACTOR_TRACE").is_some() {
             eprintln!("Crew interpretation: {:?}", intent);
         }
@@ -1013,7 +1368,6 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                     .sum::<usize>()
                     <= 8192
         });
-        let mut vetoed = false;
         let intent = if let Some(mut intent) = intent {
             let properties = allowed
                 .iter()
@@ -1053,65 +1407,142 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                                 })
                             }),
                     );
-                    let missing = intent
-                        .actions
-                        .iter()
-                        .filter(|action| {
-                            openatc_core::crew::validate(
-                                &profile,
-                                role,
-                                &action.control,
-                                action.value,
-                            ) && !controls
-                                .actions
-                                .iter()
-                                .any(|target| target.control == action.control)
-                        })
-                        .collect::<Vec<_>>();
-                    if !missing.is_empty() {
-                        let targets = missing.iter().enumerate().map(|(index, action)| (
-                            format!("candidate_{index}"), json!({"control":action.control,
-                                "label":profile.controls[&action.control].label,"value":action.value})
-                        )).collect::<serde_json::Map<_,_>>();
-                        let properties = targets
-                            .keys()
-                            .map(|id| (id.clone(), json!({"type":"boolean"})))
-                            .collect::<serde_json::Map<_, _>>();
-                        let schema = json!({"type":"object","additionalProperties":false,
-                            "required":properties.keys().collect::<Vec<_>>(),"properties":properties});
-                        let current =
-                            json!({"captainMessage":request.text,"targets":targets}).to_string();
-                        if let Ok(approved) =
-                            crate::llm::structured_format::<BTreeMap<String, bool>>(
-                                &client,
-                                &settings.ai_url,
-                                &settings.ai_model,
-                                0.0,
-                                &proposal_prompt,
-                                &current,
-                                Some(schema),
-                            )
-                            .await
-                        {
-                            for (index, action) in missing.iter().enumerate() {
-                                if approved.get(&format!("candidate_{index}")) == Some(&true) {
-                                    controls.actions.push(
-                                        openatc_core::crew::request::ControlAction {
-                                            control: action.control.clone(),
-                                            value: action.value,
-                                        },
-                                    );
-                                }
-                            }
+                    let mut candidates = Vec::new();
+                    for action in intent.actions.iter().chain(controls.actions.iter()) {
+                        if openatc_core::crew::validate(
+                            &profile,
+                            role,
+                            &action.control,
+                            action.value,
+                        ) && !candidates.iter().any(
+                            |previous: &&openatc_core::crew::request::ControlAction| {
+                                previous.control == action.control && previous.value == action.value
+                            },
+                        ) {
+                            candidates.push(action);
                         }
                     }
+                    // Independent current-message interpretations can agree on a target; disagreements need quoted evidence.
+                    let agreed = candidates
+                        .iter()
+                        .filter(|action| {
+                            intent.actions.iter().any(|proposal| {
+                                proposal.control == action.control && proposal.value == action.value
+                            }) && controls.actions.iter().any(|proposal| {
+                                proposal.control == action.control && proposal.value == action.value
+                            })
+                        })
+                        .copied()
+                        .collect::<Vec<_>>();
+                    let disputed = candidates
+                        .iter()
+                        .filter(|action| {
+                            !agreed.iter().any(|agreed| {
+                                agreed.control == action.control && agreed.value == action.value
+                            })
+                        })
+                        .copied()
+                        .collect::<Vec<_>>();
+                    let mut approved_actions = agreed
+                        .into_iter()
+                        .map(|action| openatc_core::crew::request::ControlAction {
+                            control: action.control.clone(),
+                            value: action.value,
+                        })
+                        .collect::<Vec<_>>();
+                    let check_agreed = intent.cross_check && controls.cross_check;
+                    let check_disputed = intent.cross_check != controls.cross_check;
+                    controls.cross_check = check_agreed;
+                    if !disputed.is_empty() || check_disputed {
+                        let mut targets=disputed.iter().enumerate().map(|(index,action)|{
+                            let control=&profile.controls[&action.control];
+                            let meaning=control.states.iter().find(|(_,value)|(**value-action.value).abs()<0.001)
+                                .map(|(state,_)|state.clone()).unwrap_or_else(||{
+                                    if action.value==control.off {say("crew_state_off",&[])}
+                                    else if action.value==control.on {say("crew_state_on",&[])}
+                                    else {format!("{}",action.value)}
+                                });
+                            (format!("candidate_{index}"),json!({"control":action.control,
+                                "proposedOperation":format!("{}: {}",control.label,meaning),"value":action.value,
+                                "instructions":control.instructions}))
+                        }).collect::<serde_json::Map<_,_>>();
+                        if check_disputed {
+                            targets.insert("@cross_check".into(),json!({"control":"@cross_check","proposedOperation":"@cross_check"}));
+                        }
+                        let properties=targets.keys().map(|id|(id.clone(),json!({"type":"object","additionalProperties":false,
+                            "required":["evidence","requested"],"properties":{"evidence":{"type":"string"},"requested":{"type":"boolean"}}}))).collect::<serde_json::Map<_,_>>();
+                        let schema = json!({"type":"object","additionalProperties":false,"required":properties.keys().collect::<Vec<_>>(),"properties":properties});
+                        let current =
+                            json!({"captainMessage":request.text,"targets":targets}).to_string();
+                        if crate::llm::prompt_fits(
+                            &client,
+                            &settings.ai_url,
+                            &proposal_prompt,
+                            &current,
+                        )
+                        .await
+                            == Some(false)
+                        {
+                            let mut state = shared.write().await;
+                            return Some(reply(
+                                &mut state,
+                                role,
+                                "crew_action_clarify",
+                                &[],
+                                false,
+                            ));
+                        }
+                        let approved = match crate::llm::structured_format::<
+                            BTreeMap<String, ControlAuthority>,
+                        >(
+                            &client,
+                            &settings.ai_url,
+                            &settings.ai_model,
+                            0.0,
+                            &proposal_prompt,
+                            &current,
+                            Some(schema),
+                        )
+                        .await
+                        {
+                            Ok(approved) => approved,
+                            Err(error) => {
+                                eprintln!("Crew control authority could not be checked: {error}");
+                                let mut state = shared.write().await;
+                                return Some(reply(
+                                    &mut state,
+                                    role,
+                                    "crew_action_clarify",
+                                    &[],
+                                    false,
+                                ));
+                            }
+                        };
+                        if std::env::var_os("OPENATC_ACTOR_TRACE").is_some() {
+                            eprintln!("Crew control authority: {approved:?}");
+                        }
+                        for (index, action) in disputed.iter().enumerate() {
+                            if approved
+                                .get(&format!("candidate_{index}"))
+                                .is_some_and(|authority| authority.matches(&request.text))
+                            {
+                                approved_actions.push(openatc_core::crew::request::ControlAction {
+                                    control: action.control.clone(),
+                                    value: action.value,
+                                });
+                            }
+                        }
+                        controls.cross_check = check_agreed
+                            || (check_disputed
+                                && approved
+                                    .get("@cross_check")
+                                    .is_some_and(|authority| authority.matches(&request.text)));
+                    }
+                    controls.actions = approved_actions;
                     if !controls.valid_controls(&profile, role) {
                         let mut state = shared.write().await;
                         return Some(reply(&mut state, role, "crew_action_clarify", &[], false));
                     }
-                    vetoed = (!intent.actions.is_empty() || intent.cross_check)
-                        && controls.actions.is_empty()
-                        && !controls.cross_check;
                     intent.actions = controls.actions;
                     intent.cross_check = controls.cross_check;
                     intent.conversation_only = intent.actions.is_empty() && !intent.cross_check;
@@ -1131,60 +1562,60 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         if role == "ground" && s.session.ground_interphone_disconnected {
             return Some(Json(json!({"result":{"accepted":false,"silent":true,"notice":say("crew_ground_interphone_disconnected",&[])},"state":snapshot(&s.session,&s.settings)})).into_response());
         }
-        if s.session_generation != generation || s.crew.aircraft != aircraft {
-            return Some(reply(&mut s, role, "crew_action_clarify", &[], false));
+        if s.session_generation != generation
+            || s.crew.aircraft != aircraft
+            || s.crew.revision != revision
+        {
+            return Some(Json(json!({"result":{"accepted":false,"silent":true},"state":snapshot(&s.session,&s.settings)})).into_response());
         }
         let Some(mut intent) = intent else {
             return Some(reply(&mut s, role, "crew_action_clarify", &[], false));
         };
         if intent.actions.is_empty() && !intent.cross_check {
-            if vetoed || intent.reply.trim().is_empty() {
-                drop(s);
-                intent.reply =
-                    compose(shared, role, &request.text, &intent.reply, &[], &[], false).await;
-                s = shared.write().await;
-                if s.session_generation != generation || s.crew.aircraft != aircraft {
-                    return Some(reply(&mut s, role, "crew_action_clarify", &[], false));
-                }
-            }
-            if !intent.memory.is_empty()
-                && intent.memory.chars().count() <= 700
-                && crate::llm::spoken(&intent.memory).is_ok()
+            drop(s);
+            let response = converse(shared, role, &request.text, &intent.conversation_points).await;
+            s = shared.write().await;
+            if s.session_generation != generation
+                || s.crew.aircraft != aircraft
+                || s.crew.revision != revision
             {
-                s.crew
-                    .memories
-                    .insert(role.to_owned(), intent.memory.clone());
+                return Some(Json(json!({"result":{"accepted":false,"silent":true},"state":snapshot(&s.session,&s.settings)})).into_response());
             }
+            update_ground_connection(&mut s);
+            if role == "ground" && s.session.ground_interphone_disconnected {
+                return Some(Json(json!({"result":{"accepted":false,"silent":true,"notice":say("crew_ground_interphone_disconnected",&[])},"state":snapshot(&s.session,&s.settings)})).into_response());
+            }
+            let Some(response) = response else {
+                return Some(Json(json!({"result":{"accepted":false,"silent":true,"notice":say("crew_conversation_unavailable",&[])},"state":snapshot(&s.session,&s.settings)})).into_response());
+            };
+            intent.reply = response;
             if crate::llm::spoken(&intent.reply).is_ok() && intent.reply.len() <= 3000 {
                 speak(&mut s, role, &intent.reply);
                 return Some(Json(json!({"result":{"accepted":true,"message":intent.reply},"state":snapshot(&s.session,&s.settings)})).into_response());
             }
             return Some(reply(&mut s, role, "crew_action_clarify", &[], false));
         }
-        if intent.reply.trim().is_empty() && !intent.conversation_points.is_empty() {
-            drop(s);
-            intent.reply = compose(
-                shared,
-                role,
-                &request.text,
-                &intent.reply,
-                &[],
-                &intent.conversation_points,
-                true,
-            )
-            .await;
-            s = shared.write().await;
-            if s.session_generation != generation || s.crew.aircraft != aircraft {
-                return Some(reply(&mut s, role, "crew_action_clarify", &[], false));
-            }
-        }
-        if !intent.memory.is_empty()
-            && intent.memory.chars().count() <= 700
-            && crate::llm::spoken(&intent.memory).is_ok()
         {
-            s.crew
-                .memories
-                .insert(role.to_owned(), intent.memory.clone());
+            drop(s);
+            let points = conversation_points(shared, role, &request.text)
+                .await
+                .unwrap_or_default();
+            intent.reply = if points.is_empty() {
+                String::new()
+            } else {
+                converse(shared, role, &request.text, &points)
+                    .await
+                    .unwrap_or_default()
+            };
+            s = shared.write().await;
+            update_ground_connection(&mut s);
+            if s.session_generation != generation
+                || s.crew.aircraft != aircraft
+                || s.crew.revision != revision
+                || (role == "ground" && s.session.ground_interphone_disconnected)
+            {
+                return Some(Json(json!({"result":{"accepted":false,"silent":true},"state":snapshot(&s.session,&s.settings)})).into_response());
+            }
         }
         Some(intent)
     } else {
@@ -1469,7 +1900,6 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         let mut batch = Batch {
             outcomes: Vec::new(),
             held_reply: intent.reply.clone(),
-            failed: false,
             started: std::time::Instant::now(),
         };
         if intent.cross_check && !intent.actions.iter().any(|a| a.control == "slides") {
@@ -1537,6 +1967,25 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
 #[cfg(test)]
 mod narration_tests {
     #[test]
+    fn partial_control_failure_does_not_discard_held_conversation() {
+        let mut state = crate::test_state();
+        let text = super::batch_reply(
+            &mut state,
+            super::Batch {
+                outcomes: vec![
+                    "Slides could not be confirmed".into(),
+                    "Cabin lighting set to 50 percent".into(),
+                ],
+                held_reply: "I'll check for a spare lobster and bring a coffee.".into(),
+                started: std::time::Instant::now(),
+            },
+        );
+        assert!(text.contains("could not be confirmed") && text.contains("50 percent"));
+        assert!(text.contains("lobster") && text.contains("coffee"));
+        assert!(!text.contains("Slides armed"));
+    }
+
+    #[test]
     fn generated_reply_keeps_control_outcomes_and_operational_numbers() {
         let protected = vec!["Heading 275 set".to_owned()];
         assert!(super::valid_narration(
@@ -1579,7 +2028,600 @@ mod conversation_routing_tests {
     use axum::{Router, routing::post};
 
     #[tokio::test]
-    async fn context_budget_discards_social_notes_before_controls_and_refuses_tiny_contexts() {
+    async fn dialogue_receives_readable_current_situation_and_known_duration() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/v1/chat/completions",
+                    post(|Json(body): Json<serde_json::Value>| async move {
+                        let system = body["messages"][0]["content"].as_str().unwrap();
+                        assert!(system.contains("\"phase\":\"TaxiIn\""));
+                        assert!(system.contains("\"onGround\":true"));
+                        assert!(system.contains("\"estimatedMinutes\":43.0"));
+                        assert!(system.contains("already landed"));
+                        dialogue_response(
+                            &body,
+                            json!({"reply":"We're on the ground after landing.","joke":""}),
+                        )
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let mut state = crate::test_state();
+        state.settings.ai_url = origin;
+        state.settings.ai_model = "test".into();
+        state.session.phase = openatc_core::state::PhaseCode::TaxiIn;
+        state.session.telemetry.on_ground = true;
+        state.session.plan.estimated_minutes = 43.0;
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+        assert_eq!(
+            converse(&shared, "copilot", "Where are we in the flight?", &[])
+                .await
+                .as_deref(),
+            Some("We're on the ground after landing.")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the configured live model server"]
+    async fn live_crew_phase_and_short_flight_context() {
+        let origin = std::env::var("OPENATC_LIVE_AI_URL").expect("live model URL");
+        let mut report = Vec::new();
+        for (phase, on_ground, minutes) in [
+            (openatc_core::state::PhaseCode::Pushback, true, 43.0),
+            (openatc_core::state::PhaseCode::Cruise, false, 43.0),
+            (openatc_core::state::PhaseCode::TaxiIn, true, 43.0),
+            (openatc_core::state::PhaseCode::Cruise, false, 0.0),
+        ] {
+            for role in ["ground", "cabin", "copilot"] {
+                if role == "ground" && phase != openatc_core::state::PhaseCode::Pushback {
+                    continue;
+                }
+                let mut state = crate::test_state();
+                state.settings.ai_enabled = true;
+                state.settings.ai_url = origin.clone();
+                state.settings.ai_model = "qwen2.5-7b-instruct-q4_k_m".into();
+                state.settings.llm_phrase_variety = true;
+                state.session.plan.departure = "LFMN".into();
+                state.session.plan.destination = "LIMC".into();
+                state.session.plan.estimated_minutes = minutes;
+                state.session.phase = phase;
+                state.session.telemetry.on_ground = on_ground;
+                state.session.telemetry.position_valid = true;
+                let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+                let started = std::time::Instant::now();
+                let reply = converse(
+                    &shared,
+                    role,
+                    "Is this a long-haul flight? Are we on the ground or in the air now?",
+                    &[],
+                )
+                .await
+                .expect("spoken response");
+                report.push(json!({"role":role,"phase":format!("{phase:?}"),"onGround":on_ground,"estimatedMinutes":minutes,"reply":reply,"seconds":started.elapsed().as_secs_f64()}));
+            }
+        }
+        std::fs::write(
+            std::env::temp_dir().join("openatc-crew-phase-validation.json"),
+            serde_json::to_string_pretty(&report).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn dialogue_response(
+        body: &serde_json::Value,
+        answer: serde_json::Value,
+    ) -> Json<serde_json::Value> {
+        let answer = if let Some(properties) = body
+            .pointer("/response_format/json_schema/schema/properties")
+            .and_then(serde_json::Value::as_object)
+            && !properties.is_empty()
+            && properties
+                .values()
+                .all(|property| property["type"] == "boolean")
+        {
+            serde_json::Value::Object(
+                properties
+                    .keys()
+                    .map(|key| (key.clone(), json!(true)))
+                    .collect(),
+            )
+        } else {
+            answer
+        };
+        Json(json!({"choices":[{"message":{"content":answer.to_string()}}]}))
+    }
+
+    #[test]
+    fn control_authority_requires_current_source_evidence() {
+        let accepted = ControlAuthority {
+            evidence: "Turn OFF the cabin lights".into(),
+            requested: true,
+        };
+        assert!(accepted.matches("Please turn off the cabin lights and bring a sandwich."));
+        assert!(!accepted.matches("Please bring a sandwich."));
+        assert!(
+            !ControlAuthority {
+                requested: false,
+                ..accepted
+            }
+            .matches("Turn off the cabin lights.")
+        );
+        assert!(
+            !ControlAuthority {
+                evidence: String::new(),
+                requested: true
+            }
+            .matches("Turn off the cabin lights.")
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_extraction_keeps_quoted_clauses_and_rejects_invented_sources() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener,Router::new().route("/v1/chat/completions",post(|Json(body):Json<serde_json::Value>|async move{
+                let context:serde_json::Value=serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+                assert_eq!(context["role"],"cabin");
+                Json(json!({"choices":[{"message":{"content":json!({"points":["Can you check for lobster?","Tell me a joke while we wait!","Emily is the captain's sister."]}).to_string()}}]}))
+            }))).await.unwrap();
+        });
+        let mut state = crate::test_state();
+        state.settings.ai_url = origin;
+        state.settings.ai_model = "test".into();
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+        let result=conversation_points(&shared,"cabin","Dim the lights to 50.5 percent. Can you check for lobster? Tell me a joke while we wait!").await.unwrap();
+        assert_eq!(
+            result,
+            vec![
+                "Can you check for lobster?",
+                "Tell me a joke while we wait!"
+            ]
+        );
+        assert!(shared.read().await.session.crew_actions.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn dialogue_compacts_optional_history_but_keeps_relevant_original_facts() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let token_calls = Arc::new(AtomicUsize::new(0));
+        let counter = token_calls.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener,Router::new()
+                .route("/v1/tokenize",post(move |Json(body):Json<serde_json::Value>| {
+                    counter.fetch_add(1,Ordering::SeqCst);
+                    async move {
+                        let prompt = body["messages"][0]["content"].as_str().unwrap();
+                        assert!(body["messages"].to_string().contains("Nora") && body["messages"].to_string().contains("Hobart"));
+                        assert_eq!(body["max_tokens"],512);
+                        Json(json!({"fits":!prompt.contains("UNRELATED_HISTORY")}))
+                    }
+                }))
+                .route("/v1/chat/completions",post(|Json(body):Json<serde_json::Value>|async move {
+                    dialogue_response(&body,json!({"reply":"Your sister is Nora, and you are meeting in Hobart.","joke":""}))
+                }))).await.unwrap();
+        });
+        let mut state = crate::test_state();
+        state.settings.ai_url = origin;
+        state.settings.ai_model = "test".into();
+        let fact = "My sister is Nora, and we are meeting in Hobart.".to_owned();
+        state.crew.social.remember(
+            "copilot",
+            std::slice::from_ref(&fact),
+            std::slice::from_ref(&fact),
+        );
+        for index in 0..100 {
+            let quote = format!("UNRELATED_HISTORY preference {index} is blue.");
+            state.crew.social.remember(
+                "copilot",
+                std::slice::from_ref(&quote),
+                std::slice::from_ref(&quote),
+            );
+        }
+        let shared = Arc::new(tokio::sync::RwLock::new(state));
+        let result = converse(
+            &shared,
+            "copilot",
+            "What is my sister's name and where are we meeting?",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(result.contains("Nora") && result.contains("Hobart"));
+        assert!(token_calls.load(Ordering::SeqCst) > 1);
+        assert!(shared.read().await.session.crew_actions.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn dialogue_refuses_tiny_context_without_generation_or_memory_changes() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route(
+                        "/v1/tokenize",
+                        post(|| async { Json(json!({"fits":false})) }),
+                    )
+                    .route(
+                        "/v1/chat/completions",
+                        post(move || {
+                            counter.fetch_add(1, Ordering::SeqCst);
+                            async { Json(json!({})) }
+                        }),
+                    ),
+            )
+            .await
+            .unwrap();
+        });
+        let mut state = crate::test_state();
+        state.settings.ai_url = origin;
+        state.settings.ai_model = "test".into();
+        let shared = Arc::new(tokio::sync::RwLock::new(state));
+        assert!(
+            converse(&shared, "copilot", "Hello, how are you?", &[])
+                .await
+                .is_none()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let state = shared.read().await;
+        assert!(state.session.crew_actions.is_empty() && state.session.transcript.is_empty());
+        assert!(
+            state.crew.social.context("copilot", "hello")["captainQuotesNewestFirst"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn dialogue_discards_replies_after_flight_or_aircraft_profile_changes() {
+        use std::sync::Arc;
+        for reset_profile in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let server = tokio::spawn({
+                let entered = entered.clone();
+                let release = release.clone();
+                async move {
+                    axum::serve(listener,Router::new().route("/v1/chat/completions",post(move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        Json(json!({"choices":[{"message":{"content":json!({"reply":"Your sister is Nora.","joke":"","remember":["My sister is Nora."]}).to_string()}}]}))
+                    }
+                }))).await.unwrap();
+                }
+            });
+            let mut state = crate::test_state();
+            state.settings.ai_url = origin;
+            state.settings.ai_model = "test".into();
+            let shared = Arc::new(tokio::sync::RwLock::new(state));
+            let request = tokio::spawn({
+                let shared = shared.clone();
+                async move { converse(&shared, "copilot", "My sister is Nora.", &[]).await }
+            });
+            entered.notified().await;
+            {
+                let mut state = shared.write().await;
+                if reset_profile {
+                    state.crew.revision = state.crew.revision.wrapping_add(1);
+                } else {
+                    state.session_generation = state.session_generation.wrapping_add(1);
+                }
+                state.crew.social.clear();
+            }
+            release.notify_one();
+            assert!(request.await.unwrap().is_none());
+            let state = shared.read().await;
+            assert!(state.session.transcript.is_empty() && state.session.crew_actions.is_empty());
+            assert!(
+                !state
+                    .crew
+                    .social
+                    .context("copilot", "sister")
+                    .to_string()
+                    .contains("Nora")
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn one_extractor_cannot_authorize_unrequested_controls() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener,Router::new().route("/v1/chat/completions",post(|Json(body):Json<serde_json::Value>|async move{
+                let properties=body.pointer("/response_format/json_schema/schema/properties").and_then(serde_json::Value::as_object).unwrap();
+                let answer=if properties.values().all(|property|property.pointer("/properties/evidence").is_some()) {
+                    serde_json::Value::Object(properties.keys().map(|key|(key.clone(),json!({"evidence":"","requested":false}))).collect())
+                } else if properties.values().all(|property|property["type"]=="boolean") {
+                    serde_json::Value::Object(properties.keys().map(|key|(key.clone(),json!(true))).collect())
+                } else if properties.contains_key("control_targets") {
+                    json!({"control_targets":{},"cross_check":false})
+                } else if properties.contains_key("actions") {
+                    json!({"actions":[{"control":"heading","value":275},{"control":"beacon","value":1}],"cross_check":false,"conversation_points":["Are you ready for landing?"]})
+                } else {
+                    json!({"reply":"Ready here, Captain.","joke":""})
+                };
+                Json(json!({"choices":[{"message":{"content":answer.to_string()}}]}))
+            }))).await.unwrap();
+        });
+        let catalogue: toml::Value =
+            toml::from_str(include_str!("../../../aircraft/toliss_a320.toml")).unwrap();
+        let profile: CrewProfile =
+            serde_json::from_value(serde_json::to_value(&catalogue["aircraft"]["crew"]).unwrap())
+                .unwrap();
+        let mut state = crate::test_state();
+        state.settings.ai_enabled = true;
+        state.settings.ai_model = "test".into();
+        state.settings.ai_url = origin;
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+        observe(
+            AxumState(shared.clone()),
+            Json(Observation {
+                aircraft: "test".into(),
+                available: profile.controls.keys().cloned().collect(),
+                profile: Some(profile),
+                values: BTreeMap::new(),
+            }),
+        )
+        .await;
+        request(
+            &shared,
+            &Request {
+                role: "copilot".into(),
+                intent: "conversation".into(),
+                text: "Are you ready for landing?".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let state = shared.read().await;
+        assert!(state.session.crew_actions.is_empty());
+        assert_eq!(
+            state.session.transcript.last().unwrap().text,
+            "Ready here, Captain."
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn dialogue_retries_only_when_the_expanded_prompt_still_fits() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let old = "Why don't scientists trust atoms? Because they make up everything.";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener,Router::new()
+                .route("/v1/tokenize",post(|Json(body):Json<serde_json::Value>|async move{
+                    Json(json!({"fits":!body["messages"][0]["content"].as_str().unwrap().contains("rejectedJoke")}))
+                }))
+                .route("/v1/chat/completions",post(move ||{
+                    counter.fetch_add(1,Ordering::SeqCst);
+                    async move{Json(json!({"choices":[{"message":{"content":json!({"reply":"Your sister is Nora.","joke":old}).to_string()}}]}))}
+                }))).await.unwrap();
+        });
+        let mut state = crate::test_state();
+        state.settings.ai_url = origin;
+        state.settings.ai_model = "test".into();
+        state.crew.social.record_joke(old);
+        let shared = Arc::new(tokio::sync::RwLock::new(state));
+        assert!(
+            converse(&shared, "copilot", "Tell me another joke.", &[])
+                .await
+                .is_none()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(shared.read().await.session.crew_actions.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn crew_dialogue_cannot_grant_aircraft_movement_authority() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener,Router::new().route("/v1/chat/completions",post(||async{
+                Json(json!({"choices":[{"message":{"content":"{\"reply\":\"You are cleared to land.\",\"joke\":\"\"}"}}]}))
+            }))).await.unwrap();
+        });
+        let mut state = crate::test_state();
+        state.settings.ai_url = origin;
+        state.settings.ai_model = "test".into();
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+        assert!(
+            converse(&shared, "copilot", "Are we ready for landing?", &[])
+                .await
+                .is_none()
+        );
+        let state = shared.read().await;
+        assert!(state.session.crew_actions.is_empty() && state.session.transcript.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn complete_joke_is_kept_but_a_tacked_on_question_is_removed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener,Router::new().route("/v1/chat/completions",post(move || {
+                counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                async {Json(json!({"choices":[{"message":{"content":"{\"kind\":\"follow_up\"}"}}]}))}
+            }))).await.unwrap();
+        });
+        let mut settings = openatc_settings::Settings::default();
+        settings.ai_url = origin;
+        settings.ai_model = "test".into();
+        let joke = "Why did the pie fly? It wanted a window seat!";
+        let spoken = format!("All set. {joke} How is the flight going?");
+        let result = pace_crew_reply_with_joke(
+            &reqwest::Client::new(),
+            &settings,
+            "pacing",
+            "Tell me a joke.",
+            &spoken,
+            "",
+            Some(&format!("  {joke}\n")),
+        )
+        .await;
+        assert_eq!(result, format!("All set. {joke}"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn repeated_joke_gets_one_bounded_retry_without_losing_factual_answers() {
+        let old = "Why don't scientists trust atoms? Because they make up everything.";
+        let new = "The catering trolley applied for a pilot job. It already knew how to roll.";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/v1/chat/completions",
+                    post(move |Json(body):Json<serde_json::Value>| {
+                        let review=body.pointer("/response_format/json_schema/schema/properties").and_then(serde_json::Value::as_object).is_some_and(|properties|properties.values().all(|property|property["type"]=="boolean"));
+                        let index=if review{0}else{counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst)};
+                        async move {dialogue_response(&body,json!({"reply":if index==0{"Your sister is Nora and the meeting is in Hobart."}else{"This second draft lost the factual answer."},"joke":if index==0{old}else{new},"remember":[]}))}
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let mut state = crate::test_state();
+        state.settings.ai_url = origin;
+        state.settings.ai_model = "test".into();
+        state.crew.social.record_joke(old);
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+        let reply = converse(
+            &shared,
+            "copilot",
+            "Remind me about Nora and tell me a different joke.",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(reply.contains("Nora") && reply.contains("Hobart") && reply.contains(new));
+        assert!(!reply.contains(old));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(shared.read().await.session.crew_actions.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn conversation_keeps_exact_recall_evidence_without_the_full_control_catalogue() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let source = "My sister’s name is Nora and we are meeting in Hobart.".to_owned();
+        let quoted = source.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/v1/chat/completions",post(move |Json(body):Json<serde_json::Value>| {
+                let quoted = quoted.clone();
+                async move {
+                    let prompt = body["messages"][0]["content"].as_str().unwrap();
+                    assert!(body["messages"].to_string().contains("Nora") && body["messages"].to_string().contains("Hobart"));
+                    assert!(body["messages"].to_string().contains("heading") && body["messages"].to_string().contains("275"));
+                    assert!(!prompt.contains("button_000900"));
+                    dialogue_response(&body,json!({"reply":"Your sister is Nora, and you are meeting in Hobart. The heading is 275.","remember":[quoted,"Your sister is Emily."]}))
+                }
+            }))).await.unwrap();
+        });
+        let mut state = crate::test_state();
+        state.settings.ai_url = origin;
+        state.settings.ai_model = "test".into();
+        state.crew.observed_at = Some(std::time::Instant::now());
+        for index in 0..1000 {
+            state
+                .session
+                .crew_controls
+                .push(openatc_core::crew::Capability {
+                    id: format!("button_{index:06}"),
+                    label: "Other control".into(),
+                    role: "copilot".into(),
+                    available: true,
+                    value: None,
+                });
+        }
+        state
+            .session
+            .crew_controls
+            .push(openatc_core::crew::Capability {
+                id: "heading".into(),
+                label: "Heading".into(),
+                role: "copilot".into(),
+                available: true,
+                value: Some(275.0),
+            });
+        state.crew.values.insert("heading".into(), 275.0);
+        state
+            .request_memory
+            .begin("copilot", openatc_core::state::PhaseCode::Cruise, &source);
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+        let reply = converse(
+            &shared,
+            "copilot",
+            "What is my sister’s name, where are we meeting and what heading did you set?",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(reply.contains("Nora") && reply.contains("Hobart"));
+        let state = shared.read().await;
+        let memory = state.crew.social.context("copilot", "sister");
+        assert!(
+            memory["captainQuotesNewestFirst"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|quote| quote == &json!(source))
+        );
+        assert!(!memory.to_string().contains("Emily"));
+        assert!(state.session.crew_actions.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn control_interpreter_excludes_social_history_and_refuses_tiny_contexts() {
         use std::sync::{
             Arc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1637,12 +2679,12 @@ mod conversation_routing_tests {
             }),
         )
         .await;
-        shared
-            .write()
-            .await
-            .crew
-            .memories
-            .insert("ground".into(), "OPTIONAL_SOCIAL_NOTE".repeat(30));
+        let optional = "OPTIONAL_SOCIAL_NOTE".repeat(10);
+        shared.write().await.crew.social.remember(
+            "ground",
+            std::slice::from_ref(&optional),
+            std::slice::from_ref(&optional),
+        );
         let request = Request {
             role: "ground".into(),
             intent: "conversation".into(),
@@ -1650,12 +2692,12 @@ mod conversation_routing_tests {
             ..Default::default()
         };
         super::request(&shared, &request).await.unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(token_calls.load(Ordering::SeqCst), 2);
         assert!(shared.read().await.session.crew_actions.is_empty());
         tiny.store(true, Ordering::SeqCst);
         super::request(&shared, &request).await.unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert!(shared.read().await.session.crew_actions.is_empty());
         server.abort();
     }
@@ -1666,6 +2708,12 @@ mod conversation_routing_tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             axum::serve(listener, Router::new().route("/v1/chat/completions", post(|Json(body):Json<serde_json::Value>| async move {
+                if let Some(properties)=body.pointer("/response_format/json_schema/schema/properties").and_then(serde_json::Value::as_object)
+                    && properties.values().all(|value|value.pointer("/properties/evidence").is_some()) {
+                    let context:serde_json::Value=serde_json::from_str(body["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap()).unwrap();
+                    let approved=properties.keys().map(|key|(key.clone(),json!({"evidence":context["captainMessage"],"requested":true}))).collect::<serde_json::Map<_,_>>();
+                    return Json(json!({"choices":[{"message":{"content":json!(approved).to_string()}}]}));
+                }
                 if let Some(properties)=body.pointer("/response_format/json_schema/schema/properties").and_then(serde_json::Value::as_object)
                     && properties.values().all(|value|value["type"]=="boolean") {
                     let approved=properties.keys().map(|key|(key.clone(),json!(true))).collect::<serde_json::Map<_,_>>();
@@ -1917,7 +2965,7 @@ mod conversation_routing_tests {
                     else if classifier { json!({"reply":"Here is a quick one: why did the biscuit visit the doctor? It felt crummy!","actions":[],"cross_check":false,"memory":"Captain enjoys biscuit jokes."}).to_string() }
                     else if body.get("response_format").is_some() { json!({"reply":"Here's a quick one: why did the biscuit visit the doctor? It felt crummy!"}).to_string() }
                     else { "Here's a quick one: why did the biscuit visit the doctor? It felt crummy!".into() };
-                Json(json!({"choices":[{"message":{"content":content}}]}))
+                dialogue_response(&body,serde_json::from_str(&content).unwrap())
             }}))).await.unwrap();
         });
         let mut state = crate::test_state();
@@ -1996,13 +3044,21 @@ mod conversation_routing_tests {
                     .contains("biscuit")
             );
         }
-        // Each of four replies uses interpretation and the shared question guard.
-        assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 12);
+        // Four short exchanges stay within a bounded number of model calls.
+        assert!(generations.load(std::sync::atomic::Ordering::SeqCst) <= 20);
         let state = shared.read().await;
         for role in ["cabin", "copilot", "ground"] {
-            assert_eq!(
-                state.crew.memories.get(role).unwrap(),
-                "Captain enjoys biscuit jokes."
+            let context = state.crew.social.context(role, "biscuit");
+            assert!(
+                !context["captainQuotesNewestFirst"]
+                    .to_string()
+                    .contains("biscuit")
+            );
+            assert!(
+                context["recentCrewRepliesNewestFirst"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("biscuit")
             );
         }
         server.abort();

@@ -20,8 +20,23 @@ impl Crew<'_> {
         self.engine.post("crew/ack",json!({"sequence":task["sequence"],"aircraft":task["aircraft"],"success":success,"detail":"test simulator confirmation"}))
     }
     fn action(&mut self, role: &str, text: &str, control: &str, value: f64) -> Result<Value> {
+        self.action_with_conversation(role, text, control, value, &[])
+    }
+    fn action_with_conversation(
+        &mut self,
+        role: &str,
+        text: &str,
+        control: &str,
+        value: f64,
+        points: &[&str],
+    ) -> Result<Value> {
         self.model
             .propose(json!([{"control":control,"value":value}]));
+        if let Some(proposal) = self.model.proposal.lock().unwrap().as_mut() {
+            let mut value: Value = serde_json::from_str(proposal)?;
+            value["conversation_points"] = json!(points);
+            *proposal = value.to_string();
+        }
         let v = self.request(role, text)?;
         *self.model.proposal.lock().unwrap() = None;
         assert_eq!(v["result"]["pending"], true, "{v}");
@@ -132,11 +147,12 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     )?;
     m.set(json!({"reply":"Cabin lights off. I will get the passengers ready for departure."}));
     e.settings(json!({"aiEnabled":true,"aiModel":"test","aiUrl":m.url()}))?;
-    let combined = c.action(
+    let combined = c.action_with_conversation(
         "cabin",
         "how are the passengers and get you turn off cabin lights and get ready for depature?",
         "cabin_brightness",
         0.,
+        &["how are the passengers", "get ready for depature"],
     )?;
     let response = latest(&combined["state"]).to_lowercase();
     assert!(
@@ -152,13 +168,25 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         "ATTENDANT"
     );
     m.set(json!({"reply":"Cabin lights off. I will bring you a coffee."}));
-    for text in [
-        "turn off cabin lights, can i have a coffee",
-        "can i have a coffee and turn cabin lights off please",
-        "turn off cabin ligths and can i have a cofee",
-        "how are the passengers, turn off cabin lights, can i have a coffee",
+    for (text, point) in [
+        (
+            "turn off cabin lights, can i have a coffee",
+            "can i have a coffee",
+        ),
+        (
+            "can i have a coffee and turn cabin lights off please",
+            "can i have a coffee",
+        ),
+        (
+            "turn off cabin ligths and can i have a cofee",
+            "can i have a cofee",
+        ),
+        (
+            "how are the passengers, turn off cabin lights, can i have a coffee",
+            "can i have a coffee",
+        ),
     ] {
-        let done = c.action("cabin", text, "cabin_brightness", 0.)?;
+        let done = c.action_with_conversation("cabin", text, "cabin_brightness", 0., &[point])?;
         let reply = latest(&done["state"]).to_lowercase();
         assert!(
             reply.contains("coffee") && reply.contains("lights"),
@@ -188,11 +216,12 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         );
     }
     m.set(json!({"reply":"Cabin lights off. I will prepare the cabin for landing."}));
-    let landing = c.action(
+    let landing = c.action_with_conversation(
         "cabin",
         "prepare cabin for landing and turn off lights please",
         "cabin_brightness",
         0.,
+        &["prepare cabin for landing"],
     )?;
     assert!(latest(&landing["state"]).to_lowercase().contains("landing"));
     e.settings(json!({"aiEnabled":false}))?;
@@ -223,6 +252,11 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         "arm and cross check, can you bring me a quick coffee before we push back?",
     ] {
         m.propose(json!([{"control":"slides","value":1}]));
+        if let Some(proposal) = m.proposal.lock().unwrap().as_mut() {
+            let mut value: Value = serde_json::from_str(proposal)?;
+            value["conversation_points"] = json!([text]);
+            *proposal = value.to_string();
+        }
         let request = c.request("cabin", text)?;
         let tasks = request["state"]["crewActions"].as_array().unwrap();
         assert_eq!(tasks.len(), 1);
@@ -339,11 +373,12 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     c.denied("ground", "connect high pressure air")?;
     m.set(json!({"reply":"Chocks removed. Ha, coffee first! Have a good flight."}));
     e.settings(json!({"aiEnabled":true,"aiModel":"test","aiUrl":m.url()}))?;
-    let narrated = c.action(
+    let narrated = c.action_with_conversation(
         "ground",
         "remove chocks. have a beer for me haha",
         "chocks",
         0.,
+        &["have a beer for me haha"],
     )?;
     assert!(latest(&narrated["state"]).contains("coffee first"));
     assert!(
@@ -355,6 +390,12 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
     );
     m.set(json!({"reply":"External power disconnected and chocks removed, Captain. Ha, thanks! Enjoy your flight."}));
     m.propose(json!([{"control":"external_power","value":0},{"control":"chocks","value":0}]));
+    if let Some(proposal) = m.proposal.lock().unwrap().as_mut() {
+        let mut value: Value = serde_json::from_str(proposal)?;
+        value["conversation_points"] =
+            json!(["have a beer for me after that! you deserve it haha"]);
+        *proposal = value.to_string();
+    }
     let banter = c.request("ground", "disoconnect external power and chocks please kind sir, and have a beer for me after that! you deserve it haha")?;
     accepted(&banter);
     let tasks = banter["state"]["crewActions"].as_array().unwrap();
@@ -389,10 +430,11 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         ),
     ] {
         m.set(json!({"reply":response}));
-        let done = c.action(role, request, control, value)?;
+        let done =
+            c.action_with_conversation(role, request, control, value, &["have a beer for me"])?;
         assert!(latest(&done["state"]).contains("Ha,"));
     }
-    m.set(json!({"answers":["I'll check for spare lobster and bring a coffee.","The passengers are settled and the crew is cheerful."]}));
+    m.set(json!({"reply":"I'll check for spare lobster and bring a coffee. The passengers are settled and the crew is cheerful."}));
     *m.proposal.lock().unwrap() = Some(json!({"conversation_reply":"","actions":[{"control":"cabin_brightness","value":50}],"cross_check":false,"memory":"","conversation_points":["Can I have spare lobster and coffee?","How are the passengers and crew?"]}).to_string());
     let mixed = c.request("cabin", "Can I have spare lobster and coffee? Dim the cabin lights to 50%. How are the passengers and crew?")?;
     accepted(&mixed);
@@ -459,7 +501,7 @@ pub(super) fn crew(e: &mut Engine, m: &Model) -> Result {
         })
         .unwrap();
     assert!(!classifier.contains("Pilot wording examples"));
-    assert!(classifier.contains("misspellings") && classifier.contains("reordered words"));
+    assert!(classifier.contains("typos") && classifier.contains("multiple requests"));
     drop(requests);
     m.set(
         json!({"actions":[{"control":"chocks","value":0},{"control":"external_power","value":0}]}),
@@ -705,8 +747,42 @@ pub(super) fn live_actors(e: &mut Engine) -> Result {
                 response = e.post("crew/ack",json!({"sequence":action["sequence"],"aircraft":action["aircraft"],"success":true,"detail":"verified fixture control value"}))?;
             }
             let reply = latest(&response["state"]);
-            println!("{role}: actions={actual:?}; reply={reply}");
-            report.push(json!({"role":role,"request":text,"expected":expected,"actions":actual,"passed":passed,"actionChecksPassed":passed,"conversationReview":"Pending manual review: coverage, continuity, repeated jokes, unsupported claims and control wording", "reply":reply,"seconds":started.elapsed().as_secs_f64()}));
+            let lower = reply.to_lowercase();
+            let required: &[&str] = if text.starts_with("What is my sister's name") {
+                &["nora", "hobart"]
+            } else if text.starts_with("What is my dog's name") {
+                &["miso", "thursday", "harbour"]
+            } else if text.starts_with("What snack did I say") {
+                &["meat pie", "tomato", "football"]
+            } else if text.starts_with("How are you and your family?") {
+                &["sandwich"]
+            } else if text.starts_with("I will be back in town soon and would love") {
+                &[
+                    "sandwich",
+                    "lobster",
+                    "meat pie",
+                    "coffee",
+                    "snack",
+                    "passenger",
+                    "crew",
+                ]
+            } else {
+                &[]
+            };
+            let heading_recalled = !text.starts_with("What is my sister's name")
+                || lower.contains("275")
+                || lower.contains("two seven five")
+                || lower.contains("two hundred and seventy five");
+            let recall_passed =
+                heading_recalled && required.iter().all(|term| lower.contains(term));
+            if !recall_passed {
+                failures += 1;
+            }
+            println!(
+                "{role}: actions={actual:?}; actions_ok={passed}; recall={recall_passed}; seconds={:.2}; reply={reply}",
+                started.elapsed().as_secs_f64()
+            );
+            report.push(json!({"role":role,"request":text,"expected":expected,"actions":actual,"passed":passed&&recall_passed,"actionChecksPassed":passed,"recallChecksPassed":recall_passed,"conversationReview":"Pending manual review: coverage, continuity, repeated jokes, unsupported claims and control wording", "reply":reply,"seconds":started.elapsed().as_secs_f64()}));
         }
         let mut folder = repo().join(".ai/actor-validation");
         if let Ok(scenario) = std::env::var("OPENATC_LIVE_ACTOR_SCENARIO")
@@ -724,7 +800,10 @@ pub(super) fn live_actors(e: &mut Engine) -> Result {
             folder.join("engine.log"),
         )?;
         if failures > 0 {
-            return Err(format!("{failures} live actor action cases failed; inspect .ai/actor-validation/report.json").into());
+            return Err(format!(
+                "{failures} live actor checks failed; inspect .ai/actor-validation/report.json"
+            )
+            .into());
         }
         Ok(())
     })();

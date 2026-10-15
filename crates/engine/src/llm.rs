@@ -35,9 +35,33 @@ pub async fn structured_format<T: DeserializeOwned>(
     user: &str,
     schema: Option<serde_json::Value>,
 ) -> Result<T, StructuredError> {
-    let content = complete_request(client, url, model, temperature, system, user, true, schema)
-        .await
-        .map_err(StructuredError::Service)?;
+    structured_history(client, url, model, temperature, system, user, &[], schema).await
+}
+
+/// Conversation history keeps user and crew speakers distinct at the provider boundary.
+pub async fn structured_history<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+    model: &str,
+    temperature: f32,
+    system: &str,
+    user: &str,
+    history: &[serde_json::Value],
+    schema: Option<serde_json::Value>,
+) -> Result<T, StructuredError> {
+    let content = complete_request(
+        client,
+        url,
+        model,
+        temperature,
+        system,
+        user,
+        history,
+        true,
+        schema,
+    )
+    .await
+    .map_err(StructuredError::Service)?;
     let value: serde_json::Value = serde_json::from_str(&content)
         .map_err(|error| StructuredError::Invalid(format!("Invalid AI JSON: {error}")))?;
     if !value.is_object() {
@@ -68,7 +92,7 @@ pub async fn narration(
         .await
         .map_err(|error| error.to_string())?;
     spoken(&result.reply)?;
-    Ok(result.reply.trim().to_owned())
+    Ok(openatc_core::dialogue::speech_text(&result.reply))
 }
 
 pub(crate) fn spoken(reply: &str) -> Result<(), String> {
@@ -96,14 +120,26 @@ pub async fn prompt_fits(
     system: &str,
     user: &str,
 ) -> Option<bool> {
+    prompt_fits_history(client, url, system, user, &[]).await
+}
+
+pub async fn prompt_fits_history(
+    client: &reqwest::Client,
+    url: &str,
+    system: &str,
+    user: &str,
+    history: &[serde_json::Value],
+) -> Option<bool> {
     let mut request = client.post(format!("{}/v1/tokenize", url.trim_end_matches('/')));
     if let Ok(key) = std::env::var("OPENATC_AI_KEY") {
         request = request.bearer_auth(key);
     }
     let response = request
         .timeout(std::time::Duration::from_secs(5))
-        .json(&serde_json::json!({"messages":[{"role":"system","content":system},{"role":"user","content":user}],"max_tokens":512}))
-        .send().await.ok()?;
+        .json(&serde_json::json!({"messages":messages(system,user,history),"max_tokens":512}))
+        .send()
+        .await
+        .ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -147,10 +183,27 @@ pub async fn text(
     system: &str,
     user: &str,
 ) -> Result<String, String> {
-    let reply =
-        complete_request(client, url, model, temperature, system, user, false, None).await?;
+    let reply = complete_request(
+        client,
+        url,
+        model,
+        temperature,
+        system,
+        user,
+        &[],
+        false,
+        None,
+    )
+    .await?;
     spoken(&reply)?;
-    Ok(reply.trim().to_owned())
+    Ok(openatc_core::dialogue::speech_text(&reply))
+}
+
+fn messages(system: &str, user: &str, history: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut messages = vec![serde_json::json!({"role":"system","content":system})];
+    messages.extend_from_slice(history);
+    messages.push(serde_json::json!({"role":"user","content":user}));
+    messages
 }
 
 async fn complete_request(
@@ -160,6 +213,7 @@ async fn complete_request(
     temperature: f32,
     system: &str,
     user: &str,
+    history: &[serde_json::Value],
     structured: bool,
     schema: Option<serde_json::Value>,
 ) -> Result<String, String> {
@@ -167,10 +221,7 @@ async fn complete_request(
         "model": model,
         "temperature": temperature,
         "max_tokens": 512,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        "messages": messages(system,user,history),
     });
     if structured {
         body["response_format"] = match schema {
@@ -235,6 +286,59 @@ mod tests {
     use super::*;
     use axum::{Json, Router, routing::post};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn token_budget_and_generation_receive_identical_ordered_chat_messages() {
+        use std::sync::{Arc, Mutex};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let server = tokio::spawn({
+            let seen = requests.clone();
+            async move {
+                let budget = seen.clone();
+                axum::serve(listener,Router::new()
+                .route("/v1/tokenize",post(move |Json(body):Json<serde_json::Value>| {
+                    budget.lock().unwrap().push(body);
+                    async{Json(json!({"fits":true}))}
+                }))
+                .route("/v1/chat/completions",post(move |Json(body):Json<serde_json::Value>| {
+                    seen.lock().unwrap().push(body);
+                    async{Json(json!({"choices":[{"message":{"content":"{\"reply\":\"Your sister is Nora.\"}"}}]}))}
+                }))).await.unwrap();
+            }
+        });
+        let history = vec![
+            json!({"role":"user","content":"My sister is Nora."}),
+            json!({"role":"assistant","content":"I'll remember that."}),
+        ];
+        let client = reqwest::Client::new();
+        assert_eq!(
+            prompt_fits_history(&client, &origin, "role", "What is her name?", &history).await,
+            Some(true)
+        );
+        let result: Narration = structured_history(
+            &client,
+            &origin,
+            "test",
+            0.0,
+            "role",
+            "What is her name?",
+            &history,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.reply, "Your sister is Nora.");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["messages"], requests[1]["messages"]);
+        assert_eq!(requests[0]["max_tokens"], requests[1]["max_tokens"]);
+        assert_eq!(requests[0]["messages"][1], history[0]);
+        assert_eq!(requests[0]["messages"][2], history[1]);
+        assert_eq!(requests[0]["messages"][3]["content"], "What is her name?");
+        server.abort();
+    }
 
     async fn model(answer: serde_json::Value) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

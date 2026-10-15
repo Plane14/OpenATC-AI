@@ -282,7 +282,7 @@ pub async fn debug_cancel_actions(AxumState(shared): AxumState<Shared>) -> Respo
     state.crew.batch = None;
     state.crew.pushback = None;
     state.crew.checklist = None;
-    state.crew.memories.clear();
+    state.crew.social.clear();
     state.crew.ground_taxi_origin = None;
     state.request_memory.cancel_pending();
     state.session.taxi_clearance.holding_channel = 0;
@@ -351,7 +351,7 @@ fn reset_flight(state: &mut crate::EngineState) {
     state.flow = super::flight::FlightFlow::default();
     state.crew.checklist = None;
     state.crew.batch = None;
-    state.crew.memories.clear();
+    state.crew.social.clear();
     state.crew.pushback = None;
     state.request_memory = Default::default();
     state.cabin.reset();

@@ -314,3 +314,28 @@ mod tests {
         assert!(rendered.contains("Keep {callsign} literal"));
     }
 }
+
+/// Remove decorative emoji before sending a line to speech synthesis.
+pub fn speech_text(text: &str) -> String {
+    static EMOJI: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let emoji = EMOJI.get_or_init(|| {
+        regex::Regex::new(
+            r"[\p{Extended_Pictographic}\p{Emoji_Presentation}\x{FE0F}\x{200D}\x{20E3}]",
+        )
+        .expect("speech decoration pattern")
+    });
+    emoji.replace_all(text, "").trim().to_owned()
+}
+
+#[cfg(test)]
+mod speech_text_tests {
+    #[test]
+    fn removes_decorations_without_losing_names_or_units() {
+        assert_eq!(super::speech_text("Nora in Hobart. 😄"), "Nora in Hobart.");
+        assert_eq!(
+            super::speech_text("Harbour Café, 23°C, ready for departure."),
+            "Harbour Café, 23°C, ready for departure."
+        );
+        assert_eq!(super::speech_text("Ready 👨‍✈️"), "Ready");
+    }
+}
