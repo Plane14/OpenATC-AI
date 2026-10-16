@@ -138,7 +138,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ matrix.platform }}-${{ matrix.product }}
+          shared-key: ${{ matrix.platform }}-${{ matrix.product }}${{ matrix.platform == 'windows-x64' && matrix.product == 'ai-server' && '-ninja-v1' || '' }}
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
       - name: Install Linux build tools
@@ -154,6 +154,10 @@ jobs:
           $linker = (Get-Command link.exe -ErrorAction Stop).Source
           if ($linker -notmatch 'Microsoft Visual Studio') { throw "Expected the MSVC linker, found $linker" }
           "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" >> $env:GITHUB_ENV
+          if ('${{ matrix.product }}' -eq 'ai-server') {
+            Get-Command ninja.exe -ErrorAction Stop | Out-Null
+            'CMAKE_GENERATOR=Ninja' >> $env:GITHUB_ENV
+          }
       - uses: actions/cache@v4
         if: runner.os != 'macOS' && matrix.product == 'ai-server'
         id: vulkan-cache

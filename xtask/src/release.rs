@@ -278,7 +278,7 @@ pub fn launch() -> Result {
                         return Ok(());
                     }
                     (String::from_utf8(choice.stdout)?.trim() == "Configure")
-                        .then_some("--configure")
+                        .then_some("--configure-web")
                 } else {
                     None
                 };
@@ -315,9 +315,14 @@ pub fn launch() -> Result {
         let bin = root.join("bin");
         let mut command =
             Command::new(bin.join(format!("openatc-ai{}", std::env::consts::EXE_SUFFIX)));
-        command
-            .args(args.into_iter().filter(|a| a != "--terminal-child"))
-            .current_dir(&bin);
+        let args: Vec<_> = args
+            .into_iter()
+            .filter(|a| a != "--terminal-child")
+            .collect();
+        if args.is_empty() {
+            command.arg("--manage-web");
+        }
+        command.args(args).current_dir(&bin);
         #[cfg(target_os = "linux")]
         {
             let mut paths = vec![bin.clone()];

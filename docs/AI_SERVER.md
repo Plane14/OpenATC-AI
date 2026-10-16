@@ -26,6 +26,33 @@ Models are checked before the HTTP listener opens. The default manifest is compi
 
 The STT process is started automatically on a private loopback port. Do not point the plugin at that child port. Set all three service URLs in the plugin to `http://SERVER-IP:8099`, without `/v1`. Kokoro/Kitten run inside the server, while STT remains separate because the LLM and STT native libraries currently cannot coexist in one binary.
 
+## Browser dashboard and setup
+
+The packaged launcher opens a persistent dashboard hosted by the AI-server executable. The HTML, CSS, JavaScript and banner image are embedded; there is no separate web-server installation or remote web dependency. The default form schema is embedded too. An installed editable `server/settings-schema.toml` overrides the embedded form definitions; changing that schema requires reopening the manager. User settings and model weights remain external so upgrades can preserve them.
+
+First run opens the guided wizard before downloading models. Afterwards use **Edit settings** for direct tabs or **Run setup wizard** to review the same settings step by step. Both are generated from the TOML field definitions. Qwen2.5 Instruct and Kokoro remain the defaults, with a fixed 4096-token context; automatic sizing is opt-in.
+
+**Save and apply** validates the full configuration before stopping the running inference process. Invalid edits leave its saved settings and runtime intact. A successful save reloads the selected models automatically, with verification, download byte counts, component loading and readiness shown on the same page. The dashboard remains available throughout. A modal overlay blocks duplicate commands during load/unload, Save and apply, and deletion. It shows a spinner with actual verification/loading stages and download bytes when available. The overlay stays open until the requested operation completes, rather than closing as soon as the server accepts it. Errors expose a Dismiss action; connection failures never imply success. A valid setting can still fail to start because of an occupied port, insufficient memory or an incompatible model; the dashboard reports the error and keeps settings available for correction.
+
+The **Models** panel combines model files, locations, download progress, loaded state and actions. **Delete** removes only that model’s known cached files, preserving their pinned checksums for future downloads; an enabled selected model must be unloaded first. Voice weights and their supporting data are grouped under one model row. **Edit** opens the appropriate direct settings tab. Each row has **Load / Unload** for its language, recognition or voice component. Loading another bundled model switches that component’s selection. Component changes automatically reload the inference runtime, so other enabled components briefly reload too; the dashboard stays available throughout. **Load models / Unload models** applies to the whole model set. Once all models are unloaded, inference health remains reachable and model-dependent endpoints return HTTP 503 with a clear explanation. A partial runtime reports its enabled components separately from HTTP liveness.
+
+Resource readings identify the server host, rather than the browser’s computer. Overall CPU/RAM and NVIDIA GPU/VRAM counters are separate from inference-process figures. Recognition has its own process. When language and synthesis are both enabled, they share one process, so their table figures are marked **Shared**, include context/runtime overhead, and must not be added together. With only one of those components loaded, the process observation applies to that component and its runtime overhead. These are process observations, not exact tensor-allocation accounting. Unavailable per-process GPU counters remain unavailable; macOS unified memory is not represented as dedicated VRAM. `GPU requested` remains distinct from confirmed accelerator initialization.
+
+```sh
+# Dashboard with automatic browser opening and saved-model startup.
+openatc-ai --manage-web
+
+# Headless dashboard with a fixed management port.
+openatc-ai --manage-web --no-browser --dashboard-port 8100
+
+# Trusted LAN management using this server's actual interface address.
+openatc-ai --manage-web --no-browser --dashboard-host 192.168.1.10 --dashboard-port 8100
+```
+
+The management listener defaults to loopback and has no login. An explicit LAN bind is for trusted networks. Mutations require the dashboard's exact browser Origin. Do not expose it directly to the public internet. The plugin continues to use the inference endpoint, normally port 8099; do not substitute the dashboard port in plugin settings.
+
+The manager owns its inference child and speech sidecar. Reopening the same configuration reuses its existing dashboard without changing its model load state. Unloading or applying settings stops the owned process tree; an unrelated service on the requested inference port is reported rather than terminated. A manager pipe closure also terminates its managed child tree. Desktop process shutdown and Windows/macOS native behavior still need their platform checks.
+
 ## Compute flags
 
 GPU is preferred when the build has a suitable backend and the runtime can initialize it. CPU remains available for every component.
@@ -77,7 +104,7 @@ cargo build --locked --release -p openatc-ai -p openatc-stt \
 cargo xtask install-ai /path/to/openatc-ai
 ```
 
-Use one line in PowerShell, or its backtick continuation syntax. Windows builds require Visual Studio C++ build tools, Clang/libclang and CMake. The workflow installs a pinned Vulkan SDK rather than assuming it is on the runner.
+Use one line in PowerShell, or its backtick continuation syntax. Windows builds require Visual Studio C++ build tools, Clang/libclang and CMake. The workflow installs a pinned Vulkan SDK rather than assuming it is on the runner. For accelerated Windows builds, use a Visual Studio developer shell with Ninja available on `PATH` and set `$env:CMAKE_GENERATOR = "Ninja"` before Cargo. The Visual Studio project generator can exceed Windows path limits in the nested Vulkan shader-generator build. When switching an existing build from the Visual Studio generator, remove the affected generated CMake caches first; do not reuse them with Ninja.
 
 The current `ort` prebuilt CUDA provider uses **CUDA 13**. Tested Linux runtime libraries include CUDA runtime, cuBLAS/cuBLASLt, cuRAND and **cuDNN 9**. An NVIDIA driver alone does not provide those user-space libraries. `libonnxruntime_providers_cuda` and its shared-provider companion ship with the GPU build; NVIDIA runtime installation remains a host requirement. The CUDA build feature does not bundle the entire CUDA toolkit into OpenATC.
 

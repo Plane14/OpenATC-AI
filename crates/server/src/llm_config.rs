@@ -80,6 +80,22 @@ pub fn custom_manifest(source: &str) -> Result<openatc_ai_core::Manifest, String
             "Custom model needs a safe llm/*.gguf path, name, HTTPS URL, size and SHA-256".into(),
         );
     }
+    for source in [
+        include_str!("../../../models.toml"),
+        include_str!("../../../models-kitten.toml"),
+    ] {
+        let bundled = openatc_ai_core::Manifest::parse(source).map_err(|e| e.to_string())?;
+        if bundled
+            .model
+            .iter()
+            .any(|entry| entry.name == model.name || entry.path == model.path)
+        {
+            return Err(
+                "Choose a custom model name and file path that do not overlap a bundled model"
+                    .into(),
+            );
+        }
+    }
     manifest.model[0].sha256.make_ascii_lowercase();
     Ok(manifest)
 }
@@ -179,4 +195,29 @@ pub fn configured_manifest(
         toml::Value::Array(vec![toml::Value::Table(entry)]),
     );
     custom_manifest(&toml::to_string(&manifest).map_err(|error| error.to_string())?).map(Some)
+}
+
+#[cfg(test)]
+mod cache_identity_tests {
+    #[test]
+    fn custom_models_cannot_alias_bundled_cache_entries() {
+        let source = format!(
+            "[[model]]\nname='custom-test'\npath='llm/custom.gguf'\nurl='https://example.org/custom.gguf'\nsize=42\nsha256='{}'",
+            "a".repeat(64)
+        );
+        assert!(super::custom_manifest(&source).is_ok());
+        assert!(
+            super::custom_manifest(&source.replace("custom-test", "qwen2.5-7b-instruct-q4_k_m"))
+                .is_err()
+        );
+        let bundled =
+            openatc_ai_core::Manifest::parse(include_str!("../../../models.toml")).unwrap();
+        let path = &bundled
+            .model
+            .iter()
+            .find(|model| model.path.starts_with("llm/"))
+            .unwrap()
+            .path;
+        assert!(super::custom_manifest(&source.replace("llm/custom.gguf", path)).is_err());
+    }
 }

@@ -1,7 +1,9 @@
-WizardStyle=modern
+WizardStyle=modern dynamic
 WizardSizePercent=120
 WizardImageFile=@BRANDING_DIR@\wizard.bmp,@BRANDING_DIR@\wizard-2x.bmp
 WizardSmallImageFile=@BRANDING_DIR@\wizard-small.bmp,@BRANDING_DIR@\wizard-small-2x.bmp
 WizardImageBackColor=$271806
 WizardSmallImageBackColor=$271806
 SetupIconFile="@BRANDING_DIR@\setup.ico"
+WizardImageFileDynamicDark=@BRANDING_DIR@\wizard.bmp,@BRANDING_DIR@\wizard-2x.bmp
+WizardSmallImageFileDynamicDark=@BRANDING_DIR@\wizard-small.bmp,@BRANDING_DIR@\wizard-small-2x.bmp

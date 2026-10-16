@@ -1,100 +1,38 @@
 # This schema drives both setup interfaces. Runtime values use the same CLI validation.
 [[field]]
-key = "host"
-label = "Listen address"
-kind = "string"
-default = "127.0.0.1"
-help = "Use 0.0.0.0 only when clients need LAN access."
-[[field]]
-key = "port"
-label = "Port"
-kind = "integer"
-default = 8099
-[[field]]
+section = "Models"
+advanced = false
 key = "llm-model"
 label = "Language model"
 kind = "string"
 default = "qwen2.5-7b"
 choices = ["qwen2.5-7b", "qwen3-8b", "qwen3.5-4b"]
 [[field]]
+section = "Models"
+advanced = true
 key = "llm-manifest"
 label = "Custom GGUF manifest (optional)"
 kind = "string"
 default = ""
 help = "A TOML download manifest with one model, HTTPS URL, size and SHA-256. Overrides the bundled language model."
 [[field]]
+section = "Models"
+advanced = true
 key = "chat-template"
 label = "Custom chat template override (optional)"
 kind = "string"
 default = ""
 help = "Custom models otherwise use their GGUF chat template."
 [[field]]
+section = "Models"
+advanced = true
 key = "assistant-prefix"
 label = "Model-specific assistant prefix (optional)"
 kind = "string"
 default = ""
 [[field]]
-key = "ctx-size"
-label = "Fixed context tokens"
-kind = "integer"
-default = 4096
-help = "Keep GPU memory free for X-Plane when sharing the computer."
-[[field]]
-key = "ctx-auto"
-label = "Automatic GPU context sizing"
-kind = "boolean"
-default = false
-help = "Opt-in. Currently supports one NVIDIA GPU; other hardware retains fixed sizing."
-[[field]]
-key = "ctx-max"
-label = "Maximum automatic context"
-kind = "integer"
-default = 32768
-[[field]]
-key = "vram-reserve-mib"
-label = "GPU memory reserve (MiB)"
-kind = "integer"
-default = 1536
-[[field]]
-key = "force-llm-cpu"
-label = "Run language model on CPU"
-kind = "boolean"
-default = false
-[[field]]
-key = "threads"
-label = "Generation threads (optional)"
-kind = "integer"
-default = 0
-help = "Zero leaves the backend default. Benchmark before increasing this."
-[[field]]
-key = "batch-threads"
-label = "Prompt processing threads (optional)"
-kind = "integer"
-default = 0
-[[field]]
-key = "force-stt-cpu"
-label = "Run speech recognition on CPU"
-kind = "boolean"
-default = false
-[[field]]
-key = "stt-backend"
-label = "Speech recognition backend"
-kind = "string"
-default = "auto"
-choices = ["auto", "cpu", "cuda"]
-[[field]]
-key = "force-tts-cpu"
-label = "Run speech synthesis on CPU"
-kind = "boolean"
-default = false
-[[field]]
-key = "tts-provider"
-label = "Speech voice engine"
-kind = "string"
-default = "kokoro"
-choices = ["kokoro", "kitten"]
-
-[[field]]
+section = "Models"
+advanced = true
 key = "llm-url"
 label = "Custom GGUF HTTPS download URL"
 kind = "string"
@@ -102,6 +40,8 @@ default = ""
 help = "Optional. Fill all five custom model fields, or use a manifest path."
 
 [[field]]
+section = "Models"
+advanced = true
 key = "llm-name"
 label = "Custom model name"
 kind = "string"
@@ -109,6 +49,8 @@ default = ""
 help = "A unique name containing letters, numbers, dots, underscores or hyphens."
 
 [[field]]
+section = "Models"
+advanced = true
 key = "llm-file"
 label = "Custom model relative path"
 kind = "string"
@@ -116,6 +58,8 @@ default = ""
 help = "For example llm/custom.gguf."
 
 [[field]]
+section = "Models"
+advanced = true
 key = "llm-sha256"
 label = "Custom model SHA-256"
 kind = "string"
@@ -123,8 +67,126 @@ default = ""
 help = "The publisher checksum, 64 hexadecimal characters."
 
 [[field]]
+section = "Models"
+advanced = true
 key = "llm-bytes"
 label = "Custom model size in bytes"
 kind = "integer"
 default = 0
 help = "The exact published file size."
+
+[[field]]
+section = "Models"
+advanced = true
+key = "models-dir"
+label = "Model storage folder (optional)"
+kind = "string"
+default = ""
+help = "Leave blank to use the platform data folder. Existing models stay in their current folder."
+[[field]]
+section = "Compute"
+advanced = false
+key = "force-cpu"
+label = "Run all models on CPU"
+kind = "boolean"
+default = false
+help = "Overrides the individual model device choices below."
+[[field]]
+section = "Compute"
+advanced = false
+key = "ctx-size"
+label = "Fixed context tokens"
+kind = "integer"
+default = 4096
+help = "Keep GPU memory free for X-Plane when sharing the computer."
+[[field]]
+section = "Compute"
+advanced = true
+key = "ctx-auto"
+label = "Automatic GPU context sizing"
+kind = "boolean"
+default = false
+help = "Opt-in. Currently supports one NVIDIA GPU; other hardware retains fixed sizing."
+[[field]]
+section = "Compute"
+advanced = true
+key = "ctx-max"
+label = "Maximum automatic context"
+kind = "integer"
+default = 32768
+[[field]]
+section = "Compute"
+advanced = true
+key = "vram-reserve-mib"
+label = "GPU memory reserve (MiB)"
+help = "Headroom target for automatic context sizing; this is not a hard cap on model VRAM."
+kind = "integer"
+default = 1536
+[[field]]
+section = "Compute"
+advanced = false
+key = "force-llm-cpu"
+label = "Run language model on CPU"
+kind = "boolean"
+default = false
+[[field]]
+section = "Compute"
+advanced = true
+key = "threads"
+label = "Generation threads (optional)"
+kind = "integer"
+default = 0
+help = "Zero leaves the backend default. Benchmark before increasing this."
+[[field]]
+section = "Compute"
+advanced = true
+key = "batch-threads"
+label = "Prompt processing threads (optional)"
+kind = "integer"
+default = 0
+[[field]]
+section = "Speech"
+advanced = false
+key = "force-stt-cpu"
+label = "Run speech recognition on CPU"
+kind = "boolean"
+default = false
+[[field]]
+section = "Speech"
+advanced = true
+key = "stt-backend"
+label = "Speech recognition backend"
+kind = "string"
+default = "auto"
+choices = ["auto", "cpu", "cuda"]
+[[field]]
+section = "Speech"
+advanced = false
+key = "force-tts-cpu"
+label = "Run speech synthesis on CPU"
+kind = "boolean"
+default = false
+[[field]]
+section = "Speech"
+advanced = false
+key = "tts-provider"
+label = "Speech voice engine"
+kind = "string"
+default = "kokoro"
+choices = ["kokoro", "kitten"]
+
+[[field]]
+section = "Connection"
+advanced = false
+key = "host"
+label = "Listen address"
+kind = "string"
+default = "127.0.0.1"
+help = "Use 0.0.0.0 only when clients need LAN access."
+[[field]]
+section = "Connection"
+advanced = false
+key = "port"
+label = "Port"
+kind = "integer"
+default = 8099

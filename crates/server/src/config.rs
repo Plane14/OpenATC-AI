@@ -40,6 +40,11 @@ pub fn arguments(
             "version",
             "configure",
             "configure-web",
+            "manage-web",
+            "no-browser",
+            "dashboard-port",
+            "dashboard-host",
+            "managed-events",
             "settings-schema",
         ]
         .contains(&key.as_str())

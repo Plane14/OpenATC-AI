@@ -3,13 +3,12 @@ use clap::{CommandFactory, Parser};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{self, Write},
-    path::{Path, PathBuf},
-    sync::Arc,
+    path::Path,
 };
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Field {
+pub(super) struct Field {
     key: String,
     label: String,
     kind: String,
@@ -18,13 +17,17 @@ struct Field {
     help: String,
     #[serde(default)]
     choices: Vec<String>,
+    #[serde(default)]
+    section: String,
+    #[serde(default)]
+    advanced: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Schema {
     field: Vec<Field>,
 }
-fn fields(path: Option<&Path>) -> Result<Vec<Field>, String> {
+pub(super) fn fields(path: Option<&Path>) -> Result<Vec<Field>, String> {
     let installed = std::env::current_exe()
         .ok()
         .and_then(|exe| {
@@ -72,7 +75,7 @@ fn fields(path: Option<&Path>) -> Result<Vec<Field>, String> {
     }
     Ok(schema.field)
 }
-fn values(path: &Path) -> Result<toml::Table, String> {
+pub(super) fn values(path: &Path) -> Result<toml::Table, String> {
     match std::fs::read_to_string(path) {
         Ok(source) => toml::from_str(&source).map_err(|error| error.to_string()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(toml::Table::new()),
@@ -90,7 +93,7 @@ fn normalize(mut values: toml::Table) -> toml::Table {
     }
     values
 }
-fn save(path: &Path, values: toml::Table) -> Result<(), String> {
+pub(super) fn save(path: &Path, values: toml::Table) -> Result<(), String> {
     let source = toml::to_string_pretty(&normalize(values)).map_err(|error| error.to_string())?;
     let arguments =
         crate::config::arguments(&source, &["openatc-ai".into()], &crate::Args::command())?;
@@ -161,79 +164,45 @@ pub fn terminal(path: &Path, schema: Option<&Path>) -> Result<(), String> {
     println!("Saved {}", path.display());
     Ok(())
 }
-#[derive(Clone)]
-struct Editor {
-    path: PathBuf,
-    fields: Vec<Field>,
-    origin: String,
-}
-pub async fn browser(path: &Path, schema: Option<&Path>) -> Result<(), String> {
-    use axum::{
-        Json, Router,
-        extract::State,
-        http::{HeaderMap, StatusCode},
-        response::Html,
-        routing::get,
+pub(super) fn open_browser(origin: &str) {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = tokio::process::Command::new("rundll32.exe");
+        command.arg("url.dll,FileProtocolHandler");
+        command
     };
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .map_err(|error| error.to_string())?;
-    let origin = format!(
-        "http://{}",
-        listener.local_addr().map_err(|error| error.to_string())?
-    );
-    let editor = Arc::new(Editor {
-        path: path.into(),
-        fields: fields(schema)?,
-        origin: origin.clone(),
-    });
-    let app = Router::new()
-        .route(
-            "/",
-            get(|| async { Html(include_str!("../../../server/settings.html")) }),
-        )
-        .route(
-            "/settings",
-            get(|State(editor): State<Arc<Editor>>| async move {
-                values(&editor.path)
-                    .map(|values| Json(serde_json::json!({"fields":editor.fields,"values":values})))
-                    .map_err(|error| (StatusCode::BAD_REQUEST, error))
-            })
-            .post(
-                |State(editor): State<Arc<Editor>>,
-                 headers: HeaderMap,
-                 Json(values): Json<toml::Table>| async move {
-                    if headers.get("origin").and_then(|value| value.to_str().ok())
-                        != Some(editor.origin.as_str())
-                    {
-                        return Err((
-                            StatusCode::FORBIDDEN,
-                            "Setup requires a same-origin browser request".into(),
-                        ));
-                    }
-                    save(&editor.path, values)
-                        .map(|()| Json(serde_json::json!({"saved":true})))
-                        .map_err(|error| (StatusCode::BAD_REQUEST, error))
-                },
-            ),
-        )
-        .with_state(editor);
-    println!(
-        "Settings editor: {origin}\nSave settings, then stop this editor with Ctrl-C. Restart the inference server to apply them."
-    );
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-        .map_err(|error| error.to_string())
+    #[cfg(target_os = "macos")]
+    let mut command = tokio::process::Command::new("open");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let mut command = tokio::process::Command::new("xdg-open");
+    let child = command
+        .arg(origin)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let origin = origin.to_owned();
+    match child {
+        Ok(mut child) => {
+            tokio::spawn(async move {
+                if !child.wait().await.is_ok_and(|status| status.success()) {
+                    eprintln!(
+                        "Could not open the browser automatically. Open {origin} in your browser."
+                    );
+                }
+            });
+        }
+        Err(error) => eprintln!(
+            "Could not open the browser automatically: {error}. Open {origin} in your browser."
+        ),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn shipped_form_defaults_validate_and_do_not_enable_auto() {
-        use clap::{CommandFactory, Parser};
+        use clap::CommandFactory;
         let fields = super::fields(None).unwrap();
         let values = fields
             .into_iter()

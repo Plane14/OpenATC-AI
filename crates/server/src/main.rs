@@ -11,6 +11,9 @@
 mod compute;
 mod config;
 mod json_mode;
+mod manager;
+mod progress;
+mod resources;
 mod setup;
 mod synthesis;
 
@@ -47,6 +50,29 @@ struct Args {
     /// Open a local browser settings editor without loading inference models.
     #[arg(long)]
     configure_web: bool,
+    /// Open the local setup wizard and server dashboard.
+    #[arg(long)]
+    manage_web: bool,
+    /// Keep the dashboard available without opening a browser (headless servers).
+    #[arg(long)]
+    no_browser: bool,
+    /// Fixed loopback dashboard port for a headless service (zero chooses a free port).
+    #[arg(long, default_value_t = 0)]
+    dashboard_port: u16,
+    /// Dashboard interface. Use this server’s LAN address for trusted remote access.
+    #[arg(long, default_value = "127.0.0.1")]
+    dashboard_host: std::net::IpAddr,
+    #[arg(long, hide = true)]
+    managed_events: bool,
+    /// Leave the language model unloaded until enabled in the dashboard.
+    #[arg(long)]
+    disable_llm: bool,
+    /// Leave speech recognition unloaded.
+    #[arg(long)]
+    disable_stt: bool,
+    /// Leave speech synthesis unloaded.
+    #[arg(long)]
+    disable_tts: bool,
     /// Editable TOML schema for the setup interfaces.
     #[arg(long)]
     settings_schema: Option<PathBuf>,
@@ -242,9 +268,9 @@ struct TtsJob {
 
 /// Shared server state (all fields are Send).
 struct AppState {
-    inference: InferenceHandle,
-    stt: SttHandle,
-    tts: TtsHandle,
+    inference: Option<InferenceHandle>,
+    stt: Option<SttHandle>,
+    tts: Option<TtsHandle>,
     model_name: String,
     model_status: BTreeMap<String, String>,
     backend: String,
@@ -658,12 +684,18 @@ async fn chat_completions(
         max_tokens,
         reply: reply_tx,
     };
-    state.inference.jobs.send(job).map_err(|_| {
-        api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "inference thread gone".to_owned(),
-        )
-    })?;
+    state
+        .inference
+        .as_ref()
+        .ok_or_else(|| unloaded("Language model"))?
+        .jobs
+        .send(job)
+        .map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "inference thread gone".to_owned(),
+            )
+        })?;
     let output = reply_rx.await.map_err(|_| {
         api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -719,6 +751,8 @@ async fn tokenize(
     let (reply, result) = oneshot::channel();
     state
         .inference
+        .as_ref()
+        .ok_or_else(|| unloaded("Language model"))?
         .jobs
         .send(InferenceJob {
             tokenize_only: true,
@@ -744,6 +778,7 @@ async fn tokenize(
 async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
+        "components":{"llm":state.inference.is_some(),"stt":state.stt.is_some(),"tts":state.tts.is_some()},
         "backend": state.backend,
         "stt": state.stt_backend,
         "compute": {"llm": state.llm_device, "stt": state.stt_backend, "tts": state.tts_status.device},
@@ -754,9 +789,20 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
 }
 
 /// Voices in the selected model's loaded table.
-async fn list_voices(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(
+async fn list_voices(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    if state.tts.is_none() {
+        return Err(unloaded("Speech synthesis"));
+    }
+    Ok(Json(
         serde_json::json!({ "provider": state.tts_status.provider, "voices": state.tts_status.voices }),
+    ))
+}
+fn unloaded(component: &str) -> (StatusCode, Json<ErrorBody>) {
+    api_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        format!("{component} is unloaded. Load it in the server dashboard."),
     )
 }
 
@@ -788,10 +834,13 @@ async fn transcriptions(
             "multipart needs a file part".to_owned(),
         )
     })?;
-    let response = state
+    let stt = state
         .stt
+        .as_ref()
+        .ok_or_else(|| unloaded("Speech recognition"))?;
+    let response = stt
         .client
-        .post(format!("{}/transcribe", state.stt.base_url))
+        .post(format!("{}/transcribe", stt.base_url))
         .body(wav)
         .send()
         .await
@@ -889,6 +938,8 @@ async fn speech(
     let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tts
+        .as_ref()
+        .ok_or_else(|| unloaded("Speech synthesis"))?
         .jobs
         .send(TtsJob {
             text,
@@ -928,13 +979,22 @@ fn ensure_all(
     let mut lock_changed = false;
     for entry in &manifest.model {
         let locked = lockfile.model.get(&entry.name).cloned();
+        progress::emit(
+            serde_json::json!({"stage":"verifying","model":entry.name,"path":root.join(&entry.path),"kind":entry.path.split('/').next()}),
+        );
         eprintln!("openatc-ai: ensuring {} ...", entry.name);
         match ensure(root, entry, locked.as_ref(), |done, total| {
+            progress::emit(
+                serde_json::json!({"stage":"downloading","model":entry.name,"done":done,"total":total}),
+            );
             if total > 0 {
                 eprint!("\ropenatc-ai: {} {done}/{total} bytes", entry.name);
             }
         }) {
             Ok(path) => {
+                progress::emit(
+                    serde_json::json!({"stage":"verified","model":entry.name,"path":path,"kind":entry.path.split('/').next()}),
+                );
                 eprintln!("\nopenatc-ai: {} ready", entry.name);
                 status.insert(entry.name.clone(), "ready".to_owned());
                 if locked.is_none() {
@@ -945,6 +1005,9 @@ fn ensure_all(
                 }
             }
             Err(error) => {
+                progress::emit(
+                    serde_json::json!({"stage":"error","model":entry.name,"error":error.to_string()}),
+                );
                 eprintln!("\nopenatc-ai: {error}");
                 status.insert(entry.name.clone(), "missing".to_owned());
             }
@@ -960,6 +1023,7 @@ async fn ensure_models(
     provider: synthesis::Provider,
     llm: llm_config::Model,
     custom: Option<Manifest>,
+    disabled: Vec<&'static str>,
 ) -> Result<(std::path::PathBuf, Manifest, BTreeMap<String, String>), String> {
     std::fs::create_dir_all(&root)
         .map_err(|error| format!("cannot create {}: {error}", root.display()))?;
@@ -997,9 +1061,14 @@ async fn ensure_models(
         .ok()
         .and_then(|text| toml::from_str(&text).ok())
         .unwrap_or_default();
-    let manifest_clone = manifest.clone();
+    let mut manifest_clone = manifest.clone();
+    manifest_clone.model.retain(|entry| {
+        !disabled
+            .iter()
+            .any(|kind| entry.path.starts_with(&format!("{kind}/")))
+    });
     let root_clone = root.clone();
-    let (status, lock_changed, lockfile) = tokio::task::spawn_blocking(move || {
+    let (mut status, lock_changed, lockfile) = tokio::task::spawn_blocking(move || {
         let mut lockfile = lockfile;
         let (status, lock_changed) = ensure_all(&root_clone, &manifest_clone, &mut lockfile);
         (status, lock_changed, lockfile)
@@ -1009,6 +1078,11 @@ async fn ensure_models(
     if lock_changed {
         let text = toml::to_string(&lockfile).map_err(|error| error.to_string())?;
         std::fs::write(&lock_path, text).map_err(|error| error.to_string())?;
+    }
+    for entry in &manifest.model {
+        status
+            .entry(entry.name.clone())
+            .or_insert_with(|| "unloaded".into());
     }
     Ok((root, manifest, status))
 }
@@ -1021,11 +1095,30 @@ async fn main() -> Result<(), String> {
         .config
         .clone()
         .unwrap_or_else(|| openatc_platform::state_dir().join("server.toml"));
-    if initial.configure_web {
-        return setup::browser(&config_path, initial.settings_schema.as_deref()).await;
+    if initial.configure_web || initial.manage_web {
+        return manager::run(
+            &config_path,
+            initial.settings_schema.as_deref(),
+            initial.manage_web,
+            !initial.no_browser,
+            initial.dashboard_port,
+            initial.dashboard_host,
+        )
+        .await;
     }
     if initial.configure {
         return setup::terminal(&config_path, initial.settings_schema.as_deref());
+    }
+    progress::enable(initial.managed_events);
+    if initial.managed_events {
+        // A closed manager pipe means its runtime must not be left running invisibly.
+        std::thread::spawn(|| {
+            use std::io::Read;
+            let mut byte = [0u8; 1];
+            while std::io::stdin().read(&mut byte).is_ok_and(|n| n > 0) {}
+            resources::kill_descendants(std::process::id());
+            std::process::exit(0);
+        });
     }
     use std::io::IsTerminal;
     if !config_path.exists() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
@@ -1049,8 +1142,21 @@ async fn main() -> Result<(), String> {
     let root = args.models_dir.clone().unwrap_or_else(models_dir);
     let custom = llm_config::configured_manifest(&args)?;
     let custom_template = custom.is_some();
-    let (root, manifest, status) =
-        ensure_models(root, args.tts_provider, args.llm_model, custom).await?;
+    let (root, manifest, status) = ensure_models(
+        root,
+        args.tts_provider,
+        args.llm_model,
+        custom,
+        [
+            ("llm", args.disable_llm),
+            ("stt", args.disable_stt),
+            ("tts", args.disable_tts),
+        ]
+        .into_iter()
+        .filter_map(|(kind, disabled)| disabled.then_some(kind))
+        .collect(),
+    )
+    .await?;
     let model_name = manifest
         .model
         .iter()
@@ -1066,7 +1172,7 @@ async fn main() -> Result<(), String> {
             .find(|entry| entry.path.starts_with("llm/"))
             .ok_or("manifest has no llm entry")?,
     );
-    if !llm_path.exists() {
+    if !args.disable_llm && !llm_path.exists() {
         return Err(format!("LLM file missing: {}", llm_path.display()));
     }
     let stt_backend = match if args.cpu.stt() {
@@ -1089,72 +1195,113 @@ async fn main() -> Result<(), String> {
             .find(|entry| entry.path.starts_with("stt/"))
             .ok_or("manifest has no stt entry")?,
     );
-    if !stt_path.exists() {
+    if !args.disable_stt && !stt_path.exists() {
         return Err(format!("STT file missing: {}", stt_path.display()));
     }
-    let (job_tx, job_rx) = mpsc::channel();
-    let (llm_ready_tx, llm_ready_rx) = mpsc::channel();
-    let force_llm_cpu = args.cpu.llm();
-    let sidecar_bin = sidecar_path(args.stt_bin.as_deref());
-    let (stt_child, stt_base_url, stt_backend_name) =
-        start_sidecar(&sidecar_bin, &stt_path, &stt_backend).await?;
-    let (tts_tx, tts_rx) = mpsc::channel();
-    let (tts_ready_tx, tts_ready_rx) = mpsc::channel();
-    let config = synthesis::Config {
-        provider: args.tts_provider,
-        force_cpu: args.cpu.tts(),
-        root,
-    };
-    let tts_loader = std::thread::spawn(move || synthesis::run(&config, tts_rx, &tts_ready_tx));
-    let tts_status = tokio::task::spawn_blocking(move || {
-        tts_ready_rx.recv_timeout(std::time::Duration::from_secs(300))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| format!("TTS startup: {e}"))??;
-    let loader = std::thread::spawn(move || {
-        inference_loop(
-            &llm_path,
-            args.ctx_size,
-            &job_rx,
-            force_llm_cpu,
-            &llm_ready_tx,
-            args.ctx_auto,
-            args.ctx_max,
-            args.vram_reserve_mib,
-            args.llm_model,
-            args.threads,
-            args.batch_threads,
-            custom_template,
-            args.chat_template,
-            args.assistant_prefix,
+    let stt = if args.disable_stt {
+        None
+    } else {
+        progress::emit(serde_json::json!({"stage":"loading","component":"stt"}));
+        let (child, base_url, backend) = start_sidecar(
+            &sidecar_path(args.stt_bin.as_deref()),
+            &stt_path,
+            &stt_backend,
         )
-    });
-    let (llm_device, context_tokens) = tokio::task::spawn_blocking(move || {
-        llm_ready_rx.recv_timeout(std::time::Duration::from_secs(300))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| format!("LLM startup: {e}"))??;
+        .await?;
+        Some((
+            SttHandle {
+                child,
+                base_url,
+                client: reqwest::Client::new(),
+            },
+            backend,
+        ))
+    };
+    let (tts_tx, tts_rx) = mpsc::channel();
+    let mut tts_loader = None;
+    let tts_status = if args.disable_tts {
+        synthesis::Status {
+            provider: args.tts_provider.name().into(),
+            device: compute::DeviceStatus::new("unloaded", "Speech synthesis is unloaded"),
+            voices: serde_json::json!([]),
+        }
+    } else {
+        progress::emit(serde_json::json!({"stage":"loading","component":"tts"}));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let config = synthesis::Config {
+            provider: args.tts_provider,
+            force_cpu: args.cpu.tts(),
+            root,
+        };
+        tts_loader = Some(std::thread::spawn(move || {
+            synthesis::run(&config, tts_rx, &ready_tx)
+        }));
+        tokio::task::spawn_blocking(move || {
+            ready_rx.recv_timeout(std::time::Duration::from_secs(300))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("TTS startup: {e}"))??
+    };
+    let (job_tx, job_rx) = mpsc::channel();
+    let mut loader = None;
+    let (llm_device, context_tokens) = if args.disable_llm {
+        (
+            compute::DeviceStatus::new("unloaded", "Language model is unloaded"),
+            0,
+        )
+    } else {
+        progress::emit(serde_json::json!({"stage":"loading","component":"llm"}));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let force_cpu = args.cpu.llm();
+        loader = Some(std::thread::spawn(move || {
+            inference_loop(
+                &llm_path,
+                args.ctx_size,
+                &job_rx,
+                force_cpu,
+                &ready_tx,
+                args.ctx_auto,
+                args.ctx_max,
+                args.vram_reserve_mib,
+                args.llm_model,
+                args.threads,
+                args.batch_threads,
+                custom_template,
+                args.chat_template,
+                args.assistant_prefix,
+            )
+        }));
+        tokio::task::spawn_blocking(move || {
+            ready_rx.recv_timeout(std::time::Duration::from_secs(300))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("LLM startup: {e}"))??
+    };
+    let (stt, stt_backend) = match stt {
+        Some((handle, backend)) => (Some(handle), backend),
+        None => (None, "unloaded".into()),
+    };
     let state = Arc::new(AppState {
-        inference: InferenceHandle { jobs: job_tx },
-        tts: TtsHandle { jobs: tts_tx },
-        stt: SttHandle {
-            base_url: stt_base_url,
-            client: reqwest::Client::new(),
-            child: stt_child,
-        },
+        inference: (!args.disable_llm).then_some(InferenceHandle { jobs: job_tx }),
+        tts: (!args.disable_tts).then_some(TtsHandle { jobs: tts_tx }),
+        stt,
         model_name,
         context_tokens,
         model_status: status,
         backend: llm_device.device.clone(),
-        stt_backend: stt_backend_name,
+        stt_backend,
         llm_device,
         tts_status,
     });
     serve(state, args.host.clone(), args.port).await?;
-    let _ = loader.join();
-    let _ = tts_loader.join();
+    if let Some(loader) = loader {
+        let _ = loader.join();
+    }
+    if let Some(loader) = tts_loader {
+        let _ = loader.join();
+    }
     Ok(())
 }
 
@@ -1167,11 +1314,14 @@ async fn serve(state: Arc<AppState>, host: String, port: u16) -> Result<(), Stri
         .route("/v1/tokenize", post(tokenize))
         .route("/v1/audio/transcriptions", post(transcriptions))
         .route("/v1/audio/speech", post(speech))
-        .with_state(state);
+        .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind((host.as_str(), port))
         .await
         .map_err(|error| error.to_string())?;
     eprintln!("openatc-ai: listening on {host}:{port}");
+    progress::emit(
+        serde_json::json!({"stage":"ready","health":health(State(state.clone())).await.0,"port":port}),
+    );
     axum::serve(listener, app)
         .await
         .map_err(|error| error.to_string())?;

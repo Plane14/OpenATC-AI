@@ -1,8 +1,1288 @@
-<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>OpenATC AI server settings</title>
-<style>body{font:16px system-ui;background:#17232e;color:#edf5fb;max-width:760px;margin:32px auto;padding:20px}label{display:block;margin-top:20px}input,select,button{font:inherit;padding:8px;border-radius:4px}input:not([type=checkbox]),select{display:block;width:95%;margin-top:6px}small{display:block;color:#b9c9d7;margin-top:5px}button{margin-top:24px;cursor:pointer}#status{white-space:pre-wrap}</style>
-<h1>OpenATC AI server settings</h1><p>Choose resources for this computer. Automatic context sizing is optional. Restart the inference server after saving.</p><form id="form"></form><button id="save">Save settings</button><p id="status" role="status"></p>
-<script>
-let fields=[],current={};const status=document.getElementById('status'),form=document.getElementById('form');
-fetch('/settings').then(r=>{if(!r.ok)throw Error('Cannot load settings');return r.json()}).then(data=>{fields=data.fields;current=data.values;for(const f of fields){const label=document.createElement('label');label.textContent=f.label;const input=document.createElement(f.choices.length?'select':'input');input.id=f.key;const value=current[f.key]??f.default;if(f.choices.length){for(const choice of f.choices){const option=document.createElement('option');option.value=choice;option.textContent=choice;input.append(option)}input.value=value}else if(f.kind==='boolean'){input.type='checkbox';input.checked=value}else{input.type=f.kind==='integer'?'number':'text';input.value=value}label.append(input);const help=document.createElement('small');help.textContent=f.help;label.append(help);form.append(label)}}).catch(e=>status.textContent=e.message);
-document.getElementById('save').onclick=async()=>{const values={...current};for(const f of fields){const input=document.getElementById(f.key);values[f.key]=f.kind==='boolean'?input.checked:f.kind==='integer'?Number(input.value):input.value}try{const r=await fetch('/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)});if(!r.ok)throw Error(await r.text());status.textContent='Saved. Restart the inference server to apply these settings.'}catch(e){status.textContent=e.message}};
-</script></html>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>OpenATC AI · Server</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #09141e;
+        --panel: #112331;
+        --line: #294151;
+        --text: #edf6fa;
+        --muted: #a4bbc9;
+        --accent: #2cd6e8;
+        --ok: #81e3b7;
+        --error: #ffb6aa;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font:
+          15px/1.55 system-ui,
+          sans-serif;
+      }
+      main {
+        max-width: 1160px;
+        margin: auto;
+        padding: 24px;
+      }
+      .brand-banner {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        overflow: hidden;
+        background: #06131d;
+      }
+      .brand-banner img {
+        display: block;
+        width: 100%;
+        aspect-ratio: 4.8;
+        object-fit: cover;
+        object-position: center;
+      }
+      h1 {
+        font-size: 30px;
+        letter-spacing: -0.7px;
+        margin: 0;
+      }
+      h2 {
+        font-size: 19px;
+        margin: 0 0 12px;
+      }
+      h3 {
+        font-size: 16px;
+        margin: 0;
+      }
+      p {
+        margin: 8px 0;
+      }
+      small,
+      .muted {
+        color: var(--muted);
+      }
+      .eyebrow {
+        color: var(--accent);
+        font-size: 12px;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+      }
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+      button {
+        border: 1px solid var(--line);
+        color: var(--text);
+        background: #183447;
+        border-radius: 7px;
+        padding: 9px 16px;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) {
+        border-color: var(--accent);
+      }
+      button.primary {
+        background: var(--accent);
+        color: #05202a;
+        border-color: var(--accent);
+        font-weight: 650;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      button:focus-visible,
+      input:focus-visible,
+      select:focus-visible,
+      summary:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+      }
+      .actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .model-actions {
+        display: grid;
+        grid-template-columns: repeat(3, 80px);
+        gap: 8px;
+        align-items: start;
+      }
+      .model-actions button {
+        width: 80px;
+        padding: 8px 10px;
+        white-space: nowrap;
+      }
+      #start,
+      #stop,
+      #edit-open {
+        min-width: 140px;
+      }
+      .toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin: 24px 0 16px;
+        gap: 16px;
+      }
+      .badge {
+        display: inline-block;
+        border: 1px solid var(--line);
+        border-radius: 30px;
+        padding: 4px 12px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .badge.ready {
+        color: var(--ok);
+        border-color: #387d67;
+      }
+      .badge.error {
+        color: var(--error);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        padding: 22px;
+        border-radius: 12px;
+      }
+      .value {
+        font-size: 25px;
+        font-weight: 600;
+        letter-spacing: -0.5px;
+      }
+      .card small {
+        display: block;
+        margin-top: 6px;
+      }
+      .section {
+        margin-top: 20px;
+      }
+      .status-detail {
+        color: var(--muted);
+        min-height: 24px;
+      }
+      .error-box {
+        color: var(--error);
+        background: #351e23;
+        border: 1px solid #75414a;
+        padding: 12px;
+        border-radius: 8px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .hidden,
+      [hidden] {
+        display: none !important;
+      }
+      .model {
+        padding: 14px 0;
+        border-top: 1px solid var(--line);
+      }
+      .model-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .model small {
+        overflow-wrap: anywhere;
+      }
+      progress {
+        width: 100%;
+        height: 9px;
+        accent-color: var(--accent);
+        display: block;
+        margin-top: 12px;
+      }
+      details {
+        margin-top: 16px;
+      }
+      summary {
+        cursor: pointer;
+        color: var(--muted);
+      }
+      pre {
+        font:
+          12px/1.65 ui-monospace,
+          monospace;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        max-height: 280px;
+        overflow: auto;
+        color: var(--muted);
+      }
+      .catalogue {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      .catalogue th,
+      .catalogue td {
+        text-align: left;
+        padding: 12px 8px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+      }
+      .catalogue th {
+        white-space: nowrap;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .catalogue td small {
+        display: block;
+        max-width: 350px;
+        overflow-wrap: anywhere;
+      }
+      .scroll {
+        overflow: auto;
+      }
+      footer {
+        margin: 22px 0;
+        color: var(--muted);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+      dialog {
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        width: min(740px, calc(100vw - 24px));
+        max-height: 90vh;
+        padding: 28px;
+        box-shadow: 0 24px 100px #0009;
+      }
+      dialog::backdrop {
+        background: #020b13bd;
+      }
+      dialog h2 {
+        font-size: 24px;
+        margin: 6px 0;
+      }
+      #steps {
+        display: flex;
+        gap: 8px;
+        margin: 20px 0;
+        flex-wrap: wrap;
+      }
+      #steps span {
+        padding: 4px 10px;
+        border-radius: 20px;
+        border: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 12px;
+      }
+      #steps .active {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      .fields {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+      }
+      .field {
+        display: block;
+        color: var(--text);
+      }
+      .field input:not([type="checkbox"]),
+      .field select {
+        display: block;
+        width: 100%;
+        margin-top: 6px;
+        padding: 10px;
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
+      .field input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        accent-color: var(--accent);
+        margin: 0 10px 0 0;
+        vertical-align: middle;
+      }
+      .field small {
+        display: block;
+        font-size: 12px;
+        margin-top: 5px;
+      }
+      .wizard-actions {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 26px;
+        border-top: 1px solid var(--line);
+        padding-top: 18px;
+      }
+      .wizard-actions div {
+        display: flex;
+        gap: 8px;
+      }
+      #review {
+        color: var(--muted);
+      }
+      .review-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+        border-bottom: 1px solid var(--line);
+        padding: 10px 0;
+      }
+      .review-row strong {
+        color: var(--text);
+        overflow-wrap: anywhere;
+        text-align: right;
+      }
+      .wizard-copy {
+        color: var(--muted);
+        margin-bottom: 18px;
+      }
+      #wizard-error {
+        margin-top: 16px;
+      }
+      a {
+        color: var(--accent);
+      }
+      #operation {
+        width: min(440px, calc(100vw - 32px));
+        text-align: center;
+        padding: 32px;
+      }
+      #operation::backdrop {
+        background: #020b13c9;
+        backdrop-filter: blur(3px);
+      }
+      .spinner {
+        width: 44px;
+        height: 44px;
+        margin: 0 auto 20px;
+        border: 3px solid var(--line);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.9s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      #operation h2 {
+        font-size: 21px;
+        overflow-wrap: anywhere;
+      }
+      #operation-detail {
+        color: var(--muted);
+        overflow-wrap: anywhere;
+        min-height: 48px;
+      }
+      #operation-dismiss {
+        margin-top: 18px;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .spinner {
+          animation: none;
+        }
+      }
+      @media (max-width: 760px) {
+        main {
+          padding: 14px;
+        }
+        .grid {
+          grid-template-columns: 1fr;
+        }
+        .fields {
+          grid-template-columns: 1fr;
+        }
+        .toolbar {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .card {
+          padding: 18px;
+        }
+        dialog {
+          padding: 20px;
+        }
+        .review-row {
+          display: block;
+        }
+        .review-row strong {
+          display: block;
+          text-align: left;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="brand-banner">
+        <img
+          src="/branding/banner.png"
+          alt="OpenATC AI · AI air traffic control for X-Plane 12"
+        />
+      </div>
+      <div class="toolbar">
+        <div>
+          <div style="display: flex; align-items: center; gap: 12px">
+            <h1 style="font-size: 24px">AI server</h1>
+            <span id="badge" class="badge" role="status">Connecting</span>
+          </div>
+          <div id="status-detail" class="status-detail">
+            Checking the local server manager…
+          </div>
+          <small id="machine" class="muted"></small>
+        </div>
+      </div>
+      <p id="error" class="error-box" role="alert" hidden></p>
+      <div class="grid">
+        <section class="card">
+          <h3>Processor</h3>
+          <div id="cpu" class="value">—</div>
+          <small id="cpu-detail">Waiting for a resource sample</small>
+        </section>
+        <section class="card">
+          <h3>Memory</h3>
+          <div id="ram" class="value">—</div>
+          <small id="ram-detail">Waiting for a resource sample</small>
+        </section>
+        <section class="card">
+          <h3>Graphics</h3>
+          <div id="gpu" class="value">—</div>
+          <small id="gpu-detail">Checking available driver counters</small>
+        </section>
+      </div>
+      <section class="card section">
+        <div class="toolbar" style="margin-top: 0">
+          <h2>Models</h2>
+          <div class="actions">
+            <button id="start">Load models</button
+            ><button id="stop" disabled>Unload models</button
+            ><button id="edit-open" class="primary" disabled>
+              Edit settings</button
+            ><button id="wizard-open" disabled>Run setup wizard</button>
+          </div>
+        </div>
+        <p class="muted">
+          Edit model and compute settings directly, or use the guided wizard.
+          Missing files download when you apply your choices.
+        </p>
+        <div class="scroll">
+          <table class="catalogue">
+            <thead>
+              <tr>
+                <th>Model / location</th>
+                <th>On disk</th>
+                <th>This session</th>
+                <th>CPU / GPU</th>
+                <th>RAM</th>
+                <th>VRAM</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="models"></tbody>
+          </table>
+        </div>
+        <p id="model-root" class="muted"></p>
+        <p class="muted" id="memory-note">
+          Memory figures are process measurements. Language and voice models
+          currently share a process; their shared figures are not additive.
+        </p>
+        <details>
+          <summary>Runtime details</summary>
+          <pre id="health">No runtime loaded</pre>
+        </details>
+      </section>
+      <details class="card section">
+        <summary>Recent server messages</summary>
+        <pre id="logs">No messages yet</pre>
+      </details>
+      <footer id="config-path"></footer>
+    </main>
+    <dialog id="wizard" aria-labelledby="wizard-title">
+      <div class="eyebrow">Server setup</div>
+      <h2 id="wizard-title">Make yourself flight ready</h2>
+      <p class="muted">
+        Review your choices, then apply. You can return here any time.
+      </p>
+      <div id="steps"></div>
+      <p id="wizard-copy" class="wizard-copy"></p>
+      <form id="form"></form>
+      <div id="review" hidden></div>
+      <p id="wizard-error" class="error-box" role="alert" hidden></p>
+      <div class="wizard-actions">
+        <button id="cancel" type="button">Close</button>
+        <div>
+          <button id="back" type="button">Back</button
+          ><button id="next" type="button" class="primary">Next</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog
+      id="operation"
+      aria-labelledby="operation-title"
+      aria-describedby="operation-detail"
+    >
+      <div id="operation-spinner" class="spinner" aria-hidden="true"></div>
+      <h2 id="operation-title">Working…</h2>
+      <p id="operation-detail" role="status" aria-live="polite">
+        Preparing your request…
+      </p>
+      <progress
+        id="operation-progress"
+        hidden
+        aria-label="Model download progress"
+      ></progress>
+      <small id="operation-note"
+        >Please wait. Other enabled models may reload automatically.</small
+      >
+      <button id="operation-dismiss" type="button" hidden>Dismiss</button>
+    </dialog>
+    <script>
+      "use strict";
+      const $ = (id) => document.getElementById(id);
+      let fields = [],
+        current = {},
+        sections = [],
+        step = 0,
+        busy = false,
+        loadedSettings = false,
+        editMode = false,
+        operation = null,
+        lastData = null,
+        lastContact = Date.now();
+      const inputs = new Map();
+      const bytes = (n) => {
+        if (typeof n !== "number") return "Unavailable";
+        const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        const i =
+          n > 0 ? Math.min(4, Math.floor(Math.log(n) / Math.log(1024))) : 0;
+        return (
+          new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(
+            n / 1024 ** i,
+          ) +
+          " " +
+          units[i]
+        );
+      };
+      const percent = (n) =>
+        typeof n === "number" ? Math.round(n) + "%" : "—";
+      const set = (id, value) => {
+        $(id).textContent = value;
+      };
+      function message(id, text) {
+        $(id).textContent = text || "";
+        $(id).hidden = !text;
+      }
+      function node(tag, text, cls) {
+        const e = document.createElement(tag);
+        if (text !== undefined) e.textContent = text;
+        if (cls) e.className = cls;
+        return e;
+      }
+      async function api(path, body) {
+        const controller = new AbortController();
+        const timeout = setTimeout(
+          () => controller.abort(),
+          body === undefined ? 10000 : 30000,
+        );
+        try {
+          const response = await fetch(
+            path,
+            body === undefined
+              ? { cache: "no-store", signal: controller.signal }
+              : {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(body),
+                  signal: controller.signal,
+                },
+          );
+          if (!response.ok) throw Error(await response.text());
+          return await response.json();
+        } catch (error) {
+          if (error.name === "AbortError")
+            throw Error(
+              "The server took too long to respond. Completion could not be confirmed; check the connection before retrying.",
+            );
+          throw error;
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+      function beginOperation(
+        title,
+        { automatic = false, generation = null, instance = null } = {},
+      ) {
+        operation = {
+          title,
+          accepted: automatic,
+          failed: false,
+          generation: generation ?? (lastData?.runtime.generation ?? 0) + 1,
+          instance: instance ?? lastData?.instance,
+        };
+        busy = true;
+        set("operation-title", title);
+        set(
+          "operation-detail",
+          automatic ? "Checking model progress…" : "Sending your request…",
+        );
+        $("operation-spinner").hidden = false;
+        $("operation-progress").hidden = true;
+        $("operation-dismiss").hidden = true;
+        $("operation-note").hidden = false;
+        $("operation").setAttribute("aria-busy", "true");
+        if (!$("operation").open) $("operation").showModal();
+        return operation;
+      }
+      function finishOperation() {
+        operation = null;
+        busy = false;
+        $("operation").setAttribute("aria-busy", "false");
+        if ($("operation").open) $("operation").close();
+      }
+      function operationError(error) {
+        if (!operation) return;
+        operation.failed = true;
+        set("operation-title", "Task needs attention");
+        set("operation-detail", error);
+        $("operation-spinner").hidden = true;
+        $("operation-progress").hidden = true;
+        $("operation-note").hidden = true;
+        $("operation-dismiss").hidden = false;
+        $("operation").setAttribute("aria-busy", "false");
+        $("operation-dismiss").focus();
+      }
+      $("operation").addEventListener("cancel", (event) => {
+        event.preventDefault();
+        if (operation?.failed) $("operation-dismiss").click();
+      });
+      $("operation-dismiss").onclick = () => {
+        finishOperation();
+        if (lastData) render(lastData);
+      };
+      function updateOperation(runtime, instance) {
+        const active = [
+          "starting",
+          "restarting",
+          "verifying",
+          "downloading",
+          "loading",
+        ].includes(runtime.stage);
+        if (!operation && active)
+          beginOperation("Preparing models", {
+            automatic: true,
+            generation: runtime.generation,
+            instance,
+          });
+        const task = operation;
+        if (!task || task.failed) return;
+        if (
+          task.accepted &&
+          task.instance &&
+          instance &&
+          task.instance !== instance
+        ) {
+          operationError(
+            "The server manager restarted. Check the current model state before retrying.",
+          );
+          return;
+        }
+        if (!task.accepted || runtime.generation < task.generation) return;
+        if (runtime.stage === "error") {
+          operationError(
+            runtime.error ||
+              "The task failed. Check the recent server messages.",
+          );
+          return;
+        }
+        if (["ready", "stopped"].includes(runtime.stage)) {
+          finishOperation();
+          return;
+        }
+        const stages = {
+          starting: "Starting the inference runtime…",
+          restarting: "Unloading models and applying your changes…",
+          verifying: "Verifying model files…",
+          downloading: "Downloading model files…",
+          loading:
+            "Loading " +
+            ({
+              llm: "language model",
+              tts: "voice model",
+              stt: "speech recognition",
+            }[runtime.component] || "models") +
+            "…",
+        };
+        let detail = stages[runtime.stage] || "Waiting for the server…";
+        const progress = $("operation-progress");
+        progress.hidden = true;
+        const model = Object.values(runtime.models || {}).find(
+          (model) => model.stage === runtime.stage,
+        );
+        if (runtime.stage === "downloading" && model) {
+          detail =
+            "Downloading " +
+            (model.model || "model") +
+            " · " +
+            bytes(model.done || 0) +
+            (model.total ? " / " + bytes(model.total) : "");
+          progress.hidden = false;
+          if (model.total > 0) {
+            progress.max = model.total;
+            progress.value = model.done || 0;
+          } else progress.removeAttribute("value");
+        } else if (runtime.stage === "verifying" && model?.model) {
+          detail = "Verifying " + model.model + "…";
+        }
+        set("operation-detail", detail);
+      }
+      async function perform(
+        title,
+        path,
+        body,
+        { reload = true, errorTarget = "error", accepted = () => {} } = {},
+      ) {
+        if (busy) return;
+        const task = beginOperation(title);
+        try {
+          const result = await api(path, body);
+          if (operation !== task) return;
+          accepted();
+          message(errorTarget, "");
+          if (!reload) {
+            finishOperation();
+            await poll();
+            return;
+          }
+          task.accepted = true;
+          task.generation = result.generation ?? task.generation;
+          task.instance = result.instance ?? task.instance;
+          if (lastData) updateOperation(lastData.runtime, lastData.instance);
+          await poll();
+        } catch (error) {
+          if (operation === task) {
+            message(errorTarget, error.message);
+            operationError(error.message);
+          }
+        }
+      }
+      function draft() {
+        const result = { ...current };
+        for (const field of fields) {
+          const input = inputs.get(field.key);
+          result[field.key] =
+            field.kind === "boolean"
+              ? input.checked
+              : field.kind === "integer"
+                ? Number(input.value)
+                : input.value;
+        }
+        return result;
+      }
+      const descriptions = {
+        Models:
+          "Qwen2.5 Instruct is the default language model. Advanced options support a custom GGUF model with its published checksum.",
+        Compute:
+          "GPU acceleration is preferred when the installed runtime supports it. CPU options are available for each component. Keep memory available for X-Plane.",
+        Speech:
+          "Kokoro provides the default voices. Choose where speech recognition and synthesis run.",
+        Connection:
+          "Use the loopback address for this computer. Only use 0.0.0.0 when the plugin connects from another computer on your trusted network.",
+      };
+      function fieldNode(field) {
+        const label = node("label", undefined, "field");
+        const input = document.createElement(
+          (field.choices || []).length ? "select" : "input",
+        );
+        input.id = "field-" + field.key;
+        const value = current[field.key] ?? field.default;
+        if ((field.choices || []).length) {
+          for (const choice of field.choices)
+            input.append(new Option(choice, choice));
+          input.value = value;
+        } else if (field.kind === "boolean") {
+          input.type = "checkbox";
+          input.checked = value;
+        } else {
+          input.type = field.kind === "integer" ? "number" : "text";
+          input.value = value;
+          if (field.kind === "integer") input.step = "1";
+        }
+        if (field.kind === "boolean") {
+          label.append(input, document.createTextNode(field.label));
+        } else {
+          label.append(document.createTextNode(field.label), input);
+        }
+        if (field.help) label.append(node("small", field.help));
+        inputs.set(field.key, input);
+        return label;
+      }
+      function buildFields() {
+        inputs.clear();
+        $("form").replaceChildren();
+        sections = [...new Set(fields.map((f) => f.section || "Settings"))];
+        for (const section of sections) {
+          const panel = node("section");
+          panel.dataset.section = section;
+          const regular = node("div", undefined, "fields"),
+            advanced = node("div", undefined, "fields");
+          for (const f of fields.filter(
+            (f) => (f.section || "Settings") === section,
+          ))
+            (f.advanced ? advanced : regular).append(fieldNode(f));
+          panel.append(regular);
+          if (advanced.childElementCount) {
+            const details = node("details");
+            details.append(node("summary", "Advanced options"), advanced);
+            advanced.style.marginTop = "16px";
+            panel.append(details);
+          }
+          $("form").append(panel);
+        }
+      }
+      function renderStep() {
+        const review = !editMode && step === sections.length;
+        set(
+          "wizard-title",
+          review
+            ? "Review and apply"
+            : (editMode ? "Edit settings · " : "") + sections[step],
+        );
+        set(
+          "wizard-copy",
+          review
+            ? "Applying saves your choices and restarts the server automatically. This page stays available while files download and models load."
+            : descriptions[sections[step]] || "Review these server settings.",
+        );
+        $("steps").replaceChildren();
+        (editMode ? sections : [...sections, "Review"]).forEach((s, i) => {
+          const tab = node(
+            editMode ? "button" : "span",
+            s,
+            i === step ? "active" : "",
+          );
+          if (editMode) {
+            tab.type = "button";
+            tab.disabled = busy;
+            tab.onclick = () => {
+              if (busy) return;
+              step = i;
+              renderStep();
+            };
+          }
+          $("steps").append(tab);
+        });
+        for (const panel of $("form").children)
+          panel.hidden = review || panel.dataset.section !== sections[step];
+        $("review").hidden = !review;
+        if (review) {
+          $("review").replaceChildren();
+          for (const f of fields.filter((f) => !f.advanced)) {
+            const row = node("div", undefined, "review-row");
+            const value = draft()[f.key];
+            row.append(
+              node("span", f.label),
+              node(
+                "strong",
+                typeof value === "boolean"
+                  ? value
+                    ? "Enabled"
+                    : "Disabled"
+                  : String(value),
+              ),
+            );
+            $("review").append(row);
+          }
+        }
+        $("back").hidden = editMode || step === 0;
+        set("next", editMode || review ? "Save and apply" : "Next");
+        message("wizard-error", "");
+      }
+      async function settings() {
+        const data = await api("/settings");
+        fields = data.fields;
+        current = data.values;
+        loadedSettings = true;
+        buildFields();
+        set("config-path", "Settings file: " + data.configPath);
+        $("wizard-open").disabled = false;
+        $("edit-open").disabled = false;
+        if (data.firstRun && !$("wizard").open) {
+          editMode = false;
+          step = 0;
+          renderStep();
+          $("wizard").showModal();
+        }
+      }
+      $("wizard-open").onclick = async () => {
+        try {
+          await settings();
+          editMode = false;
+          step = 0;
+          renderStep();
+          if (!$("wizard").open) $("wizard").showModal();
+        } catch (e) {
+          message("error", e.message);
+        }
+      };
+      async function editSettings(section = "Models", model = null) {
+        try {
+          await settings();
+          editMode = true;
+          if (model?.choice) {
+            const key = model.kind === "llm" ? "llm-model" : "tts-provider";
+            inputs.get(key).value = model.choice;
+            if (model.kind === "llm" && !model.selected) {
+              for (const key of [
+                "llm-manifest",
+                "llm-url",
+                "llm-name",
+                "llm-file",
+                "llm-sha256",
+                "llm-bytes",
+                "chat-template",
+                "assistant-prefix",
+              ]) {
+                const input = inputs.get(key);
+                if (input) input.value = key === "llm-bytes" ? 0 : "";
+              }
+            }
+          }
+          step = Math.max(0, sections.indexOf(section));
+          renderStep();
+          if (!$("wizard").open) $("wizard").showModal();
+        } catch (e) {
+          message("error", e.message);
+        }
+      }
+      $("edit-open").onclick = () => editSettings();
+      async function removeModel(model) {
+        if (
+          busy ||
+          !confirm(
+            "Delete the cached model files for " +
+              model.name +
+              "? This removes its weights and supporting files from disk. They will need to download again before use.",
+          )
+        )
+          return;
+        await perform(
+          "Deleting " + model.name,
+          "/models/remove",
+          { name: model.name },
+          { reload: false },
+        );
+      }
+      async function setModelState(model) {
+        await perform(
+          (model.loaded ? "Unloading " : "Loading ") + model.name,
+          "/models/state",
+          { name: model.name, loaded: !model.loaded },
+        );
+      }
+      $("cancel").onclick = () => {
+        if (!busy) $("wizard").close();
+      };
+      $("wizard").addEventListener("cancel", (e) => {
+        if (busy) e.preventDefault();
+      });
+      $("back").onclick = () => {
+        if (!busy) {
+          step--;
+          renderStep();
+        }
+      };
+      $("next").onclick = async () => {
+        if (busy) return;
+        if (!stepValid()) return;
+        if (!editMode && step < sections.length) {
+          step++;
+          renderStep();
+          return;
+        }
+        for (const id of ["next", "back", "cancel"]) $(id).disabled = true;
+        set("next", "Applying…");
+        try {
+          const values = draft();
+          await perform("Applying settings", "/settings", values, {
+            errorTarget: "wizard-error",
+            accepted: () => {
+              current = values;
+              $("wizard").close();
+            },
+          });
+        } finally {
+          for (const id of ["next", "back", "cancel"]) $(id).disabled = false;
+          set(
+            "next",
+            editMode || step === sections.length ? "Save and apply" : "Next",
+          );
+        }
+      };
+      function stepValid() {
+        const panels = [...$("form").children].filter((p) => !p.hidden);
+        for (const panel of panels) {
+          for (const input of panel.querySelectorAll("input")) {
+            if (!input.reportValidity()) return false;
+          }
+        }
+        return true;
+      }
+      $("form").onsubmit = (e) => {
+        e.preventDefault();
+        $("next").click();
+      };
+      for (const action of ["start", "stop"])
+        $(action).onclick = () =>
+          perform(
+            action === "start" ? "Loading models" : "Unloading models",
+            "/action/" + (action === "stop" ? "unload-all" : action),
+            {},
+          );
+      function render(data) {
+        lastData = data;
+        updateOperation(data.runtime, data.instance);
+        set(
+          "machine",
+          "Server: " +
+            (data.machine?.hostname || "This computer") +
+            " · " +
+            (data.machine?.os || "") +
+            " · Resource readings come from this server.",
+        );
+        const r = data.runtime,
+          resource = r.resources || {},
+          gpu = r.gpu || {};
+        const stage = r.stage || "stopped";
+        const components = r.health?.components;
+        const count = components
+          ? Object.values(components).filter(Boolean).length
+          : 3;
+        const partial = stage === "ready" && count < 3;
+        set(
+          "badge",
+          stage === "ready"
+            ? partial
+              ? count + " / 3 loaded"
+              : "Ready"
+            : stage.charAt(0).toUpperCase() + stage.slice(1),
+        );
+        $("badge").className = "badge " + stage;
+        set(
+          "status-detail",
+          stage === "ready"
+            ? partial
+              ? count +
+                " of 3 components loaded. Functions for unloaded components are unavailable."
+              : "Models are loaded and the plugin can connect."
+            : stage === "stopped"
+              ? "Models unloaded. The dashboard stays available; cached files are kept."
+              : stage === "error"
+                ? "The server needs attention. Review the message below."
+                : r.component
+                  ? "Loading " + r.component + "…"
+                  : "Preparing selected models…",
+        );
+        if (r.error) message("error", r.error);
+        else if (stage !== "error") message("error", "");
+        $("start").disabled = busy || (!!r.pid && !partial) || !loadedSettings;
+        $("stop").disabled =
+          busy || !r.pid || (stage === "ready" && count === 0);
+        set("cpu", percent(resource.cpuPercent));
+        set(
+          "cpu-detail",
+          (resource.cpuName || "CPU") +
+            " · Whole computer" +
+            (resource.serverCpuPercent != null
+              ? " · Server " + percent(resource.serverCpuPercent)
+              : ""),
+        );
+        set("ram", bytes(resource.ramUsed) + " / " + bytes(resource.ramTotal));
+        set(
+          "ram-detail",
+          "Whole computer · Server " + bytes(resource.serverRam),
+        );
+        const devices = gpu.devices || [];
+        if (gpu.available && devices.length) {
+          set(
+            "gpu",
+            devices.length === 1
+              ? percent(devices[0].percent)
+              : devices.length + " GPUs",
+          );
+          set(
+            "gpu-detail",
+            devices
+              .map(
+                (d) =>
+                  d.name +
+                  " · VRAM " +
+                  bytes(d.usedMiB == null ? null : d.usedMiB * 1048576) +
+                  " / " +
+                  bytes(d.totalMiB == null ? null : d.totalMiB * 1048576),
+              )
+              .join(" | ") +
+              (gpu.serverMiB != null
+                ? " · Server VRAM (all GPUs) " + bytes(gpu.serverMiB * 1048576)
+                : " · Server VRAM unavailable"),
+          );
+        } else {
+          set("gpu", "Unavailable");
+          set(
+            "gpu-detail",
+            gpu.reason ||
+              "Driver counters unavailable. Actual compute devices appear below once loaded.",
+          );
+        }
+        set(
+          "health",
+          r.health ? JSON.stringify(r.health, null, 2) : "No runtime loaded",
+        );
+        set("logs", (r.logs || []).join("\n") || "No messages yet");
+        const rows = data.catalogue?.models || [];
+        $("models").replaceChildren();
+        for (const m of rows) {
+          const tr = node("tr"),
+            name = node("td"),
+            disk = node(
+              "td",
+              m.present
+                ? bytes(m.bytes)
+                : m.cached
+                  ? "Partial · " + bytes(m.bytes)
+                  : "Not downloaded",
+            ),
+            status = node(
+              "td",
+              m.loaded ? "Loaded" : m.verified ? "Verified" : "Not loaded",
+            );
+          name.append(
+            node("strong", m.name + (m.selected ? " · Selected" : "")),
+          );
+          if ((m.files || []).length > 1) {
+            const detail = node("details");
+            detail.append(node("summary", m.files.length + " files"));
+            for (const file of m.files) detail.append(node("small", file.path));
+            name.append(detail);
+          } else {
+            name.append(node("small", m.path));
+          }
+          const progress = m.progress || {};
+          if (progress.stage === "downloading") {
+            const bar = document.createElement("progress");
+            if (progress.total > 0) {
+              bar.max = progress.total;
+              bar.value = progress.done || 0;
+            }
+            name.append(
+              bar,
+              node(
+                "small",
+                bytes(progress.done || 0) +
+                  (progress.total
+                    ? " / " + bytes(progress.total)
+                    : " downloaded"),
+              ),
+            );
+            status.textContent = "Downloading";
+          } else if (progress.stage === "verifying" && !m.verified) {
+            status.textContent = "Verifying";
+          }
+          const device = node("td", m.compute?.label || "Not loaded");
+          device.title = m.compute?.reason || "";
+          const ram = node("td", m.loaded ? bytes(m.usage?.ramBytes) : "—"),
+            vram = node("td", m.loaded ? bytes(m.usage?.vramBytes) : "—");
+          for (const cell of [ram, vram]) {
+            if (m.usage?.shared && m.loaded)
+              cell.append(node("small", "Shared"));
+            cell.title =
+              m.usage?.description || "Resource counters unavailable";
+          }
+          const actions = node("td"),
+            edit = node("button", "Edit"),
+            remove = node("button", "Delete"),
+            load = node("button", m.loaded ? "Unload" : "Load");
+          edit.type = remove.type = load.type = "button";
+          load.disabled =
+            busy || (!!r.pid && stage !== "ready" && stage !== "error");
+          load.onclick = () => setModelState(m);
+          load.title =
+            "Changes this component and automatically reloads the inference runtime; the dashboard stays open.";
+          edit.disabled = busy;
+          edit.onclick = () =>
+            editSettings(
+              m.kind === "tts"
+                ? "Speech"
+                : m.kind === "llm"
+                  ? "Models"
+                  : "Speech",
+              m,
+            );
+          remove.disabled = busy || !m.removable;
+          remove.title = m.removable
+            ? "Delete this cached model file"
+            : "Unload models before deleting a selected file";
+          remove.onclick = () => removeModel(m);
+          const controls = node("div", undefined, "actions model-actions");
+          controls.append(load, edit, remove);
+          actions.append(controls);
+          tr.append(name, disk, status, device, ram, vram, actions);
+          $("models").append(tr);
+        }
+        set(
+          "model-root",
+          data.catalogue?.error ||
+            "Storage: " + (data.catalogue?.root || "Platform data folder"),
+        );
+      }
+      let polling = false;
+      async function poll() {
+        if (polling) return;
+        polling = true;
+        try {
+          const data = await api("/status");
+          lastContact = Date.now();
+          render(data);
+        } catch (e) {
+          set("badge", "Disconnected");
+          set(
+            "status-detail",
+            "Cannot reach the dashboard manager. Keep its application running.",
+          );
+          message("error", e.message);
+          if (operation && !operation.failed) {
+            if (Date.now() - lastContact > 15000)
+              operationError(
+                "Connection to the server was lost. The task may still be running; check its state before retrying.",
+              );
+            else set("operation-detail", "Checking the server connection…");
+          }
+        } finally {
+          polling = false;
+        }
+      }
+      (async () => {
+        try {
+          await settings();
+        } catch (e) {
+          message("error", e.message);
+        }
+        await poll();
+        setInterval(poll, 2000);
+      })();
+    </script>
+  </body>
+</html>
