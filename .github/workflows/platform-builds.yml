@@ -85,13 +85,35 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
-          if (!(Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'The Windows runner is missing Inno Setup 6' }
+          $compiler = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if (!$compiler) { throw 'Inno Setup 6 was not found in the machine or user installation directories' }
           Write-Host "Using Inno Setup compiler at $compiler; packaging preflight reports the engine version and checks compatibility."
           "ISCC=$compiler" >> $env:GITHUB_ENV
+      - name: Select Windows packaging linker
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $linker = (Get-Command link.exe -ErrorAction Stop).Source
+          if ($linker -notmatch 'Microsoft Visual Studio') { throw "Expected the MSVC linker, found $linker" }
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" >> $env:GITHUB_ENV
       - name: Test installer discovery and transactions
         run: cargo test --locked -p xtask installer::tests
-      - name: Validate installer assets and native package generation
+      - name: Validate Windows installer assets and native package generation
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($document in @('docs/INSTALL.md', 'docs/RELEASE_PACKAGING.md')) {
+            if (!(Test-Path -LiteralPath $document -PathType Leaf)) { throw "Missing installer document: $document" }
+            if ((Get-Item -LiteralPath $document).Length -eq 0) { throw "Empty installer document: $document" }
+          }
+          cargo run --locked -p xtask -- release-preflight ${{ matrix.platform }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Validate Linux and macOS installer assets and native package generation
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           test -s docs/INSTALL.md
@@ -272,8 +294,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
-          if (!(Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'The Windows runner is missing Inno Setup 6' }
+          $compiler = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if (!$compiler) { throw 'Inno Setup 6 was not found in the machine or user installation directories' }
           Write-Host "Using Inno Setup compiler at $compiler; packaging preflight reports the engine version and checks compatibility."
           "ISCC=$compiler" >> $env:GITHUB_ENV
       - name: Install Linux packaging runtimes
