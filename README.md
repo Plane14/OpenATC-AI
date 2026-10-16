@@ -82,13 +82,15 @@ cargo xtask install-plugin "/path/to/X-Plane 12"
 External Cargo dependencies use exact version requirements, and the committed `Cargo.lock` fixes the transitive dependency graph. Keep `--locked` on build and test commands. Dependency upgrades are deliberate changes: update the relevant manifest pins and lockfile together, then validate the affected components before installing.
 
 
+Fresh Steam installations can be detected before their first launch; choose the X-Plane root folder, and the installer adds `Resources/plugins/OpenATC`. Standalone installations require a version log from one prior launch.
+
 The installer checks speech files, makes a recoverable backup outside the plugin directory, and installs the plugin, engine and editable resources. It preserves personal settings and existing station-role overrides. Do not rename the engine executable into an `.xpl`: the simulator module and companion engine are different binaries.
 
 The simulator module is `64/lin.xpl` on Linux, `64/win.xpl` on Windows and `64/mac.xpl` on macOS. Keep the rest of the OpenATC folder with it. Restart X-Plane and open **Plugins → OpenATC**.
 
 ### Saved server configuration
 
-The redesigned dashboard is installed and has been reviewed on Fedora, including real model loading, downloads and settings application. Updated Windows/macOS dashboard and installer checks remain pending; see [Validation](docs/VALIDATION.md).
+The redesigned dashboard is installed and has been reviewed on Fedora, including real model loading, downloads and settings application. The updated Windows server and installer build successfully; interactive Windows dashboard/install checks and macOS verification remain pending; see [Validation](docs/VALIDATION.md).
 
 The server supports Linux, Windows and macOS. Launching the packaged server opens its browser dashboard: the first launch offers a setup wizard, while later launches reuse your saved choices. **Edit settings** provides direct model, compute, speech and connection tabs; **Run setup wizard** remains available as a guided alternative. **Save and apply** validates and saves `server.toml`, then reloads the inference runtime automatically while the dashboard remains available. Load/unload, applying settings and deletion show a modal progress overlay; verification/download/loading stages remain visible until completion, and failures can be dismissed to correct the settings. Per-model **Load / Unload** controls each component; the top buttons control the whole model set. Changes reload inference automatically while keeping the dashboard open. The single **Models** panel includes download progress, cache locations, CPU/GPU status, RAM/VRAM observations and cached-model deletion. Supporting voice files are grouped with their model. Files cannot be deleted while their model is enabled in the running runtime. When language and synthesis are loaded together they share one process, so their RAM/VRAM observations are explicitly marked shared rather than attributed to each model separately.
 

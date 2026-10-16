@@ -56,6 +56,38 @@ fn executable_name() -> &'static str {
     }
 }
 
+fn steam_identifies_xplane12(root: &Path) -> bool {
+    let Some(common) = root.parent() else {
+        return false;
+    };
+    let Some(apps) = common.parent() else {
+        return false;
+    };
+    let Some(source) = text(&apps.join("appmanifest_2014780.acf")) else {
+        return false;
+    };
+    let words = tokens(&source);
+    if !words
+        .windows(2)
+        .any(|pair| pair[0] == "appid" && pair[1] == "2014780")
+    {
+        return false;
+    }
+    let Some(pair) = words.windows(2).find(|pair| pair[0] == "installdir") else {
+        return false;
+    };
+    let relative = Path::new(&pair[1]);
+    if relative.as_os_str().is_empty()
+        || !relative
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return false;
+    }
+    // Match the manifest's actual installation, not a similarly named nearby folder.
+    fs::canonicalize(apps.join("common").join(relative)).is_ok_and(|path| path == root)
+}
+
 pub fn validate(root: &Path) -> Result<PathBuf> {
     let root = fs::canonicalize(root)?;
     if !root.join("Resources/plugins").is_dir() || !root.join(executable_name()).is_file() {
@@ -113,7 +145,12 @@ pub fn validate(root: &Path) -> Result<PathBuf> {
         return Err("The simulator executable does not match this platform's installer.".into());
     }
     let mut log = Vec::new();
-    fs::File::open(root.join("Log.txt")).map_err(|_| "Start X-Plane 12 once, then close it before installing; its Log.txt identifies the simulator version.")?.take(4096).read_to_end(&mut log)?;
+    match fs::File::open(root.join("Log.txt")) {
+        Ok(file) => { file.take(4096).read_to_end(&mut log)?; }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && steam_identifies_xplane12(&root) => return Ok(root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err("This folder has no X-Plane 12 log or matching Steam manifest. For standalone installations, start X-Plane once, then close it before installing.".into()),
+        Err(error) => return Err(error.into()),
+    }
     if !String::from_utf8_lossy(&log)
         .lines()
         .next()
@@ -208,6 +245,20 @@ pub fn discover(home: &Path, extra_steam: &[PathBuf]) -> Vec<PathBuf> {
     found.sort();
     found.dedup();
     found
+}
+
+// Folder pickers expect ordinary drive/UNC paths, not Rust's extended-length spelling.
+fn windows_folder_path(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    if let Some(drive) = path.strip_prefix(r"\\?\") {
+        let bytes = drive.as_bytes();
+        if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1..3] == *b":\\" {
+            return drive.to_owned();
+        }
+    }
+    path.to_owned()
 }
 
 fn home() -> PathBuf {
@@ -564,7 +615,14 @@ fn launch_inner(bundle: &Path, args: &[std::ffi::OsString]) -> Result {
                 if cfg!(windows) { "\u{feff}" } else { "" },
                 found
                     .iter()
-                    .map(|p| p.to_string_lossy())
+                    .map(|p| {
+                        let path = p.to_string_lossy();
+                        if cfg!(windows) {
+                            windows_folder_path(&path)
+                        } else {
+                            path.into_owned()
+                        }
+                    })
                     .filter(|p| !p.contains(['\r', '\n']))
                     .collect::<Vec<_>>()
                     .join("\n")
@@ -763,6 +821,60 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert!(found.contains(&fs::canonicalize(sim).unwrap()));
         assert!(found.contains(&fs::canonicalize(direct).unwrap()));
+    }
+    #[test]
+    fn windows_folder_picker_paths_keep_drive_and_network_roots_usable() {
+        assert_eq!(
+            windows_folder_path(r"\\?\C:\Flight Sims\X-Plane 12"),
+            r"C:\Flight Sims\X-Plane 12"
+        );
+        assert_eq!(
+            windows_folder_path(r"\\?\UNC\server\Flight Sims\X-Plane 12"),
+            r"\\server\Flight Sims\X-Plane 12"
+        );
+        assert_eq!(
+            windows_folder_path(r"C:\Flight Sims\X-Plane 12"),
+            r"C:\Flight Sims\X-Plane 12"
+        );
+        assert_eq!(
+            windows_folder_path(r"\\server\Flight Sims"),
+            r"\\server\Flight Sims"
+        );
+        assert_eq!(
+            windows_folder_path(r"\\?\Volume{abc}\sim"),
+            r"\\?\Volume{abc}\sim"
+        );
+    }
+    #[test]
+    fn fresh_steam_install_uses_matching_app_identity_without_launching_simulator() {
+        let temp = tempfile::tempdir().unwrap();
+        let steam = temp.path().join("Steam");
+        let sim = steam.join("steamapps/common/X-Plane 12");
+        simulator(&sim);
+        fs::remove_file(sim.join("Log.txt")).unwrap();
+        assert!(validate(&sim).is_err());
+        put(
+            &steam,
+            "steamapps/appmanifest_2014780.acf",
+            "\"AppState\" { \"appid\" \"2014780\" \"installdir\" \"X-Plane 12\" }",
+        );
+        assert_eq!(
+            discover(temp.path(), std::slice::from_ref(&steam)),
+            vec![fs::canonicalize(&sim).unwrap()]
+        );
+        let other = steam.join("steamapps/common/Other simulator");
+        simulator(&other);
+        fs::remove_file(other.join("Log.txt")).unwrap();
+        assert!(validate(&other).is_err());
+        put(&sim, "Log.txt", "Log.txt for X-Plane 11.55\n");
+        assert!(validate(&sim).is_err());
+        fs::remove_file(sim.join("Log.txt")).unwrap();
+        put(
+            &steam,
+            "steamapps/appmanifest_2014780.acf",
+            "\"AppState\" { \"appid\" \"269950\" \"installdir\" \"X-Plane 12\" }",
+        );
+        assert!(validate(&sim).is_err());
     }
     #[test]
     fn upgrades_preserve_custom_files_remove_obsolete_owned_files_and_uninstall_safely() {

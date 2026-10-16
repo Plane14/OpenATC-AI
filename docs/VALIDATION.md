@@ -1,5 +1,15 @@
 # Validation
 
+## Windows folder-picker path repair — 16 October 2026
+
+Interactive review found that discovered paths used Rust's extended-length Windows prefix, which Inno Setup's folder field rejected. Discovery output now converts drive and UNC paths to their ordinary folder-picker spelling while retaining canonical paths for internal filesystem checks. Eight focused tests pass on Linux and seven on Windows, including drive/network path regression cases. The rebuilt helper returns the actual Steam root without the prefix and the real plugin installer compiles. Continuing through the interactive wizard remains a separate user check.
+
+## Updated Windows server package and fresh Steam discovery — 16 October 2026
+
+The refactored AI server, recognition sidecar and launcher build natively on Windows 11 with the release Vulkan/Vulkan/CUDA-TTS features. Both server executables pass `--help` linkage checks. The actual server Setup.exe and ZIP are generated successfully; Inno Setup 6.7.3 accepts the dynamic light/dark theme and branding. This establishes package construction, not interactive dashboard, GPU, installation or uninstallation acceptance.
+
+A fresh Steam X-Plane 12 installation exposed a discovery gap: no simulator log exists before its first launch, so the installer silently excluded it. Native executable validation now also accepts a matching X-Plane 12 Steam app manifest when the log is absent. The manifest must identify the exact selected installation; unrelated folders, another app identity and an existing X-Plane 11 log remain rejected. All seven focused installer tests pass on Linux and all six applicable tests pass natively on Windows, including the fresh-install regression. The rebuilt native helper discovers the actual newly installed Steam simulator without a log, and the plugin Setup.exe and ZIP build successfully. Interactive installer/install/remove acceptance remains separate. Standalone installations still require their version log.
+
 Dashboard overlay follow-up: load/unload, Save/apply and deletion now show a modal spinner with actual phase/download progress until the acknowledged runtime generation completes. The user reported the change working on Fedora. A browser check additionally submitted an invalid context draft, verified the error overlay and Dismiss action, returned to the editor, and closed it without saving; the running server and saved settings stayed intact. The focused HTTP mutation test also verifies the generation/instance receipt. Reduced-motion styling and connection-error recovery are implemented; these additions have not yet been tested natively on Windows/macOS.
 
 ## AI-server dashboard and model controls — 16 October 2026

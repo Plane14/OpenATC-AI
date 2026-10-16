@@ -37,7 +37,7 @@ begin
   ExtractTemporaryFile('openatc-install.exe');
   XPlanePage := CreateInputDirPage(wpSelectDir, 'Choose X-Plane 12',
     'Select the simulator installation to update.',
-    'Choose a detected installation below, or browse to the X-Plane root folder. Start X-Plane once before installing, then close it.', False, '');
+    'Choose a detected installation below, or browse to the X-Plane root folder. Select the X-Plane root, not Resources\plugins. Close X-Plane before installing.', False, '');
   XPlanePage.Add('X-Plane 12 root folder:');
   Detected := TNewComboBox.Create(XPlanePage);
   Detected.Parent := XPlanePage.Surface;

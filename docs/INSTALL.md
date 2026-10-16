@@ -6,7 +6,7 @@ Read the release notes for unfinished features. Generated traffic is disabled by
 
 ## Before installing
 
-1. Start the chosen X-Plane 12 installation once, then close it. The installer uses its executable and `Log.txt` to validate the platform and major version. This also applies to a new second installation.
+1. For standalone installations, start the chosen X-Plane 12 installation once, then close it. The installer uses its native executable and `Log.txt` to validate platform and major version. Fresh Steam installations can instead be identified by their matching X-Plane 12 app manifest, without a first launch.
 2. Close every X-Plane process before installing, updating or removing the plugin. Close other OpenATC installers too.
 3. Keep a backup of customised configuration. Allow enough free space for the new plugin, preserved custom files and the previous version. Large custom CSL/model folders also need staging space.
 4. Extract portable ZIP downloads completely before running anything. Keep their folder contents together. Compare the download's SHA-256 checksum with its accompanying `.sha256` file if checking download integrity.
