@@ -1,5 +1,11 @@
 # Validation
 
+## Flatpak PNG export repair — 16 October 2026
+
+The supplied Linux packaging log shows successful AppImage generation followed by Flatpak rejecting the SVG icon as an unrecognized format. Flatpak now exports a supplied 128×128 PNG derived from the existing tower SVG. Early asset validation checks its header/dimensions. A dedicated packaging fixture calls the actual Rust Flatpak function with a minimal payload, exports the repository and produces a `.flatpak` bundle; it passes locally with Freedesktop 25.08. CI runs that fixture after installing the SDK/runtime, before the real server package operation.
+
+This verifies Flatpak icon validation, export and bundle creation on the local host. It is not a full server install, launch or inference acceptance check; the hosted package run still needs the new source and PNG asset. The AppImage AppStream metadata warning in the supplied log was nonfatal and is separate from this Flatpak repair.
+
 ## Linux ONNX ABI and Actions runtime updates — 16 October 2026
 
 A subsequent Linux AI-server link reached ONNX Runtime and failed on `__isoc23_strtol`, `__isoc23_strtoll`, `__isoc23_strtoull` and C++ `_M_replace_cold` symbols. These prebuilt dependency requirements exceed the Ubuntu 22.04 runtime. Only the Linux server build moves to Ubuntu 24.04, with a distinct Rust cache key; the plugin stays on Ubuntu 22.04. Server DEB/RPM metadata declares glibc 2.39 and installation guides state the native binary baseline.

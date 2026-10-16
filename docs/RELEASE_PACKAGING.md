@@ -53,6 +53,10 @@ The Mac plugin app supports explicit installation and removal with native result
 
 The Windows AI-server build downloads LunarG's pinned 1.4.341.0 runtime components archive and verifies both the archive and x64 loader SHA-256 checksums. This is separate from the pinned 1.4.341.1 shader SDK. It stages that verified `vulkan-1.dll` beside the server and recognition executable, instead of relying on the hosted runner having a system Vulkan runtime. Both executables undergo `--help` startup checks before packaging. Runtime binaries are downloaded build inputs, not checked-in files; their required notice is included in `licenses/VulkanRT-LICENSE.txt`.
 
+## Flatpak icon export
+
+Flatpak uses the supplied 128×128 PNG tower icon in `share/icons/hicolor/128x128/apps`, so its validator does not depend on an SVG decoder. Asset preflight checks the PNG header and dimensions. After installing the Freedesktop SDK/runtime, CI runs a small export/bundle fixture through the same Rust packaging function before packaging the actual server. The fixture does not load models or launch the application.
+
 ## Actions runtimes and Linux build baseline
 
 Checkout, cache and artifact upload/download actions use releases declaring Node.js 24. Visual Studio's native `Launch-VsDevShell.ps1` replaces the Node 20 MSVC setup action; its compiler and SDK environment is exported for subsequent steps. The native environment export/import was checked by compiling and running a C program on Windows.

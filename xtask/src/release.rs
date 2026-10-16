@@ -72,14 +72,18 @@ fn check_branding() -> Result {
             );
         }
     }
-    for name in ["banner.png", "sidebar.png", "icon.png"] {
+    for name in ["banner.png", "sidebar.png", "icon.png", "flatpak-icon.png"] {
         let bytes = fs::read(root.join(name))?;
         if bytes.len() < 33 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" || &bytes[12..16] != b"IHDR" {
             return Err(format!("Invalid installer PNG: {name}").into());
         }
         let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
         let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
-        if width == 0 || height == 0 || (name == "icon.png" && (width != 1024 || height != 1024)) {
+        if width == 0
+            || height == 0
+            || (name == "icon.png" && (width != 1024 || height != 1024))
+            || (name == "flatpak-icon.png" && (width != 128 || height != 128))
+        {
             return Err(format!("Installer PNG has unexpected dimensions: {name}").into());
         }
     }
@@ -964,9 +968,9 @@ fn flatpak(
         &build.join(format!("files/share/applications/{id}.desktop")),
         &desktop,
     )?;
-    let icon = build.join(format!("files/share/icons/hicolor/scalable/apps/{id}.svg"));
+    let icon = build.join(format!("files/share/icons/hicolor/128x128/apps/{id}.png"));
     fs::create_dir_all(icon.parent().unwrap())?;
-    fs::copy(repo().join("assets/logo.svg"), icon)?;
+    fs::copy(repo().join("assets/installer/flatpak-icon.png"), icon)?;
     let mut finish = Command::new("flatpak");
     finish
         .args(["build-finish", "--share=network", "--device=dri"])
@@ -1013,6 +1017,32 @@ mod tests {
                 product == "ai-server"
             );
         }
+    }
+    #[test]
+    #[ignore = "requires Flatpak and the installed Freedesktop 25.08 SDK/runtime"]
+    fn flatpak_package_exports_with_png_icon() {
+        let work = tempfile::tempdir().unwrap();
+        let bundle = work.path().join("bundle");
+        let output = work.path().join("output");
+        fs::create_dir_all(&bundle).unwrap();
+        fs::create_dir_all(&output).unwrap();
+        write(&bundle.join("openatc-launcher"), "#!/bin/sh\nexit 0\n").unwrap();
+        flatpak(
+            &bundle,
+            work.path(),
+            &output,
+            "icon-check",
+            "ai-server",
+            "openatc-launcher",
+            "org.openatc.AI",
+        )
+        .unwrap();
+        assert!(
+            fs::metadata(output.join("icon-check.flatpak"))
+                .unwrap()
+                .len()
+                > 0
+        );
     }
     #[test]
     fn release_versions_reject_paths_and_shell_text() {

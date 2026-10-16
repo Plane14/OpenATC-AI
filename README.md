@@ -696,3 +696,5 @@ Windows engine integration fixtures explicitly restore blocking mode on accepted
 Linux AI release builds install the Vulkan loader development package as well as the shader SDK and check loader linking before the full build. This build dependency is separate from the GPU driver required for acceleration.
 
 Windows AI packages obtain the x64 Vulkan loader from a pinned, checksum-verified LunarG runtime archive during CI. Both server executables receive startup linkage checks before packaging; runtime binaries are not stored in the source repository.
+
+Flatpak packaging uses a pre-rendered PNG tower icon and checks a small export/bundle fixture before packaging the real server, avoiding dependence on an SVG decoder on the build host.
