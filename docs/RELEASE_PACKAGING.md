@@ -49,6 +49,10 @@ The Windows wizard discovers roots through the bundled helper, validates the sel
 
 The Mac plugin app supports explicit installation and removal with native result dialogs. The server app offers Start/Configure and opens the persistent browser dashboard through its launcher. First-run setup and model download/loading progress use that dashboard; Configure opens the same manager rather than a second inference process. Server application removal preserves separate settings/models; stop its process first. Windows includes Start-menu launch/configuration shortcuts. Linux DEB/RPM provide an optional user service without enabling it automatically. Flatpak exposes network and DRI devices; proprietary GPU driver libraries are excluded from the Linux portable dependency copy. Actual GPU access still depends on host drivers, Flatpak extensions and the chosen model backend.
 
+## Intel Mac ONNX dependency build
+
+The Intel Mac server compiles ONNX Runtime with CoreML support. Its build supplies `CMAKE_POLICY_VERSION_MINIMUM=3.5` for older bundled dependencies such as psimd, whose declared policy version is rejected by CMake 4. This uses CMake's external compatibility setting rather than modifying vendor sources. The ONNX cache key includes this build revision. A dependency configuring successfully on Linux is not evidence of a complete Intel Mac build; the native workflow remains the release check.
+
 ## Optional signing and notarisation
 
 Unsigned manual test builds remain possible without secrets. Public publisher identity requires the maintainer's certificates; no certificate or private key is committed. The normal native workflow imports optional credentials before expensive model builds, signs native payload files before archiving and signs Windows setup/removal or the Mac app/DMG. Signing failures fail packaging rather than silently producing an unsigned substitute.

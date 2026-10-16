@@ -220,7 +220,7 @@ jobs:
         id: onnx-cache
         with:
           path: ${{ runner.temp }}/openatc-onnx
-          key: onnxruntime-1.28.0-macos15-intel-coreml-no-tests-v2
+          key: onnxruntime-1.28.0-macos15-intel-coreml-cmake-policy-v3
       - uses: actions/checkout@v4
         if: matrix.platform == 'macos-intel' && matrix.product == 'ai-server' && steps.onnx-cache.outputs.cache-hit != 'true' 
         with:
@@ -232,7 +232,7 @@ jobs:
         if: matrix.platform == 'macos-intel' && matrix.product == 'ai-server' && steps.onnx-cache.outputs.cache-hit != 'true'
         run: |
           cd build-deps/onnxruntime
-          ./build.sh --config Release --build_shared_lib --use_coreml --parallel 3 --skip_tests --compile_no_warning_as_error --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF CMAKE_OSX_ARCHITECTURES=x86_64 CMAKE_INSTALL_RPATH=@loader_path
+          ./build.sh --config Release --build_shared_lib --use_coreml --parallel 3 --skip_tests --compile_no_warning_as_error --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF CMAKE_POLICY_VERSION_MINIMUM=3.5 CMAKE_OSX_ARCHITECTURES=x86_64 CMAKE_INSTALL_RPATH=@loader_path
           runtime="$PWD/build/MacOS/Release"
           test -f "$runtime/libonnxruntime.dylib"
           mkdir -p "$RUNNER_TEMP/openatc-onnx"

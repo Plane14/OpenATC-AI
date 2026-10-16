@@ -296,8 +296,40 @@ mod tests {
                 let Ok((mut stream, _)) = listener.accept() else {
                     break;
                 };
-                let mut head = vec![0u8; 4096];
-                let _ = std::io::Read::read(&mut stream, &mut head);
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                let (head_end, length) = loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0, "request ended before its headers");
+                    request.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let head = std::str::from_utf8(&request[..end]).unwrap();
+                        let length = head
+                            .lines()
+                            .filter_map(|line| line.split_once(':'))
+                            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, length)| length.trim().parse::<usize>().unwrap())
+                            .unwrap_or(0);
+                        break (end + 4, length);
+                    }
+                    assert!(request.len() < 65536, "test request headers too large");
+                };
+                // Closing with an unread POST body can reset the connection on Windows.
+                let received = request.len() - head_end;
+                if received < length {
+                    let mut remaining = vec![0; length - received];
+                    stream.read_exact(&mut remaining).unwrap();
+                    request.extend_from_slice(&remaining);
+                }
+                if length > 0 {
+                    serde_json::from_slice::<serde_json::Value>(
+                        &request[head_end..head_end + length],
+                    )
+                    .unwrap();
+                }
                 let reply = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
@@ -328,7 +360,7 @@ mod tests {
         let (status, posted) = post_json(
             &origin,
             "/request",
-            &serde_json::json!({}),
+            &serde_json::json!({"message": "radio check ".repeat(2048)}),
             Duration::from_secs(5),
         )
         .unwrap();

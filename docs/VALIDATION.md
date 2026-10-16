@@ -1,5 +1,11 @@
 # Validation
 
+## Windows HTTP fixture and Intel Mac CMake repairs — 16 October 2026
+
+Native build run [38852127966](https://github.com/billpayne4x4/OpenATC-AI/actions/runs/38852127966) on `b17acbc` exposed two independent failures. Windows failed `openatc-http::tests::round_trips_json`: the fixture read the socket only once and could close with an unread POST body, resetting the connection. The fixture now reads complete headers and the declared body before replying; its POST regression exceeds the original read buffer. All three HTTP tests pass locally. The exact native shared gate (`openatc-core`, `openatc-settings`, `openatc-platform`, `openatc-http`, `xtask`) passes on the Windows 11 VM, followed by 20 successful repeats of the HTTP regression. Production transport behavior is unchanged.
+
+Intel Mac's server failed while configuring ONNX Runtime's pinned psimd dependency: CMake 4.4.2 rejected its old minimum policy version. The Intel-only ONNX build now supplies `CMAKE_POLICY_VERSION_MINIMUM=3.5` and uses a revised dependency cache key. The exact psimd revision fails configuration under local CMake 4.3 without the flag and configures successfully with it. Workflow YAML, formatting and diff checks pass. This reproduces and checks the dependency-level repair on Linux; the full Intel Mac build still requires a new native workflow run. Apple Silicon server and both Mac plugin packages were already produced by the earlier run and do not establish Intel server acceptance.
+
 ## Windows folder-picker path repair — 16 October 2026
 
 Interactive review found that discovered paths used Rust's extended-length Windows prefix, which Inno Setup's folder field rejected. Discovery output now converts drive and UNC paths to their ordinary folder-picker spelling while retaining canonical paths for internal filesystem checks. Eight focused tests pass on Linux and seven on Windows, including drive/network path regression cases. The rebuilt helper returns the actual Steam root without the prefix and the real plugin installer compiles. Continuing through the interactive wizard remains a separate user check.
