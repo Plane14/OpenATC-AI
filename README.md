@@ -3,6 +3,9 @@
   <img src="assets/branding/logo-light.png" alt="OpenATC AI" width="600">
 </picture>
 
+> [!IMPORTANT]
+> **Early alpha — testers welcome.** Release packages have not yet been tested by users. Windows has not been tested inside X-Plane, and macOS has not been tested on a real Mac. Linux release packages also need installation and simulator testing. Building from source on Linux is the best-tested option so far and has completed a full IFR flight through landing and parking. Automated builds and packaging checks do not replace testing in the simulator. Please expect bugs and share your findings with the community.
+
 # OpenATC AI
 
 Free, open-source ATC and cockpit crew conversations for **X-Plane 12**. OpenATC combines a Rust controller engine, editable TOML phrasebooks, voice input/output, simulator telemetry and aircraft control profiles. You can speak, type or use the available request buttons.
