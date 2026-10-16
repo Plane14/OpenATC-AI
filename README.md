@@ -14,7 +14,7 @@ The **AI server can run on another computer**. Keep its language model, speech r
 
 OpenATC's application code is MIT-licensed. Models, libraries, fonts and simulator data have their own terms; see [third-party notices](docs/THIRD_PARTY.md). This is an early-development flight-simulator project. A phrase in the library does not mean that every associated procedure, aircraft or regional rule has been implemented or validated.
 
-Release uploads include installer/archive files and verified SHA-256 sidecars; flight replay reports are kept out of the release assets.
+Release uploads include installer/archive files and verified SHA-256 sidecars; flight replay reports are kept out of the release assets. Regular releases target Linux x64, Windows x64 and Apple Silicon macOS. Intel Mac builds are retained for explicitly requested manual builds and are disabled in the normal release matrix.
 
 ## Contents
 

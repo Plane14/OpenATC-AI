@@ -9,7 +9,7 @@ on:
         required: true
         default: '0.0.1-alpha.1'
       platform:
-        description: 'Platform to test'
+        description: 'Platform to test (all excludes Intel Mac; select macos-intel explicitly on demand)'
         type: choice
         options: [all, linux-x64, windows-x64, macos-intel, macos-arm64]
         default: all
@@ -39,6 +39,7 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           version="$INPUT_VERSION"
@@ -46,6 +47,8 @@ jobs:
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$ ]] || { echo 'Invalid version'; exit 1; }
           matrix='[]'
           for platform in linux-x64 windows-x64 macos-intel macos-arm64; do
+            # Keep Intel Mac available only for an explicit manual request.
+            if [ "$platform" = macos-intel ] && { [ "$EVENT_NAME" != workflow_dispatch ] || [ "$INPUT_PLATFORM" != macos-intel ]; }; then continue; fi
             [ "$INPUT_PLATFORM" = all ] || [ "$INPUT_PLATFORM" = "$platform" ] || continue
             case "$platform" in
               linux-x64) runner=ubuntu-22.04 ;;
@@ -380,7 +383,7 @@ jobs:
           fi
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: native
     runs-on: ubuntu-24.04
     permissions:

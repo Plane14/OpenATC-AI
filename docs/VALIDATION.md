@@ -1,5 +1,9 @@
 # Validation
 
+## Intel Mac builds opt-in — 16 October 2026
+
+Both Intel Mac products are omitted from tag releases and manual all-platform builds; explicit manual macos-intel builds remain supported. Executed the exact matrix script for tagged all-platform and manual all-platform runs (six builds, three preflights), explicit Intel both-products (two builds, one preflight), and each Intel product separately (one build, one preflight). All passed. Publication additionally requires a push event, keeping manual tag-selected builds artifact-only. No hosted workflow was changed or cancelled; this takes effect after the user commits/pushes the workflow.
+
 ## Linux Vulkan download replacement — 16 October 2026
 
 The full LunarG SDK download stalled during a hosted run. Replaced the Linux-only SDK download with Ubuntu 24.04 packages `libvulkan-dev`, `glslc` and `spirv-headers`; Windows SDK/runtime handling is unchanged. In clean Ubuntu 24.04 container builds, compiled the actual pinned llama-cpp-sys 0.1.158 Vulkan backend (329 build steps) and whisper-rs-sys 0.15.0 Vulkan backend (316 steps), including shader generation and shared-library linkage. Also executed the exact replacement workflow shell, with container root replacing sudo: package checks, Vulkan 1.3 shader compilation and loader link/run passed. Optional shader extensions unsupported by the distro compiler are disabled by existing backend detection. These checks establish build compatibility, not hardware inference, optimal GPU performance or full hosted package acceptance. Workflow parsing and diff checks pass; no tag or release was created.

@@ -2,6 +2,8 @@
 
 The plugin and AI server remain separate downloads. A successful package build is not proof of installation, upgrade, removal, GPU/audio compatibility or simulator acceptance on that platform.
 
+Intel Mac plugin and AI-server builds are disabled in tag releases and in the manual **all** selection. The build implementation is retained: choose **Run workflow → platform: macos-intel** explicitly for an on-demand build of either or both products. Normal runs build Linux x64, Windows x64 and Apple Silicon macOS (six product/platform jobs, with twelve package/native artifact bundles). Manual runs never publish, including when launched from a tag.
+
 ## Check packaging before the long build
 
 In GitHub Actions, select **Native platform builds**, choose a version and platform, and enable **preflight_only**. This runs the small packaging checks without the full plugin/server/model builds or publication. The platform preflight checks both product layouts, even when the later product selection is narrower.
