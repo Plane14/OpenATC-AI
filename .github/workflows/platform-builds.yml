@@ -364,7 +364,7 @@ jobs:
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: packages-${{ matrix.platform }}-${{ matrix.product }}
-          path: packages/*
+          path: packages/openatc-*
           if-no-files-found: error
       - name: Collect Windows build outputs
         if: runner.os == 'Windows'
@@ -406,6 +406,16 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          cd release
+          shopt -s nullglob
+          packages=(openatc-*.zip openatc-*.exe openatc-*.dmg openatc-*.deb openatc-*.rpm openatc-*.AppImage openatc-*.flatpak)
+          (( ${#packages[@]} > 0 )) || { echo 'No release packages downloaded'; exit 1; }
+          checksums=()
+          for package in "${packages[@]}"; do
+            [[ -f "$package" && -f "$package.sha256" ]] || { echo "Missing package/checksum: $package"; exit 1; }
+            checksums+=("$package.sha256")
+          done
+          sha256sum --check -- "${checksums[@]}"
           args=(--verify-tag --generate-notes --title "OpenATC $RELEASE_TAG")
           if [[ "$RELEASE_TAG" == *-* ]]; then args+=(--prerelease); fi
-          gh release create "$RELEASE_TAG" release/* "${args[@]}"
+          gh release create "$RELEASE_TAG" "${packages[@]}" "${checksums[@]}" "${args[@]}"
