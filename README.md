@@ -694,3 +694,5 @@ The native release checks also exercise local HTTP request/response transport wi
 Windows engine integration fixtures explicitly restore blocking mode on accepted mock-model sockets, while keeping listener polling nonblocking. Radio, crew, speech and all four flight arrangements pass against the native release engine with this correction; a hosted rerun must include the updated fixture.
 
 Linux AI release builds install the Vulkan loader development package as well as the shader SDK and check loader linking before the full build. This build dependency is separate from the GPU driver required for acceleration.
+
+Windows AI packages obtain the x64 Vulkan loader from a pinned, checksum-verified LunarG runtime archive during CI. Both server executables receive startup linkage checks before packaging; runtime binaries are not stored in the source repository.

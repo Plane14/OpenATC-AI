@@ -1,5 +1,11 @@
 # Validation
 
+## Windows AI-server runtime staging — 16 October 2026
+
+The Windows server in [run 38853995407](https://github.com/billpayne4x4/OpenATC-AI/actions/runs/38853995407/job/116822121583) compiled successfully but failed the subsequent runtime copy because neither the SDK Bin folder nor System32 contained `vulkan-1.dll`. The workflow now obtains LunarG's pinned runtime components separately and verifies the archive and x64 DLL checksums before the build. It stages the verified DLL and checks both server executables' startup linkage before packaging. No runtime DLL/archive is committed.
+
+The actual workflow download/extraction/checksum block passed natively on win11-dev. The native release STT executable passed `--help` from an isolated folder containing the downloaded x64 loader; the server also passed with its other packaged dependencies present. This verifies startup linkage, not Vulkan hardware inference or full hosted packaging. Workflow YAML, platform scope, pinned checksums and diff checks pass; the hosted job must still rerun with these changes.
+
 ## Linux AI-server Vulkan loader link dependency — 16 October 2026
 
 The Linux AI-server job in [run 38853995407](https://github.com/billpayne4x4/OpenATC-AI/actions/runs/38853995407/job/116822121397) built its native dependencies but failed linking the recognition sidecar: `unable to find library -lvulkan`. Shader compilation used the downloaded SDK, while Rust's final linker needed the loader development library in its normal search path. The Linux AI-only SDK step now installs `libvulkan-dev` and verifies a small loader-linked executable before building models' native libraries.

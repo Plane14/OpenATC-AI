@@ -49,6 +49,10 @@ The Windows wizard discovers roots through the bundled helper, validates the sel
 
 The Mac plugin app supports explicit installation and removal with native result dialogs. The server app offers Start/Configure and opens the persistent browser dashboard through its launcher. First-run setup and model download/loading progress use that dashboard; Configure opens the same manager rather than a second inference process. Server application removal preserves separate settings/models; stop its process first. Windows includes Start-menu launch/configuration shortcuts. Linux DEB/RPM provide an optional user service without enabling it automatically. Flatpak exposes network and DRI devices; proprietary GPU driver libraries are excluded from the Linux portable dependency copy. Actual GPU access still depends on host drivers, Flatpak extensions and the chosen model backend.
 
+## Windows Vulkan runtime staging
+
+The Windows AI-server build downloads LunarG's pinned 1.4.341.0 runtime components archive and verifies both the archive and x64 loader SHA-256 checksums. This is separate from the pinned 1.4.341.1 shader SDK. It stages that verified `vulkan-1.dll` beside the server and recognition executable, instead of relying on the hosted runner having a system Vulkan runtime. Both executables undergo `--help` startup checks before packaging. Runtime binaries are downloaded build inputs, not checked-in files; their required notice is included in `licenses/VulkanRT-LICENSE.txt`.
+
 ## Linux Vulkan loader dependency
 
 The Linux AI-server job installs `libvulkan-dev` alongside the pinned shader SDK. Its early loader link/run check catches missing `-lvulkan` before the full native dependency build. Installing shader tools and setting `LD_LIBRARY_PATH` alone does not provide the development library to Rust's linker. End-user GPU support still depends on the installed Vulkan driver; portable packaging excludes proprietary driver libraries.

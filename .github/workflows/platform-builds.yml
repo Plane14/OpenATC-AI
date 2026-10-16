@@ -195,6 +195,14 @@ jobs:
             if ($process.ExitCode -ne 0) { throw "Vulkan SDK install failed: $($process.ExitCode)" }
           }
           if (!(Test-Path "$sdk\Bin\glslc.exe")) { throw 'Vulkan shader compiler is missing' }
+          $runtime = "$env:RUNNER_TEMP\openatc-vulkan-runtime"
+          $archive = "$env:RUNNER_TEMP\vulkan-runtime.zip"
+          Invoke-WebRequest https://sdk.lunarg.com/sdk/download/1.4.341.0/windows/VulkanRT-X64-1.4.341.0-Components.zip -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne '20571dcc8292b80a47d68bbbfa4094d87044041f50f4e2e1f326a01e3732b226') { throw 'Vulkan runtime archive checksum mismatch' }
+          Expand-Archive $archive -DestinationPath $runtime -Force
+          $loader = "$runtime\VulkanRT-X64-1.4.341.0-Components\x64\vulkan-1.dll"
+          if ((Get-FileHash $loader -Algorithm SHA256).Hash -ne '98bc6e33b384f83e8cc36174ce1ba81357611d0cbe03462e1ca58d0663034039') { throw 'Vulkan x64 loader checksum mismatch' }
+          "OPENATC_VULKAN_LOADER=$loader" >> $env:GITHUB_ENV
           "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
           "$sdk\Bin" >> $env:GITHUB_PATH
       - name: Find Apple SDK and libclang
@@ -268,9 +276,12 @@ jobs:
         run: |
           cargo build --locked --release -p openatc-ai -p openatc-stt --features openatc-ai/vulkan,openatc-stt/vulkan,openatc-ai/tts-cuda
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $loader = @("$env:VULKAN_SDK\Bin\vulkan-1.dll", "$env:WINDIR\System32\vulkan-1.dll") | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (!$loader) { throw 'Vulkan loader is missing from the SDK/runtime installation' }
-          Copy-Item $loader target/release/vulkan-1.dll
+          if (!(Test-Path $env:OPENATC_VULKAN_LOADER -PathType Leaf)) { throw 'Verified Vulkan x64 loader is missing' }
+          Copy-Item $env:OPENATC_VULKAN_LOADER target/release/vulkan-1.dll
+          & .\target\release\openatc-ai.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\target\release\openatc-stt.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build Linux AI server and speech sidecar
         if: runner.os == 'Linux' && matrix.product == 'ai-server'
         run: cargo build --locked --release -p openatc-ai -p openatc-stt --features openatc-ai/vulkan,openatc-stt/vulkan,openatc-ai/tts-cuda

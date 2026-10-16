@@ -8,7 +8,7 @@ Kokoro uses the [Kokoro-82M model](https://huggingface.co/hexgrad/Kokoro-82M) an
 
 Accelerated speech uses separately installed NVIDIA CUDA and cuDNN runtime libraries. These are NVIDIA-licensed components, not MIT application code or downloaded model weights. OpenATC's release package contains its ONNX provider libraries; users supply compatible GPU drivers and NVIDIA runtime libraries. Keep any runtime redistribution within the vendor's terms. Apple and Vulkan backends similarly depend on their platform runtimes.
 
-The Windows AI package includes the Vulkan loader so a missing system loader does not prevent CPU fallback from starting. Its upstream Apache-2.0 and permissive notices are retained in `assets/licenses/Vulkan-Loader-LICENSE.txt`. A loader does not supply a hardware driver's Vulkan implementation.
+The Windows AI package includes the Vulkan loader so a missing system loader does not prevent CPU fallback from starting. Its upstream Apache-2.0 and permissive notices are retained in `assets/licenses/Vulkan-Loader-LICENSE.txt`; the pinned LunarG runtime archive notice is retained in `assets/licenses/VulkanRT-LICENSE.txt`. CI downloads and checksum-verifies the x64 runtime; its DLL and archive are not repository files. A loader does not supply a hardware driver's Vulkan implementation.
 
 The AI-server package includes this documentation and the project license notices. No model weights or personal provider keys are bundled. See [AI server setup](AI_SERVER.md) for the build features and required runtime files.
 
