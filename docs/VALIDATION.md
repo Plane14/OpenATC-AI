@@ -1,5 +1,11 @@
 # Validation
 
+## Linux AI-server Vulkan loader link dependency — 16 October 2026
+
+The Linux AI-server job in [run 38853995407](https://github.com/billpayne4x4/OpenATC-AI/actions/runs/38853995407/job/116822121397) built its native dependencies but failed linking the recognition sidecar: `unable to find library -lvulkan`. Shader compilation used the downloaded SDK, while Rust's final linker needed the loader development library in its normal search path. The Linux AI-only SDK step now installs `libvulkan-dev` and verifies a small loader-linked executable before building models' native libraries.
+
+A clean Ubuntu 22.04 container reproduced the missing `-lvulkan` error before that package was installed. After installation, the same linker found it, and a program using the Vulkan loader's global entry-point lookup compiled and ran successfully without a GPU. Workflow YAML, shell syntax and diff checks pass. This verifies the missing link dependency, not a complete hosted server/package build or GPU inference; those still need the next native run.
+
 ## Windows integration fixture socket mode — 16 October 2026
 
 Run [38853995407](https://github.com/billpayne4x4/OpenATC-AI/actions/runs/38853995407) passed the repaired shared HTTP checks and built the Windows plugin/engine, then failed `test-crew`. The mock model logged Winsock error 10035 before the expected cabin response. Its listener deliberately accepts without blocking so it can stop promptly, but the accepted worker connection must explicitly return to blocking mode on Windows. The fixture now sets that mode before applying bounded read/write timeouts. Application/engine code is unchanged.

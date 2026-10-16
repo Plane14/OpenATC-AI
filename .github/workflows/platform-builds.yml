@@ -168,6 +168,10 @@ jobs:
         if: runner.os == 'Linux' && matrix.product == 'ai-server'
         run: |
           set -euo pipefail
+          sudo apt-get install -y libvulkan-dev
+          pkg-config --exists vulkan
+          printf '#include <vulkan/vulkan.h>\nint main(void) { return vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance") == 0; }\n' | cc -x c - -lvulkan -o "$RUNNER_TEMP/openatc-vulkan-link-check"
+          "$RUNNER_TEMP/openatc-vulkan-link-check"
           sdk="$RUNNER_TEMP/openatc-vulkan"
           if [ ! -x "$sdk/1.4.341.1/x86_64/bin/glslc" ]; then
             curl --fail --location --retry 3 https://sdk.lunarg.com/sdk/download/1.4.341.1/linux/vulkansdk-linux-x86_64-1.4.341.1.tar.xz -o "$RUNNER_TEMP/vulkan.tar.xz"
