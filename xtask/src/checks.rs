@@ -131,7 +131,10 @@ fn serve(
     release: Arc<AtomicBool>,
     proposal: Arc<Mutex<Option<String>>>,
 ) -> Result {
+    // Windows can inherit nonblocking mode from the listener; worker reads are blocking.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let mut data = Vec::new();
     let mut byte = [0];
     while !data.ends_with(b"\r\n\r\n") {

@@ -1,5 +1,11 @@
 # Validation
 
+## Windows integration fixture socket mode — 16 October 2026
+
+Run [38853995407](https://github.com/billpayne4x4/OpenATC-AI/actions/runs/38853995407) passed the repaired shared HTTP checks and built the Windows plugin/engine, then failed `test-crew`. The mock model logged Winsock error 10035 before the expected cabin response. Its listener deliberately accepts without blocking so it can stop promptly, but the accepted worker connection must explicitly return to blocking mode on Windows. The fixture now sets that mode before applying bounded read/write timeouts. Application/engine code is unchanged.
+
+The crew suite passes on Linux. All four actual Windows engine integration suites (`test-radio`, `test-crew`, `test-speech`, `test-flight`) pass against the native release engine with the repaired mock. The flight suite covers four controller/COM arrangements through parking. These are HTTP-engine checks, not native simulator graphics/audio acceptance. Hosted verification still requires a run containing this fixture correction.
+
 ## Windows HTTP fixture and Intel Mac CMake repairs — 16 October 2026
 
 Native build run [38852127966](https://github.com/billpayne4x4/OpenATC-AI/actions/runs/38852127966) on `b17acbc` exposed two independent failures. Windows failed `openatc-http::tests::round_trips_json`: the fixture read the socket only once and could close with an unread POST body, resetting the connection. The fixture now reads complete headers and the declared body before replying; its POST regression exceeds the original read buffer. All three HTTP tests pass locally. The exact native shared gate (`openatc-core`, `openatc-settings`, `openatc-platform`, `openatc-http`, `xtask`) passes on the Windows 11 VM, followed by 20 successful repeats of the HTTP regression. Production transport behavior is unchanged.
