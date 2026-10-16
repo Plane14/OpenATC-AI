@@ -65,7 +65,7 @@ Linux AI-server builds use Ubuntu 24.04 and a distinct Rust cache key because th
 
 ## Linux Vulkan loader dependency
 
-The Linux AI-server job installs `libvulkan-dev` alongside the pinned shader SDK. Its early loader link/run check catches missing `-lvulkan` before the full native dependency build. Installing shader tools and setting `LD_LIBRARY_PATH` alone does not provide the development library to Rust's linker. End-user GPU support still depends on the installed Vulkan driver; portable packaging excludes proprietary driver libraries.
+The Linux AI-server job installs Ubuntu’s `libvulkan-dev`, `glslc` and `spirv-headers` packages instead of downloading the full LunarG SDK. It compiles a Vulkan 1.3 compute shader and links/runs a loader probe before the native dependency build. Both pinned LLM and Whisper Vulkan backends were compiled with these Ubuntu 24.04 tools, including generated shaders. Optional shader extensions follow the compiler’s detected capabilities; this is not a GPU inference/performance benchmark. The Linux native build cache uses a separate system-toolchain revision. Windows retains its pinned SDK and runtime downloads. End-user GPU support still depends on the installed Vulkan driver; portable packaging excludes proprietary driver libraries.
 
 ## Intel Mac ONNX dependency build
 

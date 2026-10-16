@@ -1,5 +1,9 @@
 # Validation
 
+## Linux Vulkan download replacement — 16 October 2026
+
+The full LunarG SDK download stalled during a hosted run. Replaced the Linux-only SDK download with Ubuntu 24.04 packages `libvulkan-dev`, `glslc` and `spirv-headers`; Windows SDK/runtime handling is unchanged. In clean Ubuntu 24.04 container builds, compiled the actual pinned llama-cpp-sys 0.1.158 Vulkan backend (329 build steps) and whisper-rs-sys 0.15.0 Vulkan backend (316 steps), including shader generation and shared-library linkage. Also executed the exact replacement workflow shell, with container root replacing sudo: package checks, Vulkan 1.3 shader compilation and loader link/run passed. Optional shader extensions unsupported by the distro compiler are disabled by existing backend detection. These checks establish build compatibility, not hardware inference, optimal GPU performance or full hosted package acceptance. Workflow parsing and diff checks pass; no tag or release was created.
+
 ## Final release upload audit — 16 October 2026
 The follow-up downstream audit exercised the exact publication shell with all eight platform/product outputs: 18 package files and 18 checksum sidecars were selected, replay reports excluded, and a missing sidecar blocked the upload. Intel Mac source inspection confirmed ONNX 1.28 uses an `@rpath` install name and `@loader_path` runtime lookup; pinned ort-sys enables copying dynamic libraries beside release binaries, and distribution copying dereferences them into the package. The real packaged server and recognition executables run `--help` before archives are completed. ZIP/DMG tooling passed the native preflight; the remaining Intel ONNX compilation, Rust linkage and real macOS runtime probe still require a completed hosted build. GitHub showed no workflow runs at the latest browser observation after user cancellation/deletion; the former 34-percent build was not available to inspect. No native Mac completion is claimed.
 

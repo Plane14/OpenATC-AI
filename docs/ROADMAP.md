@@ -1,5 +1,11 @@
 # Roadmap
 
+## Current delivery order
+
+Generated traffic integration comes first, followed by traffic performance validation, remaining conversation quality, traffic coordination and optional pilot exchanges, the outstanding takeoff-callout timing investigation, and the wider plugin backlog. Debug checkpoint acceptance follows those items; release/build/publication leftovers remain the final catch-all. Coordination and movement-authority requirements remain prerequisites of safe generated-flight integration.
+
+The latest user flight confirms the reported window, speed-instruction, controller-message, crew, taxiway-speech and descent-readback repairs worked. The remaining reported flight issue is V2 audio timing after Rotate; preserve correct speed identities while checking delay and aircraft-specific callout policy. Installer/platform acceptance is delegated to community testers, including Intel and Apple Silicon Macs, and is not claimed complete.
+
 ## Crew conversation pipeline — 16 October 2026
 
 Dedicated bounded role dialogue, ordered chat history, exact captain-quote continuity, current-request control isolation, flight/aircraft reset guards and identical token-count/generation framing are implemented. Current situation and total planned minutes now distinguish predeparture, airborne and postlanding conversation. Focused tests and HTTP-engine crew/radio/flight replays pass; these pipeline changes are installed for Linux testing, with conversation quality and native acceptance still open.
@@ -16,7 +22,7 @@ The latest Linux build includes the following repairs:
 - Avoid reporting a climb back to the ILS intercept altitude during final Tower check-in.
 - Retain editable crew pacing guidance, taxiway pronunciation, ATIS reception updates and independent takeoff-callout playback.
 
-The locked Linux release build, focused readback/descent tests and four HTTP flight-replay arrangements pass. The replays cover a published STAR speed restriction, descent, approach clearance, Tower transfer, landing, runway exit, crossing and parking. Native window, speech and aircraft-specific checks for this build remain pending. A previous ToLiss Nice–Milan flight through parking was completed successfully. Generated traffic and the wider AI pipeline remain in development; generated traffic is disabled by default.
+The locked Linux release build, focused readback/descent tests and four HTTP flight-replay arrangements pass. The replays cover a published STAR speed restriction, descent, approach clearance, Tower transfer, landing, runway exit, crossing and parking. The user confirms the last-flight repairs worked, with V2 audio timing remaining under investigation. A ToLiss Nice–Milan flight through parking was completed successfully. Generated traffic and the wider AI pipeline remain in development; generated traffic is disabled by default.
 
 Operational wording is in `speech/runtime/responses.toml`. Full-file overrides must retain the required situation IDs and slot contracts; compare customised files with the shipped defaults when upgrading.
 
@@ -24,7 +30,7 @@ Operational wording is in `speech/runtime/responses.toml`. Full-file overrides m
 
 Current priorities include IFR reliability and generated traffic, with bounded multicore execution on Linux, Windows and macOS. The items below distinguish completed foundations from planned work.
 
-Current priorities are crew conversation completeness and latency, followed by complete generated-flight integration. IFR descent, approach clearance and Tower transfer have been exercised in replays and a native Nice–Milan flight. The developer jump menu includes surface holds/runway start and source-tested SID/cruise/STAR/pre-approach checkpoints using native flight initialization and confirmed-position route synchronisation. Native ToLiss/default-aircraft checkpoint acceptance remains open; final/landing are flown normally so the tool does not manufacture those permissions. Native aircraft acceptance remains separate from replay results.
+Current priorities are complete generated-flight integration and traffic performance validation, followed by remaining crew conversation completeness and latency. IFR descent, approach clearance and Tower transfer have been exercised in replays and a native Nice–Milan flight. The developer jump menu includes surface holds/runway start and source-tested SID/cruise/STAR/pre-approach checkpoints using native flight initialization and confirmed-position route synchronisation. Native ToLiss/default-aircraft checkpoint acceptance remains open; final/landing are flown normally so the tool does not manufacture those permissions. Native aircraft acceptance remains separate from replay results.
 
 The 0.2 interface, online OFP import, local navdata reader, stage controller, taxi graph, simulator airport-weather/ATIS reporting, audio settings and HTTP/TLS separation are implemented in source. Check `VALIDATION.md` before assuming runtime coverage.
 

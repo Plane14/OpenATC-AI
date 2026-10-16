@@ -150,7 +150,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ matrix.platform }}-${{ matrix.product }}${{ matrix.platform == 'windows-x64' && matrix.product == 'ai-server' && '-ninja-v1' || matrix.platform == 'linux-x64' && matrix.product == 'ai-server' && '-ubuntu24-v1' || '' }}
+          shared-key: ${{ matrix.platform }}-${{ matrix.product }}${{ matrix.platform == 'windows-x64' && matrix.product == 'ai-server' && '-ninja-v1' || matrix.platform == 'linux-x64' && matrix.product == 'ai-server' && '-ubuntu24-system-vulkan-v2' || '' }}
       - name: Import Visual Studio build environment
         if: runner.os == 'Windows'
         shell: pwsh
@@ -181,30 +181,22 @@ jobs:
             'CMAKE_GENERATOR=Ninja' >> $env:GITHUB_ENV
           }
       - uses: actions/cache@v6.1.0
-        if: runner.os != 'macOS' && matrix.product == 'ai-server'
+        if: runner.os == 'Windows' && matrix.product == 'ai-server'
         id: vulkan-cache
         with:
           path: ${{ runner.temp }}/openatc-vulkan
           key: vulkan-1.4.341.1-${{ runner.os }}
-      - name: Install Linux Vulkan SDK
+      - name: Install Linux Vulkan build tools
         if: runner.os == 'Linux' && matrix.product == 'ai-server'
         run: |
           set -euo pipefail
-          sudo apt-get install -y libvulkan-dev
+          sudo apt-get install -y libvulkan-dev glslc spirv-headers
           pkg-config --exists vulkan
+          glslc --version
+          printf '#version 450\nlayout(local_size_x = 1) in;\nvoid main() {}\n' > "$RUNNER_TEMP/openatc-vulkan-check.comp"
+          glslc --target-env=vulkan1.3 "$RUNNER_TEMP/openatc-vulkan-check.comp" -o "$RUNNER_TEMP/openatc-vulkan-check.spv"
           printf '#include <vulkan/vulkan.h>\nint main(void) { return vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance") == 0; }\n' | cc -x c - -lvulkan -o "$RUNNER_TEMP/openatc-vulkan-link-check"
           "$RUNNER_TEMP/openatc-vulkan-link-check"
-          sdk="$RUNNER_TEMP/openatc-vulkan"
-          if [ ! -x "$sdk/1.4.341.1/x86_64/bin/glslc" ]; then
-            curl --fail --location --retry 3 https://sdk.lunarg.com/sdk/download/1.4.341.1/linux/vulkansdk-linux-x86_64-1.4.341.1.tar.xz -o "$RUNNER_TEMP/vulkan.tar.xz"
-            mkdir -p "$sdk"
-            tar -xf "$RUNNER_TEMP/vulkan.tar.xz" -C "$sdk"
-          fi
-          sdk="$sdk/1.4.341.1/x86_64"
-          test -x "$sdk/bin/glslc"
-          echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
-          echo "$sdk/bin" >> "$GITHUB_PATH"
-          echo "LD_LIBRARY_PATH=$sdk/lib" >> "$GITHUB_ENV"
       - name: Install Windows Vulkan SDK
         if: runner.os == 'Windows' && matrix.product == 'ai-server'
         shell: pwsh
