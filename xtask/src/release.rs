@@ -840,12 +840,17 @@ fn linux(
 }
 
 fn deb(root: &Path, work: &Path, output: &Path, stem: &str, name: &str, version: &str) -> Result {
+    let libc_version = if name == "openatc-ai-server" {
+        "2.39"
+    } else {
+        "2.35"
+    };
     let package = work.join("deb");
     distribution::tree(root, &package)?;
     write(
         &package.join("DEBIAN/control"),
         &format!(
-            "Package: {name}\nVersion: {}\nArchitecture: amd64\nMaintainer: OpenATC contributors <noreply@openatc.invalid>\nSection: games\nPriority: optional\nDepends: libc6 (>= 2.35), libstdc++6, libgcc-s1\nDescription: OpenATC flight simulation {name}\n Free and open-source X-Plane ATC software.\n",
+            "Package: {name}\nVersion: {}\nArchitecture: amd64\nMaintainer: OpenATC contributors <noreply@openatc.invalid>\nSection: games\nPriority: optional\nDepends: libc6 (>= {libc_version}), libstdc++6, libgcc-s1\nDescription: OpenATC flight simulation {name}\n Free and open-source X-Plane ATC software.\n",
             version.replace('-', "~")
         ),
     )?;
@@ -858,11 +863,16 @@ fn deb(root: &Path, work: &Path, output: &Path, stem: &str, name: &str, version:
 fn rpm(root: &Path, work: &Path, output: &Path, stem: &str, name: &str, version: &str) -> Result {
     let top = work.join("rpm");
     let base = version.split('-').next().unwrap();
+    let libc_requirement = if name == "openatc-ai-server" {
+        "Requires: glibc >= 2.39\n"
+    } else {
+        ""
+    };
     let spec = top.join("SPECS/openatc.spec");
     write(
         &spec,
         &format!(
-            "Name: {name}\nVersion: {base}\nRelease: {}\nSummary: OpenATC flight simulation software\nLicense: MIT\nBuildArch: x86_64\nAutoReqProv: yes\n%global debug_package %{{nil}}\n%global __os_install_post %{{nil}}\n%description\nFree and open-source X-Plane ATC software.\n%prep\n%build\n%install\nmkdir -p %{{buildroot}}\ncp -a \"{}\"/. %{{buildroot}}/\n%files\n/usr/lib/{name}\n/usr/share/applications/*\n/usr/share/icons/hicolor/scalable/apps/*\n",
+            "Name: {name}\nVersion: {base}\nRelease: {}\nSummary: OpenATC flight simulation software\nLicense: MIT\nBuildArch: x86_64\n{libc_requirement}AutoReqProv: yes\n%global debug_package %{{nil}}\n%global __os_install_post %{{nil}}\n%description\nFree and open-source X-Plane ATC software.\n%prep\n%build\n%install\nmkdir -p %{{buildroot}}\ncp -a \"{}\"/. %{{buildroot}}/\n%files\n/usr/lib/{name}\n/usr/share/applications/*\n/usr/share/icons/hicolor/scalable/apps/*\n",
             if version.contains('-') {
                 format!("0.{}", version.split_once('-').unwrap().1.replace('-', "."))
             } else {

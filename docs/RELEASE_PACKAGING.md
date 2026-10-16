@@ -53,6 +53,12 @@ The Mac plugin app supports explicit installation and removal with native result
 
 The Windows AI-server build downloads LunarG's pinned 1.4.341.0 runtime components archive and verifies both the archive and x64 loader SHA-256 checksums. This is separate from the pinned 1.4.341.1 shader SDK. It stages that verified `vulkan-1.dll` beside the server and recognition executable, instead of relying on the hosted runner having a system Vulkan runtime. Both executables undergo `--help` startup checks before packaging. Runtime binaries are downloaded build inputs, not checked-in files; their required notice is included in `licenses/VulkanRT-LICENSE.txt`.
 
+## Actions runtimes and Linux build baseline
+
+Checkout, cache and artifact upload/download actions use releases declaring Node.js 24. Visual Studio's native `Launch-VsDevShell.ps1` replaces the Node 20 MSVC setup action; its compiler and SDK environment is exported for subsequent steps. The native environment export/import was checked by compiling and running a C program on Windows.
+
+Linux AI-server builds use Ubuntu 24.04 and a distinct Rust cache key because the pinned ONNX Runtime archive requires newer libc/C++ symbols than Ubuntu 22.04 supplies. Native server DEB/RPM packages declare glibc 2.39; ZIP/AppImage users need the same host baseline. The plugin still builds on Ubuntu 22.04. The actual preparation script produces eight product/platform builds with the correct per-product runner, plus four packaging preflights.
+
 ## Linux Vulkan loader dependency
 
 The Linux AI-server job installs `libvulkan-dev` alongside the pinned shader SDK. Its early loader link/run check catches missing `-lvulkan` before the full native dependency build. Installing shader tools and setting `LD_LIBRARY_PATH` alone does not provide the development library to Rust's linker. End-user GPU support still depends on the installed Vulkan driver; portable packaging excludes proprietary driver libraries.

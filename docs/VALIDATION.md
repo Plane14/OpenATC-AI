@@ -1,5 +1,13 @@
 # Validation
 
+## Linux ONNX ABI and Actions runtime updates — 16 October 2026
+
+A subsequent Linux AI-server link reached ONNX Runtime and failed on `__isoc23_strtol`, `__isoc23_strtoll`, `__isoc23_strtoull` and C++ `_M_replace_cold` symbols. These prebuilt dependency requirements exceed the Ubuntu 22.04 runtime. Only the Linux server build moves to Ubuntu 24.04, with a distinct Rust cache key; the plugin stays on Ubuntu 22.04. Server DEB/RPM metadata declares glibc 2.39 and installation guides state the native binary baseline.
+
+Clean Ubuntu 24.04 container checks linked and ran a minimal `OrtGetApiBase` program against both the actual pinned CPU and CUDA-capable ONNX Runtime 1.28 static archives. This establishes the dependency's libc/C++ ABI linkage and API entry-point startup, not model inference or a complete hosted server/package build. The actual workflow preparation shell generated the expected eight product/platform entries and four preflights. Focused packaging tests, formatting and diff checks pass.
+
+All external JavaScript actions referenced by the workflows now declare Node.js 24 in their fetched action metadata: checkout 7.0.1, cache 6.1.0, upload-artifact 7.0.2, download-artifact 8.0.2 and the current Rust cache v2. The Rust toolchain action is composite. The Node 20 Visual Studio action is replaced by the installed Microsoft developer shell; its exported environment was reset/re-imported on win11-dev and compiled and ran a C executable successfully. YAML and input/platform scope checks pass. Hosted integration of these action upgrades still requires the next run; deprecation warnings from earlier runs remain historical.
+
 ## Windows AI-server runtime staging — 16 October 2026
 
 The Windows server in [run 38853995407](https://github.com/billpayne4x4/OpenATC-AI/actions/runs/38853995407/job/116822121583) compiled successfully but failed the subsequent runtime copy because neither the SDK Bin folder nor System32 contained `vulkan-1.dll`. The workflow now obtains LunarG's pinned runtime components separately and verifies the archive and x64 DLL checksums before the build. It stages the verified DLL and checks both server executables' startup linkage before packaging. No runtime DLL/archive is committed.

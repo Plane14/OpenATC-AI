@@ -125,6 +125,10 @@ cargo build --locked --release -p openatc-ai -p openatc-stt \
 
 Intel Macs additionally need an appropriate ONNX Runtime library and the `ORT_LIB_PATH`/dynamic-link setup used by the workflow. On Apple Silicon, graphics memory shares system memory: the dedicated NVIDIA VRAM figures below do not describe Mac memory requirements. The new accelerated macOS build path still needs native CI and runtime validation.
 
+### Linux binary compatibility
+
+Native Linux server packages use an Ubuntu 24.04 build baseline and require glibc 2.39 or newer. The pinned ONNX Runtime 1.28 archive references C23 libc and newer C++ runtime symbols unavailable on Ubuntu 22.04. The plugin's separate Ubuntu 22.04 build baseline is unchanged. AppImage does not remove the host glibc requirement; Flatpak uses its own runtime. Building for older distributions requires compatible native inference libraries built for that distribution.
+
 ### CPU-compatible source build
 
 ```sh

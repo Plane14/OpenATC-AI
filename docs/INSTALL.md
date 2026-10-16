@@ -4,6 +4,8 @@ OpenATC has two downloads: the **X-Plane 12 plugin** and the **AI server**. Inst
 
 Read the release notes for unfinished features. Generated traffic is disabled by default while its full flight lifecycle is being completed. A package building successfully does not establish simulator, audio or GPU compatibility on every computer.
 
+Native Linux AI-server ZIP, AppImage, DEB and RPM packages require glibc 2.39 or newer, such as Ubuntu 24.04. The Linux plugin retains its older build baseline; the AI server can run separately on a compatible machine. Flatpak uses its own runtime.
+
 ## Before installing
 
 1. For standalone installations, start the chosen X-Plane 12 installation once, then close it. The installer uses its native executable and `Log.txt` to validate platform and major version. Fresh Steam installations can instead be identified by their matching X-Plane 12 app manifest, without a first launch.

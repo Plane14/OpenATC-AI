@@ -55,7 +55,9 @@ jobs:
             esac
             for product in plugin ai-server; do
               [ "$INPUT_PRODUCT" = all ] || [ "$INPUT_PRODUCT" = "$product" ] || continue
-              matrix=$(jq -c --arg platform "$platform" --arg product "$product" --arg runner "$runner" '. + [{platform:$platform,product:$product,runner:$runner}]' <<< "$matrix")
+              build_runner="$runner"
+              if [ "$platform" = linux-x64 ] && [ "$product" = ai-server ]; then build_runner=ubuntu-24.04; fi
+              matrix=$(jq -c --arg platform "$platform" --arg product "$product" --arg runner "$build_runner" '. + [{platform:$platform,product:$product,runner:$runner}]' <<< "$matrix")
             done
           done
           [ "$matrix" != '[]' ] || { echo 'No build targets selected'; exit 1; }
@@ -74,10 +76,20 @@ jobs:
         include: ${{ fromJSON(needs.prepare.outputs.preflight) }}
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Import Visual Studio build environment
         if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'Visual Studio C++ tools not found' }
+          & "$vs\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          foreach ($name in @('Path', 'INCLUDE', 'LIB', 'LIBPATH', 'VSINSTALLDIR', 'VCINSTALLDIR', 'VCToolsInstallDir', 'VCToolsVersion', 'VisualStudioVersion', 'WindowsSdkDir', 'WindowsSDKVersion', 'UniversalCRTSdkDir', 'UCRTVersion', 'VSCMD_ARG_HOST_ARCH', 'VSCMD_ARG_TGT_ARCH')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { "$name=$value" >> $env:GITHUB_ENV }
+          }
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: installer-preflight-${{ matrix.platform }}
@@ -134,13 +146,23 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ matrix.platform }}-${{ matrix.product }}${{ matrix.platform == 'windows-x64' && matrix.product == 'ai-server' && '-ninja-v1' || '' }}
-      - uses: ilammy/msvc-dev-cmd@v1
+          shared-key: ${{ matrix.platform }}-${{ matrix.product }}${{ matrix.platform == 'windows-x64' && matrix.product == 'ai-server' && '-ninja-v1' || matrix.platform == 'linux-x64' && matrix.product == 'ai-server' && '-ubuntu24-v1' || '' }}
+      - name: Import Visual Studio build environment
         if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'Visual Studio C++ tools not found' }
+          & "$vs\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          foreach ($name in @('Path', 'INCLUDE', 'LIB', 'LIBPATH', 'VSINSTALLDIR', 'VCINSTALLDIR', 'VCToolsInstallDir', 'VCToolsVersion', 'VisualStudioVersion', 'WindowsSdkDir', 'WindowsSDKVersion', 'UniversalCRTSdkDir', 'UCRTVersion', 'VSCMD_ARG_HOST_ARCH', 'VSCMD_ARG_TGT_ARCH')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { "$name=$value" >> $env:GITHUB_ENV }
+          }
       - name: Install Linux build tools
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y build-essential clang libclang-dev cmake pkg-config
@@ -158,7 +180,7 @@ jobs:
             Get-Command ninja.exe -ErrorAction Stop | Out-Null
             'CMAKE_GENERATOR=Ninja' >> $env:GITHUB_ENV
           }
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6.1.0
         if: runner.os != 'macOS' && matrix.product == 'ai-server'
         id: vulkan-cache
         with:
@@ -227,13 +249,13 @@ jobs:
           OPENATC_APPLE_PASSWORD: ${{ secrets.OPENATC_APPLE_PASSWORD }}
           OPENATC_APPLE_TEAM_ID: ${{ secrets.OPENATC_APPLE_TEAM_ID }}
         run: bash packaging/installer/import-signing.sh
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6.1.0
         if: matrix.platform == 'macos-intel' && matrix.product == 'ai-server'
         id: onnx-cache
         with:
           path: ${{ runner.temp }}/openatc-onnx
           key: onnxruntime-1.28.0-macos15-intel-coreml-cmake-policy-v3
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         if: matrix.platform == 'macos-intel' && matrix.product == 'ai-server' && steps.onnx-cache.outputs.cache-hit != 'true' 
         with:
           repository: microsoft/onnxruntime
@@ -338,7 +360,7 @@ jobs:
       - name: Package Linux and macOS releases
         if: runner.os != 'Windows'
         run: cargo xtask release-package ${{ matrix.product }} ${{ matrix.platform }} "$RELEASE_VERSION"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: packages-${{ matrix.platform }}-${{ matrix.product }}
           path: packages/*
@@ -350,7 +372,7 @@ jobs:
       - name: Collect Linux and macOS build outputs
         if: runner.os != 'Windows'
         run: cargo xtask collect-artifacts ${{ matrix.product }} build-artifacts
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: native-${{ matrix.platform }}-${{ matrix.product }}
           path: build-artifacts/
@@ -371,7 +393,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8.0.2
         with:
           pattern: packages-*
           path: release
