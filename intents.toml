@@ -6,7 +6,6 @@
 #   can declare, and anyone can talk when nothing ATC-specific matches.
 # - `catalogue = true` makes a request available to the button list.
 #   Titles and order are editable; the controller still checks eligibility.
-#   `altimeter`/`weather` are parser-only requests without buttons.
 # - `pattern` documents how the intent is recognised:
 #   "exact" (exact phrases plus the lowercased title), "substring"
 #   (emergency scan), "altitude"/"direct" (slot regexes), "none".
@@ -440,7 +439,7 @@ fallback = "Emergency acknowledged, {callsign}. State position, altitude, fuel r
 [intent.altimeter]
 title = "Request altimeter"
 group = "Communication"
-catalogue = false
+catalogue = true
 parameter = false
 roles = ["atc", "copilot"]
 exact = ["request altimeter"]
@@ -459,7 +458,7 @@ fallback = "QNH {qnh}, {callsign}."
 [intent.weather]
 title = "Request weather"
 group = "Communication"
-catalogue = false
+catalogue = true
 parameter = false
 roles = ["atc", "copilot"]
 exact = ["request weather"]
@@ -644,7 +643,7 @@ exact = ["clear of weather", "resume planned route", "back on course"]
 pattern = "exact"
 
 [buttons]
-order = ["clearance", "start", "pushback", "start_pushback", "taxi", "backtrack", "ready", "gate", "progressive", "radio_check", "repeat", "standby", "unable", "frequency", "checkin", "traffic_sighted", "traffic_not_sighted", "cross_runway", "landing", "position", "altitude", "direct", "descent", "cancel_ifr", "approach", "change_approach", "departure_runway", "arrival_runway", "speed", "deviation", "resume_course", "go_around", "emergency"]
+order = ["clearance", "start", "pushback", "start_pushback", "taxi", "backtrack", "ready", "gate", "progressive", "radio_check", "altimeter", "weather", "repeat", "standby", "unable", "frequency", "checkin", "traffic_sighted", "traffic_not_sighted", "cross_runway", "landing", "position", "altitude", "direct", "descent", "cancel_ifr", "approach", "change_approach", "departure_runway", "arrival_runway", "speed", "deviation", "resume_course", "go_around", "emergency"]
 
 [parser]
 altitude = '(?:request )?(?:altitude |climb |descend |descent )(?:to )?(fl\s*)?([0-9]{2,5})(?: feet| meters)?'

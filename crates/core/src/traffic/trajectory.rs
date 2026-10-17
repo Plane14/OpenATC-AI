@@ -312,7 +312,7 @@ fn compile_once(
         envelope.descent_fpm,
     )?;
     let mut altitude = start.altitude_feet;
-    let mut result = Vec::with_capacity(fixes.len());
+    let mut result: Vec<Leg> = Vec::with_capacity(fixes.len());
     for (((samples, meters), crossing), level) in geometry.into_iter().zip(crossings).zip(levels) {
         let mut along = 0.0;
         let mut points = Vec::with_capacity(samples.len());
@@ -330,6 +330,18 @@ fn compile_once(
                 altitude + (level - altitude) * (along / meters).clamp(0.0, 1.0),
             ));
         }
+        // Preserve known joins through the projection round trip.
+        points[0] = result
+            .last()
+            .and_then(|leg| leg.points.last())
+            .copied()
+            .unwrap_or(start);
+        let coordinate = fixes[result.len()].coordinate;
+        *points.last_mut().unwrap() = Waypoint {
+            latitude: coordinate[0],
+            longitude: coordinate[1],
+            altitude_feet: level,
+        };
         let nm: f64 = points
             .windows(2)
             .map(|pair| {
@@ -443,6 +455,15 @@ mod tests {
                 (legs[0].ground_knots - fixes[0].ground_knots).abs() > 1.0,
                 "Fixed preferred-level ground speed must change"
             );
+            assert_eq!(legs[0].points[0], start);
+            assert!(
+                legs.windows(2)
+                    .all(|pair| pair[0].points.last() == pair[1].points.first())
+            );
+            for (leg, fix) in legs.iter().zip(&fixes) {
+                let last = leg.points.last().unwrap();
+                assert_eq!([last.latitude, last.longitude], fix.coordinate);
+            }
             for leg in &legs {
                 let end = leg.points.last().unwrap();
                 let before = leg.points.iter().rev().nth(1).unwrap();

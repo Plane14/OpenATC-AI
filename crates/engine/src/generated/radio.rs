@@ -18,6 +18,9 @@ pub(super) struct Exchange {
     pub(super) due: Instant,
     pub(super) grant: bool,
     pub(super) tune_after: Option<i32>,
+    /// Recovery reports cannot complete an exchange from the original route.
+    pub(super) recovery_from: Option<usize>,
+    pub(super) rejoin: bool,
 }
 
 pub(super) fn cancel_crossing(mut exchange: Exchange, runway: Option<&str>) -> Exchange {
@@ -197,6 +200,8 @@ fn departure_hold(state: &mut EngineState) {
             due: Instant::now(),
             grant: false,
             tune_after,
+            recovery_from: None,
+            rejoin: false,
         });
         break;
     }
@@ -268,6 +273,7 @@ fn blocked(state: &EngineState, id: u32, order: &openatc_core::state::TaxiCleara
 }
 
 pub fn tick(state: &mut EngineState) {
+    super::flight::synchronise_recoveries(&mut state.generated);
     if !state.settings.generated_traffic
         || state.generated.epoch != Some(state.session_generation)
         || state.generated.simulation_job.is_some()
@@ -379,6 +385,8 @@ pub fn tick(state: &mut EngineState) {
                 due: Instant::now(),
                 grant: false,
                 tune_after: None,
+                recovery_from: None,
+                rejoin: false,
             });
             break;
         }
@@ -449,6 +457,8 @@ pub fn tick(state: &mut EngineState) {
                     due: Instant::now(),
                     grant: true,
                     tune_after: None,
+                    recovery_from: None,
+                    rejoin: false,
                 });
                 break;
             }
@@ -541,6 +551,8 @@ pub fn tick(state: &mut EngineState) {
                         due: Instant::now(),
                         grant: false,
                         tune_after: None,
+                        recovery_from: None,
+                        rejoin: false,
                     });
                     break;
                 }
@@ -617,6 +629,8 @@ pub fn tick(state: &mut EngineState) {
                 due: Instant::now(),
                 grant: true,
                 tune_after: None,
+                recovery_from: None,
+                rejoin: false,
             });
             break;
         }
@@ -635,6 +649,12 @@ pub fn tick(state: &mut EngineState) {
         return;
     }
     if exchange.next == exchange.messages.len() {
+        if exchange.rejoin {
+            if let Some(source) = exchange.recovery_from {
+                super::flight::accept_rejoin(&mut state.generated, exchange.id, source);
+            }
+            return;
+        }
         if exchange.grant
             && state.generated.active_flights.contains(&exchange.id)
             && state

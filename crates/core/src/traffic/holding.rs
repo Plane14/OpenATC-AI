@@ -19,6 +19,7 @@ pub struct Clearance {
 }
 
 /// Fully specified hold after resolving the published magnetic reference and vertical limits.
+#[derive(Clone)]
 pub struct Pattern {
     /// Fix coordinate and cleared geometric drawing altitude.
     pub fix: Waypoint,
@@ -34,6 +35,29 @@ pub struct Pattern {
     pub bank_degrees: f64,
     /// Rate cap applied together with the aircraft's bank limit.
     pub turn_rate_degrees_sec: f64,
+}
+
+/// Holding geometry awaiting its complete terrain/airspace check.
+#[derive(Clone)]
+pub struct Draft {
+    segment: Segment,
+}
+impl Draft {
+    /// No movement segment is returned if any part of the racetrack is unprotected.
+    pub fn protect(
+        self,
+        protected: impl Fn(Waypoint, Waypoint) -> bool,
+    ) -> Result<Segment, String> {
+        if self
+            .segment
+            .points
+            .windows(2)
+            .any(|pair| !protected(pair[0], pair[1]))
+        {
+            return Err("Holding path lacks verified terrain/airspace protection".into());
+        }
+        Ok(self.segment)
+    }
 }
 
 impl Pattern {
@@ -95,6 +119,10 @@ impl Pattern {
         &self,
         protected: impl Fn(Waypoint, Waypoint) -> bool,
     ) -> Result<Segment, String> {
+        self.draft()?.protect(protected)
+    }
+    /// Prepare bounded geometry without releasing it as a movement segment.
+    pub fn draft(&self) -> Result<Draft, String> {
         if !(-90.0..=90.0).contains(&self.fix.latitude)
             || !(-180.0..=180.0).contains(&self.fix.longitude)
             || !(-2000.0..=60000.0).contains(&self.fix.altitude_feet)
@@ -181,15 +209,14 @@ impl Pattern {
             .collect();
         points[0] = self.fix;
         *points.last_mut().unwrap() = self.fix;
-        if points.windows(2).any(|pair| !protected(pair[0], pair[1])) {
-            return Err("Holding path lacks verified terrain/airspace protection".into());
-        }
-        Ok(Segment {
-            stage: Stage::Holding,
-            points,
-            knots: self.ground_knots,
-            resources: vec![],
-            dwell_seconds: 0.0,
+        Ok(Draft {
+            segment: Segment {
+                stage: Stage::Holding,
+                points,
+                knots: self.ground_knots,
+                resources: vec![],
+                dwell_seconds: 0.0,
+            },
         })
     }
 }
@@ -213,6 +240,8 @@ mod tests {
             turn_rate_degrees_sec: 3.0,
         };
         let hold = pattern.compile(|_, _| true).unwrap();
+        assert!(pattern.draft().unwrap().protect(|_, _| false).is_err());
+
         let first_turn_seconds: f64 = hold.points[..=90]
             .windows(2)
             .map(|pair| {

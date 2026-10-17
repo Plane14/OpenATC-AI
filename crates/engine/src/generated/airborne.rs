@@ -9,6 +9,7 @@ use openatc_core::traffic::{
 pub(super) struct Decoded {
     pub candidate: usize,
     pub nominal: Option<Draft>,
+    pub missed: Option<super::recovery::Draft>,
     pub departure: Vec<Fix>,
     pub enroute: Vec<Fix>,
     pub arrival: Vec<Fix>,
@@ -149,6 +150,7 @@ pub(super) fn resolve(input: Request<'_>) -> Result<Decoded, String> {
     Ok(Decoded {
         candidate: input.candidate,
         nominal: None,
+        missed: None,
         departure,
         enroute,
         arrival,
@@ -277,6 +279,12 @@ impl Planner<'_> {
                         spacing_meters: self.policy.airborne_sample_meters,
                         maximum_detour_meters: self.policy.airborne_detour_meters,
                     },
+                )?);
+                decoded.missed = Some(super::recovery::prepare(
+                    self,
+                    terminal,
+                    decoded.approach.last().ok_or("Approach MAP is missing")?,
+                    arrival_floor_feet,
                 )?);
                 if !self.departure_weather.fresh() || !self.arrival_weather.fresh() {
                     return Err("Terminal weather expired before arrival selection".to_owned());

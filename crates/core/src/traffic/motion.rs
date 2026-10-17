@@ -200,6 +200,29 @@ impl Route {
         }
         Ok(Self { segments, legs })
     }
+    /// A fallback must have enough distance to brake at each of its internal speed limits.
+    fn speed_changes_fit(&self, braking: f64) -> bool {
+        self.segments.windows(2).enumerate().all(|(index, pair)| {
+            let distance =
+                self.legs[index].iter().map(|leg| leg.duration).sum::<f64>() * pair[0].knots;
+            let slowing =
+                (pair[0].knots.powi(2) - pair[1].knots.powi(2)).max(0.0) / (2.0 * braking);
+            distance + 8.0 * f64::EPSILON * distance.abs().max(slowing.abs()).max(1.0) >= slowing
+        })
+    }
+    fn recovery_speed_fits(&self, boundary: usize, recovery: &Route, braking: f64) -> bool {
+        let Some(segment) = self.segments.get(boundary) else {
+            return false;
+        };
+        let distance = self.legs[boundary]
+            .iter()
+            .map(|leg| leg.duration)
+            .sum::<f64>()
+            * segment.knots;
+        let slowing =
+            (segment.knots.powi(2) - recovery.segments[0].knots.powi(2)).max(0.0) / (2.0 * braking);
+        recovery.speed_changes_fit(braking) && distance + 1e-8 >= slowing
+    }
     #[must_use]
     /// Retrieve a controller's next clearance limit.
     pub fn segment(&self, index: usize) -> Option<&Segment> {
@@ -233,23 +256,152 @@ pub struct Pose {
     pub complete: bool,
     /// The aircraft is following its separately checked recovery instead of the normal flight.
     pub recovering: bool,
+    /// Original clearance limit that led into the current recovery route.
+    pub recovery_from: Option<usize>,
     /// Nominal time remaining to this clearance limit, before any slower speed adjustment.
     pub seconds_to_limit: f64,
 }
 
+/// Constant acceleration to a target, followed by steady speed. Distances are knot-seconds.
+struct SpeedChange {
+    initial: f64,
+    target: f64,
+    rate: f64,
+}
+impl SpeedChange {
+    fn new(initial: f64, target: f64, acceleration: f64, braking: f64) -> Self {
+        Self {
+            initial,
+            target,
+            rate: if target >= initial {
+                acceleration
+            } else {
+                -braking
+            },
+        }
+    }
+    fn ramp_seconds(&self) -> f64 {
+        ((self.target - self.initial) / self.rate).max(0.0)
+    }
+    fn sample(&self, seconds: f64) -> (f64, f64) {
+        let ramp = seconds.min(self.ramp_seconds());
+        let speed = self.initial + self.rate * ramp;
+        let distance = (self.initial + speed) * 0.5 * ramp + self.target * (seconds - ramp);
+        (distance, speed.max(0.0))
+    }
+    fn seconds_to(&self, distance: f64) -> f64 {
+        if distance <= 0.0 {
+            return 0.0;
+        }
+        let ramp = self.ramp_seconds();
+        let ramp_distance = (self.initial + self.target) * 0.5 * ramp;
+        if distance <= ramp_distance {
+            let speed = (self.initial.powi(2) + 2.0 * self.rate * distance)
+                .max(0.0)
+                .sqrt();
+            2.0 * distance / (self.initial + speed)
+        } else {
+            ramp + (distance - ramp_distance) / self.target
+        }
+    }
+}
+
+/// Accelerate, coast and brake while preserving an upper speed limit at the next boundary.
+struct BoundarySpeed {
+    first: SpeedChange,
+    coast: f64,
+    last: SpeedChange,
+}
+impl BoundarySpeed {
+    fn new(
+        initial: f64,
+        maximum: f64,
+        end: f64,
+        distance: f64,
+        acceleration: f64,
+        braking: f64,
+    ) -> Option<Self> {
+        let end = end
+            .min(maximum)
+            .min((initial.powi(2) + 2.0 * acceleration * distance).sqrt());
+        let peak = if initial > maximum {
+            maximum
+        } else {
+            ((2.0 * acceleration * braking * distance
+                + braking * initial.powi(2)
+                + acceleration * end.powi(2))
+                / (acceleration + braking))
+                .sqrt()
+                .min(maximum)
+        };
+        let first = SpeedChange::new(initial, peak, acceleration, braking);
+        let last = SpeedChange::new(peak, end.min(peak), acceleration, braking);
+        let remaining =
+            distance - first.sample(first.ramp_seconds()).0 - last.sample(last.ramp_seconds()).0;
+        if remaining < -1e-8 {
+            return None;
+        }
+        Some(Self {
+            first,
+            coast: if peak > 0.0 {
+                remaining.max(0.0) / peak
+            } else {
+                0.0
+            },
+            last,
+        })
+    }
+    fn sample(&self, seconds: f64) -> (f64, f64) {
+        let first_time = seconds.min(self.first.ramp_seconds());
+        let (first_distance, first_speed) = self.first.sample(first_time);
+        if first_time == seconds {
+            return (first_distance, first_speed);
+        }
+        let coast_time = (seconds - first_time).min(self.coast);
+        let (last_distance, last_speed) = self.last.sample(seconds - first_time - coast_time);
+        (
+            first_distance + self.first.target * coast_time + last_distance,
+            last_speed,
+        )
+    }
+    fn seconds_to(&self, distance: f64) -> f64 {
+        let first_time = self.first.ramp_seconds();
+        let first_distance = self.first.sample(first_time).0;
+        if distance <= first_distance {
+            return self.first.seconds_to(distance);
+        }
+        let rest = distance - first_distance;
+        let coast_distance = self.first.target * self.coast;
+        if rest <= coast_distance {
+            return first_time + rest / self.first.target;
+        }
+        first_time + self.coast + self.last.seconds_to(rest - coast_distance)
+    }
+}
+
+#[derive(Clone)]
+struct HoldExit {
+    route: std::sync::Arc<Route>,
+    recoveries: BTreeMap<usize, std::sync::Arc<Route>>,
+    through: usize,
+}
+
 #[derive(Clone)]
 struct Aircraft {
+    assigned_route: std::sync::Arc<Route>,
     route: std::sync::Arc<Route>,
     segment: usize,
     elapsed: f64,
     authorised: bool,
     complete: bool,
     next_authorised: bool,
+    airborne_authority: Option<(usize, usize)>,
+    hold_exit: Option<HoldExit>,
     rates: Option<(f64, f64)>,
     speed: f64,
     holding: bool,
     recoveries: BTreeMap<usize, std::sync::Arc<Route>>,
-    recovering: bool,
+    recovery_from: Option<usize>,
     surface_reservation: Option<(usize, BTreeSet<String>)>,
 }
 impl Aircraft {
@@ -339,7 +491,8 @@ impl Aircraft {
             awaiting_clearance: (!self.authorised || self.holding && self.speed == 0.0)
                 && !self.complete,
             complete: self.complete,
-            recovering: self.recovering,
+            recovering: self.recovery_from.is_some(),
+            recovery_from: self.recovery_from,
             seconds_to_limit: (self.duration() - self.elapsed).max(0.0),
         }
     }
@@ -391,6 +544,12 @@ impl World {
         let Some(aircraft) = self.aircraft.get_mut(&id) else {
             return false;
         };
+        if aircraft
+            .rates
+            .is_some_and(|(_, braking)| !route.speed_changes_fit(braking))
+        {
+            return false;
+        }
         let current = aircraft.pose(id);
         let first = route.segments[0].points[0];
         if !aircraft.complete
@@ -402,16 +561,19 @@ impl World {
         {
             return false;
         }
+        aircraft.assigned_route = route.clone();
         aircraft.route = route;
         aircraft.segment = 0;
         aircraft.elapsed = 0.0;
         aircraft.authorised = false;
         aircraft.next_authorised = false;
+        aircraft.airborne_authority = None;
+        aircraft.hold_exit = None;
         aircraft.complete = false;
         aircraft.holding = false;
         aircraft.surface_reservation = None;
         aircraft.recoveries.clear();
-        aircraft.recovering = false;
+        aircraft.recovery_from = None;
         true
     }
     /// Identify the reserved surface traffic preventing the next taxi clearance.
@@ -475,17 +637,20 @@ impl World {
         self.aircraft.insert(
             id,
             Aircraft {
+                assigned_route: route.clone(),
                 route,
                 segment: 0,
                 elapsed: 0.0,
                 authorised: false,
                 complete: false,
                 next_authorised: false,
+                airborne_authority: None,
+                hold_exit: None,
                 rates: None,
                 speed: initial_speed,
                 holding: false,
                 recoveries: BTreeMap::new(),
-                recovering: false,
+                recovery_from: None,
                 surface_reservation: None,
             },
         );
@@ -535,6 +700,29 @@ impl World {
         };
         if !Self::recovery_matches(&aircraft.route, boundary, &route) {
             return false;
+        }
+        if let Some((_, braking)) = aircraft.rates {
+            if !route.speed_changes_fit(braking) {
+                return false;
+            }
+            let segment = &aircraft.route.segments[boundary];
+            let duration = aircraft.route.legs[boundary]
+                .iter()
+                .map(|leg| leg.duration)
+                .sum::<f64>();
+            let (speed, remaining) = if boundary == aircraft.segment {
+                (
+                    aircraft.speed,
+                    (duration - aircraft.elapsed).max(0.0) * segment.knots,
+                )
+            } else {
+                (segment.knots, duration * segment.knots)
+            };
+            let slowing =
+                (speed.powi(2) - route.segments[0].knots.powi(2)).max(0.0) / (2.0 * braking);
+            if remaining + 1e-8 < slowing {
+                return false;
+            }
         }
         aircraft.recoveries.insert(boundary, route);
         true
@@ -590,6 +778,13 @@ impl World {
         {
             return false;
         }
+        if let Some((_, braking)) = aircraft.rates
+            && recoveries.iter().any(|(boundary, recovery)| {
+                !route.recovery_speed_fits(*boundary, recovery, braking)
+            })
+        {
+            return false;
+        }
         let current = aircraft.pose(id);
         let first = &route.segments[0];
         let outgoing = route.legs[0]
@@ -610,18 +805,120 @@ impl World {
         for resource in &first.resources {
             self.owners.insert(resource.clone(), id);
         }
+        aircraft.assigned_route = route.clone();
         aircraft.route = route;
         aircraft.segment = 0;
         aircraft.elapsed = 0.0;
         aircraft.authorised = true;
         aircraft.next_authorised = false;
+        aircraft.airborne_authority = None;
+        aircraft.hold_exit = None;
         aircraft.complete = false;
         aircraft.holding = false;
         aircraft.surface_reservation = None;
-        aircraft.recovering = false;
+        aircraft.recovery_from = None;
         aircraft.recoveries = recoveries;
         true
     }
+    /// Queue a checked onward flight for the next crossing of the holding fix.
+    /// The aircraft completes its current circuit rather than jumping to the new path.
+    pub fn leave_hold_at_fix(
+        &mut self,
+        generation: u64,
+        id: u32,
+        route: std::sync::Arc<Route>,
+        recoveries: BTreeMap<usize, std::sync::Arc<Route>>,
+        through: usize,
+    ) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        let Some(aircraft) = self.aircraft.get_mut(&id) else {
+            return false;
+        };
+        let current = &aircraft.route.segments[aircraft.segment];
+        if current.stage != Stage::Holding
+            || !aircraft.authorised
+            || aircraft.complete
+            || aircraft.hold_exit.is_some()
+            || through >= route.segments.len()
+            || !matches!(
+                route.segments[0].stage,
+                Stage::Climb
+                    | Stage::Cruise
+                    | Stage::Descent
+                    | Stage::Approach
+                    | Stage::MissedApproach
+            )
+            || route.segments[..=through]
+                .iter()
+                .enumerate()
+                .any(|(index, segment)| {
+                    segment.stage != route.segments[0].stage
+                        || !segment.resources.is_empty()
+                        || !recoveries.contains_key(&index)
+                })
+            || route.segments.iter().enumerate().any(|(index, segment)| {
+                !segment.stage.on_ground()
+                    && segment.stage != Stage::Holding
+                    && !recoveries.contains_key(&index)
+            })
+            || recoveries
+                .iter()
+                .any(|(boundary, recovery)| !Self::recovery_matches(&route, *boundary, recovery))
+        {
+            return false;
+        }
+        let anchor = current.points[0];
+        let first = route.segments[0].points[0];
+        let incoming = aircraft.route.legs[aircraft.segment]
+            .last()
+            .map_or(0.0, |leg| leg.course);
+        let outgoing = route.legs[0].first().map_or(incoming, |leg| leg.course);
+        if distance_nm(anchor.coordinate(), first.coordinate()) > 0.001
+            || (anchor.altitude_feet - first.altitude_feet).abs() > 1.0
+            || crate::navigation::turn(incoming, outgoing).abs() > 30.0
+            || route.segments[0].knots + 0.1 < current.knots
+        {
+            return false;
+        }
+        if let Some((_, braking)) = aircraft.rates {
+            if recoveries.iter().any(|(boundary, recovery)| {
+                !route.recovery_speed_fits(*boundary, recovery, braking)
+            }) {
+                return false;
+            }
+            for index in 0..through {
+                let segment = &route.segments[index];
+                let distance = route.legs[index]
+                    .iter()
+                    .map(|leg| leg.duration)
+                    .sum::<f64>()
+                    * segment.knots;
+                let slowing = (segment.knots.powi(2) - route.segments[index + 1].knots.powi(2))
+                    .max(0.0)
+                    / (2.0 * braking);
+                if distance + 1e-8 < slowing {
+                    return false;
+                }
+            }
+        }
+        aircraft.hold_exit = Some(HoldExit {
+            route,
+            recoveries,
+            through,
+        });
+        true
+    }
+
+    /// Route identity survives worker clones and distinguishes a queued flight from its predecessor.
+    #[must_use]
+    pub fn follows(&self, id: u32, route: &std::sync::Arc<Route>) -> bool {
+        self.aircraft
+            .get(&id)
+            .is_some_and(|aircraft| std::sync::Arc::ptr_eq(&aircraft.assigned_route, route))
+    }
+
     /// Replace a hold only after the controller approves a complete onward path.
     pub fn leave_hold(&mut self, generation: u64, id: u32, route: std::sync::Arc<Route>) -> bool {
         if generation != self.generation
@@ -644,19 +941,22 @@ impl World {
         let outgoing = route.legs[0]
             .first()
             .map_or(current.heading, |leg| leg.course);
-        if distance_nm(current.position.coordinate(), first.coordinate()) > 0.001
+        if route.segments[0].knots + 0.1 < current.knots
+            || distance_nm(current.position.coordinate(), first.coordinate()) > 0.001
             || (current.position.altitude_feet - first.altitude_feet).abs() > 1.0
             || crate::navigation::turn(current.heading, outgoing).abs() > 30.0
         {
             return false;
         }
+        aircraft.recovery_from.get_or_insert(aircraft.segment);
         aircraft.route = route;
         aircraft.segment = 0;
         aircraft.elapsed = 0.0;
         aircraft.authorised = true;
         aircraft.next_authorised = false;
+        aircraft.airborne_authority = None;
+        aircraft.hold_exit = None;
         aircraft.complete = false;
-        aircraft.recovering = true;
         aircraft.recoveries.clear();
         self.owners.retain(|_, owner| *owner != id);
         true
@@ -684,10 +984,16 @@ impl World {
         if let Some((_, braking)) = aircraft.rates {
             let remaining = (aircraft.duration() - aircraft.elapsed)
                 * aircraft.route.segments[aircraft.segment].knots
-                * 0.514444;
-            let slowing_distance =
-                (aircraft.speed.powi(2) - next.knots.powi(2)).max(0.0) * 0.514444 / (2.0 * braking);
-            if remaining + 0.02 < slowing_distance {
+                * (1852.0 / 3600.0);
+            let slowing_distance = (aircraft.speed.powi(2) - next.knots.powi(2)).max(0.0)
+                * (1852.0 / 3600.0)
+                / (2.0 * braking);
+            let tolerance = if aircraft.route.segments[aircraft.segment].stage.on_ground() {
+                0.02
+            } else {
+                8.0 * f64::EPSILON * remaining.abs().max(slowing_distance.abs()).max(1.0)
+            };
+            if remaining + tolerance < slowing_distance {
                 return false;
             }
         }
@@ -709,6 +1015,86 @@ impl World {
         aircraft.next_authorised = true;
         true
     }
+    /// Grant the explicit airborne limits covered by one accepted readback.
+    /// Landing, holding, runway and surface permissions cannot be included.
+    pub fn authorise_airborne_until(
+        &mut self,
+        generation: u64,
+        id: u32,
+        first: usize,
+        end: usize,
+    ) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        let Some(aircraft) = self.aircraft.get(&id) else {
+            return false;
+        };
+        if aircraft.complete
+            || aircraft.recovery_from.is_some()
+            || first < aircraft.segment
+            || first > aircraft.segment + 1
+            || end < first
+            || end >= aircraft.route.segments.len()
+        {
+            return false;
+        }
+        let stage = aircraft.route.segments[first].stage;
+        if !matches!(
+            stage,
+            Stage::Climb | Stage::Cruise | Stage::Descent | Stage::Approach | Stage::MissedApproach
+        ) || aircraft.route.segments[first..=end]
+            .iter()
+            .enumerate()
+            .any(|(offset, segment)| {
+                segment.stage != stage
+                    || !segment.resources.is_empty()
+                    || !aircraft.recoveries.contains_key(&(first + offset))
+            })
+        {
+            return false;
+        }
+        if let Some((_, braking)) = aircraft.rates {
+            for index in first..end {
+                let current = &aircraft.route.segments[index];
+                let distance = aircraft.route.legs[index]
+                    .iter()
+                    .map(|leg| leg.duration)
+                    .sum::<f64>()
+                    * current.knots;
+                let slowing = (current.knots.powi(2)
+                    - aircraft.route.segments[index + 1].knots.powi(2))
+                .max(0.0)
+                    / (2.0 * braking);
+                if distance + 1e-8 < slowing {
+                    return false;
+                }
+            }
+        }
+        let current = aircraft.segment;
+        // A takeoff readback can include the initial SID before the roll starts.
+        // Runway entry and the takeoff roll still need their own permission.
+        let waiting_takeoff = first == current + 1
+            && !aircraft.authorised
+            && aircraft.route.segments[current].stage == Stage::Takeoff;
+        let accepted = if waiting_takeoff {
+            true
+        } else if first == current {
+            self.authorise(generation, id, first, &BTreeSet::new())
+        } else {
+            self.authorise_continuation(generation, id, first, &BTreeSet::new())
+        };
+        if !accepted {
+            return false;
+        }
+        let aircraft = self.aircraft.get_mut(&id).unwrap();
+        aircraft.airborne_authority = Some((first, end));
+        if first == current {
+            aircraft.next_authorised = false;
+        }
+        true
+    }
+
     /// Protect a clearance while its readback is pending, without moving the aircraft.
     pub fn reserve_surface_route(
         &mut self,
@@ -837,6 +1223,8 @@ impl World {
         }
         aircraft.authorised = false;
         aircraft.next_authorised = false;
+        aircraft.airborne_authority = None;
+        aircraft.hold_exit = None;
         aircraft.surface_reservation = None;
         self.owners
             .retain(|resource, owner| *owner != id || occupied.contains(resource));
@@ -873,6 +1261,8 @@ impl World {
                     })
             {
                 aircraft.next_authorised = false;
+                aircraft.airborne_authority = None;
+                aircraft.hold_exit = None;
                 self.owners.retain(|resource, owner| {
                     *owner != *id
                         || current.resources.contains(resource)
@@ -892,6 +1282,19 @@ impl World {
         let Some(aircraft) = self.aircraft.get_mut(&id) else {
             return false;
         };
+        if aircraft.authorised
+            && !aircraft.route.segments[aircraft.segment].stage.on_ground()
+            && aircraft.rates != Some((acceleration, braking))
+        {
+            return false;
+        }
+        if aircraft.recoveries.iter().any(|(boundary, recovery)| {
+            !aircraft
+                .route
+                .recovery_speed_fits(*boundary, recovery, braking)
+        }) {
+            return false;
+        }
         aircraft.rates = Some((acceleration, braking));
         true
     }
@@ -954,6 +1357,8 @@ impl World {
                     aircraft.speed = 0.0;
                 }
                 aircraft.next_authorised = false;
+                aircraft.airborne_authority = None;
+                aircraft.hold_exit = None;
             }
             return Advance::ClockChanged;
         }
@@ -964,122 +1369,190 @@ impl World {
                 if !aircraft.authorised || aircraft.complete {
                     continue;
                 }
-                let segment = &aircraft.route.segments[aircraft.segment];
-                let progress = if let Some((acceleration, braking)) = aircraft.rates
-                    && segment.knots > 0.0
-                {
-                    let remaining =
-                        (aircraft.duration() - aircraft.elapsed) * segment.knots * 0.514444;
-                    let next_speed = if aircraft.next_authorised || aircraft.recovering {
-                        aircraft
-                            .route
-                            .segments
-                            .get(aircraft.segment + 1)
-                            .map(|segment| segment.knots)
-                    } else {
-                        aircraft
-                            .recoveries
-                            .get(&aircraft.segment)
-                            .map(|route| route.segments[0].knots)
-                    };
-                    let distance_to_limit = remaining
-                        + if aircraft.next_authorised {
-                            let index = aircraft.segment + 1;
-                            aircraft.route.legs[index]
-                                .iter()
-                                .map(|leg| leg.duration)
-                                .sum::<f64>()
-                                * aircraft.route.segments[index].knots
-                                * 0.514444
-                        } else {
-                            0.0
-                        };
-                    let nonstop = aircraft.recovering
-                        || segment.stage == Stage::Holding
-                        || !segment.stage.on_ground()
-                            && aircraft.recoveries.contains_key(&aircraft.segment);
-                    let target = if aircraft.holding && segment.stage.on_ground() {
-                        0.0
-                    } else {
-                        let limit = if nonstop {
-                            segment.knots
-                        } else {
-                            (2.0 * braking * 0.514444 * distance_to_limit).sqrt() / 0.514444
-                        };
-                        let next_limit = next_speed.map_or(segment.knots, |speed| {
-                            (speed.powi(2) + 2.0 * braking * remaining / 0.514444).sqrt()
-                        });
-                        segment.knots.min(limit).min(next_limit)
-                    };
-                    let before = aircraft.speed;
-                    aircraft.speed +=
-                        (target - before).clamp(-braking * elapsed, acceleration * elapsed);
-                    if remaining < 0.02 {
-                        aircraft.duration() - aircraft.elapsed
-                    } else {
-                        elapsed * (before + aircraft.speed) / 2.0 / segment.knots
+                let mut pending_seconds = elapsed;
+                for _ in 0..512 {
+                    if pending_seconds <= 0.0 || !aircraft.authorised || aircraft.complete {
+                        break;
                     }
-                } else {
-                    elapsed
-                };
-                let total = aircraft.elapsed + progress;
-                let duration = aircraft.duration();
-                aircraft.elapsed = total.min(duration);
-                if aircraft.elapsed >= duration && segment.stage == Stage::Holding {
-                    aircraft.elapsed = total.rem_euclid(duration);
-                    continue;
-                }
-                if aircraft.elapsed >= aircraft.duration() {
-                    if !aircraft.next_authorised
-                        && !segment.stage.on_ground()
-                        && let Some(recovery) = aircraft.recoveries.remove(&aircraft.segment)
+                    let segment = &aircraft.route.segments[aircraft.segment];
+                    let next_authorised = aircraft.next_authorised
+                        || aircraft.airborne_authority.is_some_and(|(first, end)| {
+                            (first..=end).contains(&(aircraft.segment + 1))
+                        });
+                    let duration = aircraft.duration();
+                    let remaining_seconds = (duration - aircraft.elapsed).max(0.0);
+                    let consumed = if let Some((acceleration, braking)) = aircraft.rates
+                        && segment.knots > 0.0
                     {
-                        self.owners.retain(|_, owner| *owner != *id);
-                        aircraft.route = recovery;
-                        aircraft.segment = 0;
-                        aircraft.elapsed = (total - duration).min(aircraft.duration());
-                        aircraft.authorised = true;
-                        aircraft.complete = false;
-                        aircraft.recoveries.clear();
-                        aircraft.recovering = true;
+                        let remaining = (aircraft.duration() - aircraft.elapsed)
+                            * segment.knots
+                            * (1852.0 / 3600.0);
+                        let next_speed = if next_authorised || aircraft.recovery_from.is_some() {
+                            aircraft
+                                .route
+                                .segments
+                                .get(aircraft.segment + 1)
+                                .map(|segment| segment.knots)
+                        } else {
+                            aircraft
+                                .recoveries
+                                .get(&aircraft.segment)
+                                .map(|route| route.segments[0].knots)
+                        };
+                        let distance_to_limit = remaining
+                            + if next_authorised {
+                                let index = aircraft.segment + 1;
+                                aircraft.route.legs[index]
+                                    .iter()
+                                    .map(|leg| leg.duration)
+                                    .sum::<f64>()
+                                    * aircraft.route.segments[index].knots
+                                    * (1852.0 / 3600.0)
+                            } else {
+                                0.0
+                            };
+                        let nonstop = aircraft.recovery_from.is_some()
+                            || segment.stage == Stage::Holding
+                            || !segment.stage.on_ground()
+                                && aircraft.recoveries.contains_key(&aircraft.segment);
+                        let target = if aircraft.holding && segment.stage.on_ground() {
+                            0.0
+                        } else {
+                            let limit = if nonstop {
+                                segment.knots
+                            } else {
+                                (2.0 * braking * (1852.0 / 3600.0) * distance_to_limit).sqrt()
+                                    / (1852.0 / 3600.0)
+                            };
+                            let next_limit = next_speed.map_or(segment.knots, |speed| {
+                                (speed.powi(2) + 2.0 * braking * remaining / (1852.0 / 3600.0))
+                                    .sqrt()
+                            });
+                            segment.knots.min(limit).min(next_limit)
+                        };
+                        let change =
+                            SpeedChange::new(aircraft.speed, target, acceleration, braking);
+                        let to_boundary = remaining_seconds * segment.knots;
+                        let boundary =
+                            if !segment.stage.on_ground() && segment.stage != Stage::Holding {
+                                next_speed.and_then(|end| {
+                                    BoundarySpeed::new(
+                                        aircraft.speed,
+                                        segment.knots,
+                                        end,
+                                        to_boundary,
+                                        acceleration,
+                                        braking,
+                                    )
+                                })
+                            } else {
+                                None
+                            };
+                        let sample = |seconds| {
+                            boundary.as_ref().map_or_else(
+                                || change.sample(seconds),
+                                |boundary| boundary.sample(seconds),
+                            )
+                        };
+                        let (distance, speed) = sample(pending_seconds);
+                        if distance < to_boundary
+                            && !(remaining < 0.02 && segment.stage.on_ground())
+                        {
+                            aircraft.elapsed += distance / segment.knots;
+                            aircraft.speed = speed;
+                            break;
+                        }
+                        let consumed = if distance < to_boundary {
+                            0.0
+                        } else {
+                            boundary
+                                .as_ref()
+                                .map_or_else(
+                                    || change.seconds_to(to_boundary),
+                                    |boundary| boundary.seconds_to(to_boundary),
+                                )
+                                .clamp(0.0, pending_seconds)
+                        };
+                        aircraft.speed = sample(consumed).1;
+                        aircraft.elapsed = duration;
+                        consumed
+                    } else {
+                        let consumed = pending_seconds.min(remaining_seconds);
+                        aircraft.elapsed = (aircraft.elapsed + consumed).min(duration);
+                        consumed
+                    };
+                    pending_seconds = (pending_seconds - consumed).max(0.0);
+                    if aircraft.elapsed < duration {
+                        break;
+                    }
+                    if segment.stage == Stage::Holding {
+                        aircraft.elapsed = 0.0;
+                        if let Some(exit) = aircraft.hold_exit.take() {
+                            self.owners.retain(|_, owner| *owner != *id);
+                            aircraft.assigned_route = exit.route.clone();
+                            aircraft.route = exit.route;
+                            aircraft.recoveries = exit.recoveries;
+                            aircraft.segment = 0;
+                            aircraft.next_authorised = false;
+                            aircraft.airborne_authority = Some((0, exit.through));
+                            aircraft.recovery_from = None;
+                            aircraft.holding = false;
+                            aircraft.surface_reservation = None;
+                        }
                         continue;
                     }
-                    let next = aircraft.segment + 1;
-                    // Retain shared resources until the segment that actually leaves them completes.
-                    let retained = aircraft
-                        .route
-                        .segments
-                        .get(next)
-                        .map(|s| &s.resources)
-                        .or_else(|| {
-                            aircraft.route.segments[aircraft.segment]
-                                .stage
-                                .on_ground()
-                                .then_some(&aircraft.route.segments[aircraft.segment].resources)
+                    if aircraft.elapsed >= aircraft.duration() {
+                        if !next_authorised
+                            && !segment.stage.on_ground()
+                            && let Some(recovery) = aircraft.recoveries.remove(&aircraft.segment)
+                        {
+                            self.owners.retain(|_, owner| *owner != *id);
+                            aircraft.airborne_authority = None;
+                            aircraft.hold_exit = None;
+                            aircraft.recovery_from = Some(aircraft.segment);
+                            aircraft.route = recovery;
+                            aircraft.segment = 0;
+                            aircraft.elapsed = 0.0;
+                            aircraft.authorised = true;
+                            aircraft.complete = false;
+                            aircraft.recoveries.clear();
+                            continue;
+                        }
+                        let next = aircraft.segment + 1;
+                        // Retain shared resources until the segment that actually leaves them completes.
+                        let retained = aircraft
+                            .route
+                            .segments
+                            .get(next)
+                            .map(|s| &s.resources)
+                            .or_else(|| {
+                                aircraft.route.segments[aircraft.segment]
+                                    .stage
+                                    .on_ground()
+                                    .then_some(&aircraft.route.segments[aircraft.segment].resources)
+                            });
+                        self.owners.retain(|resource, owner| {
+                            *owner != *id
+                                || retained.is_some_and(|r| r.contains(resource))
+                                || aircraft.surface_reservation.as_ref().is_some_and(
+                                    |(end, resources)| next <= *end && resources.contains(resource),
+                                )
                         });
-                    self.owners.retain(|resource, owner| {
-                        *owner != *id
-                            || retained.is_some_and(|r| r.contains(resource))
-                            || aircraft.surface_reservation.as_ref().is_some_and(
-                                |(end, resources)| next <= *end && resources.contains(resource),
-                            )
-                    });
-                    if aircraft
-                        .surface_reservation
-                        .as_ref()
-                        .is_some_and(|(end, _)| next > *end)
-                    {
-                        aircraft.surface_reservation = None;
-                    }
-                    aircraft.authorised = aircraft.next_authorised || aircraft.recovering;
-                    aircraft.next_authorised = false;
-                    if next == aircraft.route.segments.len() {
-                        aircraft.complete = true;
-                    } else {
-                        aircraft.segment = next;
-                        aircraft.elapsed = 0.0;
-                        if aircraft.authorised {
-                            aircraft.elapsed = (total - duration).min(aircraft.duration());
+                        if aircraft
+                            .surface_reservation
+                            .as_ref()
+                            .is_some_and(|(end, _)| next > *end)
+                        {
+                            aircraft.surface_reservation = None;
+                        }
+                        aircraft.authorised = next_authorised || aircraft.recovery_from.is_some();
+                        aircraft.next_authorised = false;
+
+                        if next == aircraft.route.segments.len() {
+                            aircraft.complete = true;
+                        } else {
+                            aircraft.segment = next;
+                            aircraft.elapsed = 0.0;
                         }
                     }
                 }
@@ -1380,6 +1853,165 @@ mod tests {
     }
 
     #[test]
+    fn speed_changes_carry_real_time_across_a_clearance_boundary() {
+        let start = Waypoint {
+            latitude: 0.0,
+            longitude: 0.0,
+            altitude_feet: 5000.0,
+        };
+        let point = |nm| {
+            let coordinate = destination(start.coordinate(), 90.0, nm);
+            Waypoint {
+                latitude: coordinate[0],
+                longitude: coordinate[1],
+                ..start
+            }
+        };
+        let entry = point(160.0 * 0.2 / 3600.0);
+        let end = point(2.0);
+        let hold = |fix, knots| {
+            crate::traffic::holding::Pattern {
+                fix,
+                inbound_degrees: 90.0,
+                right: true,
+                ground_knots: knots,
+                leg_seconds: 60.0,
+                bank_degrees: 25.0,
+                turn_rate_degrees_sec: 3.0,
+            }
+            .compile(|_, _| true)
+            .unwrap()
+        };
+        let segment = |from, to, knots| Segment {
+            stage: Stage::Cruise,
+            points: vec![from, to],
+            knots,
+            resources: vec![],
+            dwell_seconds: 0.0,
+        };
+        let route = std::sync::Arc::new(
+            Route::compile(
+                vec![
+                    segment(start, entry, 160.0),
+                    segment(entry, end, 100.0),
+                    hold(end, 100.0),
+                ],
+                1000.0,
+                1000.0,
+            )
+            .unwrap(),
+        );
+        let mut world = World::default();
+        assert!(world.insert(0, 1, route));
+        assert!(world.ground_rates(1, 0.1, 0.1));
+        for (boundary, fix, knots) in [(0, entry, 160.0), (1, end, 100.0)] {
+            let recovery = std::sync::Arc::new(
+                Route::compile(vec![hold(fix, knots)], 1000.0, 1000.0).unwrap(),
+            );
+            assert!(world.recovery(0, 1, boundary, recovery));
+        }
+        assert!(world.authorise(0, 1, 0, &BTreeSet::new()));
+        // Represent a speed carried from a preceding slower phase.
+        world.aircraft.get_mut(&1).unwrap().speed = 80.0;
+        assert!(world.authorise_continuation(0, 1, 1, &BTreeSet::new()));
+        world.advance(0.0, false);
+        world.advance(0.5, false);
+        let pose = &world.snapshot()[0];
+        assert_eq!(pose.segment, 1);
+        assert!((pose.knots - 80.05).abs() < 1e-8);
+        let expected_nm = (80.0 * 0.5 + 0.5 * 0.1 * 0.5_f64.powi(2)) / 3600.0;
+        let actual_nm = distance_nm(start.coordinate(), pose.position.coordinate());
+        assert!(
+            (actual_nm - expected_nm).abs() < 1e-7,
+            "Travelled {actual_nm}, expected {expected_nm} NM"
+        );
+    }
+
+    #[test]
+    fn approach_speed_is_reached_before_the_slower_segment_begins() {
+        let start = Waypoint {
+            latitude: 0.0,
+            longitude: 0.0,
+            altitude_feet: 5000.0,
+        };
+        let point = |nm| {
+            let coordinate = destination(start.coordinate(), 90.0, nm);
+            Waypoint {
+                latitude: coordinate[0],
+                longitude: coordinate[1],
+                ..start
+            }
+        };
+        // The braking event falls between half-second movement samples.
+        let entry = point(15333.3 / 3600.0);
+        let end = point(12.0);
+        let hold = |fix, knots| {
+            crate::traffic::holding::Pattern {
+                fix,
+                inbound_degrees: 90.0,
+                right: true,
+                ground_knots: knots,
+                leg_seconds: 60.0,
+                bank_degrees: 25.0,
+                turn_rate_degrees_sec: 3.0,
+            }
+            .compile(|_, _| true)
+            .unwrap()
+        };
+        let segment = |from, to, knots| Segment {
+            stage: Stage::Approach,
+            points: vec![from, to],
+            knots,
+            resources: vec![],
+            dwell_seconds: 0.0,
+        };
+        let route = std::sync::Arc::new(
+            Route::compile(
+                vec![
+                    segment(start, entry, 200.0),
+                    segment(entry, end, 100.0),
+                    hold(end, 100.0),
+                ],
+                1000.0,
+                1000.0,
+            )
+            .unwrap(),
+        );
+        for step in [0.5, 0.1, 0.02] {
+            let mut world = World::default();
+            assert!(world.insert(0, 1, route.clone()));
+            assert!(world.ground_rates(1, 1.0, 1.0));
+            for (boundary, fix, knots) in [(0, entry, 200.0), (1, end, 100.0)] {
+                let recovery = std::sync::Arc::new(
+                    Route::compile(vec![hold(fix, knots)], 1000.0, 1000.0).unwrap(),
+                );
+                assert!(world.recovery(0, 1, boundary, recovery));
+            }
+            assert!(world.authorise(0, 1, 0, &BTreeSet::new()));
+            assert!(world.authorise_continuation(0, 1, 1, &BTreeSet::new()));
+            world.advance(0.0, false);
+            let mut entered = false;
+            let mut before = 200.0;
+            for tick in 1..=6000 {
+                world.advance(tick as f64 * step, false);
+                let pose = &world.snapshot()[0];
+                assert!((before - pose.knots).abs() <= step + 1e-7);
+                if pose.segment == 1 {
+                    assert!(
+                        pose.knots <= 100.0 + 1e-7,
+                        "{step}: entered at {} knots",
+                        pose.knots
+                    );
+                    entered = true;
+                    break;
+                }
+                before = pose.knots;
+            }
+            assert!(entered);
+        }
+    }
+
+    #[test]
     fn airborne_spawn_and_late_speed_clearance_keep_the_recovery_flyable() {
         let start = Waypoint {
             latitude: 0.0,
@@ -1470,11 +2102,265 @@ mod tests {
             late.advance(f64::from(second), false);
         }
         assert!(!late.authorise_continuation(0, 1, 1, &BTreeSet::new()));
+        let slow_recovery =
+            std::sync::Arc::new(Route::compile(vec![hold(entry, 100.0)], 2000.0, 2000.0).unwrap());
+        assert!(!late.recovery(0, 1, 0, slow_recovery.clone()));
+        assert_eq!(late.aircraft[&1].recoveries[&0].segments[0].knots, 200.0);
+        let mut alternative = prepare();
+        assert!(alternative.recovery(0, 1, 0, slow_recovery));
+        for second in 1..=200 {
+            alternative.advance(f64::from(second), false);
+        }
+        assert!(alternative.snapshot()[0].recovering);
+        assert!(alternative.snapshot()[0].knots <= 100.0 + 1e-7);
         late.advance(duration + 5.0, false);
         let pose = &late.snapshot()[0];
         assert_eq!(pose.stage, Stage::Holding);
         assert!(!pose.awaiting_clearance);
         assert!(pose.knots > 190.0);
+    }
+
+    #[test]
+    fn recovery_speed_limits_and_hold_departures_cannot_jump_to_a_slower_speed() {
+        let hold = |fix, speed| {
+            crate::traffic::holding::Pattern {
+                fix,
+                inbound_degrees: 90.0,
+                right: true,
+                ground_knots: speed,
+                leg_seconds: 60.0,
+                bank_degrees: 25.0,
+                turn_rate_degrees_sec: 3.0,
+            }
+            .compile(|_, _| true)
+            .unwrap()
+        };
+        let start = point(0.0, 5000.0);
+        let boundary = point(1000.0, 5000.0);
+        let route = std::sync::Arc::new(
+            Route::compile(
+                vec![
+                    Segment {
+                        stage: Stage::Cruise,
+                        points: vec![start, boundary],
+                        knots: 200.0,
+                        resources: vec![],
+                        dwell_seconds: 0.0,
+                    },
+                    hold(boundary, 200.0),
+                ],
+                2000.0,
+                2000.0,
+            )
+            .unwrap(),
+        );
+        let mut world = World::default();
+        assert!(world.insert(0, 1, route.clone()));
+        assert!(world.ground_rates(1, 1.0, 1.0));
+        let valid = std::sync::Arc::new(
+            Route::compile(vec![hold(boundary, 200.0)], 2000.0, 2000.0).unwrap(),
+        );
+        assert!(world.recovery(0, 1, 0, valid.clone()));
+        let short = point(1010.0, 5000.0);
+        let invalid = std::sync::Arc::new(
+            Route::compile(
+                vec![
+                    Segment {
+                        stage: Stage::MissedApproach,
+                        points: vec![boundary, short],
+                        knots: 200.0,
+                        resources: vec![],
+                        dwell_seconds: 0.0,
+                    },
+                    hold(short, 100.0),
+                ],
+                2000.0,
+                2000.0,
+            )
+            .unwrap(),
+        );
+        assert!(!world.recovery(0, 1, 0, invalid.clone()));
+        assert!(std::sync::Arc::ptr_eq(
+            &world.aircraft[&1].recoveries[&0],
+            &valid
+        ));
+        assert!(world.authorise(0, 1, 0, &BTreeSet::new()));
+        assert!(!world.replace_airborne(
+            0,
+            1,
+            route.clone(),
+            BTreeMap::from([(0, invalid)]),
+            &BTreeSet::new()
+        ));
+        assert!(std::sync::Arc::ptr_eq(&world.aircraft[&1].route, &route));
+        assert!(!world.ground_rates(1, 0.1, 0.1));
+        assert_eq!(world.aircraft[&1].rates, Some((1.0, 1.0)));
+        world.advance(0.0, false);
+        world.advance(20.0, false);
+        let current = world.snapshot()[0].clone();
+        assert!(current.recovering && current.stage == Stage::Holding);
+        assert_eq!(current.recovery_from, Some(0));
+        let slow = std::sync::Arc::new(
+            Route::compile(vec![hold(current.position, 50.0)], 2000.0, 2000.0).unwrap(),
+        );
+        assert!(!world.leave_hold(0, 1, slow));
+        assert_eq!(world.snapshot()[0].position, current.position);
+        assert_eq!(world.snapshot()[0].knots, current.knots);
+    }
+
+    #[test]
+    fn one_airborne_authority_covers_only_its_explicit_limits() {
+        let hold = |fix| {
+            crate::traffic::holding::Pattern {
+                fix,
+                inbound_degrees: 90.0,
+                right: true,
+                ground_knots: 100.0,
+                leg_seconds: 60.0,
+                bank_degrees: 25.0,
+                turn_rate_degrees_sec: 3.0,
+            }
+            .compile(|_, _| true)
+            .unwrap()
+        };
+        let mut segments = (0..3)
+            .map(|index| Segment {
+                stage: Stage::Cruise,
+                points: vec![
+                    point(f64::from(index) * 20.0, 5000.0),
+                    point(f64::from(index + 1) * 20.0, 5000.0),
+                ],
+                knots: 100.0,
+                resources: vec![],
+                dwell_seconds: 0.0,
+            })
+            .collect::<Vec<_>>();
+        segments.push(hold(point(60.0, 5000.0)));
+        let mut world = World::default();
+        assert!(world.insert(
+            0,
+            1,
+            std::sync::Arc::new(Route::compile(segments, 1000.0, 1000.0).unwrap())
+        ));
+        assert!(world.ground_rates(1, 1.0, 1.0));
+        for boundary in 0..3 {
+            let recovery = std::sync::Arc::new(
+                Route::compile(
+                    vec![hold(point((boundary + 1) as f64 * 20.0, 5000.0))],
+                    1000.0,
+                    1000.0,
+                )
+                .unwrap(),
+            );
+            assert!(world.recovery(0, 1, boundary, recovery));
+        }
+        assert!(!world.authorise_airborne_until(1, 1, 0, 2));
+        assert!(!world.authorise_airborne_until(0, 1, 0, 3));
+        assert!(world.snapshot()[0].awaiting_clearance);
+        let mut missing = world.clone();
+        missing.aircraft.get_mut(&1).unwrap().recoveries.remove(&1);
+        assert!(!missing.authorise_airborne_until(0, 1, 0, 2));
+        assert!(missing.snapshot()[0].awaiting_clearance);
+        let mut narrowed = world.clone();
+        assert!(narrowed.authorise_airborne_until(0, 1, 0, 2));
+        assert!(narrowed.authorise_continuation(0, 1, 1, &BTreeSet::new()));
+        assert!(narrowed.authorise_airborne_until(0, 1, 0, 0));
+        narrowed.advance(0.0, false);
+        narrowed.advance(0.5, false);
+        assert_eq!(narrowed.snapshot()[0].recovery_from, Some(0));
+        let mut shortened = world.clone();
+        assert!(shortened.authorise_airborne_until(0, 1, 0, 1));
+        shortened.advance(0.0, false);
+        shortened.advance(1.0, false);
+        assert_eq!(shortened.snapshot()[0].recovery_from, Some(1));
+        assert!(world.authorise_airborne_until(0, 1, 0, 2));
+        let mut clock = world.clone();
+        clock.advance(0.0, false);
+        assert_eq!(clock.advance(1000.0, false), Advance::ClockChanged);
+        clock.advance(1000.5, false);
+        assert_eq!(clock.snapshot()[0].recovery_from, Some(0));
+        world.advance(0.0, false);
+        world.advance(1.0, false);
+        assert_eq!(world.snapshot()[0].segment, 2);
+        assert!(!world.snapshot()[0].recovering);
+        world.advance(2.0, false);
+        assert_eq!(world.snapshot()[0].recovery_from, Some(2));
+    }
+
+    #[test]
+    fn initial_climb_span_waits_for_the_separate_takeoff_permission() {
+        let hold = |fix| {
+            crate::traffic::holding::Pattern {
+                fix,
+                inbound_degrees: 90.0,
+                right: true,
+                ground_knots: 100.0,
+                leg_seconds: 60.0,
+                bank_degrees: 25.0,
+                turn_rate_degrees_sec: 3.0,
+            }
+            .compile(|_, _| true)
+            .unwrap()
+        };
+        let mut segments = (0..3)
+            .map(|index| Segment {
+                stage: if index == 0 {
+                    Stage::Takeoff
+                } else {
+                    Stage::Climb
+                },
+                points: vec![
+                    point(f64::from(index) * 20.0, 5000.0),
+                    point(f64::from(index + 1) * 20.0, 5000.0),
+                ],
+                knots: 100.0,
+                resources: if index == 0 {
+                    vec!["RUNWAY".into()]
+                } else {
+                    vec![]
+                },
+                dwell_seconds: 0.0,
+            })
+            .collect::<Vec<_>>();
+        segments.push(hold(point(60.0, 5000.0)));
+        let mut world = World::default();
+        assert!(world.insert(
+            0,
+            1,
+            std::sync::Arc::new(Route::compile(segments, 1000.0, 1000.0).unwrap())
+        ));
+        for boundary in 1..3 {
+            assert!(
+                world.recovery(
+                    0,
+                    1,
+                    boundary,
+                    std::sync::Arc::new(
+                        Route::compile(
+                            vec![hold(point((boundary + 1) as f64 * 20.0, 5000.0))],
+                            1000.0,
+                            1000.0
+                        )
+                        .unwrap()
+                    )
+                )
+            );
+        }
+        assert!(world.authorise_airborne_until(0, 1, 1, 2));
+        let stopped = world.snapshot()[0].position;
+        world.advance(0.0, false);
+        world.advance(1.0, false);
+        assert_eq!(world.snapshot()[0].position, stopped);
+        assert!(world.snapshot()[0].awaiting_clearance);
+        assert!(!world.authorise(0, 1, 0, &BTreeSet::from(["RUNWAY".into()])));
+        world.advance(2.0, false);
+        assert_eq!(world.snapshot()[0].position, stopped);
+        assert!(world.authorise(0, 1, 0, &BTreeSet::new()));
+        world.advance(3.0, false);
+        assert_eq!(world.snapshot()[0].segment, 2);
+        assert!(!world.snapshot()[0].recovering);
+        world.advance(4.0, false);
+        assert_eq!(world.snapshot()[0].recovery_from, Some(2));
     }
 
     #[test]

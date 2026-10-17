@@ -28,7 +28,7 @@ fn supported(legs: &[Leg], missed: bool) -> bool {
         && legs.iter().all(|leg| {
             matches!(
                 leg.terminator.as_str(),
-                "IF" | "TF" | "DF" | "CF" | "CA" | "VI"
+                "IF" | "TF" | "DF" | "CF" | "CA" | "FA" | "VI"
             ) || (missed && leg.terminator == "HM")
         })
 }

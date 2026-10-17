@@ -3360,6 +3360,62 @@ mod tests {
     }
 
     #[test]
+    fn parked_requests_include_radio_and_local_information_before_filing() {
+        use openatc_core::state::{FlightPlan, PhaseCode};
+        use openatc_core::stations::Station;
+        let mut state = State::default();
+        state.plan = FlightPlan::default();
+        state.phase = PhaseCode::Parked;
+        state.telemetry.on_ground = true;
+        let buttons = openatc_core::catalog::buttons();
+        for service in ["Clearance", "Ground", "Tower"] {
+            let station = Station {
+                service: service.into(),
+                ..Default::default()
+            };
+            for intent in [
+                "radio_check",
+                "altimeter",
+                "weather",
+                "checkin",
+                "frequency",
+                "position",
+                "emergency",
+            ] {
+                assert!(
+                    buttons.iter().any(|(id, _)| id == intent),
+                    "missing {intent} button"
+                );
+                assert!(
+                    quick_request_available(&state, Some(&station), intent),
+                    "{service}: {intent}"
+                );
+            }
+            for intent in [
+                "repeat", "standby", "unable", "readback", "start", "pushback", "taxi", "ready",
+                "landing", "altitude", "direct",
+            ] {
+                assert!(
+                    !quick_request_available(&state, Some(&station), intent),
+                    "{service}: {intent}"
+                );
+            }
+        }
+        for service in ["ATIS", "Unicom"] {
+            let station = Station {
+                service: service.into(),
+                ..Default::default()
+            };
+            for intent in ["radio_check", "altimeter", "weather", "checkin"] {
+                assert!(!quick_request_available(&state, Some(&station), intent));
+            }
+        }
+        for intent in ["radio_check", "altimeter", "weather", "checkin"] {
+            assert!(!quick_request_available(&state, None, intent));
+        }
+    }
+
+    #[test]
     fn quick_requests_follow_phase_controller_and_combined_duties() {
         use openatc_core::state::{Clearance, PhaseCode};
         use openatc_core::stations::Station;

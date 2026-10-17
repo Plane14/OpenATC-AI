@@ -23,6 +23,7 @@ mod flight;
 mod landing;
 mod policy;
 mod radio;
+mod recovery;
 mod routing;
 mod runway;
 pub use radio::tick as radio_tick;
@@ -57,11 +58,13 @@ pub struct Runtime {
     approved_orders: BTreeSet<(u32, usize)>,
     exchange: Option<radio::Exchange>,
     reported_crossings: BTreeSet<(u32, usize)>,
+    reported_recoveries: BTreeSet<(u32, usize)>,
     warnings: Vec<String>,
     reported_holds: BTreeSet<(u32, usize)>,
     tower_notified: BTreeSet<u32>,
     tower_ready: BTreeSet<u32>,
     flights: BTreeMap<u32, Arc<flight::Prepared>>,
+    rejoins: BTreeMap<u32, flight::Rejoin>,
     terminal_routes: Vec<routing::Terminal>,
     environments: BTreeMap<String, environment::Environment>,
     active_flights: BTreeSet<u32>,
@@ -1488,7 +1491,8 @@ fn observed_targets(
     targets
 }
 
-fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) {
+fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) -> bool {
+    let mut clock_changed = false;
     if let (Some(_airport), Some(seconds), Some(_policy)) = (
         &runtime.airport,
         telemetry.simulation_seconds,
@@ -1556,7 +1560,12 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) {
                 }
             }
         }
-        runtime.world.advance(seconds, telemetry.paused);
+        clock_changed = runtime.world.advance(seconds, telemetry.paused)
+            == openatc_core::traffic::motion::Advance::ClockChanged;
+        if clock_changed {
+            flight::clock_changed(runtime);
+        }
+        flight::synchronise_recoveries(runtime);
         let elapsed = runtime
             .previous_time
             .replace(seconds)
@@ -1638,6 +1647,7 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) {
             }
         }
     }
+    clock_changed
 }
 
 /// Publish the most recent complete worker sample without waiting for simulation.
@@ -1717,8 +1727,8 @@ pub async fn simulate(shared: Shared) {
     };
     let result = workers
         .run(move || {
-            advance(&mut runtime, &telemetry);
-            runtime
+            let clock_changed = advance(&mut runtime, &telemetry);
+            (runtime, clock_changed)
         })
         .await;
     let mut state = shared.write().await;
@@ -1732,10 +1742,14 @@ pub async fn simulate(shared: Shared) {
         return;
     }
     match result {
-        Ok(runtime) => {
+        Ok((runtime, clock_changed)) => {
             state.generated.world = runtime.world;
             state.generated.frames = runtime.frames;
             state.generated.previous_time = runtime.previous_time;
+            if clock_changed {
+                flight::clock_changed(&mut state.generated);
+            }
+            flight::synchronise_recoveries(&mut state.generated);
             step(&mut state);
         }
         Err(error) => state.generated.status = error,
@@ -2131,6 +2145,32 @@ mod tests {
                 terminal.enroute_from
             );
             assert!(decoded.nominal.as_ref().unwrap().leg_count() > 0);
+            let missed = decoded.missed.as_ref().unwrap();
+            assert_eq!(
+                [missed.map.latitude, missed.map.longitude],
+                decoded.approach.last().unwrap().coordinate
+            );
+            assert!(!missed.holding_fix.is_empty());
+            assert!(missed.holding_feet >= missed.map.altitude_feet);
+            assert!(missed.clone().protect(|_, _| false).is_err());
+            // Inspect nominal joins only; these coordinates have no terrain acceptance.
+            let recovery = missed.clone().protect(|_, _| true).unwrap();
+            assert_eq!(recovery.segment(0).unwrap().points[0], missed.map);
+            let mut last = None;
+            for index in 0..512 {
+                let Some(segment) = recovery.segment(index) else {
+                    break;
+                };
+                assert!(!segment.stage.on_ground());
+                last = Some(segment);
+            }
+            let hold = last.unwrap();
+            assert_eq!(hold.stage, openatc_core::traffic::motion::Stage::Holding);
+            assert_eq!(hold.points[0], *hold.points.last().unwrap());
+            assert_eq!(hold.points[0].altitude_feet, missed.holding_feet);
+            let edge = [hold.points[0], hold.points[1]];
+            assert!(missed.clone().protect(|a, b| [a, b] != edge).is_err());
+
             assert!(
                 decoded
                     .nominal
@@ -2292,6 +2332,25 @@ mod tests {
             observed: &[],
             reserved: &unreserved,
         };
+        let map = scene.decoded_terminals[&arrival_id]
+            .approach
+            .last()
+            .unwrap();
+        let mut displaced = map.clone();
+        displaced.coordinate[0] += 0.01;
+        assert!(recovery::prepare(&planner, selected, &displaced, 0.0).is_err());
+        let mut unsupported = selected.clone();
+        unsupported.missed[0].terminator = "RF".into();
+        assert!(recovery::prepare(&planner, &unsupported, map, 0.0).is_err());
+        let mut unresolved = selected.clone();
+        unresolved.missed.last_mut().unwrap().region = "ZZ".into();
+        assert!(recovery::prepare(&planner, &unresolved, map, 0.0).is_err());
+        let mut no_map = selected.clone();
+        no_map.approach.last_mut().unwrap().description.clear();
+        assert!(recovery::prepare(&planner, &no_map, map, 0.0).is_err());
+        let mut slow = selected.clone();
+        slow.missed.last_mut().unwrap().speed_knots = Some(planner.aircraft.approach_knots - 1.0);
+        assert!(recovery::prepare(&planner, &slow, map, 0.0).is_err());
         let (retried, arrival) = planner.arrival(&candidates).unwrap();
         assert_eq!(
             retried.candidate, 1,

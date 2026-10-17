@@ -404,7 +404,7 @@ mod tests {
         assert!(broken.validate().is_err());
         broken.direct = "[".into();
         assert!(broken.validate().is_err());
-        assert_eq!(buttons().len(), 33);
+        assert_eq!(buttons().len(), 35);
     }
 
     #[test]

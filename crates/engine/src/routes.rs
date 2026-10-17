@@ -188,10 +188,23 @@ pub async fn full_state(AxumState(state): AxumState<Shared>) -> Json<Value> {
     let mut result = snapshot(&state.session, &state.settings);
     let mut airports = Vec::new();
     if state.station_root == state.settings.simulator_root {
+        let nearby = openatc_core::stations::nearby(&state.stations, &state.session.telemetry);
+        let tuned_airports = [
+            Some(state.session.telemetry.com1_khz),
+            state.session.telemetry.com2_khz,
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|khz| openatc_core::stations::tuned(&nearby, khz))
+        .map(|station| &station.airport);
+        // Local weather is needed before filing a plan as well as en route.
         for id in [
             &state.session.plan.departure,
             &state.session.plan.destination,
-        ] {
+        ]
+        .into_iter()
+        .chain(tuned_airports)
+        {
             if !id.is_empty()
                 && !airports
                     .iter()
@@ -3099,6 +3112,82 @@ mod chatter_tests {
             shared.read().await.sim_weather["DEST"].0["magneticVariationDegrees"],
             2.5
         );
+    }
+
+    #[tokio::test]
+    async fn parked_radio_and_information_requests_work_without_a_flight_plan() {
+        use openatc_core::state::{FlightPlan, PhaseCode};
+        for service in ["Clearance", "Ground", "Tower"] {
+            for radio in ["com1", "com2"] {
+                let mut state = crate::test_state();
+                state.settings.simulator_root = "parked-radio-fixture".into();
+                state
+                    .station_root
+                    .clone_from(&state.settings.simulator_root);
+                state.settings.congestion = Congestion::Off;
+                state.voices_source.clone_from(&state.settings.tts_url);
+                state.voices_refreshed = Some(std::time::Instant::now());
+                state.session.plan = FlightPlan::default();
+                state.session.clearance = None;
+                state.session.phase = PhaseCode::Parked;
+                state.session.telemetry.on_ground = true;
+                state.session.telemetry.radio_power = true;
+                state.session.telemetry.position_valid = true;
+                state.session.telemetry.latitude = 0.0;
+                state.session.telemetry.longitude = 0.0;
+                state.session.telemetry.com1_khz = 121400;
+                state.session.telemetry.com2_khz = Some(121400);
+                state.stations = vec![openatc_core::stations::Station {
+                    airport: "TEST".into(),
+                    name: format!("Test {service}"),
+                    service: service.into(),
+                    khz: 121400,
+                    ..Default::default()
+                }];
+                let plan = state.session.plan.clone();
+                let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+                let snapshot = super::full_state(AxumState(shared.clone())).await.0;
+                assert_eq!(snapshot["weatherAirports"].as_array().unwrap().len(), 1);
+                assert_eq!(snapshot["weatherAirports"][0]["airport"], "TEST");
+                let response = crate::radio::weather(AxumState(shared.clone()), Json(json!({
+                    "airport":"TEST", "latitude":0.0,"longitude":0.0,"sampleAltitudeFeet":0.0,
+                    "source":"simulator-airport", "temperatureC":20.0,"dewpointC":10.0,"pressureHpa":1020.0,
+                    "windDegrees":180.0,"windKnots":10.0,"visibilityMeters":10000.0,"clouds":"Clear"
+                }))).await;
+                assert!(response.status().is_success());
+                for intent in ["radio_check", "altimeter", "weather"] {
+                    let response = handle_request(
+                        AxumState(shared.clone()),
+                        Json(json!({
+                            "intent":intent,"text":intent,"role":"atc","radio":radio
+                        })),
+                    )
+                    .await;
+                    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    let body: Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(
+                        body["result"]["accepted"], true,
+                        "{service}/{radio}/{intent}: {body}"
+                    );
+                    let state = shared.read().await;
+                    assert_eq!(state.session.phase, PhaseCode::Parked);
+                    assert_eq!(state.session.plan, plan);
+                    assert!(state.session.clearance.is_none());
+                    let reply = state.session.transcript.last().unwrap();
+                    assert_eq!(reply.position, format!("Test {service}"));
+                    assert_eq!(
+                        reply.radio,
+                        Some(if radio == "com1" {
+                            openatc_core::state::Radio::Com1
+                        } else {
+                            openatc_core::state::Radio::Com2
+                        })
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
