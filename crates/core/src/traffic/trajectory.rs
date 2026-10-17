@@ -73,6 +73,7 @@ pub struct Envelope {
 }
 
 /// A sampled connection ending at its crossing restriction.
+#[derive(Clone)]
 pub struct Leg {
     /// Geographic path with geometric heights.
     pub points: Vec<Waypoint>,
@@ -80,6 +81,34 @@ pub struct Leg {
     pub ground_knots: f64,
     /// Duration at the planned speed.
     pub seconds: f64,
+}
+
+/// Solved geometry and levels awaiting an independent terrain/airspace check.
+/// Its movement samples are unavailable until every connection passes that check.
+#[derive(Clone)]
+pub struct Draft {
+    legs: Vec<Leg>,
+}
+impl Draft {
+    /// Planning diagnostics; this does not make movement samples available.
+    pub fn leg_count(&self) -> usize {
+        self.legs.len()
+    }
+
+    /// Release movement samples only when the complete solved path is protected.
+    pub fn protect(
+        self,
+        protected: impl Fn(Waypoint, Waypoint) -> bool,
+    ) -> Result<Vec<Leg>, String> {
+        if self.legs.iter().any(|leg| {
+            leg.points
+                .windows(2)
+                .any(|pair| !protected(pair[0], pair[1]))
+        }) {
+            return Err("Generated airborne path lacks verified corridor protection".into());
+        }
+        Ok(self.legs)
+    }
 }
 
 /// Build heading-continuous fly-over connectors; every sample needs corridor protection.
@@ -92,10 +121,46 @@ pub fn compile(
     envelope: &Envelope,
     protected: impl Fn(Waypoint, Waypoint) -> bool,
 ) -> Result<Vec<Leg>, String> {
+    draft(
+        start,
+        heading_degrees,
+        fixes,
+        final_heading_degrees,
+        envelope,
+    )?
+    .protect(protected)
+}
+
+/// Solve bounded geometry, levels and nominal airspeed without granting movement.
+pub fn draft(
+    start: Waypoint,
+    heading_degrees: f64,
+    fixes: &[Fix],
+    final_heading_degrees: f64,
+    envelope: &Envelope,
+) -> Result<Draft, String> {
     if fixes.is_empty() || fixes.len() > 128 {
         return Err("Generated airborne crossing budget is invalid".into());
     }
     let mut scheduled = fixes.to_vec();
+    let mut previous = [start.latitude, start.longitude];
+    // Preferred cruise heights are not a valid initial TAS estimate for the
+    // first SID turn. Seed from the actual starting height, then solve the
+    // complete level/speed/geometry profile to convergence below.
+    for fix in &mut scheduled {
+        if let Some(airspeed) = fix.airspeed {
+            let track = fix
+                .arrival_heading
+                .unwrap_or_else(|| bearing(previous, fix.coordinate));
+            let seed_height = start
+                .altitude_feet
+                .min(fix.preferred_feet)
+                .max(fix.minimum_feet)
+                .min(fix.maximum_feet);
+            fix.ground_knots = airspeed.ground_knots(seed_height, track)?;
+        }
+        previous = fix.coordinate;
+    }
     // A changed level changes TAS, turn radius and time available to climb or
     // descend. Rebuild all three together; never publish an unconverged path.
     for _ in 0..12 {
@@ -105,7 +170,6 @@ pub fn compile(
             &scheduled,
             final_heading_degrees,
             envelope,
-            &protected,
         )?;
         let mut settled = true;
         for (fix, leg) in scheduled.iter_mut().zip(&legs) {
@@ -131,7 +195,7 @@ pub fn compile(
             fix.ground_knots = ground;
         }
         if settled {
-            return Ok(legs);
+            return Ok(Draft { legs });
         }
     }
     Err("Joint altitude and airspeed planning did not converge".into())
@@ -143,7 +207,6 @@ fn compile_once(
     fixes: &[Fix],
     final_heading_degrees: f64,
     envelope: &Envelope,
-    protected: impl Fn(Waypoint, Waypoint) -> bool,
 ) -> Result<Vec<Leg>, String> {
     if fixes.is_empty()
         || fixes.len() > 128
@@ -218,7 +281,8 @@ fn compile_once(
                 initial_turn: fix.required_turn,
             },
             |_, _| true,
-        )?;
+        )
+        .map_err(|error| format!("Airborne crossing {index}, radius {radius:.0} m, length {length:.0} m, headings {:.1}/{heading:.1}: {error}", from.heading))?;
         count += samples.len();
         if count > 4096 {
             return Err("Generated airborne route exceeds its sample budget".into());
@@ -265,9 +329,6 @@ fn compile_once(
                 sample.point,
                 altitude + (level - altitude) * (along / meters).clamp(0.0, 1.0),
             ));
-        }
-        if points.windows(2).any(|pair| !protected(pair[0], pair[1])) {
-            return Err("Generated airborne path lacks verified corridor protection".into());
         }
         let nm: f64 = points
             .windows(2)
@@ -346,10 +407,15 @@ mod tests {
                 spacing_meters: 150.0,
                 maximum_detour_meters: 20000.0,
             };
-            let fixed_speed = compile_once(start, 0.0, &fixes, 90.0, &envelope, |a, b| {
-                a.altitude_feet >= 10000.0 && b.altitude_feet >= 10000.0
-            })
-            .unwrap();
+            let fixed_speed = compile_once(start, 0.0, &fixes, 90.0, &envelope).unwrap();
+            let draft = draft(start, 0.0, &fixes, 90.0, &envelope).unwrap();
+            assert_eq!(draft.leg_count(), fixes.len());
+            assert!(draft.clone().protect(|_, _| false).is_err());
+            assert!(
+                draft
+                    .protect(|a, b| a.altitude_feet >= 10000.0 && b.altitude_feet >= 10000.0)
+                    .is_ok()
+            );
             let end = fixed_speed[0].points.last().unwrap();
             let before = fixed_speed[0].points.iter().rev().nth(1).unwrap();
             let required = airspeed

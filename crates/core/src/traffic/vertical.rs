@@ -13,6 +13,20 @@ pub struct Crossing {
     pub seconds: f64,
 }
 
+fn intersection(lower: f64, upper: f64, crossing: &Crossing) -> Option<(f64, f64)> {
+    if lower <= upper {
+        return Some((lower, upper));
+    }
+    // Forward/backward propagation can invert equal bounds by a few ULPs.
+    // Snap only that roundoff and retain the original published altitude band.
+    let roundoff = 8.0 * f64::EPSILON * lower.abs().max(upper.abs()).max(1.0);
+    if lower - upper > roundoff {
+        return None;
+    }
+    let level = ((lower + upper) * 0.5).clamp(crossing.minimum_feet, crossing.maximum_feet);
+    Some((level, level))
+}
+
 /// Propagate restrictions in both directions so a later ceiling starts the descent early.
 /// Pressure references must be converted before calling this function.
 pub fn levels(
@@ -50,9 +64,8 @@ pub fn levels(
             .minimum_feet
             .max(previous.0 - descent_fpm * minutes);
         let upper = crossing.maximum_feet.min(previous.1 + climb_fpm * minutes);
-        if lower > upper {
-            return Err(format!("Unreachable crossing restriction at {index}"));
-        }
+        let (lower, upper) = intersection(lower, upper, crossing)
+            .ok_or_else(|| format!("Unreachable crossing restriction at {index}"))?;
         bounds.push((lower, upper));
         previous = (lower, upper);
     }
@@ -61,9 +74,8 @@ pub fn levels(
         let minutes = crossings[index + 1].seconds / 60.0;
         bounds[index].0 = bounds[index].0.max(next.0 - climb_fpm * minutes);
         bounds[index].1 = bounds[index].1.min(next.1 + descent_fpm * minutes);
-        if bounds[index].0 > bounds[index].1 {
-            return Err(format!("Conflicting crossing restrictions at {index}"));
-        }
+        bounds[index] = intersection(bounds[index].0, bounds[index].1, &crossings[index])
+            .ok_or_else(|| format!("Conflicting crossing restrictions at {index}"))?;
     }
     let mut selected = Vec::with_capacity(crossings.len());
     let mut previous = initial_feet;
@@ -71,9 +83,8 @@ pub fn levels(
         let minutes = crossing.seconds / 60.0;
         let lower = lower.max(previous - descent_fpm * minutes);
         let upper = upper.min(previous + climb_fpm * minutes);
-        if lower > upper {
-            return Err("Generated vertical profile lost its reachable envelope".into());
-        }
+        let (lower, upper) = intersection(lower, upper, crossing)
+            .ok_or("Generated vertical profile lost its reachable envelope")?;
         previous = crossing.preferred_feet.clamp(lower, upper);
         selected.push(previous);
     }
@@ -83,6 +94,24 @@ pub fn levels(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn equal_crossings_tolerate_roundoff_without_relaxing_the_published_level() {
+        let level: f64 = 6000.0;
+        let crossing = Crossing {
+            minimum_feet: level,
+            maximum_feet: level,
+            preferred_feet: level,
+            seconds: 0.0,
+        };
+        let adjacent = f64::from_bits(level.to_bits() + 1);
+        assert_eq!(
+            levels(adjacent, &[crossing], 2000.0, 1000.0).unwrap(),
+            [level]
+        );
+        assert!(levels(level + 0.001, &[crossing], 2000.0, 1000.0).is_err());
+        assert!(levels(level - 0.001, &[crossing], 2000.0, 1000.0).is_err());
+    }
 
     #[test]
     fn future_ceiling_moves_descent_before_the_restricted_leg() {

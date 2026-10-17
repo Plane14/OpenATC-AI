@@ -6,6 +6,10 @@ Generated traffic integration comes first, followed by traffic performance valid
 
 A completed Linux test flight confirms the reported window, speed-instruction, controller-message, crew, taxiway-speech and descent-readback repairs worked. Spoken V2 has been removed. Airspeed alive, 80 knots, V1 and Rotate precede Positive rate after confirmed airborne climb; native playback timing confirmation remains pending. Installer/platform acceptance is delegated to community testers, including Intel and Apple Silicon Macs, and is not claimed complete.
 
+## Generated traffic preparation — 17 October 2026
+
+Production preparation now retains the en-route crossing inputs between the selected SID and STAR alongside each aircraft's terminal and landing inputs. Per-connection grid MORA floors constrain the incoming and outgoing crossings; short grid-corner crossings and date-line paths are covered. Crossing count, editable spacing, aircraft ceiling, endpoint weather and published STAR entry constraints are checked before the candidate is retained. Production selection also solves joint nominal geometry and levels, retaining an opaque draft that requires complete-path protection before movement samples can be used. The installed mixed jet/turboprop preparation fixture passes. Complete trajectory protection, feasible speed changes, every-boundary recoveries and controller installation are still required before generated airborne flights can be enabled. Native performance, visibility and audio acceptance remain separate.
+
 ## Crew conversation pipeline — 16 October 2026
 
 Dedicated bounded role dialogue, ordered chat history, exact captain-quote continuity, current-request control isolation, flight/aircraft reset guards and identical token-count/generation framing are implemented. Current situation and total planned minutes now distinguish predeparture, airborne and postlanding conversation. Focused tests and HTTP-engine crew/radio/flight replays pass; these pipeline changes are installed for Linux testing, with conversation quality and native acceptance still open.

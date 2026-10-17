@@ -17,6 +17,7 @@ use std::{
 mod airborne;
 mod departure;
 mod display;
+mod enroute;
 mod environment;
 mod flight;
 mod landing;
@@ -255,6 +256,10 @@ struct Operations {
     flight_clearance_lead_seconds: f64,
     terminal_candidate_limit: usize,
     terminal_intercept_limit_nm: f64,
+    enroute_segment_nm: f64,
+    airborne_sample_meters: f64,
+    airborne_detour_meters: f64,
+    airborne_turn_rate_degrees_sec: f64,
     runway_slope_limit_percent: f64,
     visible_aircraft_limit: usize,
     display_enter_nm: f64,
@@ -286,6 +291,10 @@ fn parse_operations(text: &str) -> Result<Operations, String> {
         || !(0.0..=10.0).contains(&policy.display_replacement_margin_nm)
         || !(1..=32).contains(&policy.terminal_candidate_limit)
         || !(1.0..=100.0).contains(&policy.terminal_intercept_limit_nm)
+        || !(5.0..=50.0).contains(&policy.enroute_segment_nm)
+        || !(10.0..=250.0).contains(&policy.airborne_sample_meters)
+        || !(0.0..=10000.0).contains(&policy.airborne_detour_meters)
+        || !(0.5..=3.0).contains(&policy.airborne_turn_rate_degrees_sec)
         || !(0.1..=10.0).contains(&policy.runway_slope_limit_percent)
         || !(1.0..=50.0).contains(&policy.surface_monitor_radius_nm)
         || !(1.0..=350.0).contains(&policy.gate_connector_meters)
@@ -859,6 +868,7 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
                 }
             }
         });
+    let mora = openatc_core::navigation::Mora::load(&input.simulator_root);
     let terminal_routes = match (&departure_procedures, &arrival_procedures, &terminal_points) {
         (Some(departures), Some(arrivals), Some(points)) => {
             match routing::candidates(routing::Inputs {
@@ -869,7 +879,7 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
                 departures,
                 arrivals,
                 points,
-                mora: &openatc_core::navigation::Mora::load(&input.simulator_root),
+                mora: &mora,
                 budget: policy.terminal_candidate_limit,
             }) {
                 Ok(routes) => routes,
@@ -1083,6 +1093,7 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
                                         origin: &input.origin,
                                         destination: &input.destination,
                                         points,
+                                        mora: &mora,
                                         departure_weather,
                                         arrival_weather,
                                         aircraft,
@@ -2119,6 +2130,25 @@ mod tests {
                 decoded.departure.last().unwrap().coordinate,
                 terminal.enroute_from
             );
+            assert!(decoded.nominal.as_ref().unwrap().leg_count() > 0);
+            assert!(
+                decoded
+                    .nominal
+                    .as_ref()
+                    .unwrap()
+                    .clone()
+                    .protect(|_, _| false)
+                    .is_err()
+            );
+            assert!(!decoded.enroute.is_empty());
+            assert_eq!(
+                decoded.enroute.last().unwrap().coordinate,
+                terminal.enroute_to
+            );
+            assert_eq!(
+                decoded.enroute.last().unwrap().airspeed,
+                decoded.arrival.first().unwrap().airspeed
+            );
             assert_eq!(
                 decoded.arrival.last().unwrap().coordinate,
                 decoded.approach.first().unwrap().coordinate
@@ -2127,6 +2157,7 @@ mod tests {
                 decoded
                     .departure
                     .iter()
+                    .chain(&decoded.enroute)
                     .chain(&decoded.arrival)
                     .chain(&decoded.approach)
                     .all(|fix| fix.airspeed.is_some() && fix.minimum_feet <= fix.maximum_feet)
@@ -2244,11 +2275,13 @@ mod tests {
             .find(|frame| frame.target.id == arrival_id)
             .unwrap();
         let unreserved = BTreeSet::new();
+        let mora = openatc_core::navigation::Mora::load(&root);
         let planner = airborne::Planner {
             rotation: scene.nominal_departures[&arrival_id].rotation,
             origin: &scene.airport,
             destination: &scene.destination,
             points: scene.terminal_points.as_ref().unwrap(),
+            mora: &mora,
             departure_weather: &scene.environments["LFMN"],
             arrival_weather: &scene.environments["LIMC"],
             aircraft: profiles.aircraft_for(&frame.target.aircraft).unwrap(),

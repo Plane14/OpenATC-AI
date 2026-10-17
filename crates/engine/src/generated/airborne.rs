@@ -8,7 +8,9 @@ use openatc_core::traffic::{
 #[derive(Clone)]
 pub(super) struct Decoded {
     pub candidate: usize,
+    pub nominal: Option<Draft>,
     pub departure: Vec<Fix>,
+    pub enroute: Vec<Fix>,
     pub arrival: Vec<Fix>,
     pub approach: Vec<Fix>,
 }
@@ -20,6 +22,8 @@ pub(super) struct Request<'a> {
     pub origin: &'a openatc_core::airport::Airport,
     pub destination: &'a openatc_core::airport::Airport,
     pub points: &'a openatc_core::traffic::coordinates::Points,
+    pub mora: &'a openatc_core::navigation::Mora,
+    pub enroute_segment_nm: f64,
     pub departure_weather: &'a super::environment::Environment,
     pub arrival_weather: &'a super::environment::Environment,
     pub aircraft: &'a openatc_core::traffic::profiles::Aircraft,
@@ -74,7 +78,7 @@ pub(super) fn resolve(input: Request<'_>) -> Result<Decoded, String> {
             maximum_feet: ceiling,
             preferred_feet: ceiling,
         };
-    let departure = resolved::boundary_crossings(
+    let mut departure = resolved::boundary_crossings(
         input.rotation,
         &input.terminal.departure,
         &context(
@@ -122,7 +126,19 @@ pub(super) fn resolve(input: Request<'_>) -> Result<Decoded, String> {
     if openatc_core::arrival::distance_nm(entry.coordinate, first.coordinate) >= 0.001 {
         return Err("Resolved STAR and approach no longer share their published entry".into());
     }
-    if departure.len() + arrival.len() + approach.len() + 1 > 128 {
+    let budget = 128usize.saturating_sub(departure.len() + arrival.len() + approach.len());
+    let enroute = super::enroute::crossings(super::enroute::Request {
+        terminal: input.terminal,
+        departure: &mut departure,
+        arrival: &arrival,
+        mora: input.mora,
+        departure_weather: input.departure_weather,
+        arrival_weather: input.arrival_weather,
+        aircraft: input.aircraft,
+        spacing_nm: input.enroute_segment_nm,
+        budget,
+    })?;
+    if departure.len() + enroute.len() + arrival.len() + approach.len() > 128 {
         return Err(
             "Aircraft terminal crossings exceed the combined flight planning budget".into(),
         );
@@ -132,7 +148,9 @@ pub(super) fn resolve(input: Request<'_>) -> Result<Decoded, String> {
     }
     Ok(Decoded {
         candidate: input.candidate,
+        nominal: None,
         departure,
+        enroute,
         arrival,
         approach,
     })
@@ -144,6 +162,7 @@ pub(super) struct Planner<'a> {
     pub origin: &'a openatc_core::airport::Airport,
     pub destination: &'a openatc_core::airport::Airport,
     pub points: &'a openatc_core::traffic::coordinates::Points,
+    pub mora: &'a openatc_core::navigation::Mora,
     pub departure_weather: &'a super::environment::Environment,
     pub arrival_weather: &'a super::environment::Environment,
     pub aircraft: &'a openatc_core::traffic::profiles::Aircraft,
@@ -186,13 +205,15 @@ impl Planner<'_> {
         {
             attempted += 1;
             let attempt = (|| {
-                let decoded = resolve(Request {
+                let mut decoded = resolve(Request {
                     candidate,
                     terminal,
                     rotation: self.rotation,
                     origin: self.origin,
                     destination: self.destination,
                     points: self.points,
+                    mora: self.mora,
+                    enroute_segment_nm: self.policy.enroute_segment_nm,
                     departure_weather: self.departure_weather,
                     arrival_weather: self.arrival_weather,
                     aircraft: self.aircraft,
@@ -226,6 +247,37 @@ impl Planner<'_> {
                     observed: self.observed,
                     reserved: self.reserved,
                 })?;
+                decoded.nominal = Some(draft(
+                    self.rotation,
+                    self.departure_surface.heading(),
+                    self.arrival_surface.heading(),
+                    vec![
+                        Section {
+                            stage: Stage::Climb,
+                            crossings: decoded.departure.clone(),
+                        },
+                        Section {
+                            stage: Stage::Cruise,
+                            crossings: decoded.enroute.clone(),
+                        },
+                        Section {
+                            stage: Stage::Descent,
+                            crossings: decoded.arrival.clone(),
+                        },
+                        Section {
+                            stage: Stage::Approach,
+                            crossings: decoded.approach.clone(),
+                        },
+                    ],
+                    &Envelope {
+                        bank_degrees: self.handling.maximum_bank_degrees,
+                        turn_rate_degrees_sec: self.policy.airborne_turn_rate_degrees_sec,
+                        climb_fpm: self.aircraft.climb_fpm,
+                        descent_fpm: self.aircraft.descent_fpm,
+                        spacing_meters: self.policy.airborne_sample_meters,
+                        maximum_detour_meters: self.policy.airborne_detour_meters,
+                    },
+                )?);
                 if !self.departure_weather.fresh() || !self.arrival_weather.fresh() {
                     return Err("Terminal weather expired before arrival selection".to_owned());
                 }
@@ -252,8 +304,36 @@ pub(super) struct Section {
     pub crossings: Vec<Fix>,
 }
 
-/// Published levels in later sections constrain the earlier climb and cruise too.
-/// Callers must supply verified corridor protection, not a permissive placeholder.
+/// Joint solved levels and geometry awaiting verified corridor protection.
+#[derive(Clone)]
+pub(super) struct Draft {
+    path: trajectory::Draft,
+    stages: Vec<Stage>,
+}
+impl Draft {
+    pub fn leg_count(&self) -> usize {
+        self.path.leg_count()
+    }
+    pub fn protect(
+        self,
+        protected: impl Fn(Waypoint, Waypoint) -> bool,
+    ) -> Result<Vec<Segment>, String> {
+        Ok(self
+            .path
+            .protect(protected)?
+            .into_iter()
+            .zip(self.stages)
+            .map(|(leg, stage)| Segment {
+                stage,
+                points: leg.points,
+                knots: leg.ground_knots,
+                resources: Vec::new(),
+                dwell_seconds: 0.0,
+            })
+            .collect())
+    }
+}
+
 pub(super) fn compile(
     rotation: Waypoint,
     departure_heading: f64,
@@ -262,6 +342,23 @@ pub(super) fn compile(
     envelope: &Envelope,
     protected: impl Fn(Waypoint, Waypoint) -> bool,
 ) -> Result<Vec<Segment>, String> {
+    draft(
+        rotation,
+        departure_heading,
+        runway_heading,
+        sections,
+        envelope,
+    )?
+    .protect(protected)
+}
+
+pub(super) fn draft(
+    rotation: Waypoint,
+    departure_heading: f64,
+    runway_heading: f64,
+    sections: Vec<Section>,
+    envelope: &Envelope,
+) -> Result<Draft, String> {
     if sections.len() != 4
         || sections.iter().map(|section| section.stage).ne([
             Stage::Climb,
@@ -294,27 +391,14 @@ pub(super) fn compile(
             }
         }
     }
-    let legs = trajectory::compile(
+    let path = trajectory::draft(
         rotation,
         departure_heading,
         &crossings,
         runway_heading,
         envelope,
-        protected,
     )?;
-    let segments = legs
-        .into_iter()
-        .zip(stages)
-        .map(|(leg, stage)| Segment {
-            stage,
-            points: leg.points,
-            knots: leg.ground_knots,
-            resources: Vec::new(),
-            dwell_seconds: 0.0,
-        })
-        .collect::<Vec<_>>();
-    // The complete movement route is compiled only after a real rollout and taxi-in are attached.
-    Ok(segments)
+    Ok(Draft { path, stages })
 }
 
 fn merge(previous: &mut Fix, next: &Fix) -> Result<(), String> {
@@ -417,10 +501,16 @@ mod tests {
         };
         let departure_weather = weather(&origin);
         let arrival_weather = weather(&destination);
-        let departure = leg("TF", "09", "01000");
+        let departure = leg("TF", "09", "02000");
         let arrival = leg("IF", "09", "04000");
         let final_fix = leg("TF", "27", "00050");
         let points = Points::default();
+        let mora = openatc_core::navigation::Mora(
+            [(0, 0), (1, 0)]
+                .into_iter()
+                .map(|cell| (cell, 1000))
+                .collect(),
+        );
         let terminal = super::super::routing::Terminal {
             enroute_from: Points::runway(&departure, &origin).unwrap().coordinate,
             enroute_to: Points::runway(&arrival, &destination).unwrap().coordinate,
@@ -452,6 +542,8 @@ mod tests {
             origin: &origin,
             destination: &destination,
             points: &points,
+            mora: &mora,
+            enroute_segment_nm: 20.0,
             departure_weather: &departure_weather,
             arrival_weather: &arrival_weather,
             aircraft,

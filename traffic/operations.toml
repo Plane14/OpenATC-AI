@@ -27,6 +27,14 @@ terminal_candidate_limit = 16
 # Maximum published heading-to-course intercept considered during terminal decoding.
 terminal_intercept_limit_nm = 20.0
 
+# Maximum distance between nominal en-route crossing inputs.
+enroute_segment_nm = 20.0
+
+# Nominal airborne geometry; movement still requires a separate protection check.
+airborne_sample_meters = 250.0
+airborne_detour_meters = 5000.0
+airborne_turn_rate_degrees_sec = 3.0
+
 # Supported slope for the nominal published-threshold runway surface.
 runway_slope_limit_percent = 2.0
 

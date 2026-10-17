@@ -65,6 +65,57 @@ mod tests {
         let (_, policy, _) = load(&directory).unwrap();
         assert_eq!(policy.surface_segment_meters, 30.0);
         let source = include_str!("../../../../traffic/operations.toml");
+        let legacy_enroute = source
+            .lines()
+            .filter(|line| {
+                ![
+                    "enroute_segment_nm",
+                    "airborne_sample_meters",
+                    "airborne_detour_meters",
+                    "airborne_turn_rate_degrees_sec",
+                ]
+                .iter()
+                .any(|name| line.starts_with(name))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let default = parse_operations(&legacy_enroute).unwrap();
+        assert_eq!(default.airborne_sample_meters, 250.0);
+        assert_eq!(default.airborne_detour_meters, 5000.0);
+        assert_eq!(default.airborne_turn_rate_degrees_sec, 3.0);
+        for (from, to) in [
+            (
+                "airborne_sample_meters = 250.0",
+                "airborne_sample_meters = 251.0",
+            ),
+            (
+                "airborne_detour_meters = 5000.0",
+                "airborne_detour_meters = 10001.0",
+            ),
+            (
+                "airborne_turn_rate_degrees_sec = 3.0",
+                "airborne_turn_rate_degrees_sec = 0.0",
+            ),
+        ] {
+            assert!(parse_operations(&source.replace(from, to)).is_err());
+        }
+
+        assert_eq!(
+            parse_operations(&legacy_enroute)
+                .unwrap()
+                .enroute_segment_nm,
+            20.0
+        );
+        for value in ["0.0", "nan", "51.0"] {
+            assert!(
+                parse_operations(&source.replace(
+                    "enroute_segment_nm = 20.0",
+                    &format!("enroute_segment_nm = {value}")
+                ))
+                .is_err()
+            );
+        }
+
         let legacy = source.replace("terminal_intercept_limit_nm = 20.0", "");
         assert_eq!(
             parse_operations(&legacy)

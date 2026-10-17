@@ -822,18 +822,138 @@ impl Mora {
     }
     /// Conservative floor along a prospective off-route vector; missing cells stay unknown.
     pub fn corridor(&self, from: [f64; 2], to: [f64; 2]) -> Option<i32> {
-        let distance = crate::arrival::distance_nm(from, to);
-        let count = (distance / 2.0).ceil().clamp(1.0, 500.0) as usize;
-        let bearing = crate::arrival::bearing(from, to);
-        (0..=count)
-            .map(|i| {
-                let p =
-                    crate::arrival::destination(from, bearing, distance * i as f64 / count as f64);
-                self.0
-                    .get(&(p[0].floor() as i32, p[1].floor() as i32))
-                    .copied()
-            })
-            .collect::<Option<Vec<_>>>()
-            .and_then(|v| v.into_iter().max())
+        if [from, to].iter().any(|point| {
+            !point.iter().all(|value| value.is_finite())
+                || point[0].abs() >= 85.0
+                || point[1].abs() > 180.0
+        }) {
+            return None;
+        }
+        let vector = |point: [f64; 2]| {
+            let (latitude, longitude) = (point[0].to_radians(), point[1].to_radians());
+            [
+                latitude.cos() * longitude.cos(),
+                latitude.cos() * longitude.sin(),
+                latitude.sin(),
+            ]
+        };
+        let a = vector(from);
+        let b = vector(to);
+        let dot = a
+            .iter()
+            .zip(b)
+            .map(|(a, b)| a * b)
+            .sum::<f64>()
+            .clamp(-1.0, 1.0);
+        let tangent = [b[0] - dot * a[0], b[1] - dot * a[1], b[2] - dot * a[2]];
+        let sine = tangent
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt();
+        let angle = sine.atan2(dot);
+        // Antipodal endpoints do not specify one unambiguous shortest route.
+        if sine < 1e-12 && dot < 0.0 {
+            return None;
+        }
+        let direction = tangent.map(|value| value / sine.max(1e-15));
+        let point = |along: f64| {
+            let v =
+                std::array::from_fn::<_, 3, _>(|i| a[i] * along.cos() + direction[i] * along.sin());
+            [
+                v[2].clamp(-1.0, 1.0).asin().to_degrees(),
+                v[1].atan2(v[0]).to_degrees(),
+            ]
+        };
+        let extremum = direction[2].atan2(a[2]).rem_euclid(std::f64::consts::PI);
+        let count = (angle.to_degrees() * 30.0).ceil().max(1.0) as usize;
+        let mut maximum = 0;
+        for index in 0..count {
+            let start = angle * index as f64 / count as f64;
+            let end = angle * (index + 1) as f64 / count as f64;
+            let first = if index == 0 { from } else { point(start) };
+            let last = if index + 1 == count { to } else { point(end) };
+            let mut south = first[0].min(last[0]);
+            let mut north = first[0].max(last[0]);
+            if extremum > start && extremum < end {
+                let latitude = point(extremum)[0];
+                south = south.min(latitude);
+                north = north.max(latitude);
+            }
+            if south <= -85.0 || north >= 85.0 {
+                return None;
+            }
+            let longitude = first[1] + turn(first[1], last[1]);
+            let west = first[1].min(longitude).floor() as i32;
+            let east = first[1].max(longitude).floor() as i32;
+            // Cover every intersected grid rectangle, including short corner crossings
+            // between samples. Latitude extrema bound the great-circle arc as well.
+            for latitude in south.floor() as i32..=north.floor() as i32 {
+                for longitude in west..=east {
+                    let cell = (latitude, (longitude + 180).rem_euclid(360) - 180);
+                    let height = *self.0.get(&cell)?;
+                    if !(100..60000).contains(&height) {
+                        return None;
+                    }
+                    maximum = maximum.max(height);
+                }
+            }
+        }
+        Some(maximum)
+    }
+}
+
+#[cfg(test)]
+mod mora_tests {
+    use super::Mora;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn mora_covers_short_corner_crossings_and_unknown_cells() {
+        let mut grid = Mora(BTreeMap::from([
+            ((0, 0), 1000),
+            ((0, 1), 1000),
+            ((1, 0), 12000),
+            ((1, 1), 1000),
+        ]));
+        let from = [0.999, 0.99];
+        let to = [1.01, 1.001];
+        assert_eq!(grid.corridor(from, to), Some(12000));
+        assert_eq!(grid.corridor(to, from), Some(12000));
+        grid.0.remove(&(1, 0));
+        assert_eq!(grid.corridor(from, to), None);
+    }
+
+    #[test]
+    fn mora_follows_the_dateline_and_great_circle_latitude_peak() {
+        let grid = Mora(BTreeMap::from([((10, 179), 1000), ((10, -180), 6000)]));
+        assert_eq!(grid.corridor([10.2, 179.9], [10.2, -179.9]), Some(6000));
+        assert_eq!(grid.corridor([10.2, -179.9], [10.2, 179.9]), Some(6000));
+        let mut cells = BTreeMap::new();
+        for latitude in 59..=61 {
+            for longitude in -10..=10 {
+                cells.insert(
+                    (latitude, longitude),
+                    if latitude == 60 { 9000 } else { 1000 },
+                );
+            }
+        }
+        let grid = Mora(cells);
+        assert_eq!(grid.corridor([59.9, -10.0], [59.9, 10.0]), Some(9000));
+    }
+
+    #[test]
+    fn mora_rejects_invalid_or_ambiguous_paths() {
+        let grid = Mora(BTreeMap::from([((10, 20), 1000)]));
+        assert_eq!(grid.corridor([10.2, 20.2], [10.2, 20.2]), Some(1000));
+        for (from, to) in [
+            ([f64::NAN, 20.0], [10.0, 20.0]),
+            ([90.0, 20.0], [10.0, 20.0]),
+            ([10.0, 181.0], [10.0, 20.0]),
+            ([0.0, 0.0], [0.0, 180.0]),
+            ([84.9, 0.0], [84.9, 180.0]),
+        ] {
+            assert_eq!(grid.corridor(from, to), None);
+        }
     }
 }

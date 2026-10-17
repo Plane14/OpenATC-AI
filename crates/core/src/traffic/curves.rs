@@ -93,12 +93,38 @@ pub fn connect(
         })
         .collect();
     candidates.sort_by(|first, second| first.length().total_cmp(&second.length()));
-    let spacing = limits.spacing.min(limits.radius * 2.0_f64.to_radians());
     for path in candidates {
         let length = path.length();
-        let steps = (length / spacing).ceil().max(1.0) as usize;
-        if steps > 8191 {
+        let types = path.path_type.to_segment_types();
+        let steps = std::array::from_fn::<_, 3, _>(|index| {
+            let spacing = if types[index] == SegmentType::S {
+                limits.spacing
+            } else {
+                limits.spacing.min(limits.radius * 2.0_f64.to_radians())
+            };
+            (path.segment_length(index) / spacing).ceil() as usize
+        });
+        if steps.iter().sum::<usize>() > 8191 {
             continue;
+        }
+        // Straight portions need the distance bound, while turns also need the
+        // angular bound. A long straight must not inherit the turn's tiny step.
+        let mut distances = vec![0.0];
+        let mut offset = 0.0;
+        for (index, steps) in steps.into_iter().enumerate() {
+            let part = path.segment_length(index);
+            for step in 1..=steps {
+                let distance = offset + part * step as f64 / steps as f64;
+                if distance - distances.last().unwrap() >= 0.025 {
+                    distances.push(distance);
+                }
+            }
+            offset += part;
+        }
+        if length - distances.last().unwrap() >= 0.025 || distances.len() == 1 {
+            distances.push(length);
+        } else {
+            *distances.last_mut().unwrap() = length;
         }
         let endpoint = path.endpoint();
         if (endpoint.x() - end.x()).hypot(endpoint.y() - end.y()) > 0.05
@@ -106,9 +132,9 @@ pub fn connect(
         {
             continue;
         }
-        let mut samples = Vec::with_capacity(steps + 1);
-        for index in 0..=steps {
-            let fraction = index as f64 / steps as f64;
+        let mut samples = Vec::with_capacity(distances.len());
+        for distance in distances {
+            let fraction = distance / length;
             let pose = path.sample((length * fraction).min((length - 1e-8).max(0.0)));
             samples.push(Sample {
                 point: Point {
@@ -137,6 +163,69 @@ pub fn connect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn long_straights_do_not_consume_the_turn_sampling_budget() {
+        let from = Pose {
+            point: Point::default(),
+            heading: 0.0,
+        };
+        let to = Pose {
+            point: Point {
+                north: 100000.0,
+                ..Default::default()
+            },
+            heading: 0.0,
+        };
+        let samples = connect(
+            from,
+            to,
+            &Limits {
+                radius: 1000.0,
+                spacing: 250.0,
+                length: 100100.0,
+                initial_turn: None,
+            },
+            |_, _| true,
+        )
+        .unwrap();
+        assert!(samples.len() <= 402);
+        assert_eq!(samples.first().unwrap().point, from.point);
+        assert_eq!(samples.last().unwrap().point, to.point);
+        assert!(samples.windows(2).all(|pair| {
+            (pair[1].point.east - pair[0].point.east)
+                .hypot(pair[1].point.north - pair[0].point.north)
+                <= 250.001
+                && crate::navigation::turn(pair[0].heading, pair[1].heading).abs() <= 2.01
+        }));
+        let turned = Pose {
+            point: Point {
+                east: 100000.0,
+                north: 100000.0,
+                height: 0.0,
+            },
+            heading: 90.0,
+        };
+        let samples = connect(
+            from,
+            turned,
+            &Limits {
+                radius: 1000.0,
+                spacing: 250.0,
+                length: 150000.0,
+                initial_turn: None,
+            },
+            |_, _| true,
+        )
+        .unwrap();
+        assert!(samples.len() < 1000);
+        assert!(samples.windows(2).all(|pair| {
+            (pair[1].point.east - pair[0].point.east)
+                .hypot(pair[1].point.north - pair[0].point.north)
+                <= 250.001
+                && crate::navigation::turn(pair[0].heading, pair[1].heading).abs() <= 2.01
+        }));
+    }
+
     #[test]
     fn reverse_connector_preserves_the_nose_direction_when_taxi_starts() {
         let from = Pose {

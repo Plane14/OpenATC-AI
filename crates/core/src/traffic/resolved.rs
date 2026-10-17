@@ -202,9 +202,9 @@ fn decode(
             if minimum_feet <= altitude {
                 continue;
             }
-            let tas = c
-                .atmosphere
-                .true_knots(indicated, (altitude + minimum_feet) / 2.0)?;
+            // Nominal movement uses one ground speed per leg. Use the same
+            // endpoint TAS as the trajectory solver when locating this CA end.
+            let tas = c.atmosphere.true_knots(indicated, minimum_feet)?;
             let (speed, _) = air::wind(tas, heading, c.wind_from, c.wind_knots)?;
             let minutes = (minimum_feet - altitude) / c.climb_fpm;
             destination(from, heading, speed * minutes / 60.0)
@@ -486,6 +486,12 @@ mod tests {
         assert_eq!(climb.len(), 1);
         assert_eq!(climb[0].arrival_heading, Some(44.0));
         assert_eq!(climb[0].minimum_feet, climb[0].maximum_feet);
+        let seconds = distance_nm([start.latitude, start.longitude], climb[0].coordinate)
+            / climb[0].ground_knots
+            * 3600.0;
+        let rate = (climb[0].preferred_feet - start.altitude_feet) * 60.0 / seconds;
+        assert!((rate - context.climb_fpm).abs() < 1e-6);
+
         assert!(
             climb[0].ground_knots
                 < atmosphere
