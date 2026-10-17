@@ -35,6 +35,23 @@ pub fn levels(
     climb_fpm: f64,
     descent_fpm: f64,
 ) -> Result<Vec<f64>, String> {
+    levels_selected(
+        initial_feet,
+        crossings,
+        climb_fpm,
+        descent_fpm,
+        |_, lower, upper, preferred| Some(preferred.clamp(lower, upper)),
+    )
+}
+
+/// Select clearance-compatible levels without relaxing the reachable crossing envelope.
+pub fn levels_selected(
+    initial_feet: f64,
+    crossings: &[Crossing],
+    climb_fpm: f64,
+    descent_fpm: f64,
+    select: impl Fn(usize, f64, f64, f64) -> Option<f64>,
+) -> Result<Vec<f64>, String> {
     if !initial_feet.is_finite()
         || crossings.is_empty()
         || crossings.len() > 512
@@ -77,15 +94,71 @@ pub fn levels(
         bounds[index] = intersection(bounds[index].0, bounds[index].1, &crossings[index])
             .ok_or_else(|| format!("Conflicting crossing restrictions at {index}"))?;
     }
+    // Discrete levels constrain neighbouring crossings too. Propagate their actual
+    // attainable extrema before choosing one preferred level along the route.
+    let snap = |index: usize, lower: f64, upper: f64| -> Result<(f64, f64), String> {
+        let first = select(index, lower, upper, lower)
+            .filter(|level| level.is_finite() && *level >= lower && *level <= upper);
+        let last = select(index, lower, upper, upper)
+            .filter(|level| level.is_finite() && *level >= lower && *level <= upper);
+        match (first, last) {
+            (Some(first), Some(last)) if first <= last => Ok((first, last)),
+            _ => Err(format!(
+                "No clearance-compatible envelope within crossing {index}: {lower:.3}..{upper:.3}"
+            )),
+        }
+    };
+    let mut converged = false;
+    for _ in 0..crossings.len() * 2 + 1 {
+        let mut changed = false;
+        let mut previous = (initial_feet, initial_feet);
+        for index in 0..crossings.len() {
+            let minutes = crossings[index].seconds / 60.0;
+            let (lower, upper) = intersection(
+                bounds[index].0.max(previous.0 - descent_fpm * minutes),
+                bounds[index].1.min(previous.1 + climb_fpm * minutes),
+                &crossings[index],
+            )
+            .ok_or_else(|| format!("Unreachable discrete crossing {index}"))?;
+            let next = snap(index, lower, upper)?;
+            changed |=
+                (next.0 - bounds[index].0).abs() > 1e-6 || (next.1 - bounds[index].1).abs() > 1e-6;
+            bounds[index] = next;
+            previous = next;
+        }
+        for index in (0..crossings.len() - 1).rev() {
+            let next = bounds[index + 1];
+            let minutes = crossings[index + 1].seconds / 60.0;
+            let (lower, upper) = intersection(
+                bounds[index].0.max(next.0 - climb_fpm * minutes),
+                bounds[index].1.min(next.1 + descent_fpm * minutes),
+                &crossings[index],
+            )
+            .ok_or_else(|| format!("Conflicting discrete crossing {index}"))?;
+            let next = snap(index, lower, upper)?;
+            changed |=
+                (next.0 - bounds[index].0).abs() > 1e-6 || (next.1 - bounds[index].1).abs() > 1e-6;
+            bounds[index] = next;
+        }
+        if !changed {
+            converged = true;
+            break;
+        }
+    }
+    if !converged {
+        return Err("Clearance-level envelope did not converge".into());
+    }
     let mut selected = Vec::with_capacity(crossings.len());
     let mut previous = initial_feet;
-    for (crossing, (lower, upper)) in crossings.iter().zip(bounds) {
+    for (index, (crossing, (lower, upper))) in crossings.iter().zip(bounds).enumerate() {
         let minutes = crossing.seconds / 60.0;
         let lower = lower.max(previous - descent_fpm * minutes);
         let upper = upper.min(previous + climb_fpm * minutes);
         let (lower, upper) = intersection(lower, upper, crossing)
             .ok_or("Generated vertical profile lost its reachable envelope")?;
-        previous = crossing.preferred_feet.clamp(lower, upper);
+        previous = select(index, lower, upper, crossing.preferred_feet)
+            .filter(|level| level.is_finite() && *level >= lower && *level <= upper)
+            .ok_or_else(|| format!("No clearance-compatible level within crossing {index}"))?;
         selected.push(previous);
     }
     Ok(selected)
@@ -94,6 +167,89 @@ pub fn levels(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rounded_future_envelopes_start_descent_before_a_continuous_gap() {
+        let crossings = [
+            Crossing {
+                minimum_feet: 10900.0,
+                maximum_feet: 11100.0,
+                preferred_feet: 11100.0,
+                seconds: 60.0,
+            },
+            Crossing {
+                minimum_feet: 10900.0,
+                maximum_feet: 10960.0,
+                preferred_feet: 10960.0,
+                seconds: 60.0,
+            },
+        ];
+        let grid = |_: usize, lower: f64, upper: f64, preferred: f64| {
+            let low = (lower / 100.0).ceil();
+            let high = (upper / 100.0).floor();
+            (low <= high).then(|| (preferred / 100.0).round().clamp(low, high) * 100.0)
+        };
+        // The continuous solution fits 11060 then 10960; rounding only the first
+        // target would leave no reachable standard level at the second fix.
+        assert_eq!(
+            levels_selected(10900.0, &crossings, 200.0, 100.0, grid).unwrap(),
+            [11000.0, 10900.0]
+        );
+        let constrained = [
+            crossings[0],
+            Crossing {
+                seconds: 30.0,
+                ..crossings[1]
+            },
+        ];
+        assert_eq!(
+            levels_selected(10900.0, &constrained, 200.0, 100.0, grid).unwrap(),
+            [10900.0, 10900.0]
+        );
+    }
+
+    #[test]
+    fn selected_levels_remain_inside_future_restrictions_and_reachable_rates() {
+        let crossings = [
+            Crossing {
+                minimum_feet: 0.0,
+                maximum_feet: 2000.0,
+                preferred_feet: 1450.0,
+                seconds: 120.0,
+            },
+            Crossing {
+                minimum_feet: 500.0,
+                maximum_feet: 500.0,
+                preferred_feet: 500.0,
+                seconds: 60.0,
+            },
+        ];
+        let grid = |_: usize, lower: f64, upper: f64, preferred: f64| {
+            let chosen = (preferred.clamp(lower, upper) / 100.0).floor() * 100.0;
+            (chosen >= lower && chosen <= upper).then_some(chosen)
+        };
+        assert_eq!(
+            levels_selected(0.0, &crossings, 1000.0, 1000.0, grid).unwrap(),
+            [1400.0, 500.0]
+        );
+        assert_eq!(
+            levels(0.0, &crossings, 1000.0, 1000.0).unwrap(),
+            [1450.0, 500.0]
+        );
+        assert!(
+            levels_selected(0.0, &crossings, 1000.0, 1000.0, |_, _, upper, _| Some(
+                upper + 1.0
+            ))
+            .is_err()
+        );
+        let narrow = [Crossing {
+            minimum_feet: 1550.0,
+            maximum_feet: 1590.0,
+            preferred_feet: 1570.0,
+            seconds: 120.0,
+        }];
+        assert!(levels_selected(0.0, &narrow, 1000.0, 1000.0, grid).is_err());
+    }
 
     #[test]
     fn equal_crossings_tolerate_roundoff_without_relaxing_the_published_level() {

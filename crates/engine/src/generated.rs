@@ -15,17 +15,22 @@ use std::{
     time::{Duration, Instant},
 };
 mod airborne;
+mod assembly;
+mod controller;
 mod departure;
 mod display;
 mod enroute;
 mod environment;
 mod flight;
 mod landing;
+mod network;
 mod policy;
 mod radio;
 mod recovery;
 mod routing;
 mod runway;
+mod scenery;
+mod separation;
 pub use radio::tick as radio_tick;
 
 #[derive(Default, Clone)]
@@ -38,6 +43,9 @@ pub struct Runtime {
     world: openatc_core::traffic::motion::World,
     pub(crate) airport: Option<Arc<Airport>>,
     pub(crate) destination: Option<Arc<Airport>>,
+    airports: BTreeMap<String, Arc<Airport>>,
+    network: Option<Arc<network::Plan>>,
+    require_complete_flights: bool,
     departure_procedures: Option<Arc<openatc_core::traffic::procedures::Catalogue>>,
     arrival_procedures: Option<Arc<openatc_core::traffic::procedures::Catalogue>>,
     terminal_points: Option<Arc<openatc_core::traffic::coordinates::Points>>,
@@ -45,9 +53,11 @@ pub struct Runtime {
     nominal_departures: BTreeMap<u32, Arc<departure::Surface>>,
     decoded_terminals: BTreeMap<u32, Arc<airborne::Decoded>>,
     nominal_arrivals: BTreeMap<u32, Arc<landing::Arrival>>,
+    nominal_flights: BTreeMap<u32, Arc<assembly::Draft>>,
     spoken_callsigns: BTreeMap<String, String>,
     movement: BTreeMap<u32, animation::Handling>,
     previous_time: Option<f64>,
+    observed_climbs: BTreeMap<u32, f64>,
     epoch: Option<u64>,
     pub status: String,
     policy: Option<Operations>,
@@ -56,6 +66,10 @@ pub struct Runtime {
     channels: BTreeMap<String, animation::Channel>,
     orders: BTreeMap<u32, Vec<(usize, openatc_core::state::TaxiClearance)>>,
     approved_orders: BTreeSet<(u32, usize)>,
+    departure_wake: BTreeMap<u32, f64>,
+    /// Preserve the cancellation reason until the controller can transmit (true means wake).
+    cancelled_takeoffs: BTreeMap<u32, bool>,
+    cancelled_landings: BTreeSet<(u32, usize)>,
     exchange: Option<radio::Exchange>,
     reported_crossings: BTreeSet<(u32, usize)>,
     reported_recoveries: BTreeSet<(u32, usize)>,
@@ -65,14 +79,60 @@ pub struct Runtime {
     tower_ready: BTreeSet<u32>,
     flights: BTreeMap<u32, Arc<flight::Prepared>>,
     rejoins: BTreeMap<u32, flight::Rejoin>,
+    rejoin_attempts: BTreeMap<(u32, usize), Arc<flight::Prepared>>,
     terminal_routes: Vec<routing::Terminal>,
     environments: BTreeMap<String, environment::Environment>,
+    weather_observations: environment::Observations,
     active_flights: BTreeSet<u32>,
     handoff_targets: BTreeMap<u32, usize>,
     pending_checkins: BTreeSet<(u32, usize)>,
+    controllers: BTreeMap<u32, openatc_core::stations::Station>,
+    sector_transfers: BTreeMap<(u32, usize), usize>,
+    pending_sector_checkins:
+        BTreeMap<u32, (Arc<flight::Prepared>, openatc_core::stations::Station)>,
 }
 
 impl Runtime {
+    pub(crate) fn operational_airports(&self) -> impl Iterator<Item = &Airport> {
+        let mut seen = BTreeSet::new();
+        self.airport
+            .iter()
+            .chain(self.destination.iter())
+            .chain(self.airports.values())
+            .chain(self.network.iter().flat_map(|plan| plan.airports.values()))
+            .map(Arc::as_ref)
+            .filter(move |airport| seen.insert(airport.icao.clone()))
+    }
+    fn departure_ready(&self, id: u32) -> bool {
+        !self.require_complete_flights || self.flights.contains_key(&id)
+    }
+    pub(crate) fn observe_weather(&self, airport: &str, sample: &(serde_json::Value, Instant)) {
+        if let Ok(mut observations) = self.weather_observations.write() {
+            if !observations.contains_key(airport) && observations.len() >= 64 {
+                if let Some(oldest) = observations
+                    .iter()
+                    .min_by_key(|(_, (_, at))| *at)
+                    .map(|(id, _)| id.clone())
+                {
+                    observations.remove(&oldest);
+                }
+            }
+            observations.insert(airport.to_owned(), sample.clone());
+        }
+    }
+    fn departure_airport(&self, id: u32) -> Option<Arc<Airport>> {
+        let name = &self.orders.get(&id)?.first()?.1.airport;
+        self.airport
+            .iter()
+            .chain(self.destination.iter())
+            .chain(self.airports.values())
+            .chain(self.network.iter().flat_map(|plan| plan.airports.values()))
+            .find(|airport| name.is_empty() || airport.icao == *name)
+            .cloned()
+    }
+    pub(crate) fn observed_climbs(&mut self, rates: BTreeMap<u32, f64>) {
+        self.observed_climbs = rates;
+    }
     /// Expand only whole flight identities; TCAS and target addressing keep their short codes.
     pub(crate) fn spoken_text(&self, text: &str) -> String {
         let mut output = String::with_capacity(text.len());
@@ -93,9 +153,38 @@ impl Runtime {
         let Some(segment) = segment else {
             return true;
         };
-        if segment.stage != openatc_core::traffic::motion::Stage::Crossing {
+        if segment.stage == openatc_core::traffic::motion::Stage::Takeoff
+            && self
+                .departure_wake
+                .get(&id)
+                .is_some_and(|seconds| *seconds > 0.0)
+        {
+            return true;
+        }
+        let landing_end = self
+            .flights
+            .get(&id)
+            .and_then(|flight| flight.clearances.get(&index))
+            .and_then(|clearance| clearance.landing_rollout);
+        if !matches!(
+            segment.stage,
+            openatc_core::traffic::motion::Stage::Crossing
+                | openatc_core::traffic::motion::Stage::LineUp
+                | openatc_core::traffic::motion::Stage::Takeoff
+        ) && landing_end.is_none()
+        {
             return false;
         }
+        let runway_segment = if landing_end.is_some() {
+            self.flights
+                .get(&id)
+                .and_then(|flight| flight.route.segment(index + 1))
+        } else {
+            Some(segment)
+        };
+        let Some(runway_segment) = runway_segment else {
+            return true;
+        };
         let airport = self
             .orders
             .get(&id)
@@ -114,7 +203,7 @@ impl Runtime {
             .runways
             .iter()
             .filter(|runway| {
-                segment.resources.contains(&format!(
+                runway_segment.resources.contains(&format!(
                     "RUNWAY/{}/{}/{}",
                     airport.icao, runway.first_name, runway.second_name
                 ))
@@ -123,17 +212,26 @@ impl Runtime {
         if runways.peek().is_none() {
             return true;
         }
-        let seconds = segment
-            .points
-            .windows(2)
-            .map(|pair| {
-                openatc_core::arrival::distance_nm(
-                    [pair[0].latitude, pair[0].longitude],
-                    [pair[1].latitude, pair[1].longitude],
-                ) * 1852.0
+        let seconds = (index..=landing_end.unwrap_or(index))
+            .map(|step| {
+                self.flights
+                    .get(&id)
+                    .and_then(|flight| flight.route.segment(step))
+                    .unwrap_or(segment)
+            })
+            .map(|step| {
+                step.points
+                    .windows(2)
+                    .map(|pair| {
+                        openatc_core::arrival::distance_nm(
+                            [pair[0].latitude, pair[0].longitude],
+                            [pair[1].latitude, pair[1].longitude],
+                        ) * 1852.0
+                    })
+                    .sum::<f64>()
+                    / (step.knots.max(1.0) * 0.514444)
             })
             .sum::<f64>()
-            / (segment.knots.max(1.0) * 0.514444)
             + policy.runway_clearance_buffer_seconds;
         runways.any(|runway| {
             openatc_core::holding::blocked_during(
@@ -146,10 +244,7 @@ impl Runtime {
         })
     }
     fn surface_airport(&self, id: &str) -> Option<&Airport> {
-        self.airport
-            .iter()
-            .chain(self.destination.iter())
-            .map(Arc::as_ref)
+        self.operational_airports()
             .find(|airport| id.is_empty() || airport.icao == id)
     }
 }
@@ -186,12 +281,14 @@ fn port(airport: &Airport) -> Option<Port> {
     })
 }
 fn airport(root: &str, id: &str) -> Result<Airport, String> {
-    openatc_core::airport::load_airport_from_simulator(
+    let mut airport = openatc_core::airport::load_airport_from_simulator(
         root,
         id,
         &|path| std::path::Path::new(path).is_file(),
         &|path| std::fs::read_to_string(path).map_err(|error| error.to_string()),
-    )
+    )?;
+    scenery::Terrain::new(std::path::Path::new(root))?.supplement_airport(&mut airport)?;
+    Ok(airport)
 }
 fn position(airport: &Airport, point: Point) -> [f64; 2] {
     [
@@ -200,7 +297,10 @@ fn position(airport: &Airport, point: Point) -> [f64; 2] {
             + point.east / (111320.0 * airport.reference_latitude.to_radians().cos()),
     ]
 }
+#[derive(Clone)]
 struct Preparation {
+    stations: Arc<[openatc_core::stations::Station]>,
+    regions: BTreeMap<String, openatc_core::regions::Region>,
     simulator_root: String,
     origin: Airport,
     destination: Airport,
@@ -209,13 +309,30 @@ struct Preparation {
     counts: [u8; 4],
     own: [f64; 2],
     observed: Vec<TrafficTarget>,
+    reserved_stand_cells: BTreeSet<String>,
+    reserved_surface_corridors: BTreeSet<String>,
     epoch: u64,
     runway: String,
     arrival_runway: String,
     config: std::path::PathBuf,
     weather: BTreeMap<String, (serde_json::Value, Instant)>,
+    weather_observations: Option<environment::Observations>,
+}
+impl Preparation {
+    fn refresh_weather(&mut self) -> Result<(), String> {
+        if let Some(observations) = &self.weather_observations {
+            self.weather = observations
+                .read()
+                .map_err(|_| "Simulator weather observations are unavailable")?
+                .clone();
+        }
+        Ok(())
+    }
 }
 struct Scene {
+    require_complete_flights: bool,
+    surface_corridors: BTreeSet<String>,
+    airports: BTreeMap<String, Arc<Airport>>,
     frames: Vec<GeneratedTraffic>,
     world: openatc_core::traffic::motion::World,
     movement: BTreeMap<u32, animation::Handling>,
@@ -228,6 +345,8 @@ struct Scene {
     nominal_departures: BTreeMap<u32, Arc<departure::Surface>>,
     decoded_terminals: BTreeMap<u32, Arc<airborne::Decoded>>,
     nominal_arrivals: BTreeMap<u32, Arc<landing::Arrival>>,
+    nominal_flights: BTreeMap<u32, Arc<assembly::Draft>>,
+    flights: BTreeMap<u32, Arc<flight::Prepared>>,
     spoken_callsigns: BTreeMap<String, String>,
     terminal_routes: Vec<routing::Terminal>,
     environments: BTreeMap<String, environment::Environment>,
@@ -238,10 +357,17 @@ struct Scene {
     warnings: Vec<String>,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Operations {
+    network_airport_limit: usize,
+    network_candidate_limit: usize,
+    network_radius_nm: f64,
     holding_turn_rate_degrees_sec: f64,
+    contingency_holding_maximum_ias: f64,
+    airborne_separation_nm: f64,
+    airborne_separation_feet: f64,
+    airborne_prediction_seconds: f64,
     version: u32,
     preparation_seconds_min: f64,
     preparation_seconds_max: f64,
@@ -288,7 +414,10 @@ fn parse_operations(text: &str) -> Result<Operations, String> {
     let policy: Operations = value
         .try_into()
         .map_err(|error: toml::de::Error| error.to_string())?;
-    if !(1..=63).contains(&policy.visible_aircraft_limit)
+    if !(2..=6).contains(&policy.network_airport_limit)
+        || !(policy.network_airport_limit..=32).contains(&policy.network_candidate_limit)
+        || !(25.0..=2000.0).contains(&policy.network_radius_nm)
+        || !(1..=63).contains(&policy.visible_aircraft_limit)
         || !(5.0..=100.0).contains(&policy.display_enter_nm)
         || !(policy.display_enter_nm..=150.0).contains(&policy.display_leave_nm)
         || !(0.0..=10.0).contains(&policy.display_replacement_margin_nm)
@@ -305,6 +434,10 @@ fn parse_operations(text: &str) -> Result<Operations, String> {
         || policy.version != 1
         || !(30.0..=300.0).contains(&policy.flight_clearance_lead_seconds)
         || !(0.5..=3.0).contains(&policy.holding_turn_rate_degrees_sec)
+        || !(100.0..=200.0).contains(&policy.contingency_holding_maximum_ias)
+        || !(3.0..=10.0).contains(&policy.airborne_separation_nm)
+        || !(1000.0..=5000.0).contains(&policy.airborne_separation_feet)
+        || !(60.0..=300.0).contains(&policy.airborne_prediction_seconds)
         || !(0.5..=5.0).contains(&policy.pushback_knots)
         || !(0.25..=1.0).contains(&policy.pushback_radius_scale)
         || !(20.0..=500.0).contains(&policy.pushback_max_meters)
@@ -336,6 +469,7 @@ fn cells(airport: &Airport, point: Point, radius: f64, size: f64) -> BTreeSet<St
     }
     cells
 }
+#[derive(Clone)]
 struct GroundPlan {
     route: openatc_core::traffic::motion::Route,
     orders: Vec<(usize, openatc_core::state::TaxiClearance)>,
@@ -352,6 +486,97 @@ fn ground_route(
     policy: &Operations,
     to_parking: bool,
     observed: &[TrafficTarget],
+) -> Result<GroundPlan, String> {
+    let mut alternate = None;
+    for attempt in 0..=4 {
+        let selected = alternate.as_ref().unwrap_or(airport);
+        let mut refused = None;
+        let result = ground_route_once(
+            selected,
+            stand,
+            heading,
+            gate,
+            aircraft,
+            handling,
+            runway,
+            seed,
+            policy,
+            to_parking,
+            observed,
+            &mut refused,
+        );
+        if result.is_ok() || attempt == 4 {
+            return result;
+        }
+        let Some(point) = refused else {
+            return result;
+        };
+        let Some(edge) =
+            unsupported_surface_edge(selected, point, policy.surface_sample_meters * 2.0)
+        else {
+            return result;
+        };
+        // Retry existing taxi routes; never bridge the rejected pavement gap or alter a runway edge.
+        alternate
+            .get_or_insert_with(|| airport.clone())
+            .edges
+            .remove(edge);
+    }
+    unreachable!()
+}
+
+fn unsupported_surface_edge(airport: &Airport, point: Point, maximum: f64) -> Option<usize> {
+    let nodes = airport
+        .nodes
+        .iter()
+        .map(|node| (node.id, node.point))
+        .collect::<BTreeMap<_, _>>();
+    let mut candidates = airport
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, edge)| !edge.runway)
+        .filter_map(|(index, edge)| {
+            let (first, last) = (*nodes.get(&edge.first)?, *nodes.get(&edge.second)?);
+            let delta = [last.east - first.east, last.north - first.north];
+            let squared = delta[0] * delta[0] + delta[1] * delta[1];
+            if squared <= 0.0001 {
+                return None;
+            }
+            let fraction = (((point.east - first.east) * delta[0]
+                + (point.north - first.north) * delta[1])
+                / squared)
+                .clamp(0.0, 1.0);
+            let distance = (point.east - first.east - delta[0] * fraction)
+                .hypot(point.north - first.north - delta[1] * fraction);
+            (distance <= maximum).then_some((index, distance))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let first = *candidates.first()?;
+    if candidates
+        .get(1)
+        .is_some_and(|next| (next.1 - first.1).abs() <= 0.01)
+    {
+        return None;
+    }
+    Some(first.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ground_route_once(
+    airport: &Airport,
+    stand: Point,
+    heading: f64,
+    gate: bool,
+    aircraft: &openatc_core::traffic::profiles::Aircraft,
+    handling: &animation::Handling,
+    runway: &str,
+    seed: u64,
+    policy: &Operations,
+    to_parking: bool,
+    observed: &[TrafficTarget],
+    refused: &mut Option<Point>,
 ) -> Result<GroundPlan, String> {
     use openatc_core::traffic::motion::{Route, Segment, Stage, Waypoint};
     let start = position(airport, stand);
@@ -592,20 +817,26 @@ fn ground_route(
                 continue;
             }
             let samples = (distance / policy.surface_sample_meters).ceil() as usize;
-            if samples > 4096
-                || (0..=samples).any(|index| {
+            if samples > 4096 {
+                return Err("Surface connector exceeds its sampling budget".into());
+            }
+            if let Some(point) = (0..=samples)
+                .map(|index| {
                     let amount = index as f64 / samples as f64;
-                    !openatc_core::airport::on_pavement(
-                        airport,
-                        Point {
-                            east: from.east + (to.east - from.east) * amount,
-                            north: from.north + (to.north - from.north) * amount,
-                            height: 0.0,
-                        },
-                    )
+                    Point {
+                        east: from.east + (to.east - from.east) * amount,
+                        north: from.north + (to.north - from.north) * amount,
+                        height: 0.0,
+                    }
                 })
+                .find(|point| !openatc_core::airport::on_pavement(airport, *point))
             {
-                return Err("Unverified surface connector".into());
+                *refused = Some(point);
+                let coordinate = position(airport, point);
+                return Err(format!(
+                    "Unverified surface connector at {:.7}, {:.7}",
+                    coordinate[0], coordinate[1]
+                ));
             }
             let steps = (distance / policy.surface_segment_meters).ceil() as usize;
             let previous = from;
@@ -639,7 +870,7 @@ fn ground_route(
             }
             turning = sample.turning;
         }
-        if stage == Stage::TaxiOut {
+        if matches!(stage, Stage::TaxiOut | Stage::TaxiIn) {
             let parts: Vec<_> = segments.drain(start_segment..).collect();
             let mut merged: Vec<Segment> = Vec::new();
             let mut length = 0.0;
@@ -714,11 +945,21 @@ fn ground_route(
                 .collect(),
                 dwell_seconds: policy.preparation_seconds_min,
             });
+            openatc_core::traffic::motion::limit_surface_speeds(
+                &mut segments,
+                handling.braking_knots_sec,
+                &orders.iter().map(|(index, _)| *index).collect(),
+            )?;
             return Ok(GroundPlan {
                 route: Route::compile(segments, aircraft.climb_fpm, aircraft.descent_fpm)?,
                 orders,
             });
         } else if !to_parking && path.hold_short_runway == runway {
+            openatc_core::traffic::motion::limit_surface_speeds(
+                &mut segments,
+                handling.braking_knots_sec,
+                &orders.iter().map(|(index, _)| *index).collect(),
+            )?;
             return Ok(GroundPlan {
                 route: Route::compile(segments, aircraft.climb_fpm, aircraft.descent_fpm)?,
                 orders,
@@ -753,11 +994,11 @@ fn ground_route(
                 return Err("Surface route repeats a runway crossing".into());
             }
             crossing_resource = Some(resource);
-            path = openatc_core::airport::calculate_crossing_route(
+            path = openatc_core::airport::calculate_crossing_route_for(
                 airport,
                 &telemetry,
                 &path.hold_short_runway,
-                aircraft.parking_size(),
+                aircraft,
             )?;
             stage = Stage::Crossing;
         }
@@ -765,6 +1006,7 @@ fn ground_route(
     Err("Surface route exceeds crossing budget".into())
 }
 fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
+    input.refresh_weather()?;
     let (Some(origin), Some(destination)) = (port(&input.origin), port(&input.destination)) else {
         return Err(
             "Generated traffic needs published runway and stand capacities at both airports".into(),
@@ -778,6 +1020,12 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
         if let Some(sample) = input.weather.get(&airport.icao)
             && let Ok(weather) = environment::Environment::from_sample(airport, sample)
         {
+            let weather = input
+                .weather_observations
+                .as_ref()
+                .map_or(weather.clone(), |observations| {
+                    weather.follow(&airport.icao, observations, &sample.0)
+                });
             *runway = crate::radio::atis_runway(
                 &airport.runways,
                 runway,
@@ -872,6 +1120,9 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
             }
         });
     let mora = openatc_core::navigation::Mora::load(&input.simulator_root);
+    let controller_origin = Arc::new(input.origin.clone());
+    let controller_destination = Arc::new(input.destination.clone());
+    let controller_regions = Arc::new(input.regions.clone());
     let terminal_routes = match (&departure_procedures, &arrival_procedures, &terminal_points) {
         (Some(departures), Some(arrivals), Some(points)) => {
             match routing::candidates(routing::Inputs {
@@ -918,24 +1169,76 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
             Err(error) => warnings.push(format!("{} runway {name}: {error}", airport.icao)),
         }
     }
+    let mut controller_terminals = BTreeMap::new();
     let mut nominal_departures = BTreeMap::new();
     let mut decoded_terminals = BTreeMap::new();
     let mut nominal_arrivals = BTreeMap::new();
+    let mut nominal_flights = BTreeMap::new();
+    let mut flights = BTreeMap::new();
+    let terrain = scenery::Terrain::new(std::path::Path::new(&input.simulator_root))
+        .map(std::cell::RefCell::new);
     let mut spoken_callsigns = BTreeMap::new();
     let mut reserved_arrival_stands = BTreeSet::new();
+    let mut occupied_arrival_cells = input.reserved_stand_cells.clone();
+    let mut surface_corridors = input.reserved_surface_corridors.clone();
+    let mut terminal_usage = BTreeMap::new();
     for (category, count) in classes.into_iter().zip(input.counts) {
         for _ in 0..count.min(63) {
             if result.len() >= 63 {
                 break;
             }
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let Some(choice) = input.profiles.select(
+            let Some(choice) = input.profiles.select_where(
                 &origin,
                 &destination,
                 distance,
                 category,
                 &input.models,
                 seed,
+                |_, aircraft| {
+                    let radius = aircraft.wingspan.max(aircraft.length) / 2.0;
+                    input
+                        .origin
+                        .parking
+                        .iter()
+                        .enumerate()
+                        .any(|(index, stand)| {
+                            !used.contains(&index)
+                                && openatc_core::parking::moving_supports(stand, aircraft)
+                                && cells(
+                                    &input.origin,
+                                    stand.point,
+                                    radius,
+                                    policy.conflict_cell_meters,
+                                )
+                                .is_disjoint(&input.reserved_stand_cells)
+                                && cells(
+                                    &input.origin,
+                                    stand.point,
+                                    aircraft.wingspan.max(aircraft.length) / 2.0,
+                                    policy.conflict_cell_meters,
+                                )
+                                .is_disjoint(&surface_corridors)
+                        })
+                        && input.destination.parking.iter().any(|stand| {
+                            !reserved_arrival_stands.contains(&stand.name)
+                                && openatc_core::parking::moving_supports(stand, aircraft)
+                                && cells(
+                                    &input.destination,
+                                    stand.point,
+                                    radius,
+                                    policy.conflict_cell_meters,
+                                )
+                                .is_disjoint(&occupied_arrival_cells)
+                                && cells(
+                                    &input.destination,
+                                    stand.point,
+                                    radius,
+                                    policy.conflict_cell_meters,
+                                )
+                                .is_disjoint(&surface_corridors)
+                        })
+                },
             ) else {
                 warnings.push(format!(
                     "{category:?}: no compatible fleet/model for {} to {}",
@@ -963,7 +1266,12 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
             } else {
                 format!("{}{}", choice.operator, 100 + seed % 8900)
             };
-            if result.iter().any(|frame| frame.target.callsign == callsign) {
+            if result.iter().any(|frame| frame.target.callsign == callsign)
+                || input
+                    .observed
+                    .iter()
+                    .any(|target| target.callsign == callsign)
+            {
                 continue;
             }
             if !handling.contains_key(&kind) {
@@ -977,7 +1285,16 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
             else {
                 continue;
             };
-            let stands =
+            let preference = openatc_core::parking::TrafficPreference {
+                operator: choice.operator.clone(),
+                operation: match category {
+                    Category::Airline | Category::Regional => "airline",
+                    Category::Cargo => "cargo",
+                    Category::GeneralAviation => "general_aviation",
+                }
+                .into(),
+            };
+            let mut stands =
                 input
                     .origin
                     .parking
@@ -985,7 +1302,21 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
                     .enumerate()
                     .filter(|(index, stand)| {
                         if used.contains(index)
-                            || !openatc_core::parking::supports_aircraft(stand, aircraft)
+                            || !cells(
+                                &input.origin,
+                                stand.point,
+                                aircraft.wingspan.max(aircraft.length) / 2.0,
+                                policy.conflict_cell_meters,
+                            )
+                            .is_disjoint(&input.reserved_stand_cells)
+                            || !cells(
+                                &input.origin,
+                                stand.point,
+                                aircraft.wingspan.max(aircraft.length) / 2.0,
+                                policy.conflict_cell_meters,
+                            )
+                            .is_disjoint(&surface_corridors)
+                            || !openatc_core::parking::moving_supports(stand, aircraft)
                         {
                             return false;
                         }
@@ -1009,8 +1340,11 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
                                 ) > safe
                             })
                     })
-                    .take(32)
                     .collect::<Vec<_>>();
+            stands.sort_by_key(|(index, stand)| {
+                (preference.rank(stand, aircraft.parking_size()), *index)
+            });
+            stands.truncate(32);
             if stands.is_empty() {
                 warnings.push(format!(
                     "{}: no free equipment-compatible stand for {}",
@@ -1044,8 +1378,28 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
                     &input.observed,
                 );
                 if let Ok(route) = planned {
+                    if (0..512)
+                        .map_while(|index| route.route.segment(index))
+                        .any(|segment| {
+                            segment
+                                .resources
+                                .iter()
+                                .any(|resource| input.reserved_stand_cells.contains(resource))
+                        })
+                    {
+                        warnings.push(format!(
+                            "{} / {}: departure taxi route crosses a committed arrival footprint",
+                            input.origin.icao, stand.name
+                        ));
+                        continue;
+                    }
                     let hold = route.route.end_position();
+                    let departure_corridor = (0..512)
+                        .map_while(|index| route.route.segment(index))
+                        .flat_map(|segment| segment.resources.iter().cloned())
+                        .collect::<BTreeSet<_>>();
                     if world.insert(world.generation(), id, Arc::new(route.route)) {
+                        surface_corridors.extend(departure_corridor);
                         orders.insert(id, route.orders);
                         world.ground_rates(
                             id,
@@ -1092,6 +1446,7 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
                                             "Arrival runway surface is unavailable".to_owned(),
                                         )?;
                                     airborne::Planner {
+                                        regions: &input.regions,
                                         rotation: surface.rotation,
                                         origin: &input.origin,
                                         destination: &input.destination,
@@ -1106,19 +1461,110 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
                                         arrival_surface,
                                         observed: &input.observed,
                                         reserved: &reserved_arrival_stands,
+                                        occupied_stand_cells: &occupied_arrival_cells,
+                                        parking_exclusions: &surface_corridors,
+                                        preference: &preference,
                                     }
-                                    .arrival(&terminal_routes)
+                                    .arrival(&terminal_routes, &terminal_usage)
                                 })();
                                 match decoded {
                                     Ok((decoded, arrival)) => {
-                                        reserved_arrival_stands
-                                            .insert(arrival.parking.stand.clone());
-                                        nominal_arrivals.insert(id, Arc::new(arrival));
+                                        let arrival = Arc::new(arrival);
+                                        let joined = assembly::Draft::new(
+                                            &surface,
+                                            &decoded,
+                                            arrival.clone(),
+                                            &input.destination.icao,
+                                            &input.arrival_runway,
+                                            aircraft,
+                                            &handling[&kind],
+                                            &policy,
+                                            Arc::new(controller::Flight {
+                                                origin: controller_origin.clone(),
+                                                destination: controller_destination.clone(),
+                                                departure_runway: input.runway.clone(),
+                                                arrival_runway: input.arrival_runway.clone(),
+                                                terminal: controller_terminals
+                                                    .entry(decoded.candidate)
+                                                    .or_insert_with(|| {
+                                                        Arc::new(
+                                                            terminal_routes[decoded.candidate]
+                                                                .clone(),
+                                                        )
+                                                    })
+                                                    .clone(),
+                                                callsign: callsign.clone(),
+                                                stations: input.stations.clone(),
+                                                regions: controller_regions.clone(),
+                                                departure_weather: environments[&input.origin.icao]
+                                                    .clone(),
+                                                arrival_weather: environments
+                                                    [&input.destination.icao]
+                                                    .clone(),
+                                                missed: decoded.missed_instruction.clone(),
+                                                scope_seconds: 900.0
+                                                    - policy.airborne_prediction_seconds
+                                                    - policy.flight_clearance_lead_seconds,
+                                            }),
+                                        );
+                                        match joined {
+                                            Ok(draft) => {
+                                                reserved_arrival_stands
+                                                    .insert(arrival.parking.stand.clone());
+                                                surface_corridors.extend(
+                                                    (0..512)
+                                                        .map_while(|index| {
+                                                            arrival
+                                                                .parking
+                                                                .surface
+                                                                .route
+                                                                .segment(index)
+                                                        })
+                                                        .flat_map(|segment| {
+                                                            segment.resources.iter().cloned()
+                                                        }),
+                                                );
+                                                if let Some(parked) = (0..512)
+                                                    .map_while(|index| {
+                                                        arrival.parking.surface.route.segment(index)
+                                                    })
+                                                    .last()
+                                                {
+                                                    occupied_arrival_cells
+                                                        .extend(parked.resources.iter().cloned());
+                                                }
+                                                match terrain.as_ref() {
+                                                    Ok(terrain) => match draft
+                                                        .clone()
+                                                        .production(terrain, &mora)
+                                                    {
+                                                        Ok(prepared) => {
+                                                            flights.insert(id, Arc::new(prepared));
+                                                        }
+                                                        Err(error) => warnings.push(format!(
+                                                            "{callsign}: corridor release: {error}"
+                                                        )),
+                                                    },
+                                                    Err(error) => warnings.push(format!(
+                                                        "{callsign}: scenery: {error}"
+                                                    )),
+                                                }
+                                                nominal_flights.insert(id, Arc::new(draft));
+                                                *terminal_usage
+                                                    .entry(decoded.candidate)
+                                                    .or_insert(0) += 1;
+                                            }
+                                            Err(error) => warnings.push(format!(
+                                                "{}: complete flight: {error}",
+                                                callsign
+                                            )),
+                                        }
+                                        nominal_arrivals.insert(id, arrival);
                                         decoded_terminals.insert(id, Arc::new(decoded));
                                     }
                                     Err(error) => warnings.push(format!(
-                                        "{} / {}: terminal inputs: {error}",
-                                        input.origin.icao, stand.name
+                                        "{} / {} / {} {}: terminal inputs: {error}",
+                                        input.origin.icao, stand.name, callsign, choice.aircraft
                                     )),
                                 }
                                 nominal_departures.insert(id, Arc::new(surface));
@@ -1181,14 +1627,17 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
         }
     }
     if result.is_empty() && input.counts.iter().any(|count| *count > 0) {
-        return Err(warnings
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| "No eligible generated aircraft".into()));
+        return Err(if warnings.is_empty() {
+            "No eligible generated aircraft".into()
+        } else {
+            warnings.into_iter().take(8).collect::<Vec<_>>().join("; ")
+        });
     }
     if !decoded_terminals.is_empty() && environments.values().any(|weather| !weather.fresh()) {
         decoded_terminals.clear();
         nominal_arrivals.clear();
+        nominal_flights.clear();
+        flights.clear();
         warnings.push("Terminal weather expired before scene preparation completed".into());
     }
     for airport in [&input.origin, &input.destination] {
@@ -1200,6 +1649,12 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
         }
     }
     Ok(Scene {
+        surface_corridors,
+        require_complete_flights: !input.simulator_root.is_empty(),
+        airports: [&input.origin, &input.destination]
+            .into_iter()
+            .map(|airport| (airport.icao.clone(), Arc::new(airport.clone())))
+            .collect(),
         frames: result,
         world,
         movement,
@@ -1212,6 +1667,8 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
         nominal_departures,
         decoded_terminals,
         nominal_arrivals,
+        nominal_flights,
+        flights,
         spoken_callsigns,
         terminal_routes,
         environments,
@@ -1221,6 +1678,327 @@ fn prepare_scene(mut input: Preparation) -> Result<Scene, String> {
         orders,
         warnings,
     })
+}
+
+impl Scene {
+    fn observe_prepared(&self, request: &mut Preparation) {
+        request
+            .reserved_surface_corridors
+            .extend(self.surface_corridors.iter().cloned());
+        request
+            .observed
+            .extend(self.frames.iter().map(|frame| frame.target.clone()));
+        for frame in &self.frames {
+            if let Some(parked) = self.world.current_segment(frame.target.id) {
+                request
+                    .reserved_stand_cells
+                    .extend(parked.resources.iter().cloned());
+            }
+        }
+        for (id, arrival) in &self.nominal_arrivals {
+            request.reserved_surface_corridors.extend(
+                (0..512)
+                    .map_while(|index| arrival.parking.surface.route.segment(index))
+                    .flat_map(|segment| segment.resources.iter().cloned()),
+            );
+            if let Some(segment) = (0..512)
+                .map_while(|index| arrival.parking.surface.route.segment(index))
+                .last()
+            {
+                request
+                    .reserved_stand_cells
+                    .extend(segment.resources.iter().cloned());
+                if let (Some(frame), Some(point)) = (
+                    self.frames.iter().find(|frame| frame.target.id == *id),
+                    segment.points.last(),
+                ) {
+                    let mut parked = frame.target.clone();
+                    parked.latitude = point.latitude;
+                    parked.longitude = point.longitude;
+                    parked.altitude_feet = point.altitude_feet;
+                    parked.on_ground = true;
+                    parked.ground_speed_knots = Some(0.0);
+                    request.observed.push(parked);
+                }
+            }
+        }
+    }
+    fn weather_fresh(&self) -> bool {
+        self.environments
+            .values()
+            .all(environment::Environment::fresh)
+            && self
+                .nominal_flights
+                .values()
+                .all(|draft| draft.weather_fresh())
+    }
+    fn merge(mut self, mut other: Self) -> Result<Self, String> {
+        if self
+            .airports
+            .keys()
+            .chain(other.airports.keys())
+            .collect::<BTreeSet<_>>()
+            .len()
+            > 8
+        {
+            return Err("Traffic network exceeds its airport budget".into());
+        }
+        let callsigns = self
+            .frames
+            .iter()
+            .map(|frame| frame.target.callsign.to_ascii_uppercase())
+            .collect::<BTreeSet<_>>();
+        if other
+            .frames
+            .iter()
+            .any(|frame| callsigns.contains(&frame.target.callsign.to_ascii_uppercase()))
+        {
+            return Err("Traffic network has duplicate aircraft callsigns".into());
+        }
+        if self.policy != other.policy
+            || self.channels != other.channels
+            || self.require_complete_flights != other.require_complete_flights
+        {
+            return Err("Traffic operation definitions changed during preparation".into());
+        }
+        let stale = !self.weather_fresh() || !other.weather_fresh();
+        if !self.world.merge_prepared(other.world) {
+            return Err("Prepared traffic directions have conflicting movement ownership".into());
+        }
+        let offset = self.terminal_routes.len();
+        for decoded in other.decoded_terminals.values_mut() {
+            Arc::make_mut(decoded).candidate += offset;
+        }
+        for (id, airport) in &other.airports {
+            if self
+                .airports
+                .get(id)
+                .is_some_and(|existing| existing != airport)
+            {
+                return Err("Airport scenery changed during traffic preparation".into());
+            }
+        }
+        self.surface_corridors.extend(other.surface_corridors);
+        self.airports.extend(other.airports);
+        self.frames.extend(other.frames);
+        self.movement.extend(other.movement);
+        self.nominal_departures.extend(other.nominal_departures);
+        self.decoded_terminals.extend(other.decoded_terminals);
+        self.nominal_arrivals.extend(other.nominal_arrivals);
+        self.nominal_flights.extend(other.nominal_flights);
+        self.flights.extend(other.flights);
+        self.spoken_callsigns.extend(other.spoken_callsigns);
+        self.terminal_routes.extend(other.terminal_routes);
+        self.environments.extend(other.environments);
+        self.fixed_gear.extend(other.fixed_gear);
+        self.orders.extend(other.orders);
+        self.warnings.extend(other.warnings);
+        if stale || !self.weather_fresh() {
+            self.decoded_terminals.clear();
+            self.nominal_arrivals.clear();
+            self.nominal_flights.clear();
+            self.flights.clear();
+            self.warnings.push(
+                "Terminal weather changed or expired before traffic routes were merged".into(),
+            );
+        }
+        Ok(self)
+    }
+}
+
+fn prepare_bidirectional(mut input: Preparation) -> Result<Scene, String> {
+    let mut inbound = input.clone();
+    std::mem::swap(&mut inbound.origin, &mut inbound.destination);
+    std::mem::swap(&mut inbound.runway, &mut inbound.arrival_runway);
+    let mut remaining = 63;
+    for index in 0..4 {
+        let count = input.counts[index].min(remaining);
+        remaining -= count;
+        input.counts[index] = count.div_ceil(2);
+        inbound.counts[index] = count / 2;
+    }
+    let first = prepare_direction(input);
+    if inbound.counts.iter().all(|count| *count == 0) {
+        return first;
+    }
+    if let Ok(scene) = &first {
+        scene.observe_prepared(&mut inbound);
+    }
+    let second = prepare_direction(inbound);
+    match (first, second) {
+        (Ok(scene), Ok(reverse)) => scene.merge(reverse),
+        (Ok(mut scene), Err(error)) | (Err(error), Ok(mut scene)) => {
+            scene.warnings.push(format!(
+                "Other traffic direction could not be prepared: {error}"
+            ));
+            Ok(scene)
+        }
+        (Err(first), Err(second)) => Err(format!(
+            "Neither traffic direction could be prepared: {first}; {second}"
+        )),
+    }
+}
+
+fn same_flow_runways(
+    airport: &Airport,
+    preferred: &str,
+    weather: &environment::Environment,
+) -> Vec<String> {
+    let selected = crate::radio::atis_runway(
+        &airport.runways,
+        preferred,
+        weather.wind_from,
+        weather.wind_knots,
+    );
+    let mut ends = Vec::new();
+    for runway in &airport.runways {
+        let heading = (runway.second.east - runway.first.east)
+            .atan2(runway.second.north - runway.first.north)
+            .to_degrees()
+            .rem_euclid(360.0);
+        ends.extend([
+            (runway.first_name.clone(), heading),
+            (
+                runway.second_name.clone(),
+                (heading + 180.0).rem_euclid(360.0),
+            ),
+        ]);
+    }
+    let Some((_, heading)) = ends.iter().find(|(name, _)| *name == selected) else {
+        return Vec::new();
+    };
+    std::iter::once(selected.clone())
+        .chain(
+            ends.iter()
+                .filter(|(name, course)| {
+                    *name != selected
+                        && openatc_core::navigation::turn(*heading, *course).abs() <= 15.0
+                        && crate::radio::atis_runway(
+                            &airport.runways,
+                            name,
+                            weather.wind_from,
+                            weather.wind_knots,
+                        ) == *name
+                })
+                .map(|(name, _)| name.clone())
+                .take(3),
+        )
+        .collect()
+}
+
+fn profile_category(profiles: &Profiles, name: &str) -> Option<Category> {
+    let categories = profiles
+        .airlines
+        .values()
+        .filter(|operator| operator.name == name)
+        .map(|operator| operator.category)
+        .collect::<BTreeSet<_>>();
+    (categories.len() == 1).then(|| *categories.first().unwrap())
+}
+
+fn complete_mix_score(
+    scene: &Scene,
+    profiles: &Profiles,
+    requested: &BTreeSet<Category>,
+) -> (usize, usize) {
+    let represented = scene
+        .frames
+        .iter()
+        .filter(|frame| scene.nominal_flights.contains_key(&frame.target.id))
+        .filter_map(|frame| profile_category(profiles, &frame.target.name))
+        .filter(|category| requested.contains(category))
+        .collect::<BTreeSet<_>>();
+    (represented.len(), scene.nominal_flights.len())
+}
+
+fn prepare_direction(mut input: Preparation) -> Result<Scene, String> {
+    let requested = [
+        Category::Airline,
+        Category::Regional,
+        Category::Cargo,
+        Category::GeneralAviation,
+    ]
+    .into_iter()
+    .zip(input.counts)
+    .filter_map(|(category, count)| (count > 0).then_some(category))
+    .collect::<BTreeSet<_>>();
+    let profiles = input.profiles.clone();
+    let score = |result: &Result<Scene, String>| {
+        result.as_ref().map_or((0, 0), |scene| {
+            complete_mix_score(scene, &profiles, &requested)
+        })
+    };
+    let mut best = prepare_scene(input.clone());
+    if score(&best).0 == requested.len() || input.simulator_root.is_empty() {
+        return best;
+    }
+    input.refresh_weather()?;
+    let weather = |airport: &Airport| {
+        input.weather.get(&airport.icao).and_then(|sample| {
+            let weather = environment::Environment::from_sample(airport, sample).ok()?;
+            Some(
+                input
+                    .weather_observations
+                    .as_ref()
+                    .map_or(weather.clone(), |observations| {
+                        weather.follow(&airport.icao, observations, &sample.0)
+                    }),
+            )
+        })
+    };
+    let (Some(departure_weather), Some(arrival_weather)) =
+        (weather(&input.origin), weather(&input.destination))
+    else {
+        return best;
+    };
+    let departures = same_flow_runways(&input.origin, &input.runway, &departure_weather);
+    let arrivals = same_flow_runways(&input.destination, &input.arrival_runway, &arrival_weather);
+    for departure in &departures {
+        for arrival in &arrivals {
+            if !departure_weather.fresh() || !arrival_weather.fresh() {
+                return best;
+            }
+            if departures.first() == Some(departure) && arrivals.first() == Some(arrival) {
+                continue;
+            }
+            let mut alternative = input.clone();
+            alternative.runway = departure.clone();
+            alternative.arrival_runway = arrival.clone();
+            let trial = prepare_scene(alternative);
+            if score(&trial) > score(&best) {
+                best = trial;
+                if let Ok(scene) = &mut best {
+                    scene.warnings.push(format!("Generated route uses departure runway {departure} and arrival runway {arrival} to accommodate more of the requested traffic mix"));
+                }
+                if score(&best).0 == requested.len() {
+                    return best;
+                }
+                continue;
+            }
+            if let Ok(scene) = &mut best {
+                match trial {
+                    Ok(trial) => {
+                        // Retain later stand failures as well as the first ones, within a fixed diagnostic budget.
+                        let tail = trial.warnings.len().saturating_sub(3);
+                        scene.warnings.extend(
+                            trial
+                                .warnings
+                                .into_iter()
+                                .enumerate()
+                                .filter(|(index, _)| *index < 3 || *index >= tail)
+                                .map(|(_, reason)| {
+                                    format!("Alternate runways {departure}/{arrival}: {reason}")
+                                }),
+                        );
+                    }
+                    Err(error) => scene
+                        .warnings
+                        .push(format!("Alternate runways {departure}/{arrival}: {error}")),
+                }
+            }
+        }
+    }
+    best
 }
 
 fn scene_key(state: &EngineState) -> String {
@@ -1241,7 +2019,50 @@ fn scene_key(state: &EngineState) -> String {
     )
 }
 
+fn planning_observations(telemetry: &openatc_core::state::Telemetry) -> Vec<TrafficTarget> {
+    let mut observed = telemetry
+        .traffic
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .take(126)
+        .cloned()
+        .collect::<Vec<_>>();
+    if telemetry.position_valid && telemetry.on_ground {
+        let own = TrafficTarget {
+            id: 0,
+            aircraft: telemetry.aircraft_icao.clone(),
+            latitude: telemetry.latitude,
+            longitude: telemetry.longitude,
+            altitude_feet: telemetry.altitude_feet,
+            track_degrees: telemetry
+                .ground_track_degrees
+                .unwrap_or(telemetry.heading_degrees),
+            ground_speed_knots: Some(telemetry.ground_speed_knots),
+            wingspan_meters: telemetry.wingspan_meters,
+            on_ground: true,
+            ..Default::default()
+        };
+        if openatc_core::traffic::advisory::valid(&own) {
+            observed.push(own);
+        }
+    }
+    observed
+}
+
+enum PreparedJob {
+    Survey(Arc<network::Plan>),
+    Scene(Scene),
+}
+
 pub async fn prepare(shared: Shared) {
+    if !shared.read().await.settings.generated_traffic {
+        return;
+    }
+    if let Err(error) = crate::radio::ensure_index(&shared).await {
+        shared.write().await.generated.status = error;
+        return;
+    }
     let (
         job,
         key,
@@ -1255,6 +2076,10 @@ pub async fn prepare(shared: Shared) {
         own,
         observed,
         weather,
+        weather_observations,
+        network,
+        regions,
+        stations,
     ) = {
         let mut state = shared.write().await;
         if !state.settings.generated_traffic || !state.session.telemetry.position_valid {
@@ -1286,6 +2111,19 @@ pub async fn prepare(shared: Shared) {
         {
             return;
         }
+        for (airport, sample) in &state.sim_weather {
+            state.generated.observe_weather(airport, sample);
+        }
+        let network = state
+            .generated
+            .network
+            .clone()
+            .filter(|plan| plan.key == key);
+        state.generated.status = if network.is_some() {
+            "Preparing controlled traffic routes from installed airport data".into()
+        } else {
+            "Selecting traffic airports and compatible fleets".into()
+        };
         let job = next_job();
         state.generated.preparation_job = Some(job);
         state.generated.retry = Some(Instant::now());
@@ -1303,7 +2141,7 @@ pub async fn prepare(shared: Shared) {
                 state.session.telemetry.latitude,
                 state.session.telemetry.longitude,
             ],
-            state.session.telemetry.traffic.clone().unwrap_or_default(),
+            planning_observations(&state.session.telemetry),
             [
                 &state.session.plan.departure,
                 &state.session.plan.destination,
@@ -1316,8 +2154,13 @@ pub async fn prepare(shared: Shared) {
                     .map(|sample| (id.clone(), sample.clone()))
             })
             .collect(),
+            state.generated.weather_observations.clone(),
+            network,
+            state.regions.clone(),
+            Arc::<[openatc_core::stations::Station]>::from(state.stations.clone()),
         )
     };
+    let survey_key = key.clone();
     let result = async {
         let profiles = profiles.get(&config, &workers, false).await?;
         let models = models.models(&settings.simulator_root, &workers).await?;
@@ -1329,21 +2172,37 @@ pub async fn prepare(shared: Shared) {
         ];
         workers
             .run(move || {
-                prepare_scene(Preparation {
+                let (_, policy, _) = policy::load(&config)?;
+                let (origin, destination, runway, arrival_runway) =
+                    network::endpoints(&settings.simulator_root, &plan, &stations, own, &policy)?;
+                let input = Preparation {
+                    stations,
+                    regions,
                     simulator_root: settings.simulator_root.clone(),
-                    origin: airport(&settings.simulator_root, &plan.departure)?,
-                    destination: airport(&settings.simulator_root, &plan.destination)?,
+                    origin,
+                    destination,
                     profiles,
                     models,
                     counts,
                     own,
                     observed,
                     epoch,
-                    runway: plan.runway.clone(),
-                    arrival_runway: plan.arrival_runway.clone(),
+                    runway,
+                    arrival_runway,
                     config,
                     weather,
-                })
+                    weather_observations: Some(weather_observations),
+                    reserved_stand_cells: BTreeSet::new(),
+                    reserved_surface_corridors: BTreeSet::new(),
+                };
+                match network {
+                    None => network::survey(&input, survey_key)
+                        .map(|plan| PreparedJob::Survey(Arc::new(plan))),
+                    Some(_) if input.counts.iter().all(|count| *count == 0) => {
+                        prepare_bidirectional(input).map(PreparedJob::Scene)
+                    }
+                    Some(plan) => network::prepare(input, &plan).map(PreparedJob::Scene),
+                }
             })
             .await?
     }
@@ -1359,42 +2218,67 @@ pub async fn prepare(shared: Shared) {
         return;
     }
     match result {
-        Ok(scene) => {
-            state.generated.status = format!(
-                "{} generated surface aircraft prepared; {} terminal candidates, {} aircraft-specific terminal inputs, {} joined arrivals; full airborne planning is still under development",
-                scene.frames.len(),
-                scene.terminal_routes.len(),
-                scene.decoded_terminals.len(),
-                scene.nominal_arrivals.len()
-            );
-            state.generated.terminal_routes = scene.terminal_routes;
-            state.generated.environments = scene.environments;
-            state.generated.key = key;
-            state.generated.frames = scene.frames;
-            state.generated.visible.clear();
-            state.generated.world = scene.world;
-            state.generated.movement = scene.movement;
-            state.generated.airport = Some(Arc::new(scene.airport));
-            state.generated.destination = Some(Arc::new(scene.destination));
-            state.generated.departure_procedures = scene.departure_procedures;
-            state.generated.arrival_procedures = scene.arrival_procedures;
-            state.generated.terminal_points = scene.terminal_points;
-            state.generated.published_holds = scene.published_holds;
-            state.generated.nominal_departures = scene.nominal_departures;
-            state.generated.decoded_terminals = scene.decoded_terminals;
-            state.generated.nominal_arrivals = scene.nominal_arrivals;
-            state.generated.spoken_callsigns = scene.spoken_callsigns;
-            state.generated.policy = Some(scene.policy);
-            state.generated.fixed_gear = scene.fixed_gear;
-            state.generated.channels = scene.channels;
-            state.generated.orders = scene.orders;
-            state.generated.warnings = scene.warnings;
-            state.generated.previous_time = None;
-            state.generated.epoch = Some(epoch);
-            state.generated.simulation_job = None;
+        Ok(PreparedJob::Survey(plan)) => {
+            state.generated.network = Some(plan);
+            state.generated.status =
+                "Traffic airports selected; waiting for simulator airport weather".into();
+        }
+        Ok(PreparedJob::Scene(scene)) if scene.weather_fresh() => {
+            publish_scene(&mut state.generated, scene, key, epoch);
+        }
+        Ok(PreparedJob::Scene(_)) => {
+            state.generated.status =
+                "Simulator weather changed before traffic publication; preparation will retry"
+                    .into();
         }
         Err(error) => state.generated.status = error,
     }
+}
+
+fn publish_scene(runtime: &mut Runtime, scene: Scene, key: String, epoch: u64) {
+    let weather_observations = runtime.weather_observations.clone();
+    let network = runtime.network.clone();
+    *runtime = Runtime::default();
+    runtime.weather_observations = weather_observations;
+    runtime.network = network;
+    runtime.status = format!(
+        "{} generated surface aircraft prepared; {} terminal candidates, {} aircraft-specific terminal inputs, {} joined arrivals, {} complete nominal flights, {} released flights; rejected corridors are listed in warnings",
+        scene.frames.len(),
+        scene.terminal_routes.len(),
+        scene.decoded_terminals.len(),
+        scene.nominal_arrivals.len(),
+        scene.nominal_flights.len(),
+        scene.flights.len()
+    );
+    runtime.terminal_routes = scene.terminal_routes;
+    runtime.environments = scene.environments;
+    runtime.key = key;
+    runtime.frames = scene.frames;
+    runtime.visible.clear();
+    runtime.world = scene.world;
+    runtime.movement = scene.movement;
+    runtime.require_complete_flights = scene.require_complete_flights;
+    runtime.airports = scene.airports;
+    runtime.airport = Some(Arc::new(scene.airport));
+    runtime.destination = Some(Arc::new(scene.destination));
+    runtime.departure_procedures = scene.departure_procedures;
+    runtime.arrival_procedures = scene.arrival_procedures;
+    runtime.terminal_points = scene.terminal_points;
+    runtime.published_holds = scene.published_holds;
+    runtime.nominal_departures = scene.nominal_departures;
+    runtime.decoded_terminals = scene.decoded_terminals;
+    runtime.nominal_arrivals = scene.nominal_arrivals;
+    runtime.nominal_flights = scene.nominal_flights;
+    runtime.flights = scene.flights;
+    runtime.spoken_callsigns = scene.spoken_callsigns;
+    runtime.policy = Some(scene.policy);
+    runtime.fixed_gear = scene.fixed_gear;
+    runtime.channels = scene.channels;
+    runtime.orders = scene.orders;
+    runtime.warnings = scene.warnings;
+    runtime.previous_time = None;
+    runtime.epoch = Some(epoch);
+    runtime.simulation_job = None;
 }
 
 fn external_surface_cells(
@@ -1406,7 +2290,7 @@ fn external_surface_cells(
     };
     let mut blocked = BTreeSet::new();
     let mut add = |target: &TrafficTarget| {
-        for airport in runtime.airport.iter().chain(runtime.destination.iter()) {
+        for airport in runtime.operational_airports() {
             if openatc_core::arrival::distance_nm(
                 [airport.reference_latitude, airport.reference_longitude],
                 [target.latitude, target.longitude],
@@ -1498,6 +2382,8 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) ->
         telemetry.simulation_seconds,
         &runtime.policy,
     ) {
+        withhold_conflicting_departures(runtime, telemetry);
+        withhold_conflicting_landings(runtime, telemetry);
         let blocked = external_surface_cells(runtime, telemetry);
         runtime
             .world
@@ -1551,12 +2437,14 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) ->
                         .approved_orders
                         .contains(&(pose.id, pose.segment + 1))
                 {
-                    runtime.world.authorise_continuation(
-                        generation,
-                        pose.id,
-                        pose.segment + 1,
-                        &blocked,
-                    );
+                    if !runtime.crossing_blocked(pose.id, pose.segment + 1, &targets) {
+                        runtime.world.authorise_continuation(
+                            generation,
+                            pose.id,
+                            pose.segment + 1,
+                            &blocked,
+                        );
+                    }
                 }
             }
         }
@@ -1593,7 +2481,29 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) ->
                 0.0
             };
             frame.target.altitude_feet = pose.position.altitude_feet;
-            let body = (pose.heading
+            let heading = if !pose.stage.on_ground() {
+                runtime
+                    .flights
+                    .get(&pose.id)
+                    .and_then(|flight| {
+                        flight
+                            .airspeeds
+                            .get(&pose.recovery_from.unwrap_or(pose.segment))
+                    })
+                    .and_then(|speed| {
+                        openatc_core::traffic::air::heading_from_ground(
+                            pose.knots,
+                            pose.heading,
+                            speed.wind_from,
+                            speed.wind_knots,
+                        )
+                        .ok()
+                    })
+                    .unwrap_or(pose.heading)
+            } else {
+                pose.heading
+            };
+            let body = (heading
                 + if pose.stage == openatc_core::traffic::motion::Stage::Pushback {
                     180.0
                 } else {
@@ -1650,6 +2560,203 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) ->
     clock_changed
 }
 
+/// Refresh per-aircraft departure delays before the controller or movement worker can grant a roll.
+pub(crate) fn refresh_departure_wake(state: &mut EngineState) {
+    let mut delays = BTreeMap::new();
+    let waiting = state
+        .generated
+        .world
+        .snapshot()
+        .into_iter()
+        .filter(|pose| {
+            !pose.recovering
+                && (pose.stage == openatc_core::traffic::motion::Stage::LineUp
+                    || pose.stage == openatc_core::traffic::motion::Stage::Takeoff
+                        && pose.knots <= 0.0)
+        })
+        .map(|pose| pose.id)
+        .collect::<BTreeSet<_>>();
+    for (&id, flight) in &state.generated.flights {
+        if !waiting.contains(&id) || !state.generated.active_flights.contains(&id) {
+            continue;
+        }
+        let Some(segment) = flight
+            .route
+            .segment(1)
+            .filter(|segment| segment.stage == openatc_core::traffic::motion::Stage::Takeoff)
+        else {
+            continue;
+        };
+        let Some(frame) = state
+            .generated
+            .frames
+            .iter()
+            .find(|frame| frame.target.id == id)
+        else {
+            continue;
+        };
+        let Some(airport) = flight
+            .clearances
+            .get(&1)
+            .and_then(|clearance| state.generated.surface_airport(&clearance.station.airport))
+        else {
+            continue;
+        };
+        let Some(start) = segment.points.first() else {
+            continue;
+        };
+        let heading = segment.points.last().map_or(0.0, |end| {
+            openatc_core::arrival::bearing(
+                [start.latitude, start.longitude],
+                [end.latitude, end.longitude],
+            )
+        });
+        let Some(runway) = airport
+            .runways
+            .iter()
+            .filter(|runway| {
+                segment.resources.contains(&format!(
+                    "RUNWAY/{}/{}/{}",
+                    airport.icao, runway.first_name, runway.second_name
+                ))
+            })
+            .filter_map(|runway| {
+                let position = openatc_core::traffic::runway_position(
+                    airport,
+                    &runway.first_name,
+                    start.latitude,
+                    start.longitude,
+                )?;
+                let angle = openatc_core::navigation::turn(position.3, heading).abs();
+                let error = angle.min((180.0 - angle).abs());
+                (error < 20.0).then_some((runway, error))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(runway, _)| runway)
+        else {
+            continue;
+        };
+        let first = openatc_core::traffic::runway_position(
+            airport,
+            &runway.first_name,
+            start.latitude,
+            start.longitude,
+        )
+        .is_some_and(|position| openatc_core::navigation::turn(position.3, heading).abs() < 90.0);
+        let name = if first {
+            &runway.first_name
+        } else {
+            &runway.second_name
+        };
+        let remaining = crate::traffic::departure_wake_delay(
+            state,
+            id,
+            airport,
+            name,
+            &frame.target.aircraft,
+            start.latitude,
+            start.longitude,
+        );
+        if remaining > 0.0 {
+            delays.insert(id, remaining);
+        }
+    }
+    state.generated.departure_wake = delays;
+    withhold_conflicting_departures(&mut state.generated, &state.session.telemetry);
+}
+
+fn withhold_conflicting_departures(
+    runtime: &mut Runtime,
+    telemetry: &openatc_core::state::Telemetry,
+) {
+    let targets = observed_targets(runtime, telemetry);
+    let waiting = runtime
+        .world
+        .snapshot()
+        .into_iter()
+        .filter(|pose| {
+            !pose.recovering
+                && runtime.active_flights.contains(&pose.id)
+                && matches!(
+                    pose.stage,
+                    openatc_core::traffic::motion::Stage::LineUp
+                        | openatc_core::traffic::motion::Stage::Takeoff
+                )
+        })
+        .map(|pose| pose.id)
+        .collect::<Vec<_>>();
+    for id in waiting {
+        let airborne_blocked = runtime.approved_orders.contains(&(id, 1))
+            && runtime
+                .flights
+                .get(&id)
+                .and_then(|plan| plan.clearances.get(&1))
+                .is_some_and(|clearance| separation::blocked(runtime, telemetry, id, 1, clearance));
+        if telemetry.traffic.is_some()
+            && !runtime.crossing_blocked(id, 1, &targets)
+            && !airborne_blocked
+        {
+            continue;
+        }
+        if runtime
+            .world
+            .withhold_takeoff(runtime.world.generation(), id)
+            && runtime.approved_orders.remove(&(id, 1))
+        {
+            runtime.cancelled_takeoffs.insert(
+                id,
+                runtime
+                    .departure_wake
+                    .get(&id)
+                    .is_some_and(|seconds| *seconds > 0.0),
+            );
+            if let Some(end) = runtime
+                .flights
+                .get(&id)
+                .and_then(|flight| flight.clearances.get(&1))
+                .and_then(|clearance| clearance.initial_climb)
+            {
+                for index in 2..=end {
+                    runtime.approved_orders.remove(&(id, index));
+                }
+            }
+        }
+    }
+}
+
+fn withhold_conflicting_landings(
+    runtime: &mut Runtime,
+    telemetry: &openatc_core::state::Telemetry,
+) {
+    let targets = observed_targets(runtime, telemetry);
+    let mut revoke = Vec::new();
+    for pose in runtime
+        .world
+        .snapshot()
+        .into_iter()
+        .filter(|pose| !pose.recovering && runtime.active_flights.contains(&pose.id))
+    {
+        let Some(plan) = runtime.flights.get(&pose.id) else {
+            continue;
+        };
+        for (&start, contract) in &plan.clearances {
+            if contract.landing_rollout.is_some()
+                && runtime.approved_orders.contains(&(pose.id, start))
+                && pose.segment <= start
+                && (telemetry.traffic.is_none()
+                    || runtime.crossing_blocked(pose.id, start, &targets)
+                    || separation::blocked(runtime, telemetry, pose.id, start, contract))
+            {
+                revoke.push((pose.id, start));
+            }
+        }
+    }
+    for (id, start) in revoke {
+        flight::revoke_landing(runtime, id, start);
+        runtime.cancelled_landings.insert((id, start));
+    }
+}
+
 /// Publish the most recent complete worker sample without waiting for simulation.
 pub fn step(state: &mut EngineState) {
     if !state.settings.generated_traffic {
@@ -1703,6 +2810,26 @@ pub fn step(state: &mut EngineState) {
     }
 }
 
+fn publish_revocations(current: &mut Runtime, worker: &Runtime, revoked: &BTreeSet<(u32, usize)>) {
+    for &(id, index) in revoked {
+        let same_plan = current
+            .flights
+            .get(&id)
+            .zip(worker.flights.get(&id))
+            .is_some_and(|(a, b)| Arc::ptr_eq(a, b));
+        if !same_plan {
+            continue;
+        }
+        current.approved_orders.remove(&(id, index));
+        if let Some(&wake) = worker.cancelled_takeoffs.get(&id) {
+            current.cancelled_takeoffs.insert(id, wake);
+        }
+        if worker.cancelled_landings.contains(&(id, index)) {
+            current.cancelled_landings.insert((id, index));
+        }
+    }
+}
+
 /// At most one simulation job is outstanding; later telemetry replaces the next input.
 pub async fn simulate(shared: Shared) {
     let (job, mut runtime, telemetry, workers, key, epoch) = {
@@ -1727,8 +2854,13 @@ pub async fn simulate(shared: Shared) {
     };
     let result = workers
         .run(move || {
+            let approved = runtime.approved_orders.clone();
             let clock_changed = advance(&mut runtime, &telemetry);
-            (runtime, clock_changed)
+            let revoked = approved
+                .difference(&runtime.approved_orders)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            (runtime, clock_changed, revoked)
         })
         .await;
     let mut state = shared.write().await;
@@ -1742,7 +2874,8 @@ pub async fn simulate(shared: Shared) {
         return;
     }
     match result {
-        Ok((runtime, clock_changed)) => {
+        Ok((runtime, clock_changed, revoked)) => {
+            publish_revocations(&mut state.generated, &runtime, &revoked);
             state.generated.world = runtime.world;
             state.generated.frames = runtime.frames;
             state.generated.previous_time = runtime.previous_time;
@@ -1750,6 +2883,9 @@ pub async fn simulate(shared: Shared) {
                 flight::clock_changed(&mut state.generated);
             }
             flight::synchronise_recoveries(&mut state.generated);
+            refresh_departure_wake(&mut state);
+            let telemetry = state.session.telemetry.clone();
+            withhold_conflicting_landings(&mut state.generated, &telemetry);
             step(&mut state);
         }
         Err(error) => state.generated.status = error,
@@ -1759,6 +2895,201 @@ pub async fn simulate(shared: Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn registered_airports_keep_surface_ownership_and_receive_weather_requests() {
+        use axum::{Json, extract::State};
+        let mut state = crate::test_state();
+        state.station_root = state.settings.simulator_root.clone();
+        let mut first = openatc_core::airport::demo_airport();
+        first.icao = "FIRST".into();
+        let mut third = first.clone();
+        third.icao = "THIRD".into();
+        third.reference_latitude += 2.0;
+        let target = TrafficTarget {
+            id: 2,
+            on_ground: true,
+            wingspan_meters: Some(12.0),
+            latitude: third.reference_latitude,
+            longitude: third.reference_longitude,
+            ..Default::default()
+        };
+        state.generated.policy =
+            Some(parse_operations(include_str!("../../../traffic/operations.toml")).unwrap());
+        state.generated.airport = Some(Arc::new(first.clone()));
+        state.generated.airports = [first, third.clone()]
+            .into_iter()
+            .map(|airport| (airport.icao.clone(), Arc::new(airport)))
+            .collect();
+        state.generated.orders.insert(
+            3,
+            vec![(
+                0,
+                openatc_core::state::TaxiClearance {
+                    airport: "THIRD".into(),
+                    ..Default::default()
+                },
+            )],
+        );
+        assert_eq!(state.generated.departure_airport(3).unwrap().icao, "THIRD");
+        assert_eq!(state.generated.operational_airports().count(), 2);
+        let mut telemetry = state.session.telemetry.clone();
+        telemetry.on_ground = false;
+        telemetry.traffic = Some(vec![target.clone()]);
+        let blocked = external_surface_cells(&state.generated, &telemetry);
+        let third_cells = cells(&third, Point::default(), 6.0, 50.0);
+        assert!(third_cells.is_subset(&blocked));
+        assert!(!blocked.iter().any(|resource| resource.contains("FIRST")));
+        let shared = Arc::new(tokio::sync::RwLock::new(state));
+        let snapshot = crate::routes::full_state(State(shared.clone())).await.0;
+        assert!(
+            snapshot["weatherAirports"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|airport| airport["airport"] == "THIRD"
+                    && airport["latitude"] == third.reference_latitude)
+        );
+        let response = crate::radio::weather(State(shared.clone()), Json(serde_json::json!({
+            "airport":"THIRD", "latitude":third.reference_latitude, "longitude":third.reference_longitude,
+            "sampleAltitudeFeet":third.elevation_feet, "pressureHpa":1013.25, "temperatureC":15.0,
+            "dewpointC":10.0, "visibilityMeters":10000.0, "magneticVariationDegrees":0.0,
+            "windDegrees":0.0, "windKnots":0.0
+        }))).await;
+        assert!(response.status().is_success());
+        assert!(shared.read().await.sim_weather.contains_key("THIRD"));
+    }
+
+    #[tokio::test]
+    async fn accepted_simulator_weather_updates_the_planning_watch() {
+        use axum::{Json, extract::State};
+        let mut state = crate::test_state();
+        state.station_root = state.settings.simulator_root.clone();
+        let airport = Airport {
+            icao: "TEST".into(),
+            reference_latitude: 43.0,
+            reference_longitude: 7.0,
+            elevation_feet: 25.0,
+            ..Default::default()
+        };
+        state.airport = Some(airport.clone());
+        let observations = state.generated.weather_observations.clone();
+        let shared = Arc::new(tokio::sync::RwLock::new(state));
+        let sample = serde_json::json!({
+            "airport":"TEST", "latitude":43.0, "longitude":7.0,
+            "sampleAltitudeFeet":25.0, "pressureHpa":1013.25, "temperatureC":15.0,
+            "dewpointC":10.0, "visibilityMeters":10000.0,
+            "magneticVariationDegrees":2.0, "windDegrees":220.0, "windKnots":12.0
+        });
+        assert!(
+            crate::radio::weather(State(shared.clone()), Json(sample.clone()))
+                .await
+                .status()
+                .is_success()
+        );
+        let retained = observations.read().unwrap()["TEST"].clone();
+        let weather = environment::Environment::from_sample(&airport, &retained)
+            .unwrap()
+            .follow("TEST", &observations, &sample);
+        assert!(weather.fresh());
+        let mut rejected = sample.clone();
+        rejected["pressureHpa"] = serde_json::json!(500.0);
+        assert!(
+            !crate::radio::weather(State(shared.clone()), Json(rejected))
+                .await
+                .status()
+                .is_success()
+        );
+        assert_eq!(observations.read().unwrap()["TEST"], retained);
+        let mut changed = sample;
+        changed["windKnots"] = serde_json::json!(15.0);
+        assert!(
+            crate::radio::weather(State(shared), Json(changed))
+                .await
+                .status()
+                .is_success()
+        );
+        assert!(!weather.fresh());
+    }
+
+    #[test]
+    fn traffic_mix_coverage_does_not_guess_between_ambiguous_operator_names() {
+        let mut profiles = Profiles::builtin().unwrap();
+        let name = profiles
+            .airlines
+            .values()
+            .find(|operator| operator.category == Category::Airline)
+            .unwrap()
+            .name
+            .clone();
+        assert_eq!(profile_category(&profiles, &name), Some(Category::Airline));
+        let mut other = profiles
+            .airlines
+            .values()
+            .find(|operator| operator.category == Category::Regional)
+            .unwrap()
+            .clone();
+        other.name = name.clone();
+        profiles.airlines.insert("TESTCAT".into(), other);
+        assert_eq!(profile_category(&profiles, &name), None);
+        assert_eq!(profile_category(&profiles, "Missing operator"), None);
+    }
+
+    #[test]
+    fn surface_retries_refuse_ambiguous_edges_and_preserve_runway_links() {
+        let point = |east, north| Point {
+            east,
+            north,
+            height: 0.0,
+        };
+        let mut airport = Airport {
+            nodes: vec![
+                openatc_core::airport::TaxiNode {
+                    id: 1,
+                    point: point(0.0, 0.0),
+                },
+                openatc_core::airport::TaxiNode {
+                    id: 2,
+                    point: point(100.0, 0.0),
+                },
+                openatc_core::airport::TaxiNode {
+                    id: 3,
+                    point: point(0.0, 20.0),
+                },
+                openatc_core::airport::TaxiNode {
+                    id: 4,
+                    point: point(100.0, 20.0),
+                },
+            ],
+            edges: vec![
+                openatc_core::airport::TaxiEdge {
+                    first: 1,
+                    second: 2,
+                    runway: true,
+                    ..Default::default()
+                },
+                openatc_core::airport::TaxiEdge {
+                    first: 3,
+                    second: 4,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            unsupported_surface_edge(&airport, point(50.0, 0.0), 2.0),
+            None
+        );
+        assert_eq!(
+            unsupported_surface_edge(&airport, point(50.0, 19.0), 2.0),
+            Some(1)
+        );
+        airport.edges.push(airport.edges[1].clone());
+        assert_eq!(
+            unsupported_surface_edge(&airport, point(50.0, 19.0), 2.0),
+            None
+        );
+    }
+
     #[test]
     fn arrival_surface_monitoring_uses_both_airports() {
         let mut runtime = Runtime::default();
@@ -1813,9 +3144,23 @@ mod tests {
         state.generated.policy =
             Some(parse_operations(include_str!("../../../traffic/operations.toml")).unwrap());
         state.generated.airport = Some(Arc::new(Airport {
+            icao: "OTHER".into(),
+            ..Default::default()
+        }));
+        state.generated.destination = Some(Arc::new(Airport {
             icao: "TEST".into(),
             ..Default::default()
         }));
+        state.generated.orders.insert(
+            7,
+            vec![(
+                1,
+                openatc_core::state::TaxiClearance {
+                    airport: "TEST".into(),
+                    ..Default::default()
+                },
+            )],
+        );
         state.stations.push(openatc_core::stations::Station {
             airport: "TEST".into(),
             name: "Test Ground".into(),
@@ -1873,6 +3218,16 @@ mod tests {
                 .into()
             )
         );
+        state.generated.require_complete_flights = true;
+        for _ in 0..4 {
+            radio_tick(&mut state);
+        }
+        assert!(state.generated.exchange.is_none());
+        assert!(state.session.transcript.is_empty());
+        assert!(!state.generated.approved_orders.contains(&(7, 0)));
+        assert_eq!(state.generated.world.snapshot()[0].knots, 0.0);
+        // The remaining fixture exercises the ground-only exchange independently.
+        state.generated.require_complete_flights = false;
         for _ in 0..3 {
             if let Some(exchange) = &mut state.generated.exchange {
                 exchange.due = Instant::now();
@@ -1971,10 +3326,735 @@ mod tests {
     }
     #[test]
     #[ignore = "requires installed scenery and Bluebell"]
+    fn installed_bidirectional_routes_keep_airport_ownership_through_controller_flights() {
+        installed_bidirectional_lifecycles([2, 0, 0, 0]);
+    }
+
+    #[test]
+    #[ignore = "requires installed scenery and Bluebell"]
+    fn installed_mixed_bidirectional_lifecycles_reach_parking() {
+        installed_bidirectional_lifecycles([2, 2, 0, 0]);
+    }
+
+    fn installed_bidirectional_lifecycles(counts: [u8; 4]) {
+        let expected = counts
+            .iter()
+            .map(|count| usize::from(*count))
+            .sum::<usize>();
+        let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
+        let stations: Arc<[openatc_core::stations::Station]> =
+            openatc_core::stations::load_index(&root).unwrap().into();
+        let mut scene = prepare_bidirectional(Preparation {
+            weather_observations: None,
+            reserved_stand_cells: BTreeSet::new(),
+                    reserved_surface_corridors: BTreeSet::new(),
+            stations: stations.clone(),
+            regions: openatc_core::regions::load_regions(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../regions.toml")).unwrap(),
+            simulator_root: root.clone(),
+            origin: airport(&root, "LFMN").unwrap(), destination: airport(&root, "LIMC").unwrap(),
+            profiles: Arc::new(Profiles::builtin().unwrap()),
+            models: Arc::new(Catalogue::scan(&std::path::Path::new(&root).join("Resources/plugins/OpenATC/Resources/CSL")).unwrap()),
+            counts, own: [43.655764, 7.202480], observed: vec![TrafficTarget { id:0,latitude:43.655764,longitude:7.202480,on_ground:true,..Default::default() }], epoch: 1,
+            runway: "04R".into(), arrival_runway: "35R".into(), config: std::path::PathBuf::new(),
+            weather: ["LFMN", "LIMC"].into_iter().map(|id| { let airport = airport(&root, id).unwrap(); (id.into(), (serde_json::json!({"airport":id,"latitude":airport.reference_latitude,"longitude":airport.reference_longitude,"sampleAltitudeFeet":airport.elevation_feet,"pressureHpa":1013.25,"temperatureC":15.0,"magneticVariationDegrees":0.0,"windDegrees":0.0,"windKnots":0.0}),Instant::now())) }).collect(),
+        }).unwrap();
+        assert_eq!(scene.frames.len(), expected, "{:?}", scene.warnings);
+        assert_eq!(
+            scene.nominal_flights.len(),
+            expected,
+            "{:?}",
+            scene.warnings
+        );
+        for (&id, draft) in &scene.nominal_flights {
+            let decoded = &scene.decoded_terminals[&id];
+            assert!(decoded.candidate < scene.terminal_routes.len());
+            // This branch checks geometry/controller integration; installed obstacle release stays separate.
+            let prepared = draft
+                .as_ref()
+                .clone()
+                .protect(|_, _| true)
+                .unwrap()
+                .finish_all_production(|_, _| true)
+                .unwrap();
+            let departure = &scene.orders[&id][0].1.airport;
+            assert_eq!(&prepared.clearances[&0].station.airport, departure);
+            assert!(
+                prepared
+                    .clearances
+                    .values()
+                    .any(|contract| contract.station.service == "Ground"
+                        && contract.station.airport != *departure)
+            );
+            scene.flights.insert(id, Arc::new(prepared));
+        }
+        let mut state = crate::test_state();
+        state.settings.generated_traffic = true;
+        state.stations = stations.to_vec();
+        publish_scene(
+            &mut state.generated,
+            scene,
+            "bidirectional-fixture".into(),
+            state.session_generation,
+        );
+        state.session.telemetry.position_valid = true;
+        state.session.telemetry.on_ground = true;
+        state.session.telemetry.latitude = 43.655764;
+        state.session.telemetry.longitude = 7.202480;
+        state.session.telemetry.traffic = Some(vec![]);
+        let mut stages = BTreeMap::<u32, Vec<openatc_core::traffic::motion::Stage>>::new();
+        let mut stopped_since = None;
+        for second in 0..8000 {
+            if let Some(exchange) = &mut state.generated.exchange {
+                exchange.due = Instant::now();
+            }
+            radio_tick(&mut state);
+            state.session.telemetry.simulation_seconds = Some(f64::from(second));
+            advance(&mut state.generated, &state.session.telemetry);
+            for pose in state.generated.world.snapshot() {
+                let visited = stages.entry(pose.id).or_default();
+                if !visited.contains(&pose.stage) {
+                    visited.push(pose.stage);
+                }
+            }
+            if state.generated.world.snapshot().iter().all(|pose| {
+                pose.complete && pose.stage == openatc_core::traffic::motion::Stage::Turnaround
+            }) {
+                break;
+            }
+            let poses = state.generated.world.snapshot();
+            if poses.iter().any(|pose| {
+                pose.awaiting_clearance
+                    && pose.stage == openatc_core::traffic::motion::Stage::TaxiIn
+            }) && poses.iter().all(|pose| {
+                pose.complete
+                    || pose.awaiting_clearance
+                        && pose.stage == openatc_core::traffic::motion::Stage::TaxiIn
+            }) && state.generated.exchange.is_none()
+            {
+                let since = *stopped_since.get_or_insert(second);
+                if second - since > 300 {
+                    break;
+                }
+            } else {
+                stopped_since = None;
+            }
+        }
+        for pose in state
+            .generated
+            .world
+            .snapshot()
+            .into_iter()
+            .filter(|pose| !pose.complete)
+        {
+            if let Some(plan) = state.generated.flights.get(&pose.id) {
+                if let Some(contract) = plan.clearances.get(&pose.segment) {
+                    eprintln!(
+                        "Earlier gates: takeoff cancellation {}, landing cancellation {}, vacated {:?}",
+                        state.generated.cancelled_takeoffs.contains_key(&pose.id),
+                        state
+                            .generated
+                            .cancelled_landings
+                            .iter()
+                            .any(|(id, _)| *id == pose.id),
+                        plan.vacated_reports.get(&pose.segment).map(|report| (
+                            &report.airport,
+                            &report.runway,
+                            state
+                                .generated
+                                .reported_crossings
+                                .contains(&(pose.id, pose.segment - 1)),
+                            plan.clearances.get(&(pose.segment - 1)).map(|previous| (
+                                previous.station.khz,
+                                previous.station.name.as_str()
+                            ))
+                        ))
+                    );
+                    let blocked =
+                        external_surface_cells(&state.generated, &state.session.telemetry);
+                    let mut probe = state.generated.world.clone();
+                    let grant =
+                        probe.authorise(probe.generation(), pose.id, pose.segment, &blocked);
+                    let reservation = contract.taxi_through.map(|end| {
+                        (
+                            end,
+                            probe.reserve_surface_until(
+                                probe.generation(),
+                                pose.id,
+                                pose.segment,
+                                end,
+                                &blocked,
+                            ),
+                        )
+                    });
+                    let frame = state
+                        .generated
+                        .frames
+                        .iter()
+                        .find(|frame| frame.target.id == pose.id)
+                        .unwrap();
+                    eprintln!(
+                        "Surface {} {}: blocker {:?}, grant {}, reservation {:?}, approved {}, tuned {:?}, expected {}/{}, controller {:?}, handoff {:?}, checkins {:?}",
+                        pose.id,
+                        frame.target.aircraft,
+                        state.generated.world.surface_blocker(pose.id),
+                        grant,
+                        reservation,
+                        state
+                            .generated
+                            .approved_orders
+                            .contains(&(pose.id, pose.segment)),
+                        frame.target.com1_khz,
+                        contract.station.name,
+                        contract.station.khz,
+                        state
+                            .generated
+                            .controllers
+                            .get(&pose.id)
+                            .map(|station| (&station.name, station.khz)),
+                        state.generated.handoff_targets.get(&pose.id),
+                        state.generated.pending_checkins
+                    );
+                }
+                eprintln!(
+                    "Onward refusal: {:?}",
+                    flight::rejoin_refusal(&state.generated, &state.session.telemetry, pose.id)
+                );
+                eprintln!(
+                    "Flight {} current {:?} at segment {}, {} contracts; approved count {}; next exchange {:?}",
+                    pose.id,
+                    pose.stage,
+                    pose.segment,
+                    plan.clearances.len(),
+                    state.generated.approved_orders.len(),
+                    state
+                        .generated
+                        .exchange
+                        .as_ref()
+                        .map(|exchange| (exchange.next, exchange.grant))
+                );
+            }
+        }
+        assert!(
+            state
+                .generated
+                .world
+                .snapshot()
+                .iter()
+                .all(|pose| pose.complete
+                    && pose.stage == openatc_core::traffic::motion::Stage::Turnaround),
+            "{:?}; {:?}",
+            state.generated.world.snapshot(),
+            state.generated.warnings
+        );
+        assert_eq!(state.generated.world.snapshot().len(), expected);
+        assert_eq!(stages.len(), expected);
+        for visited in stages.values() {
+            use openatc_core::traffic::motion::Stage;
+            for required in [
+                Stage::TaxiOut,
+                Stage::Takeoff,
+                Stage::Climb,
+                Stage::Cruise,
+                Stage::Descent,
+                Stage::Approach,
+                Stage::Rollout,
+                Stage::TaxiIn,
+                Stage::Turnaround,
+            ] {
+                assert!(
+                    visited.contains(&required),
+                    "Missing {required:?} from {visited:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runway_retries_preserve_the_wind_compatible_flow() {
+        let mut airport = openatc_core::airport::demo_airport();
+        let original = airport.runways[0].clone();
+        let mut parallel = original.clone();
+        parallel.first_name = "09L".into();
+        parallel.second_name = "27R".into();
+        let mut cross = original.clone();
+        cross.first_name = "18".into();
+        cross.second_name = "36".into();
+        cross.second.east = cross.first.east;
+        cross.second.north = cross.first.north + 2000.0;
+        airport.runways = vec![original, parallel, cross];
+        let sample = serde_json::json!({
+            "airport":airport.icao, "latitude":airport.reference_latitude,
+            "longitude":airport.reference_longitude, "sampleAltitudeFeet":airport.elevation_feet,
+            "pressureHpa":1013.25, "temperatureC":15.0, "magneticVariationDegrees":0.0,
+            "windDegrees":90.0, "windKnots":12.0
+        });
+        let weather =
+            environment::Environment::from_sample(&airport, &(sample, Instant::now())).unwrap();
+        assert_eq!(
+            same_flow_runways(&airport, "09", &weather),
+            vec!["09", "09L"]
+        );
+        assert_eq!(
+            same_flow_runways(&airport, "27", &weather),
+            vec!["09", "09L"]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed scenery and Bluebell"]
+    async fn installed_preparation_worker_revalidates_live_weather() {
+        installed_network_lifecycles(false, InstalledNetwork::Filed).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed scenery and Bluebell"]
+    async fn installed_network_airline_regional_lifecycles_reach_parking() {
+        installed_network_lifecycles(true, InstalledNetwork::Filed).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed scenery and Bluebell"]
+    async fn installed_unfiled_player_network_lifecycles_reach_parking() {
+        installed_network_lifecycles(true, InstalledNetwork::Unfiled).await;
+    }
+
+    #[test]
+    #[ignore = "requires installed airport scenery"]
+    fn installed_cargo_ground_routes_reach_the_holding_point() {
+        let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
+        let airport = airport(&root, "KMEM").unwrap();
+        let profiles = Profiles::builtin().unwrap();
+        let handling = animation::builtin().unwrap();
+        let policy = parse_operations(include_str!("../../../traffic/operations.toml")).unwrap();
+        eprintln!(
+            "KMEM source {}; {} pavement contours, {} faces, {} parking stands",
+            airport.source,
+            airport.pavements.len(),
+            airport.pavement_triangles.len(),
+            airport.parking.len()
+        );
+        let mut missing = Vec::new();
+        for code in ["B738", "B752", "C172"] {
+            let aircraft = profiles.aircraft_for(code).unwrap();
+            let mut accepted = 0;
+            let mut rejected = Vec::new();
+            for stand in airport
+                .parking
+                .iter()
+                .filter(|stand| openatc_core::parking::moving_supports(stand, aircraft))
+                .take(128)
+            {
+                match ground_route(
+                    &airport,
+                    stand.point,
+                    stand.heading,
+                    stand.kind == "gate",
+                    aircraft,
+                    &handling[&aircraft.handling.unwrap()],
+                    "36L",
+                    0,
+                    &policy,
+                    false,
+                    &[],
+                ) {
+                    Ok(_) => {
+                        accepted += 1;
+                    }
+                    Err(error) if rejected.len() < 8 => rejected.push(format!(
+                        "{} (pavement {}): {error}",
+                        stand.name,
+                        openatc_core::airport::on_pavement(&airport, stand.point)
+                    )),
+                    Err(_) => {}
+                }
+            }
+            eprintln!("KMEM {code}: {accepted} connected stands; {rejected:?}");
+            if accepted == 0 {
+                missing.push(code);
+            }
+        }
+        assert!(missing.is_empty(), "No connected stands for {missing:?}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed scenery and Bluebell"]
+    async fn installed_mixed_cargo_ga_network_lifecycles_reach_parking() {
+        installed_network_lifecycles(true, InstalledNetwork::MixedCargo).await;
+    }
+
+    enum InstalledNetwork {
+        Filed,
+        Unfiled,
+        MixedCargo,
+    }
+
+    async fn installed_network_lifecycles(run_movement: bool, fixture: InstalledNetwork) {
+        let unfiled = matches!(fixture, InstalledNetwork::Unfiled);
+        let mixed = matches!(fixture, InstalledNetwork::MixedCargo);
+        let (origin_id, destination_id) = if mixed {
+            ("KMEM", "KSDF")
+        } else {
+            ("LFMN", "LIMC")
+        };
+        use axum::{Json, extract::State};
+        let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
+        let origin = airport(&root, origin_id).unwrap();
+        let destination = airport(&root, destination_id).unwrap();
+        let mut state = crate::test_state();
+        state.settings.simulator_root = root;
+        state.settings.generated_traffic = true;
+        state.settings.airline_traffic = if mixed { 4 } else { 8 };
+        state.settings.regional_traffic = if mixed { 2 } else { 4 };
+        state.settings.cargo_traffic = if mixed { 4 } else { 0 };
+        state.settings.ga_traffic = if mixed { 2 } else { 0 };
+        state.session.plan.departure = origin_id.into();
+        state.session.plan.destination = destination_id.into();
+        state.session.plan.runway = if mixed { "36L" } else { "04R" }.into();
+        state.session.plan.arrival_runway = if mixed { "17L" } else { "35R" }.into();
+        if unfiled {
+            state.session.plan.departure.clear();
+            state.session.plan.destination.clear();
+            state.session.plan.runway.clear();
+            state.session.plan.arrival_runway.clear();
+            state.airport = None;
+            state.arrival_airport = None;
+        }
+        state.session.telemetry.position_valid = true;
+        state.session.telemetry.latitude = if mixed {
+            origin.reference_latitude
+        } else {
+            43.655764
+        };
+        state.session.telemetry.longitude = if mixed {
+            origin.reference_longitude
+        } else {
+            7.202480
+        };
+        if mixed {
+            let stand = origin
+                .parking
+                .first()
+                .expect("Mixed fixture needs a parked player location");
+            let own = position(&origin, stand.point);
+            state.session.telemetry.latitude = own[0];
+            state.session.telemetry.longitude = own[1];
+            state.session.telemetry.altitude_feet = origin.elevation_feet;
+            state.session.telemetry.heading_degrees = stand.heading;
+            state.session.telemetry.wingspan_meters = Some(36.0);
+            state.session.telemetry.on_ground = true;
+        }
+        if !unfiled {
+            state.airport = Some(origin.clone());
+            state.arrival_airport = Some(destination.clone());
+        }
+        let shared = Arc::new(tokio::sync::RwLock::new(state));
+        crate::radio::ensure_index(&shared).await.unwrap();
+        for airport in [&origin, &destination] {
+            let sample = serde_json::json!({
+                "airport":airport.icao, "latitude":airport.reference_latitude,
+                "longitude":airport.reference_longitude, "sampleAltitudeFeet":airport.elevation_feet,
+                "pressureHpa":1013.25, "temperatureC":15.0, "dewpointC":10.0,
+                "visibilityMeters":10000.0, "magneticVariationDegrees":0.0,
+                "windDegrees":0.0, "windKnots":0.0
+            });
+            assert!(
+                crate::radio::weather(State(shared.clone()), Json(sample.clone()))
+                    .await
+                    .status()
+                    .is_success()
+            );
+        }
+        let planning = async {
+            let mut previous_status = String::new();
+            loop {
+                prepare(shared.clone()).await;
+                let ready = {
+                    let state = shared.read().await;
+                    if state.generated.status != previous_status {
+                        eprintln!("Preparation: {}", state.generated.status);
+                        previous_status = state.generated.status.clone();
+                    }
+                    state.generated.epoch == Some(state.session_generation)
+                };
+                if ready {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        tokio::pin!(planning);
+        let started = Instant::now();
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _ = &mut planning => break,
+                _ = interval.tick() => {
+                    assert!(started.elapsed() < Duration::from_secs(180), "Preparation exceeded its test deadline: {}", shared.read().await.generated.status);
+                    let snapshot = crate::routes::full_state(State(shared.clone())).await.0;
+                    let locations: Vec<openatc_core::state::WeatherAirport> = serde_json::from_value(snapshot["weatherAirports"].clone()).unwrap();
+                    for airport in locations {
+                        let sample = serde_json::json!({
+                            "airport":airport.airport, "latitude":airport.latitude, "longitude":airport.longitude,
+                            "sampleAltitudeFeet":airport.elevation_feet, "pressureHpa":1013.25, "temperatureC":15.0,
+                            "dewpointC":10.0, "visibilityMeters":10000.0, "magneticVariationDegrees":0.0,
+                            "windDegrees":0.0, "windKnots":0.0
+                        });
+                        assert!(crate::radio::weather(State(shared.clone()), Json(sample)).await.status().is_success());
+                    }
+                }
+            }
+        }
+        let state = shared.read().await;
+        let runtime = &state.generated;
+        assert!(runtime.preparation_job.is_none());
+        assert_eq!(
+            runtime.epoch,
+            Some(state.session_generation),
+            "{}",
+            runtime.status
+        );
+        assert!(
+            !runtime.nominal_flights.is_empty(),
+            "{:?}",
+            runtime.warnings
+        );
+        let origins = runtime
+            .nominal_flights
+            .keys()
+            .filter_map(|id| runtime.departure_airport(*id))
+            .map(|airport| airport.icao.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            origins.contains(origin_id) && origins.contains(destination_id),
+            "{origins:?}: {:?}",
+            runtime.warnings
+        );
+        assert!(
+            origins.len() >= 3,
+            "No complete third-airport flight: {origins:?}: {:?}",
+            runtime.warnings
+        );
+        if unfiled {
+            assert!(state.session.plan.departure.is_empty());
+            assert!(state.session.plan.destination.is_empty());
+            assert!(state.session.plan.runway.is_empty());
+            assert!(state.session.plan.arrival_runway.is_empty());
+        }
+        if mixed {
+            let profiles = Profiles::builtin().unwrap();
+            let categories = runtime
+                .frames
+                .iter()
+                .filter(|frame| runtime.nominal_flights.contains_key(&frame.target.id))
+                .filter_map(|frame| {
+                    profiles
+                        .airlines
+                        .values()
+                        .find(|airline| airline.name == frame.target.name)
+                        .map(|airline| airline.category)
+                })
+                .collect::<BTreeSet<_>>();
+            for category in [
+                Category::Airline,
+                Category::Regional,
+                Category::Cargo,
+                Category::GeneralAviation,
+            ] {
+                assert!(
+                    categories.contains(&category),
+                    "Missing {category:?} complete flight; got {categories:?}: {:?}",
+                    runtime.warnings
+                );
+            }
+        }
+        let mut checked_flights = BTreeMap::new();
+        for (id, draft) in &runtime.nominal_flights {
+            assert!(draft.as_ref().clone().protect(|_, _| false).is_err());
+            // Controller/geometry acceptance is separate from the real scenery release above.
+            let checked = draft.as_ref().clone().protect(|_, _| true).unwrap();
+            let plan = checked
+                .finish_all_production(|_, _| true)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "Aircraft {id} from {}: {error}",
+                        runtime.departure_airport(*id).unwrap().icao
+                    )
+                });
+            plan.validate().unwrap();
+            checked_flights.insert(*id, Arc::new(plan));
+        }
+        assert!(
+            runtime
+                .environments
+                .values()
+                .all(environment::Environment::fresh)
+        );
+        assert!(
+            !runtime
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("expired")),
+            "{:?}",
+            runtime.warnings
+        );
+        eprintln!(
+            "Live-weather worker retained {} nominal flights from {origins:?} in {:.2}s; {} passed production protection",
+            runtime.nominal_flights.len(),
+            started.elapsed().as_secs_f64(),
+            runtime.flights.len()
+        );
+        if !run_movement {
+            return;
+        }
+        drop(state);
+        // Only this geometry/controller fixture installs the independently checked test plans.
+        let mut state = shared.write().await;
+        let expected = checked_flights.keys().copied().collect::<BTreeSet<_>>();
+        let stationary = state
+            .generated
+            .world
+            .snapshot()
+            .into_iter()
+            .filter(|pose| !expected.contains(&pose.id))
+            .map(|pose| (pose.id, pose.position))
+            .collect::<BTreeMap<_, _>>();
+        state.generated.flights.extend(checked_flights);
+        state.session.telemetry.traffic = Some(vec![]);
+        let mut visited = BTreeMap::<u32, Vec<openatc_core::traffic::motion::Stage>>::new();
+        let movement_started = Instant::now();
+        for second in 0..10000 {
+            if second % 30 == 0 {
+                for (airport, (sample, _)) in state.sim_weather.clone() {
+                    state
+                        .generated
+                        .observe_weather(&airport, &(sample, Instant::now()));
+                }
+            }
+            if let Some(exchange) = &mut state.generated.exchange {
+                exchange.due = Instant::now();
+            }
+            radio_tick(&mut state);
+            state.session.telemetry.simulation_seconds = Some(f64::from(second));
+            let telemetry = state.session.telemetry.clone();
+            advance(&mut state.generated, &telemetry);
+            for pose in state
+                .generated
+                .world
+                .snapshot()
+                .iter()
+                .filter(|pose| expected.contains(&pose.id))
+            {
+                let stages = visited.entry(pose.id).or_default();
+                if !stages.contains(&pose.stage) {
+                    stages.push(pose.stage);
+                }
+            }
+            if state
+                .generated
+                .world
+                .snapshot()
+                .iter()
+                .filter(|pose| expected.contains(&pose.id))
+                .all(|pose| {
+                    pose.complete && pose.stage == openatc_core::traffic::motion::Stage::Turnaround
+                })
+            {
+                break;
+            }
+        }
+        let final_poses = state.generated.world.snapshot();
+        assert_eq!(
+            final_poses
+                .iter()
+                .filter(|pose| expected.contains(&pose.id))
+                .count(),
+            expected.len()
+        );
+        for pose in &final_poses {
+            if !pose.complete {
+                let contract = state
+                    .generated
+                    .flights
+                    .get(&pose.id)
+                    .and_then(|plan| plan.clearances.get(&pose.segment));
+                eprintln!(
+                    "Network final {pose:?}; blocker {:?}; contract {:?}; controller {:?}; radio {:?}",
+                    state.generated.world.surface_blocker(pose.id),
+                    contract.map(|contract| (
+                        contract.station.name.as_str(),
+                        contract.station.khz,
+                        contract.taxi_through
+                    )),
+                    state
+                        .generated
+                        .controllers
+                        .get(&pose.id)
+                        .map(|station| (&station.name, station.khz)),
+                    state
+                        .generated
+                        .frames
+                        .iter()
+                        .find(|frame| frame.target.id == pose.id)
+                        .and_then(|frame| frame.target.com1_khz)
+                );
+            }
+        }
+        for pose in final_poses {
+            if expected.contains(&pose.id) {
+                assert!(
+                    pose.complete && pose.stage == openatc_core::traffic::motion::Stage::Turnaround,
+                    "Network lifecycle stalled: {pose:?}; rejoin {:?}; warnings {:?}",
+                    flight::rejoin_refusal(&state.generated, &state.session.telemetry, pose.id),
+                    state.generated.warnings
+                );
+                for stage in [
+                    openatc_core::traffic::motion::Stage::TaxiOut,
+                    openatc_core::traffic::motion::Stage::Takeoff,
+                    openatc_core::traffic::motion::Stage::Climb,
+                    openatc_core::traffic::motion::Stage::Cruise,
+                    openatc_core::traffic::motion::Stage::Descent,
+                    openatc_core::traffic::motion::Stage::Approach,
+                    openatc_core::traffic::motion::Stage::Rollout,
+                    openatc_core::traffic::motion::Stage::TaxiIn,
+                    openatc_core::traffic::motion::Stage::Turnaround,
+                ] {
+                    assert!(
+                        visited[&pose.id].contains(&stage),
+                        "{} missed {stage:?}",
+                        pose.id
+                    );
+                }
+            } else {
+                assert_eq!(
+                    pose.position, stationary[&pose.id],
+                    "Unreleased aircraft moved"
+                );
+            }
+        }
+        eprintln!(
+            "{} network flights reached parking across {origins:?} in {:.2}s of controller/runtime testing",
+            expected.len(),
+            movement_started.elapsed().as_secs_f64()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires installed scenery and Bluebell"]
     fn installed_nice_scene_has_verified_departure_routes() {
         let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
         let profiles = Arc::new(Profiles::builtin().unwrap());
+        let regions = openatc_core::regions::load_regions(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../regions.toml"),
+        )
+        .unwrap();
+        let stations: Arc<[openatc_core::stations::Station]> =
+            openatc_core::stations::load_index(&root).unwrap().into();
         let scene = prepare_scene(Preparation {
+            weather_observations: None,
+            reserved_stand_cells: BTreeSet::new(),
+                    reserved_surface_corridors: BTreeSet::new(),
+            stations: stations.clone(),
+            regions: regions.clone(),
             simulator_root: root.clone(),
             origin: airport(&root, "LFMN").unwrap(),
             destination: airport(&root, "LIMC").unwrap(),
@@ -2001,6 +4081,22 @@ mod tests {
         })
         .unwrap();
         assert!(!scene.frames.is_empty(), "No compatible installed aircraft");
+        eprintln!(
+            "Production corridor release: {} of {} complete nominal flights; {}",
+            scene.flights.len(),
+            scene.nominal_flights.len(),
+            scene
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("corridor release:"))
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        for prepared in scene.flights.values() {
+            prepared.validate().unwrap();
+        }
         assert!(
             !scene.terminal_routes.is_empty(),
             "No production terminal candidates: {:?}",
@@ -2123,6 +4219,144 @@ mod tests {
                     .first()
             );
         }
+        assert_eq!(scene.nominal_flights.len(), scene.nominal_arrivals.len());
+        let regions = openatc_core::regions::load_regions(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../regions.toml"),
+        )
+        .unwrap();
+        assert!(
+            scene
+                .decoded_terminals
+                .values()
+                .any(|decoded| decoded.missed_instruction.is_some()),
+            "Installed fixture must exercise an explicitly amended missed level"
+        );
+        for (id, draft) in &scene.nominal_flights {
+            assert!(draft.as_ref().clone().protect(|_, _| false).is_err());
+            // Inspect complete producer joins; this fixture supplies no actual corridor protection.
+            let checked = draft.as_ref().clone().protect(|_, _| true).unwrap();
+            let context = controller::Context {
+                origin: &scene.airport,
+                destination: &scene.destination,
+                departure_runway: "04R",
+                arrival_runway: "35R",
+                terminal: &scene.terminal_routes[scene.decoded_terminals[id].candidate],
+                callsign: &scene
+                    .frames
+                    .iter()
+                    .find(|frame| frame.target.id == *id)
+                    .unwrap()
+                    .target
+                    .callsign,
+                stations: &stations,
+                regions: &regions,
+                departure_weather: &scene.environments["LFMN"],
+                arrival_weather: &scene.environments["LIMC"],
+                missed: None,
+                scope_seconds: 600.0,
+            };
+            assert!(
+                checked
+                    .controller_contracts(&controller::Context {
+                        stations: &[],
+                        ..context
+                    })
+                    .is_err()
+            );
+            let contracts = checked.production_contracts().unwrap();
+            assert!(
+                contracts
+                    .values()
+                    .any(|contract| contract.landing_rollout.is_some())
+            );
+            assert!(
+                contracts
+                    .values()
+                    .any(|contract| contract.initial_climb.is_some())
+            );
+            let refused = checked.final_recoveries(|_, _| false);
+            assert!(!refused.is_empty());
+            assert!(refused.values().all(Result::is_err));
+            let final_routes = checked.final_recoveries(|_, _| true);
+            assert_eq!(
+                final_routes.len(),
+                scene.decoded_terminals[id].final_missed.len()
+            );
+            for (index, recovery) in &final_routes {
+                assert!(recovery.is_ok(), "Final recovery {index}: {recovery:?}");
+            }
+            assert!(checked.all_recoveries(|_, _| false).is_err());
+            let all_routes = checked.all_recoveries(|_, _| true).unwrap();
+            assert!(all_routes.len() > final_routes.len());
+            for (index, route) in &all_routes {
+                if let Some(hold) = contracts.get(index).and_then(|c| c.holding.as_ref()) {
+                    assert!(hold.matches(&all_routes[&hold.boundary]));
+                    assert!(
+                        contracts[index]
+                            .instruction
+                            .contains("maximum holding speed")
+                    );
+                    assert!(contracts[index].readback.contains("right turns"));
+                }
+                assert!(route.segment(0).is_some());
+            }
+            if let Some(expected) = &scene.decoded_terminals[id].missed_instruction {
+                assert!(
+                    contracts
+                        .values()
+                        .any(|contract| contract.missed.as_ref() == Some(expected)
+                            && contract.instruction.contains(&expected.fix)
+                            && contract.readback.contains(&expected.fix))
+                );
+            }
+            let complete = checked.finish_all_production(|_, _| true).unwrap();
+            complete.validate().unwrap();
+            assert_eq!(complete.recovery.len(), all_routes.len());
+            for (&index, clearance) in &complete.clearances {
+                if clearance
+                    .holding
+                    .as_ref()
+                    .is_some_and(|hold| hold.boundary == index)
+                {
+                    let onward = complete.resume_after_limit(index).unwrap();
+                    assert_eq!(
+                        onward.route.segment(0).unwrap().points[0],
+                        *complete
+                            .route
+                            .segment(index)
+                            .unwrap()
+                            .points
+                            .last()
+                            .unwrap()
+                    );
+                    assert_eq!(
+                        onward.recovery.len(),
+                        complete.recovery.range(index + 1..).count()
+                    );
+                    assert!(
+                        onward
+                            .clearances
+                            .values()
+                            .any(|c| c.landing_rollout.is_some())
+                    );
+                    onward.validate_onward().unwrap();
+                }
+            }
+            let mut missing_hold = complete.clone();
+            missing_hold.recovery.remove(&2);
+            assert!(missing_hold.validate().is_err());
+            let mut wrong_hold = complete.clone();
+            let instruction = wrong_hold
+                .clearances
+                .get_mut(&1)
+                .unwrap()
+                .holding
+                .as_mut()
+                .unwrap();
+            instruction.inbound_true_degrees =
+                (instruction.inbound_true_degrees + 30.0).rem_euclid(360.0);
+            assert!(wrong_hold.validate().is_err());
+        }
         for (id, decoded) in &scene.decoded_terminals {
             let frame = scene
                 .frames
@@ -2145,6 +4379,7 @@ mod tests {
                 terminal.enroute_from
             );
             assert!(decoded.nominal.as_ref().unwrap().leg_count() > 0);
+            assert!(decoded.nominal.as_ref().unwrap().enroute_checked());
             let missed = decoded.missed.as_ref().unwrap();
             assert_eq!(
                 [missed.map.latitude, missed.map.longitude],
@@ -2317,6 +4552,7 @@ mod tests {
         let unreserved = BTreeSet::new();
         let mora = openatc_core::navigation::Mora::load(&root);
         let planner = airborne::Planner {
+            regions: &regions,
             rotation: scene.nominal_departures[&arrival_id].rotation,
             origin: &scene.airport,
             destination: &scene.destination,
@@ -2331,6 +4567,9 @@ mod tests {
             arrival_surface: &arrival_surface,
             observed: &[],
             reserved: &unreserved,
+            occupied_stand_cells: &unreserved,
+            parking_exclusions: &unreserved,
+            preference: &openatc_core::parking::TrafficPreference::default(),
         };
         let map = scene.decoded_terminals[&arrival_id]
             .approach
@@ -2351,7 +4590,7 @@ mod tests {
         let mut slow = selected.clone();
         slow.missed.last_mut().unwrap().speed_knots = Some(planner.aircraft.approach_knots - 1.0);
         assert!(recovery::prepare(&planner, &slow, map, 0.0).is_err());
-        let (retried, arrival) = planner.arrival(&candidates).unwrap();
+        let (retried, arrival) = planner.arrival(&candidates, &BTreeMap::new()).unwrap();
         assert_eq!(
             retried.candidate, 1,
             "A decodable but unusable first landing must not exhaust alternatives"
@@ -2359,6 +4598,21 @@ mod tests {
         assert_eq!(
             arrival.flare.points.last(),
             arrival.parking.exit.rollout[0].points.first()
+        );
+        let alternatives = vec![selected.clone(), selected.clone()];
+        let (balanced, _) = planner
+            .arrival(&alternatives, &BTreeMap::from([(0, 1)]))
+            .unwrap();
+        assert_eq!(
+            balanced.candidate, 1,
+            "Prefer the less-used complete route without changing its catalogue index"
+        );
+        let (fallback, _) = planner
+            .arrival(&candidates, &BTreeMap::from([(1, 3)]))
+            .unwrap();
+        assert_eq!(
+            fallback.candidate, 1,
+            "A lower usage count cannot make an invalid landing usable"
         );
         let mut limited = policy.clone();
         limited.terminal_candidate_limit = 1;
@@ -2368,7 +4622,7 @@ mod tests {
         };
         assert!(
             bounded
-                .arrival(&candidates)
+                .arrival(&candidates, &BTreeMap::new())
                 .err()
                 .unwrap()
                 .contains("among 1 terminal candidates")
@@ -2384,7 +4638,7 @@ mod tests {
             ..planner
         };
         assert!(
-            blocked.arrival(&candidates).is_err(),
+            blocked.arrival(&candidates, &BTreeMap::new()).is_err(),
             "Retry cannot bypass occupied parking"
         );
         assert!(
@@ -2565,7 +4819,12 @@ mod tests {
             }],
             warnings: vec![],
         });
-        let scene = prepare_scene(Preparation {
+        let mut input = Preparation {
+            weather_observations: None,
+            reserved_stand_cells: BTreeSet::new(),
+            reserved_surface_corridors: BTreeSet::new(),
+            stations: Arc::from([]),
+            regions: BTreeMap::new(),
             simulator_root: String::new(),
             origin,
             destination,
@@ -2579,11 +4838,41 @@ mod tests {
             arrival_runway: "09".into(),
             config: std::path::PathBuf::new(),
             weather: BTreeMap::new(),
-        })
-        .unwrap();
+        };
+        let scene = prepare_bidirectional(input.clone()).unwrap();
         assert_eq!(scene.frames.len(), scene.movement.len());
         assert_eq!(scene.frames.len(), scene.world.snapshot().len());
-        let frames = scene.frames;
+        assert!(scene.frames.len() <= 5);
+        assert_eq!(
+            scene
+                .frames
+                .iter()
+                .map(|frame| frame.target.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            scene.frames.len()
+        );
+        assert_eq!(
+            scene
+                .frames
+                .iter()
+                .map(|frame| frame.target.callsign.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            scene.frames.len()
+        );
+        let departures = scene
+            .orders
+            .values()
+            .filter_map(|orders| orders.first().map(|(_, order)| order.airport.as_str()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            departures,
+            BTreeSet::from(["DEMO", "TEST"]),
+            "{:?}",
+            scene.warnings
+        );
+        let frames = &scene.frames;
         assert!(!frames.is_empty());
         for frame in frames {
             assert_eq!(frame.target.aircraft, "C172");
@@ -2595,6 +4884,85 @@ mod tests {
                 ) > 60.0 / 1852.0
             );
             assert_eq!(frame.target.ground_speed_knots, Some(0.0));
+        }
+        input.origin.icao = "THRD".into();
+        input.origin.reference_latitude += 2.0;
+        input.counts = [0, 0, 0, 1];
+        input
+            .observed
+            .extend(scene.frames.iter().map(|frame| frame.target.clone()));
+        let third = prepare_bidirectional(input).unwrap();
+        assert_eq!(third.frames.len(), 1, "{:?}", third.warnings);
+        let third_id = third.frames[0].target.id;
+        let scene = scene.merge(third).unwrap();
+        assert_eq!(scene.airports.len(), 3);
+        assert_eq!(scene.orders[&third_id][0].1.airport, "THRD");
+        assert_eq!(scene.world.snapshot().len(), scene.frames.len());
+        assert_eq!(
+            scene
+                .frames
+                .iter()
+                .map(|frame| frame.target.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            scene.frames.len()
+        );
+        let id = scene.frames[0].target.id;
+        let original = scene.world.snapshot();
+        let mut reused = Runtime::default();
+        reused.active_flights.insert(id);
+        reused.approved_orders.extend([(id, 0), (id, 1), (id, 2)]);
+        reused.pending_checkins.insert((id, 1));
+        reused.cancelled_takeoffs.insert(id, false);
+        reused.tower_ready.insert(id);
+        reused.preparation_job = Some(123);
+        reused.simulation_job = Some(456);
+        reused.exchange = Some(radio::Exchange {
+            id,
+            segment: 1,
+            station: openatc_core::stations::Station::default(),
+            callsign: "OLD123".into(),
+            messages: vec![(true, "Old taxi permission".into())],
+            next: 0,
+            due: Instant::now(),
+            grant: true,
+            tune_after: Some(openatc_core::stations::Station {
+                khz: 118675,
+                ..Default::default()
+            }),
+            sector_transfer: None,
+            recovery_from: None,
+            rejoin: false,
+        });
+        publish_scene(&mut reused, scene, "replacement".into(), 2);
+        assert_eq!(reused.epoch, Some(2));
+        assert_eq!(reused.key, "replacement");
+        assert!(reused.active_flights.is_empty() && reused.approved_orders.is_empty());
+        assert!(reused.pending_checkins.is_empty() && reused.cancelled_takeoffs.is_empty());
+        assert!(reused.tower_ready.is_empty() && reused.exchange.is_none());
+        assert!(!finish_job(&mut reused.preparation_job, 123));
+        assert!(!finish_job(&mut reused.simulation_job, 456));
+        let mut live = openatc_core::state::Telemetry {
+            position_valid: true,
+            on_ground: true,
+            traffic: Some(vec![]),
+            ..Default::default()
+        };
+        for step in 0..=180 {
+            live.simulation_seconds = Some(f64::from(step) * 0.5);
+            advance(&mut reused, &live);
+        }
+        for before in original {
+            let after = reused
+                .world
+                .snapshot()
+                .into_iter()
+                .find(|pose| pose.id == before.id)
+                .unwrap();
+            assert_eq!(
+                after.position, before.position,
+                "Reused ID moved without a fresh controller exchange"
+            );
         }
     }
     #[test]
@@ -2616,6 +4984,11 @@ mod tests {
             .first_name
             .clone();
         let scene = prepare_scene(Preparation {
+            weather_observations: None,
+            reserved_stand_cells: BTreeSet::new(),
+            reserved_surface_corridors: BTreeSet::new(),
+            stations: Arc::from([]),
+            regions: BTreeMap::new(),
             simulator_root: root.clone(),
             own: [origin.reference_latitude, origin.reference_longitude],
             origin,

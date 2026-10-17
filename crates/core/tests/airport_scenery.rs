@@ -522,3 +522,61 @@ fn displayed_fallback_hold_circle_is_a_reachable_clearance_limit() {
         }
     ));
 }
+
+#[test]
+fn selected_airport_retains_its_owning_scenery_path() {
+    let source = "/sim/Custom Scenery/Override/Earth nav data/apt.dat";
+    let apt = "1 562 0 0 YMLT Launceston\n100 45.00 1 1 0.25 0 3 0 14R -41.5370582 147.2041027 0 61 2 0 0 0 32L -41.5520733 147.2169328 0 75 2 3 0 1\n";
+    let files = std::collections::BTreeMap::from([
+        (
+            "/sim/Custom Scenery/scenery_packs.ini",
+            "SCENERY_PACK Custom Scenery/Override\n",
+        ),
+        (source, apt),
+        (
+            "/sim/Global Scenery/Global Airports/Earth nav data/apt.dat",
+            apt,
+        ),
+    ]);
+    let airport =
+        load_airport_from_simulator("/sim", "YMLT", &|path| files.contains_key(path), &|path| {
+            files
+                .get(path)
+                .map(|text| (*text).to_owned())
+                .ok_or_else(|| "Missing test file".into())
+        })
+        .unwrap();
+    assert_eq!(airport.source, source);
+}
+
+#[test]
+fn supplemental_physical_pavement_preserves_holes_and_rejects_partial_updates() {
+    use openatc_core::{
+        airport::{Airport, append_pavement, on_pavement},
+        state::Point,
+    };
+    let point = |east, north| Point {
+        east,
+        north,
+        height: 0.0,
+    };
+    let ring = |low, high| {
+        vec![
+            (point(low, low), None),
+            (point(high, low), None),
+            (point(high, high), None),
+            (point(low, high), None),
+        ]
+    };
+    let mut airport = Airport::default();
+    append_pavement(&mut airport, &[ring(0.0, 10.0), ring(4.0, 6.0)]).unwrap();
+    assert!(on_pavement(&airport, point(2.0, 2.0)));
+    assert!(!on_pavement(&airport, point(5.0, 5.0)));
+    let counts = (airport.pavements.len(), airport.pavement_triangles.len());
+    assert!(append_pavement(&mut airport, &[ring(0.0, 1.0), ring(2.0, 4.0)]).is_err());
+    assert!(append_pavement(&mut airport, &[vec![(point(f64::NAN, 0.0), None); 3]]).is_err());
+    assert_eq!(
+        counts,
+        (airport.pavements.len(), airport.pavement_triangles.len())
+    );
+}

@@ -10,16 +10,153 @@ use openatc_core::{
 };
 
 #[derive(Clone)]
+pub(super) struct HoldingPolicy {
+    pub minimum_indicated_knots: f64,
+    pub maximum_indicated_knots: f64,
+    pub bank_degrees: f64,
+    pub turn_rate_degrees_sec: f64,
+}
+
+/// A contingent clearance at an actual route boundary, with an aligned direct entry.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct LimitHold {
+    pub boundary: usize,
+    pub position: Waypoint,
+    pub inbound_true_degrees: f64,
+    pub indicated_knots: f64,
+    pub ground_knots: f64,
+    pub leg_seconds: f64,
+    pub bank_degrees: f64,
+    pub turn_rate_degrees_sec: f64,
+    reference: trajectory::Airspeed,
+}
+impl LimitHold {
+    pub fn at(
+        boundary: usize,
+        segment: &Segment,
+        fix: &trajectory::Fix,
+        policy: &HoldingPolicy,
+    ) -> Result<Self, String> {
+        if !matches!(segment.stage, Stage::Climb | Stage::Cruise | Stage::Descent)
+            || segment.points.len() < 2
+            || !(40.0..=200.0).contains(&policy.maximum_indicated_knots)
+            || !(40.0..=policy.maximum_indicated_knots).contains(&policy.minimum_indicated_knots)
+        {
+            return Err(
+                "Clearance-limit hold has no supported aircraft or movement envelope".into(),
+            );
+        }
+        let position = *segment.points.last().unwrap();
+        let before = segment.points[segment.points.len() - 2];
+        let coordinate = |point: Waypoint| [point.latitude, point.longitude];
+        if distance_nm(coordinate(position), fix.coordinate) > 0.001 {
+            return Err("Clearance-limit hold does not match its actual route crossing".into());
+        }
+        let airspeed = fix
+            .airspeed
+            .ok_or("Clearance-limit hold has no IAS reference")?;
+        let indicated = airspeed.indicated_knots.min(policy.maximum_indicated_knots);
+        if indicated < policy.minimum_indicated_knots {
+            return Err("Clearance-limit holding speed is below the aircraft envelope".into());
+        }
+        let inbound = openatc_core::arrival::bearing(coordinate(before), coordinate(position));
+        let level = airspeed
+            .atmosphere
+            .reported(position.altitude_feet, false)?;
+        let result = Self {
+            boundary,
+            position,
+            inbound_true_degrees: inbound,
+            indicated_knots: indicated,
+            ground_knots: trajectory::Airspeed {
+                indicated_knots: indicated,
+                ..airspeed
+            }
+            .ground_knots(position.altitude_feet, inbound)?,
+            leg_seconds: if level > 14000.0 { 90.0 } else { 60.0 },
+            bank_degrees: policy.bank_degrees.min(25.0),
+            turn_rate_degrees_sec: policy.turn_rate_degrees_sec,
+            reference: trajectory::Airspeed {
+                indicated_knots: indicated,
+                ..airspeed
+            },
+        };
+        result.pattern().draft()?;
+        Ok(result)
+    }
+
+    fn pattern(&self) -> holding::Pattern {
+        holding::Pattern {
+            fix: self.position,
+            inbound_degrees: self.inbound_true_degrees,
+            right: true,
+            ground_knots: self.ground_knots,
+            leg_seconds: self.leg_seconds,
+            bank_degrees: self.bank_degrees,
+            turn_rate_degrees_sec: self.turn_rate_degrees_sec,
+        }
+    }
+
+    pub fn protect(
+        &self,
+        climb_fpm: f64,
+        descent_fpm: f64,
+        protected: impl Fn(Waypoint, Waypoint) -> bool,
+    ) -> Result<Route, String> {
+        Route::compile(
+            vec![self.pattern().compile(protected)?],
+            climb_fpm,
+            descent_fpm,
+        )
+    }
+
+    pub fn matches(&self, route: &Route) -> bool {
+        let Some(segment) = route.segment(0) else {
+            return false;
+        };
+        self.boundary < 512
+            && self.position.altitude_feet.is_finite()
+            && self.inbound_true_degrees.is_finite()
+            && (0.0..360.0).contains(&self.inbound_true_degrees)
+            && (40.0..=200.0).contains(&self.indicated_knots)
+            && self.reference.indicated_knots == self.indicated_knots
+            && self
+                .reference
+                .ground_knots(self.position.altitude_feet, self.inbound_true_degrees)
+                .is_ok_and(|ground| (ground - self.ground_knots).abs() < 1e-6)
+            && segment.stage == Stage::Holding
+            && route.segment(1).is_none()
+            && segment.points.first() == Some(&self.position)
+            && segment.points.last() == Some(&self.position)
+            && segment
+                .points
+                .iter()
+                .all(|p| (p.altitude_feet - self.position.altitude_feet).abs() < 1e-6)
+            && (segment.knots - self.ground_knots).abs() < 1e-6
+            && self
+                .pattern()
+                .draft()
+                .is_ok_and(|draft| draft.matches(segment))
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct Draft {
+    /// Published MAP provenance, retained when a late path starts farther along the runway.
     pub map: Waypoint,
     pub holding_fix: String,
     pub holding_feet: f64,
     path: trajectory::Draft,
     hold: holding::Draft,
+    entry: Option<holding::EntryDraft>,
     climb_fpm: f64,
     descent_fpm: f64,
 }
 impl Draft {
+    pub fn late_entry_available(&self, position: Waypoint) -> bool {
+        self.path
+            .first_leg_join([position.latitude, position.longitude], 0.001)
+    }
     /// This checks both the missed path and the whole hold before returning a route.
     pub fn protect(self, protected: impl Fn(Waypoint, Waypoint) -> bool) -> Result<Route, String> {
         let mut segments = self
@@ -34,9 +171,233 @@ impl Draft {
                 dwell_seconds: 0.0,
             })
             .collect::<Vec<_>>();
+        if let Some(entry) = self.entry {
+            segments.push(entry.protect(&protected)?);
+        }
         segments.push(self.hold.protect(protected)?);
         Route::compile(segments, self.climb_fpm, self.descent_fpm)
     }
+}
+
+/// Retain the remaining final-approach lateral path before joining the published missed route.
+/// A late departure from the landing path may join only the first missed leg ahead of the MAP.
+pub(super) fn from_final(
+    start: Waypoint,
+    remaining_final: &[Segment],
+    missed: &Route,
+    climb_fpm: f64,
+    descent_fpm: f64,
+    protected: impl Fn(Waypoint, Waypoint) -> bool,
+) -> Result<Route, String> {
+    if ![start.latitude, start.longitude, start.altitude_feet]
+        .iter()
+        .all(|value| value.is_finite())
+        || !(-90.0..=90.0).contains(&start.latitude)
+        || !(-180.0..=180.0).contains(&start.longitude)
+        || !(-3000.0..=65000.0).contains(&start.altitude_feet)
+    {
+        return Err("Final recovery position is invalid".into());
+    }
+    let mut suffix = (0..512)
+        .map_while(|index| missed.segment(index).cloned())
+        .collect::<Vec<_>>();
+    if suffix.len() < 2
+        || suffix[0].stage != Stage::MissedApproach
+        || suffix
+            .last()
+            .is_none_or(|segment| segment.stage != Stage::Holding)
+    {
+        return Err("Final recovery needs a complete published missed approach and hold".into());
+    }
+    let coordinate = |point: Waypoint| [point.latitude, point.longitude];
+    let map = suffix[0].points[0];
+    let mut prefix = Vec::new();
+    if !remaining_final.is_empty() {
+        if distance_nm(coordinate(start), coordinate(remaining_final[0].points[0])) > 0.001
+            || (start.altitude_feet - remaining_final[0].points[0].altitude_feet).abs() > 1.0
+            || distance_nm(
+                coordinate(*remaining_final.last().unwrap().points.last().unwrap()),
+                coordinate(map),
+            ) > 0.001
+            || remaining_final
+                .iter()
+                .any(|segment| segment.stage != Stage::Approach || !segment.resources.is_empty())
+        {
+            return Err("Early missed approach does not retain its final path to the MAP".into());
+        }
+        for original in remaining_final {
+            let mut segment = original.clone();
+            segment.stage = Stage::MissedApproach;
+            for point in &mut segment.points {
+                point.altitude_feet = point.altitude_feet.max(start.altitude_feet);
+            }
+            prefix.push(segment);
+        }
+    } else if distance_nm(coordinate(start), coordinate(map)) > 0.001 {
+        let first = &mut suffix[0];
+        let cut = trajectory::forward_join_index(&first.points, coordinate(start), 0.001)
+            .ok_or("Late missed approach cannot turn back to the MAP or skip a published leg")?;
+        let end = *first.points.last().unwrap();
+        if end.altitude_feet < start.altitude_feet {
+            return Err("Late recovery would descend before its first missed fix".into());
+        }
+        let mut points = vec![start];
+        points.extend(
+            first
+                .points
+                .iter()
+                .skip(cut)
+                .copied()
+                .filter(|point| distance_nm(coordinate(start), coordinate(*point)) > 1e-8),
+        );
+        let distances = points
+            .windows(2)
+            .map(|pair| distance_nm(coordinate(pair[0]), coordinate(pair[1])))
+            .collect::<Vec<_>>();
+        let total = distances.iter().sum::<f64>();
+        if total <= 0.0 {
+            return Err("Late recovery has no forward climb distance".into());
+        }
+        let mut flown = 0.0;
+        for (point, distance) in points.iter_mut().skip(1).zip(distances) {
+            flown += distance;
+            point.altitude_feet =
+                start.altitude_feet + (end.altitude_feet - start.altitude_feet) * flown / total;
+        }
+        *points.last_mut().unwrap() = end;
+        first.points = points;
+    }
+    for segment in &mut suffix {
+        if segment.points.last().unwrap().altitude_feet + 1e-6 < start.altitude_feet {
+            return Err("Recovery needs a new cleared level above its published limit".into());
+        }
+        for point in &mut segment.points {
+            point.altitude_feet = point.altitude_feet.max(start.altitude_feet);
+        }
+    }
+    if prefix.is_empty() {
+        suffix[0].points[0] = start;
+    }
+    prefix.extend(suffix);
+    if prefix.iter().any(|segment| {
+        segment
+            .points
+            .windows(2)
+            .any(|pair| !protected(pair[0], pair[1]))
+    }) {
+        return Err("Modified final recovery lacks complete corridor protection".into());
+    }
+    Route::compile(prefix, climb_fpm, descent_fpm)
+}
+
+/// Prepare each final boundary at its actual entry height, using one explicit missed level.
+/// These remain opaque drafts until both protection and the approach clearance are complete.
+pub(super) fn final_variants(
+    planner: &super::airborne::Planner<'_>,
+    terminal: &super::routing::Terminal,
+    map: &trajectory::Fix,
+    minimum_feet: f64,
+    nominal: &super::airborne::Draft,
+    published: &Draft,
+    late: Waypoint,
+) -> Result<
+    (
+        std::collections::BTreeMap<usize, std::sync::Arc<Draft>>,
+        Option<super::flight::MissedInstruction>,
+    ),
+    String,
+> {
+    let mut levels = nominal.approach_levels();
+    if levels.is_empty() {
+        return Err("Final recovery has no approach limits".into());
+    }
+    let maximum = levels
+        .iter()
+        .map(|(_, start, end)| start.max(*end))
+        .fold(published.holding_feet, f64::max);
+    let weather = planner.arrival_weather;
+    let region = openatc_core::regions::region_for(planner.regions, &planner.destination.icao);
+    let standard =
+        weather.atmosphere.reported(maximum, false)? >= f64::from(region.transition_feet);
+    let step = if !standard && region.altitude == "meters" {
+        50.0 / 0.3048
+    } else {
+        100.0
+    };
+    let reported = (weather.atmosphere.reported(maximum, standard)? / step - 1e-8).ceil() * step;
+    let target = weather
+        .atmosphere
+        .geometric(reported, standard)?
+        .max(maximum);
+    let amended = target > published.holding_feet + 1.0;
+    let floor = if amended {
+        target
+    } else {
+        published.holding_feet
+    };
+    let instruction = amended.then(|| super::flight::MissedInstruction {
+        fix: published.holding_fix.clone(),
+        geometric_feet: floor,
+        reported_feet: reported.round() as i32,
+        standard,
+    });
+    let map_index = nominal.leg_count() - 1;
+    // Refuse an unusable balked-landing path before constructing the earlier final recoveries.
+    levels.sort_by_key(|(index, _, _)| (*index != map_index, *index));
+    let mut variants = std::collections::BTreeMap::new();
+    let mut by_height: std::collections::BTreeMap<u64, std::sync::Arc<Draft>> = Default::default();
+    let mut late_seed = None;
+    for (index, _, end) in levels {
+        let seed = if let Some(existing) = by_height.get(&end.to_bits()) {
+            existing.clone()
+        } else {
+            let mut entry = map.clone();
+            entry.preferred_feet = end;
+            let seed = std::sync::Arc::new(prepare_with_clearance(
+                planner,
+                terminal,
+                &entry,
+                minimum_feet,
+                Some(floor),
+                instruction.as_ref(),
+            )?);
+            if (seed.holding_feet - floor).abs() > 1.0 {
+                return Err("Final recovery cannot retain its cleared holding level".into());
+            }
+            by_height.insert(end.to_bits(), seed.clone());
+            seed
+        };
+        if index == map_index {
+            if terminal
+                .missed
+                .first()
+                .is_some_and(|leg| matches!(leg.terminator.as_str(), "CA" | "VA"))
+            {
+                // Re-solve the altitude termination from the actual balked-landing position.
+                // Fixed published legs still require the original forward join.
+                late_seed = Some(std::sync::Arc::new(prepare_start(
+                    planner,
+                    terminal,
+                    map,
+                    minimum_feet,
+                    Some(floor),
+                    instruction.as_ref(),
+                    Some(late),
+                )?));
+            } else if seed.late_entry_available(late) {
+                late_seed = Some(seed.clone());
+            } else {
+                return Err(
+                    "Landing path cannot join its first published missed leg after the threshold"
+                        .into(),
+                );
+            }
+        }
+        variants.insert(index, seed);
+    }
+    let late_seed = late_seed.ok_or("Final recovery lost its late-entry variant")?;
+    variants.insert(nominal.leg_count(), late_seed);
+    Ok((variants, instruction))
 }
 
 /// This seed starts at the published MAP, not at an arbitrary early or late go-around position.
@@ -46,6 +407,55 @@ pub(super) fn prepare(
     map: &trajectory::Fix,
     minimum_feet: f64,
 ) -> Result<Draft, String> {
+    prepare_with_holding_floor(planner, terminal, map, minimum_feet, None)
+}
+
+/// Re-solve an amended missed level against the original published restrictions.
+/// The resulting draft still requires protection and an explicit amended clearance.
+pub(super) fn prepare_with_holding_floor(
+    planner: &super::airborne::Planner<'_>,
+    terminal: &super::routing::Terminal,
+    map: &trajectory::Fix,
+    minimum_feet: f64,
+    holding_floor: Option<f64>,
+) -> Result<Draft, String> {
+    prepare_with_clearance(planner, terminal, map, minimum_feet, holding_floor, None)
+}
+
+fn prepare_with_clearance(
+    planner: &super::airborne::Planner<'_>,
+    terminal: &super::routing::Terminal,
+    map: &trajectory::Fix,
+    minimum_feet: f64,
+    holding_floor: Option<f64>,
+    amendment: Option<&super::flight::MissedInstruction>,
+) -> Result<Draft, String> {
+    prepare_start(
+        planner,
+        terminal,
+        map,
+        minimum_feet,
+        holding_floor,
+        amendment,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_start(
+    planner: &super::airborne::Planner<'_>,
+    terminal: &super::routing::Terminal,
+    map: &trajectory::Fix,
+    minimum_feet: f64,
+    holding_floor: Option<f64>,
+    amendment: Option<&super::flight::MissedInstruction>,
+    late: Option<Waypoint>,
+) -> Result<Draft, String> {
+    if holding_floor
+        .is_some_and(|level| !level.is_finite() || !(-3000.0..=65000.0).contains(&level))
+    {
+        return Err("Amended missed-approach holding level is invalid".into());
+    }
     let map_leg = terminal
         .approach
         .last()
@@ -74,10 +484,42 @@ pub(super) fn prepare(
     if !weather.fresh() {
         return Err("Missed approach weather is stale".into());
     }
-    let start = Waypoint {
+    let published_map = Waypoint {
         latitude: map.coordinate[0],
         longitude: map.coordinate[1],
         altitude_feet: map.preferred_feet,
+    };
+    let start = if let Some(start) = late {
+        if !prefix
+            .first()
+            .is_some_and(|leg| matches!(leg.terminator.as_str(), "CA" | "VA"))
+        {
+            return Err(
+                "Late missed approach needs a separately planned first altitude leg".into(),
+            );
+        }
+        let local = openatc_core::airport::airport_point(
+            planner.destination,
+            start.latitude,
+            start.longitude,
+        );
+        let along = planner.arrival_surface.along(local);
+        let centre = planner.arrival_surface.point(along);
+        let height = planner.arrival_surface.height(local);
+        if [start.latitude, start.longitude, start.altitude_feet, along]
+            .iter()
+            .any(|value| !value.is_finite())
+            || along <= planner.arrival_surface.threshold
+            || along >= planner.arrival_surface.length
+            || (local.east - centre.east).hypot(local.north - centre.north) > 1.852
+            || start.altitude_feet < height - 1.0
+            || start.altitude_feet > published_map.altitude_feet + 1.0
+        {
+            return Err("Late missed approach start is outside its checked runway envelope".into());
+        }
+        start
+    } else {
+        published_map
     };
     let map_speed = map.airspeed.ok_or("Missed approach has no MAP airspeed")?;
     if map_speed.atmosphere != weather.atmosphere
@@ -111,17 +553,44 @@ pub(super) fn prepare(
         preferred_feet: start.altitude_feet,
     };
     let (low, high) = resolved::altitude_bounds(published, &context)?;
-    let level = low.max(start.altitude_feet);
-    if level > high {
+    let level = low
+        .max(start.altitude_feet)
+        .max(holding_floor.unwrap_or(low));
+    let explicit = amendment.is_some_and(|amendment| {
+        amendment.fix == published.identifier
+            && (amendment.geometric_feet - level).abs() <= 1.0
+            && weather
+                .atmosphere
+                .reported(level, amendment.standard)
+                .is_ok_and(|reported| (reported - f64::from(amendment.reported_feet)).abs() <= 1.0)
+    });
+    if level > context.maximum_feet || level > high && !explicit {
         return Err("MAP altitude conflicts with the published holding level".into());
     }
-    let standard = published
+    let published_standard = published
         .altitude_one_is_flight_level
         .ok_or("Holding pressure reference is unresolved")?;
-    if published.altitude_two.is_some() && published.altitude_two_is_flight_level != Some(standard)
+    if published.altitude_two.is_some()
+        && published.altitude_two_is_flight_level != Some(published_standard)
     {
         return Err("Mixed holding pressure references need an explicit clearance solution".into());
     }
+    if amendment.is_some() && !explicit {
+        return Err("Amended missed level does not match its named holding instruction".into());
+    }
+    let standard = amendment.map_or(published_standard, |amendment| amendment.standard);
+    let cleared_leg = |leg: &openatc_core::traffic::procedures::Leg| {
+        let mut leg = leg.clone();
+        if explicit {
+            let amendment = amendment.unwrap();
+            leg.altitude_description.clear();
+            leg.altitude_one = Some(amendment.reported_feet);
+            leg.altitude_one_is_flight_level = Some(amendment.standard);
+            leg.altitude_two = None;
+            leg.altitude_two_is_flight_level = None;
+        }
+        leg
+    };
     let mut position = planner
         .points
         .resolve(published, &planner.destination.icao)
@@ -140,7 +609,7 @@ pub(super) fn prepare(
         ..map_speed
     };
     let pattern = holding::Pattern::published(
-        published,
+        &cleared_leg(published),
         position,
         &holding::Clearance {
             level_feet: weather.atmosphere.reported(level, standard)?.round() as i32,
@@ -151,34 +620,67 @@ pub(super) fn prepare(
             turn_rate_degrees_sec: planner.policy.holding_turn_rate_degrees_sec,
         },
     )?;
-    let mut fixes = resolved::boundary_crossings(start, prefix, &context)?;
+    // Only the named holding fix receives the explicitly amended level. Other crossings keep their limits.
+    let prefix = prefix
+        .iter()
+        .map(|leg| {
+            if explicit
+                && leg.identifier == published.identifier
+                && planner
+                    .points
+                    .resolve(leg, &planner.destination.icao)
+                    .is_some_and(|point| distance_nm(point.coordinate, position.coordinate) < 0.001)
+            {
+                cleared_leg(leg)
+            } else {
+                leg.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    for leg in &prefix {
+        let (_, ceiling) = resolved::altitude_bounds(leg, &context)?;
+        if ceiling < start.altitude_feet {
+            return Err("Missed entry exceeds a published intermediate ceiling".into());
+        }
+    }
+    let mut fixes = resolved::boundary_crossings(start, &prefix, &context)?;
+    for fix in &mut fixes {
+        fix.minimum_feet = fix.minimum_feet.max(start.altitude_feet);
+        if fix.minimum_feet > fix.maximum_feet {
+            return Err("Missed approach would descend below its entry level".into());
+        }
+        fix.preferred_feet = fix.preferred_feet.max(start.altitude_feet);
+    }
     let last = fixes
         .last_mut()
         .ok_or("Missed approach has no holding entry")?;
     if distance_nm(last.coordinate, position.coordinate) >= 0.001 {
         return Err("Missed approach does not reach its named holding fix".into());
     }
-    if last
-        .arrival_heading
-        .is_some_and(|heading| openatc_core::navigation::turn(heading, course).abs() > 1.0)
-        || last.airspeed != Some(airspeed)
-        || level < last.minimum_feet
-        || level > last.maximum_feet
-    {
-        return Err("Missed approach requires a separate holding entry or speed transition".into());
+    if last.airspeed != Some(airspeed) || level < last.minimum_feet || level > last.maximum_feet {
+        return Err(format!(
+            "Missed approach requires a separate holding entry or speed transition (incoming course {:?}, holding course {course:.2}, matching IAS {}, holding level {level:.1} within {:.1}..{:.1})",
+            last.arrival_heading,
+            last.airspeed == Some(airspeed),
+            last.minimum_feet,
+            last.maximum_feet
+        ));
     }
     // The HM level applies to the incoming leg. Its turn direction belongs to
     // the racetrack and must not replace a preceding missed-approach turn.
     last.minimum_feet = level;
     last.maximum_feet = level;
     last.preferred_feet = level;
-    last.arrival_heading = Some(course);
-    last.ground_knots = pattern.ground_knots;
+    let incoming = last.arrival_heading.unwrap_or(course);
+    let entry = pattern.direct_entry(incoming)?;
+    let final_heading = if entry.is_some() { incoming } else { course };
+    last.arrival_heading = Some(final_heading);
+    last.ground_knots = airspeed.ground_knots(level, final_heading)?;
     let path = trajectory::draft(
         start,
         planner.arrival_surface.heading(),
         &fixes,
-        course,
+        final_heading,
         &Envelope {
             bank_degrees: planner.handling.maximum_bank_degrees,
             turn_rate_degrees_sec: planner.policy.airborne_turn_rate_degrees_sec,
@@ -193,11 +695,12 @@ pub(super) fn prepare(
         return Err("Missed approach weather expired during preparation".into());
     }
     Ok(Draft {
-        map: start,
+        map: published_map,
         holding_fix: published.identifier.clone(),
         holding_feet: level,
         path,
         hold,
+        entry,
         climb_fpm: planner.aircraft.climb_fpm,
         descent_fpm: planner.aircraft.descent_fpm,
     })
@@ -218,6 +721,231 @@ mod tests {
         collections::BTreeSet,
         time::{Instant, SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn limit_hold_brakes_before_entry_and_keeps_flying_without_onward_authority() {
+        use openatc_core::traffic::{air::Atmosphere, motion::World, trajectory::Airspeed};
+        use std::sync::Arc;
+        let atmosphere = Atmosphere::surface(1013.25, 15.0, 0.0).unwrap();
+        let reference = Airspeed {
+            atmosphere,
+            indicated_knots: 270.0,
+            wind_from: 0.0,
+            wind_knots: 0.0,
+        };
+        let point = |longitude| Waypoint {
+            latitude: 0.0,
+            longitude,
+            altitude_feet: 35000.0,
+        };
+        let segment = Segment {
+            stage: Stage::Cruise,
+            points: vec![point(0.0), point(0.2)],
+            knots: reference.ground_knots(35000.0, 90.0).unwrap(),
+            resources: vec![],
+            dwell_seconds: 0.0,
+        };
+        let fix = Fix {
+            coordinate: [0.0, 0.2],
+            arrival_heading: Some(90.0),
+            minimum_feet: 35000.0,
+            maximum_feet: 35000.0,
+            preferred_feet: 35000.0,
+            ground_knots: segment.knots,
+            airspeed: Some(reference),
+            required_turn: None,
+            intercept: None,
+        };
+        let policy = HoldingPolicy {
+            minimum_indicated_knots: 140.0,
+            maximum_indicated_knots: 200.0,
+            bank_degrees: 30.0,
+            turn_rate_degrees_sec: 3.0,
+        };
+        let hold = LimitHold::at(0, &segment, &fix, &policy).unwrap();
+        assert_eq!(hold.indicated_knots, 200.0);
+        assert_eq!(hold.leg_seconds, 90.0);
+        assert_eq!(hold.bank_degrees, 25.0);
+        assert!(
+            hold.ground_knots > 300.0,
+            "The holding limit is IAS, not ground speed"
+        );
+        assert!(hold.protect(2000.0, 2000.0, |_, _| false).is_err());
+        let route = Arc::new(hold.protect(2000.0, 2000.0, |_, _| true).unwrap());
+        assert!(hold.matches(&route));
+        let mut changed = hold.clone();
+        changed.indicated_knots = 190.0;
+        assert!(!changed.matches(&route));
+        changed = hold.clone();
+        changed.leg_seconds = 60.0;
+        assert!(!changed.matches(&route));
+        changed = hold.clone();
+        changed.inbound_true_degrees = 180.0;
+        assert!(!changed.matches(&route));
+        let mut fast_pattern = hold.pattern();
+        fast_pattern.ground_knots = segment.knots;
+        let fast_hold = fast_pattern.compile(|_, _| true).unwrap();
+        let nominal = Arc::new(
+            Route::compile(vec![segment.clone(), fast_hold.clone()], 2000.0, 2000.0).unwrap(),
+        );
+        let mut world = World::default();
+        assert!(world.insert(0, 1, nominal));
+        assert!(world.ground_rates(1, 3.0, 3.0));
+        assert!(world.recovery(0, 1, 0, route.clone()));
+        assert!(world.authorise(0, 1, 0, &BTreeSet::new()));
+        world.advance(0.0, false);
+        let mut previous = world.snapshot()[0].clone();
+        let mut entered = false;
+        let mut holding_steps = 0;
+        for step in 1..=2400 {
+            world.advance(f64::from(step) * 0.5, false);
+            let pose = world.snapshot()[0].clone();
+            let travelled = distance_nm(
+                [previous.position.latitude, previous.position.longitude],
+                [pose.position.latitude, pose.position.longitude],
+            );
+            assert!(travelled < segment.knots * 0.5 / 3600.0 + 0.0001);
+            assert!(!pose.complete);
+            if pose.recovering {
+                entered = true;
+                holding_steps += 1;
+                assert_eq!(pose.stage, Stage::Holding);
+                assert_eq!(pose.recovery_from, Some(0));
+                assert!((pose.position.altitude_feet - 35000.0).abs() < 1e-6);
+                assert!((pose.knots - hold.ground_knots).abs() < 0.01);
+            }
+            previous = pose;
+        }
+        assert!(entered && holding_steps > 1000);
+        let mut short = segment;
+        short.points[0].longitude = 0.199;
+        let mut impossible = World::default();
+        assert!(impossible.insert(
+            0,
+            1,
+            Arc::new(Route::compile(vec![short, fast_hold], 2000.0, 2000.0).unwrap())
+        ));
+        assert!(impossible.ground_rates(1, 3.0, 3.0));
+        assert!(!impossible.recovery(0, 1, 0, route));
+    }
+
+    #[test]
+    fn final_recovery_keeps_the_map_path_and_checks_a_late_forward_join() {
+        let point = |longitude, altitude| Waypoint {
+            latitude: 0.0,
+            longitude,
+            altitude_feet: altitude,
+        };
+        let map = point(0.0, 100.0);
+        let fix = point(0.01, 1000.0);
+        let hold = holding::Pattern {
+            fix,
+            inbound_degrees: 90.0,
+            right: true,
+            ground_knots: 100.0,
+            leg_seconds: 60.0,
+            bank_degrees: 25.0,
+            turn_rate_degrees_sec: 3.0,
+        }
+        .compile(|_, _| true)
+        .unwrap();
+        let published = Route::compile(
+            vec![
+                Segment {
+                    stage: Stage::MissedApproach,
+                    points: vec![map, fix],
+                    knots: 100.0,
+                    resources: vec![],
+                    dwell_seconds: 0.0,
+                },
+                hold,
+            ],
+            5000.0,
+            3000.0,
+        )
+        .unwrap();
+        let start = point(-0.01, 500.0);
+        let final_path = vec![Segment {
+            stage: Stage::Approach,
+            points: vec![start, map],
+            knots: 100.0,
+            resources: vec![],
+            dwell_seconds: 0.0,
+        }];
+        let early =
+            from_final(start, &final_path, &published, 5000.0, 3000.0, |_, _| true).unwrap();
+        assert_eq!(early.segment(0).unwrap().points[0], start);
+        let at_map = *early.segment(0).unwrap().points.last().unwrap();
+        assert_eq!(at_map.longitude, map.longitude);
+        assert_eq!(at_map.altitude_feet, start.altitude_feet);
+        assert_eq!(early.segment(1).unwrap().points[0], at_map);
+        let late_start = point(0.002, 0.0);
+        let late = from_final(late_start, &[], &published, 5000.0, 3000.0, |_, _| true).unwrap();
+        let climb = late.segment(0).unwrap();
+        assert_eq!(climb.points[0], late_start);
+        assert_eq!(*climb.points.last().unwrap(), fix);
+        assert!(
+            climb
+                .points
+                .iter()
+                .all(|point| point.longitude >= late_start.longitude)
+        );
+        assert!(from_final(late_start, &[], &published, 5000.0, 3000.0, |_, _| false).is_err());
+        assert!(
+            from_final(
+                point(0.009, 0.0),
+                &[],
+                &published,
+                5000.0,
+                3000.0,
+                |_, _| true
+            )
+            .is_err()
+        );
+        assert!(
+            from_final(point(0.02, 0.0), &[], &published, 5000.0, 3000.0, |_, _| {
+                true
+            })
+            .is_err()
+        );
+        assert!(
+            from_final(
+                Waypoint {
+                    latitude: 0.01,
+                    ..late_start
+                },
+                &[],
+                &published,
+                5000.0,
+                3000.0,
+                |_, _| true
+            )
+            .is_err()
+        );
+        assert!(
+            from_final(
+                Waypoint {
+                    altitude_feet: f64::NAN,
+                    ..start
+                },
+                &final_path,
+                &published,
+                5000.0,
+                3000.0,
+                |_, _| true
+            )
+            .is_err()
+        );
+        let high = point(-0.01, 2000.0);
+        let high_final = vec![Segment {
+            points: vec![high, map],
+            ..final_path[0].clone()
+        }];
+        assert!(from_final(high, &high_final, &published, 5000.0, 3000.0, |_, _| true).is_err());
+        let mut wrong = final_path.clone();
+        wrong[0].resources.push("RUNWAY".into());
+        assert!(from_final(start, &wrong, &published, 5000.0, 3000.0, |_, _| true).is_err());
+    }
 
     #[test]
     fn published_missed_seed_requires_its_map_fix_level_and_protected_hold() {
@@ -326,6 +1054,7 @@ mod tests {
         let mora = Default::default();
         let reserved = BTreeSet::new();
         let planner = super::super::airborne::Planner {
+            regions: &Default::default(),
             rotation: Waypoint {
                 latitude: 0.0,
                 longitude: 0.0,
@@ -344,6 +1073,9 @@ mod tests {
             arrival_surface: &surface,
             observed: &[],
             reserved: &reserved,
+            occupied_stand_cells: &BTreeSet::new(),
+            parking_exclusions: &BTreeSet::new(),
+            preference: &openatc_core::parking::TrafficPreference::default(),
         };
         let speed = trajectory::Airspeed {
             indicated_knots: planner.aircraft.approach_knots,
@@ -360,6 +1092,7 @@ mod tests {
             ground_knots: speed.ground_knots(50.0, 0.0).unwrap(),
             airspeed: Some(speed),
             required_turn: None,
+            intercept: None,
         };
         let draft = prepare(&planner, &terminal, &map, 0.0).unwrap();
         assert_eq!(draft.holding_fix, "HOLD");
@@ -376,6 +1109,157 @@ mod tests {
         assert_eq!(
             hold.points[0].altitude_feet,
             weather.atmosphere.geometric(2000.0, false).unwrap()
+        );
+        let mut late_terminal = terminal.clone();
+        late_terminal.missed[0].terminator = "CA".into();
+        let point = planner
+            .arrival_surface
+            .point(planner.arrival_surface.threshold + 300.0);
+        let coordinate = super::super::position(planner.destination, point);
+        let late = Waypoint {
+            latitude: coordinate[0],
+            longitude: coordinate[1],
+            altitude_feet: planner.arrival_surface.height(point),
+        };
+        assert!(prepare_start(&planner, &terminal, &map, 0.0, None, None, Some(late)).is_err());
+        let late_draft =
+            prepare_start(&planner, &late_terminal, &map, 0.0, None, None, Some(late)).unwrap();
+        assert_eq!(late_draft.map, draft.map);
+        assert!(late_draft.clone().protect(|_, _| false).is_err());
+        let late_route = late_draft.protect(|_, _| true).unwrap();
+        assert_eq!(late_route.segment(0).unwrap().points[0], late);
+        assert_eq!(
+            late_route
+                .segment(0)
+                .unwrap()
+                .points
+                .last()
+                .unwrap()
+                .altitude_feet,
+            weather.atmosphere.geometric(1000.0, false).unwrap()
+        );
+        let wrong = Waypoint {
+            longitude: late.longitude + 0.01,
+            ..late
+        };
+        assert!(
+            prepare_start(&planner, &late_terminal, &map, 0.0, None, None, Some(wrong)).is_err()
+        );
+        for (along, offset) in [
+            (planner.arrival_surface.threshold - 1.0, 0.0),
+            (planner.arrival_surface.length + 1.0, 0.0),
+            (planner.arrival_surface.threshold + 300.0, 1000.0),
+            (planner.arrival_surface.threshold + 300.0, -5.0),
+        ] {
+            let point = planner.arrival_surface.point(along);
+            let coordinate = super::super::position(planner.destination, point);
+            let invalid = Waypoint {
+                latitude: coordinate[0],
+                longitude: coordinate[1],
+                altitude_feet: planner.arrival_surface.height(point) + offset,
+            };
+            assert!(
+                prepare_start(
+                    &planner,
+                    &late_terminal,
+                    &map,
+                    0.0,
+                    None,
+                    None,
+                    Some(invalid)
+                )
+                .is_err()
+            );
+        }
+        late_terminal.missed[0].terminator = "VA".into();
+        let heading =
+            prepare_start(&planner, &late_terminal, &map, 0.0, None, None, Some(late)).unwrap();
+        assert!(heading.protect(|_, _| false).is_err());
+
+        let mut elevated = map.clone();
+        elevated.preferred_feet = weather.atmosphere.geometric(2500.0, false).unwrap();
+        let target = weather.atmosphere.geometric(3000.0, false).unwrap();
+        let amended =
+            prepare_with_holding_floor(&planner, &terminal, &elevated, 0.0, Some(target)).unwrap();
+        assert!((amended.holding_feet - target).abs() < 1e-6);
+        assert!(amended.clone().protect(|_, _| false).is_err());
+        let alternate = amended.protect(|_, _| true).unwrap();
+        assert_eq!(
+            alternate.segment(0).unwrap().points[0].altitude_feet,
+            elevated.preferred_feet
+        );
+        assert!(
+            (0..512)
+                .map_while(|index| alternate.segment(index))
+                .flat_map(|segment| &segment.points)
+                .all(|point| point.altitude_feet + 1e-6 >= elevated.preferred_feet)
+        );
+        let mut limited = terminal.clone();
+        let last = limited.missed.last_mut().unwrap();
+        last.altitude_description = "-".into();
+        last.altitude_one = Some(2200);
+        assert!(
+            prepare_with_holding_floor(&planner, &limited, &elevated, 0.0, Some(target)).is_err()
+        );
+        let mut exact = terminal.clone();
+        for leg in &mut exact.missed {
+            if leg.identifier == "HOLD" {
+                leg.altitude_description.clear();
+                leg.altitude_one = Some(2000);
+            }
+        }
+        assert!(
+            prepare_with_holding_floor(&planner, &exact, &elevated, 0.0, Some(target)).is_err()
+        );
+        let instruction = super::super::flight::MissedInstruction {
+            fix: "HOLD".into(),
+            geometric_feet: target,
+            reported_feet: 3000,
+            standard: false,
+        };
+        let cleared = prepare_with_clearance(
+            &planner,
+            &exact,
+            &elevated,
+            0.0,
+            Some(target),
+            Some(&instruction),
+        )
+        .unwrap();
+        assert!((cleared.holding_feet - target).abs() < 1.0);
+        assert!(cleared.protect(|_, _| false).is_err());
+        assert_eq!(exact.missed.last().unwrap().altitude_one, Some(2000));
+        let mut wrong = instruction.clone();
+        wrong.fix = "OTHER".into();
+        assert!(
+            prepare_with_clearance(&planner, &exact, &elevated, 0.0, Some(target), Some(&wrong))
+                .is_err()
+        );
+        wrong = instruction.clone();
+        wrong.reported_feet += 100;
+        assert!(
+            prepare_with_clearance(&planner, &exact, &elevated, 0.0, Some(target), Some(&wrong))
+                .is_err()
+        );
+        let mut ceiling = terminal.clone();
+        ceiling.missed[0].altitude_description = "-".into();
+        ceiling.missed[0].altitude_one = Some(1000);
+        assert!(
+            prepare_with_holding_floor(&planner, &ceiling, &elevated, 0.0, Some(target)).is_err()
+        );
+        assert!(
+            prepare_with_clearance(
+                &planner,
+                &ceiling,
+                &elevated,
+                0.0,
+                Some(target),
+                Some(&instruction)
+            )
+            .is_err()
+        );
+        assert!(
+            prepare_with_holding_floor(&planner, &terminal, &map, 0.0, Some(f64::NAN)).is_err()
         );
         let edge = [hold.points[0], hold.points[1]];
         assert!(draft.protect(|a, b| [a, b] != edge).is_err());

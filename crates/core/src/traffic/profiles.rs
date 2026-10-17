@@ -460,6 +460,30 @@ impl Profiles {
         catalogue: &Catalogue,
         seed: u64,
     ) -> Option<Selection> {
+        self.select_where(
+            origin,
+            destination,
+            distance_nm,
+            category,
+            catalogue,
+            seed,
+            |_, _| true,
+        )
+    }
+
+    /// Apply airport equipment and stand constraints before weighing the remaining fleets.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn select_where(
+        &self,
+        origin: &Port,
+        destination: &Port,
+        distance_nm: f64,
+        category: Category,
+        catalogue: &Catalogue,
+        seed: u64,
+        allowed: impl Fn(&str, &Aircraft) -> bool,
+    ) -> Option<Selection> {
         if !distance_nm.is_finite()
             || distance_nm < 5.0
             || origin.icao == destination.icao
@@ -494,7 +518,8 @@ impl Profiles {
             let mut fleet = Vec::new();
             for (kind, weight) in &airline.fleet {
                 let aircraft = &self.aircraft[kind];
-                if distance_nm > aircraft.range_nm * 0.8
+                if !allowed(kind, aircraft)
+                    || distance_nm > aircraft.range_nm * 0.8
                     || [origin, destination].iter().any(|p| {
                         p.runway < aircraft.runway || p.parking_size < aircraft.parking_size()
                     })
@@ -604,6 +629,45 @@ pub fn stable_hash(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn actual_stand_constraints_filter_the_fleet_before_selection() {
+        let profiles = Profiles::builtin().unwrap();
+        let catalogue = models(&profiles);
+        for seed in 0..32 {
+            let selection = profiles
+                .select_where(
+                    &port("KLAX"),
+                    &port("KSFO"),
+                    300.0,
+                    Category::GeneralAviation,
+                    &catalogue,
+                    seed,
+                    |_, aircraft| !aircraft.propeller,
+                )
+                .unwrap();
+            assert!(selection.operator.is_empty());
+            assert!(
+                !profiles
+                    .aircraft_for(&selection.aircraft)
+                    .unwrap()
+                    .propeller
+            );
+        }
+        assert!(
+            profiles
+                .select_where(
+                    &port("KLAX"),
+                    &port("KSFO"),
+                    300.0,
+                    Category::GeneralAviation,
+                    &catalogue,
+                    1,
+                    |_, _| false
+                )
+                .is_none()
+        );
+    }
+
     #[test]
     fn managed_spacing_requires_valid_profile_speeds_and_standard_increments() {
         let mut profiles = Profiles::builtin().unwrap();

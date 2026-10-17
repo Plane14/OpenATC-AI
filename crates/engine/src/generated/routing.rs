@@ -28,7 +28,7 @@ fn supported(legs: &[Leg], missed: bool) -> bool {
         && legs.iter().all(|leg| {
             matches!(
                 leg.terminator.as_str(),
-                "IF" | "TF" | "DF" | "CF" | "CA" | "FA" | "VI"
+                "IF" | "TF" | "DF" | "CF" | "CA" | "FA" | "VA" | "VI" | "CI"
             ) || (missed && leg.terminator == "HM")
         })
 }
@@ -287,7 +287,11 @@ pub(super) fn candidates(input: Inputs<'_>) -> Result<Vec<Terminal>, String> {
     });
     result.truncate(input.budget);
     if result.is_empty() {
-        return Err("No resolved runway-compatible SID/STAR/approach with a published recovery and connected approach entry".into());
+        return Err(format!(
+            "No resolved runway-compatible SID/STAR/approach with a published recovery and connected approach entry ({} supported departure variants, {} joined arrival variants)",
+            departures.len(),
+            arrivals.len()
+        ));
     }
     Ok(result.into_iter().map(|(_, route)| route).collect())
 }
@@ -295,6 +299,42 @@ pub(super) fn candidates(input: Inputs<'_>) -> Result<Vec<Terminal>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires installed licensed navigation data"]
+    fn installed_cargo_terminal_candidates_keep_heading_legs() {
+        let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
+        let origin = airport(&root, "KMEM").unwrap();
+        let destination = airport(&root, "KSDF").unwrap();
+        let departures = Catalogue::load(std::path::Path::new(&root), "KMEM").unwrap();
+        let arrivals = Catalogue::load(std::path::Path::new(&root), "KSDF").unwrap();
+        let mut points = Points::requested(&[("KMEM", &departures), ("KSDF", &arrivals)]);
+        points.load(std::path::Path::new(&root)).unwrap();
+        let result = candidates(Inputs {
+            origin: &origin,
+            destination: &destination,
+            departure_runway: "36L",
+            arrival_runway: "17L",
+            departures: &departures,
+            arrivals: &arrivals,
+            points: &points,
+            mora: &openatc_core::navigation::Mora::load(&root),
+            budget: 16,
+        })
+        .unwrap();
+        assert!(
+            result
+                .iter()
+                .any(|route| route.departure.iter().any(|leg| leg.terminator == "VA"))
+        );
+        for route in result {
+            assert_eq!(route.approach.last().unwrap().identifier, "RW17L");
+            assert_eq!(
+                coordinate(route.arrival.last().unwrap(), &destination, &points),
+                coordinate(route.approach.first().unwrap(), &destination, &points)
+            );
+        }
+    }
+
     #[test]
     #[ignore = "requires installed licensed navigation data"]
     fn installed_nice_to_milan_terminal_candidates_keep_restrictions_and_recovery() {

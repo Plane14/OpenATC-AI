@@ -2,6 +2,20 @@
 use super::*;
 use openatc_core::traffic::air::Atmosphere;
 
+pub(super) type Samples = BTreeMap<String, (serde_json::Value, Instant)>;
+pub(super) type Observations = Arc<std::sync::RwLock<Samples>>;
+
+const PLANNING_FIELDS: [&str; 8] = [
+    "latitude",
+    "longitude",
+    "sampleAltitudeFeet",
+    "pressureHpa",
+    "temperatureC",
+    "magneticVariationDegrees",
+    "windDegrees",
+    "windKnots",
+];
+
 #[derive(Clone)]
 pub(super) struct Environment {
     pub atmosphere: Atmosphere,
@@ -9,6 +23,7 @@ pub(super) struct Environment {
     pub wind_from: f64,
     pub wind_knots: f64,
     observed: Instant,
+    live: Option<(Observations, String, [f64; 8])>,
 }
 impl Environment {
     pub fn from_sample(
@@ -39,6 +54,7 @@ impl Environment {
             wind_from: number("windDegrees")?,
             wind_knots: number("windKnots")?,
             observed: *observed,
+            live: None,
         };
         if !(-180.0..=180.0).contains(&environment.variation)
             || !(0.0..=360.0).contains(&environment.wind_from)
@@ -48,6 +64,19 @@ impl Environment {
             return Err("Airport planning weather is stale or outside its envelope".into());
         }
         Ok(environment)
+    }
+    pub fn follow(
+        mut self,
+        airport: &str,
+        observations: &Observations,
+        sample: &serde_json::Value,
+    ) -> Self {
+        self.live = Some((
+            observations.clone(),
+            airport.to_owned(),
+            PLANNING_FIELDS.map(|key| sample[key].as_f64().unwrap_or(f64::NAN)),
+        ));
+        self
     }
     /// Convert an indicated runway speed into movement speed using fresh local weather.
     pub fn runway_speed(
@@ -81,6 +110,18 @@ impl Environment {
             .map(|(ground, _)| ground)
     }
     pub fn fresh(&self) -> bool {
+        if let Some((observations, airport, expected)) = &self.live {
+            return observations.read().ok().is_some_and(|samples| {
+                samples.get(airport).is_some_and(|(sample, observed)| {
+                    observed.elapsed() < Duration::from_secs(45)
+                        && sample["airport"].as_str() == Some(airport.as_str())
+                        && PLANNING_FIELDS
+                            .iter()
+                            .zip(expected)
+                            .all(|(key, expected)| sample[*key].as_f64() == Some(*expected))
+                })
+            });
+        }
         self.observed.elapsed() < Duration::from_secs(45)
     }
 }
@@ -88,6 +129,65 @@ impl Environment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_observations_revalidate_only_unchanged_planning_conditions() {
+        let airport = Airport {
+            icao: "TEST".into(),
+            reference_latitude: 43.0,
+            reference_longitude: 7.0,
+            elevation_feet: 25.0,
+            ..Default::default()
+        };
+        let sample = (
+            serde_json::json!({
+                "airport":"TEST", "latitude":43.0, "longitude":7.0,
+                "sampleAltitudeFeet":25.0, "pressureHpa":1013.25, "temperatureC":15.0,
+                "magneticVariationDegrees":2.0, "windDegrees":220.0, "windKnots":12.0
+            }),
+            Instant::now(),
+        );
+        let observations = Observations::default();
+        let mut weather = Environment::from_sample(&airport, &sample).unwrap().follow(
+            "TEST",
+            &observations,
+            &sample.0,
+        );
+        weather.observed = Instant::now() - Duration::from_secs(90);
+        assert!(!weather.fresh());
+        observations
+            .write()
+            .unwrap()
+            .insert("TEST".into(), sample.clone());
+        assert!(weather.fresh());
+        for field in PLANNING_FIELDS {
+            let mut changed = sample.clone();
+            changed.0[field] = serde_json::json!(changed.0[field].as_f64().unwrap() + 0.01);
+            observations.write().unwrap().insert("TEST".into(), changed);
+            assert!(
+                !weather.fresh(),
+                "Changed {field} must invalidate the planned trajectory"
+            );
+        }
+        let mut stale = sample.clone();
+        stale.1 = Instant::now() - Duration::from_secs(46);
+        observations.write().unwrap().insert("TEST".into(), stale);
+        assert!(!weather.fresh());
+        let mut wrong_airport = sample.clone();
+        wrong_airport.0["airport"] = serde_json::json!("OTHER");
+        observations
+            .write()
+            .unwrap()
+            .insert("TEST".into(), wrong_airport);
+        assert!(!weather.fresh());
+        let mut unrelated = sample;
+        unrelated.0["visibilityMeters"] = serde_json::json!(10000);
+        observations
+            .write()
+            .unwrap()
+            .insert("TEST".into(), unrelated);
+        assert!(weather.fresh());
+    }
+
     #[test]
     fn runway_roll_speeds_use_density_wind_and_the_selected_end() {
         let airport = Airport {
@@ -110,6 +210,7 @@ mod tests {
             wind_from: 0.0,
             wind_knots: 20.0,
             observed: Instant::now(),
+            live: None,
         };
         for indicated in [60.0, 110.0, 150.0] {
             let head = weather

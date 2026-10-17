@@ -10,6 +10,8 @@ pub(super) struct Decoded {
     pub candidate: usize,
     pub nominal: Option<Draft>,
     pub missed: Option<super::recovery::Draft>,
+    pub final_missed: std::collections::BTreeMap<usize, std::sync::Arc<super::recovery::Draft>>,
+    pub missed_instruction: Option<super::flight::MissedInstruction>,
     pub departure: Vec<Fix>,
     pub enroute: Vec<Fix>,
     pub arrival: Vec<Fix>,
@@ -151,6 +153,8 @@ pub(super) fn resolve(input: Request<'_>) -> Result<Decoded, String> {
         candidate: input.candidate,
         nominal: None,
         missed: None,
+        final_missed: Default::default(),
+        missed_instruction: None,
         departure,
         enroute,
         arrival,
@@ -160,6 +164,7 @@ pub(super) fn resolve(input: Request<'_>) -> Result<Decoded, String> {
 
 /// Aircraft-specific production planning context; candidate attempts have no world side effects.
 pub(super) struct Planner<'a> {
+    pub regions: &'a std::collections::BTreeMap<String, openatc_core::regions::Region>,
     pub rotation: Waypoint,
     pub origin: &'a openatc_core::airport::Airport,
     pub destination: &'a openatc_core::airport::Airport,
@@ -174,6 +179,9 @@ pub(super) struct Planner<'a> {
     pub arrival_surface: &'a super::runway::Surface,
     pub observed: &'a [openatc_core::state::TrafficTarget],
     pub reserved: &'a std::collections::BTreeSet<String>,
+    pub occupied_stand_cells: &'a std::collections::BTreeSet<String>,
+    pub parking_exclusions: &'a std::collections::BTreeSet<String>,
+    pub preference: &'a openatc_core::parking::TrafficPreference,
 }
 impl Planner<'_> {
     /// Select only after the published crossing connects through landing and parking.
@@ -181,6 +189,7 @@ impl Planner<'_> {
     pub fn arrival(
         &self,
         candidates: &[super::routing::Terminal],
+        usage: &std::collections::BTreeMap<usize, usize>,
     ) -> Result<(Decoded, super::landing::Arrival), String> {
         let departure_floor_feet = self.origin.elevation_feet.min(
             self.departure_weather.atmosphere.geometric(
@@ -200,11 +209,20 @@ impl Planner<'_> {
         );
         let mut reason = "No terminal candidate is available".to_owned();
         let mut attempted = 0;
-        for (candidate, terminal) in candidates
-            .iter()
-            .take(self.policy.terminal_candidate_limit)
-            .enumerate()
-        {
+        let mut first_reason = None;
+        // Terminal variants often share the same final crossing and runway exit.
+        // Reuse identical landing searches only within this immutable aircraft/weather/stand request.
+        let mut landings: Vec<(
+            Waypoint,
+            f64,
+            trajectory::Airspeed,
+            Result<super::landing::Arrival, String>,
+        )> = Vec::new();
+        let mut order =
+            (0..candidates.len().min(self.policy.terminal_candidate_limit)).collect::<Vec<_>>();
+        order.sort_by_key(|index| (usage.get(index).copied().unwrap_or(0), *index));
+        for candidate in order {
+            let terminal = &candidates[candidate];
             attempted += 1;
             let attempt = (|| {
                 let mut decoded = resolve(Request {
@@ -233,23 +251,41 @@ impl Planner<'_> {
                     .last()
                     .and_then(|leg| leg.vertical_angle_degrees)
                     .ok_or("Approach has no published final descent angle")?;
-                let arrival = super::landing::prepare(super::landing::Request {
-                    airport: self.destination,
-                    surface: self.arrival_surface,
-                    crossing: Waypoint {
-                        latitude: crossing.coordinate[0],
-                        longitude: crossing.coordinate[1],
-                        altitude_feet: crossing.preferred_feet,
-                    },
-                    angle_degrees: angle,
-                    airspeed: crossing.airspeed.ok_or("Approach airspeed is unresolved")?,
-                    aircraft: self.aircraft,
-                    handling: self.handling,
-                    policy: self.policy,
-                    observed: self.observed,
-                    reserved: self.reserved,
-                })?;
-                decoded.nominal = Some(draft(
+                let threshold = Waypoint {
+                    latitude: crossing.coordinate[0],
+                    longitude: crossing.coordinate[1],
+                    altitude_feet: crossing.preferred_feet,
+                };
+                let airspeed = crossing.airspeed.ok_or("Approach airspeed is unresolved")?;
+                let arrival = if let Some((_, _, _, result)) =
+                    landings.iter().find(|(point, descent, speed, _)| {
+                        *point == threshold && *descent == angle && *speed == airspeed
+                    }) {
+                    result.clone()?
+                } else {
+                    let result = super::landing::prepare(super::landing::Request {
+                        airport: self.destination,
+                        surface: self.arrival_surface,
+                        crossing: threshold,
+                        angle_degrees: angle,
+                        airspeed,
+                        aircraft: self.aircraft,
+                        handling: self.handling,
+                        policy: self.policy,
+                        observed: self.observed,
+                        reserved: self.reserved,
+                        occupied_stand_cells: self.occupied_stand_cells,
+                        parking_exclusions: self.parking_exclusions,
+                        preference: self.preference,
+                    });
+                    landings.push((threshold, angle, airspeed, result.clone()));
+                    result?
+                };
+                let departure_region =
+                    openatc_core::regions::region_for(self.regions, &self.origin.icao);
+                let arrival_region =
+                    openatc_core::regions::region_for(self.regions, &self.destination.icao);
+                decoded.nominal = Some(draft_scheduled(
                     self.rotation,
                     self.departure_surface.heading(),
                     self.arrival_surface.heading(),
@@ -279,6 +315,15 @@ impl Planner<'_> {
                         spacing_meters: self.policy.airborne_sample_meters,
                         maximum_detour_meters: self.policy.airborne_detour_meters,
                     },
+                    Some((&departure_region, &arrival_region)),
+                    Some((self.mora, self.departure_weather, self.arrival_weather)),
+                )?);
+                decoded.nominal = Some(decoded.nominal.take().unwrap().limit_scopes(
+                    900.0
+                        - self.policy.airborne_prediction_seconds
+                        - self.policy.flight_clearance_lead_seconds,
+                    &departure_region,
+                    &arrival_region,
                 )?);
                 decoded.missed = Some(super::recovery::prepare(
                     self,
@@ -286,6 +331,22 @@ impl Planner<'_> {
                     decoded.approach.last().ok_or("Approach MAP is missing")?,
                     arrival_floor_feet,
                 )?);
+                let late = *arrival
+                    .flare
+                    .points
+                    .last()
+                    .ok_or("Flare has no late go-around position")?;
+                let (variants, instruction) = super::recovery::final_variants(
+                    self,
+                    terminal,
+                    decoded.approach.last().unwrap(),
+                    arrival_floor_feet,
+                    decoded.nominal.as_ref().unwrap(),
+                    decoded.missed.as_ref().unwrap(),
+                    late,
+                )?;
+                decoded.final_missed = variants;
+                decoded.missed_instruction = instruction;
                 if !self.departure_weather.fresh() || !self.arrival_weather.fresh() {
                     return Err("Terminal weather expired before arrival selection".to_owned());
                 }
@@ -297,9 +358,17 @@ impl Planner<'_> {
                     reason = format!(
                         "{}/{}/{}: {error}",
                         terminal.departure_name, terminal.arrival_name, terminal.approach_name
-                    )
+                    );
+                    if first_reason.is_none() {
+                        first_reason = Some(reason.clone());
+                    }
                 }
             }
+        }
+        if let Some(first) = first_reason
+            && first != reason
+        {
+            reason = format!("{first}; last candidate: {reason}");
         }
         Err(format!(
             "No complete arrival among {attempted} terminal candidates: {reason}"
@@ -307,6 +376,7 @@ impl Planner<'_> {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Section {
     pub stage: Stage,
     pub crossings: Vec<Fix>,
@@ -315,10 +385,62 @@ pub(super) struct Section {
 /// Joint solved levels and geometry awaiting verified corridor protection.
 #[derive(Clone)]
 pub(super) struct Draft {
+    enroute_checked: bool,
     path: trajectory::Draft,
     stages: Vec<Stage>,
+    crossings: Vec<Fix>,
 }
 impl Draft {
+    fn limit_scopes(
+        self,
+        seconds: f64,
+        departure: &openatc_core::regions::Region,
+        arrival: &openatc_core::regions::Region,
+    ) -> Result<Self, String> {
+        let stages = self.stages;
+        let crossings = self.crossings;
+        let (path, source) = self.path.split_limits(
+            seconds,
+            |index| stages[index] != Stage::Approach,
+            |index, lower, upper, preferred| {
+                let region = if matches!(stages[index], Stage::Climb | Stage::Cruise) {
+                    departure
+                } else {
+                    arrival
+                };
+                super::controller::select_level(&crossings[index], region, lower, upper, preferred)
+            },
+        )?;
+        let crossings = path.crossings().to_vec();
+        Ok(Self {
+            path,
+            crossings,
+            stages: source.into_iter().map(|index| stages[index]).collect(),
+            enroute_checked: self.enroute_checked,
+        })
+    }
+    pub fn enroute_checked(&self) -> bool {
+        self.enroute_checked
+    }
+
+    pub fn approach_levels(&self) -> Vec<(usize, f64, f64)> {
+        self.stages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, stage)| {
+                if *stage != Stage::Approach {
+                    return None;
+                }
+                self.path
+                    .level_span(index)
+                    .map(|(start, end)| (index, start, end))
+            })
+            .collect()
+    }
+
+    pub fn requirements(&self) -> &[Fix] {
+        &self.crossings
+    }
     pub fn leg_count(&self) -> usize {
         self.path.leg_count()
     }
@@ -367,6 +489,33 @@ pub(super) fn draft(
     sections: Vec<Section>,
     envelope: &Envelope,
 ) -> Result<Draft, String> {
+    draft_scheduled(
+        rotation,
+        departure_heading,
+        runway_heading,
+        sections,
+        envelope,
+        None,
+        None,
+    )
+}
+
+fn draft_scheduled(
+    rotation: Waypoint,
+    departure_heading: f64,
+    runway_heading: f64,
+    sections: Vec<Section>,
+    envelope: &Envelope,
+    regions: Option<(
+        &openatc_core::regions::Region,
+        &openatc_core::regions::Region,
+    )>,
+    terrain: Option<(
+        &openatc_core::navigation::Mora,
+        &super::environment::Environment,
+        &super::environment::Environment,
+    )>,
+) -> Result<Draft, String> {
     if sections.len() != 4
         || sections.iter().map(|section| section.stage).ne([
             Stage::Climb,
@@ -374,7 +523,18 @@ pub(super) fn draft(
             Stage::Descent,
             Stage::Approach,
         ])
-        || sections.iter().any(|section| section.crossings.is_empty())
+        || sections
+            .iter()
+            .enumerate()
+            .any(|(index, section)| index != 1 && section.crossings.is_empty())
+        || sections[1].crossings.is_empty()
+            && !sections[0]
+                .crossings
+                .last()
+                .zip(sections[2].crossings.first())
+                .is_some_and(|(last, first)| {
+                    openatc_core::arrival::distance_nm(last.coordinate, first.coordinate) < 0.001
+                })
     {
         return Err(
             "Airborne plan needs ordered departure, en-route, arrival and approach sections".into(),
@@ -399,17 +559,88 @@ pub(super) fn draft(
             }
         }
     }
-    let path = trajectory::draft(
-        rotation,
-        departure_heading,
-        &crossings,
-        runway_heading,
-        envelope,
-    )?;
-    Ok(Draft { path, stages })
+    for _ in 0..12 {
+        let path = trajectory::draft_selected(
+            rotation,
+            departure_heading,
+            &crossings,
+            runway_heading,
+            envelope,
+            |index, lower, upper, preferred| {
+                let Some((departure, arrival)) = regions else {
+                    return Some(preferred.clamp(lower, upper));
+                };
+                if stages[index] == Stage::Approach {
+                    // The approach clearance retains published vertical restrictions;
+                    // its sampled crossings are not separate assigned flight levels.
+                    return Some(preferred.clamp(lower, upper));
+                }
+                let region = if matches!(stages[index], Stage::Climb | Stage::Cruise) {
+                    departure
+                } else {
+                    arrival
+                };
+                super::controller::select_level(&crossings[index], region, lower, upper, preferred)
+            },
+        )?;
+        crossings = path.crossings().to_vec();
+        let Some((mora, departure_weather, arrival_weather)) = terrain else {
+            return Ok(Draft {
+                path,
+                stages,
+                crossings,
+                enroute_checked: false,
+            });
+        };
+        if !departure_weather.fresh() || !arrival_weather.fresh() {
+            return Err("Enroute protection weather expired".into());
+        }
+        let floors = path.minimum_levels(|index, from, to| {
+            if stages[index] != Stage::Cruise {
+                return Ok(None);
+            }
+            let published = mora
+                .corridor([from.latitude, from.longitude], [to.latitude, to.longitude])
+                .filter(|floor| *floor > 0)
+                .ok_or("Curved enroute corridor has unknown grid MORA")?;
+            let published = f64::from(published);
+            let floor = published
+                .max(departure_weather.atmosphere.geometric(published, false)?)
+                .max(arrival_weather.atmosphere.geometric(published, false)?);
+            Ok((from.altitude_feet.min(to.altitude_feet) + 1e-6 < floor).then_some(floor))
+        })?;
+        if floors.iter().all(Option::is_none) {
+            return Ok(Draft {
+                path,
+                stages,
+                crossings,
+                enroute_checked: true,
+            });
+        }
+        for (index, floor) in floors.into_iter().enumerate() {
+            let Some(floor) = floor else {
+                continue;
+            };
+            if index == 0 {
+                return Err("Enroute minimum conflicts with the fixed departure position".into());
+            }
+            for crossing in &mut crossings[index - 1..=index] {
+                crossing.minimum_feet = crossing.minimum_feet.max(floor);
+                if crossing.minimum_feet > crossing.maximum_feet {
+                    return Err(
+                        "Curved enroute MORA conflicts with a published crossing ceiling".into(),
+                    );
+                }
+            }
+        }
+    }
+    Err("Curved enroute level and corridor planning did not converge".into())
 }
 
-fn merge(previous: &mut Fix, next: &Fix) -> Result<(), String> {
+pub(super) fn merge(previous: &mut Fix, next: &Fix) -> Result<(), String> {
+    if previous.intercept.is_some() || next.intercept.is_some() {
+        return Err("Coincident course intercept needs a separate movement limit".into());
+    }
     let minimum = previous.minimum_feet.max(next.minimum_feet);
     let maximum = previous.maximum_feet.min(next.maximum_feet);
     if minimum > maximum {
@@ -616,6 +847,7 @@ mod tests {
                     preferred_feet,
                     ground_knots: 120.0,
                     required_turn: None,
+                    intercept: None,
                 }],
             },
         )
@@ -632,6 +864,112 @@ mod tests {
                 maximum_detour_meters: 100.0,
             },
         )
+    }
+
+    #[test]
+    fn shared_sid_star_boundary_needs_no_invented_cruise_leg() {
+        let (start, mut sections, envelope) = inputs();
+        sections[1].crossings.clear();
+        let boundary = sections[0].crossings[0].clone();
+        sections[2].crossings.insert(0, boundary);
+        let segments = compile(start, 0.0, 0.0, sections.clone(), &envelope, |_, _| true).unwrap();
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.stage)
+                .collect::<Vec<_>>(),
+            vec![Stage::Climb, Stage::Descent, Stage::Approach]
+        );
+        let mut conflicting = sections.clone();
+        conflicting[2].crossings[0].minimum_feet = 7000.0;
+        assert!(draft(start, 0.0, 0.0, conflicting, &envelope).is_err());
+        let mut different_speed = sections.clone();
+        different_speed[2].crossings[0].ground_knots += 1.0;
+        assert!(draft(start, 0.0, 0.0, different_speed, &envelope).is_err());
+        sections[2].crossings[0].coordinate[0] += 0.01;
+        assert!(draft(start, 0.0, 0.0, sections, &envelope).is_err());
+    }
+
+    #[test]
+    fn actual_enroute_edges_raise_the_profile_without_relaxing_published_ceilings() {
+        use openatc_core::{airport::Airport, navigation::Mora};
+        let airport = Airport {
+            icao: "TEST".into(),
+            ..Default::default()
+        };
+        let weather = super::super::environment::Environment::from_sample(&airport, &(
+            serde_json::json!({"airport":"TEST","latitude":0.0,"longitude":0.0,"sampleAltitudeFeet":0.0,
+                "pressureHpa":1013.25,"temperatureC":15.0,"magneticVariationDegrees":0.0,
+                "windDegrees":0.0,"windKnots":0.0}), std::time::Instant::now())).unwrap();
+        let data = || {
+            let (start, mut sections, envelope) = inputs();
+            sections[0].crossings[0].preferred_feet = 3000.0;
+            sections[1].crossings[0].preferred_feet = 3000.0;
+            sections[2].crossings[0].coordinate[0] = 0.5;
+            sections[3].crossings[0].coordinate[0] = 0.6;
+            (start, sections, envelope)
+        };
+        let mora = Mora(
+            (-1..=1)
+                .flat_map(|latitude| (-1..=1).map(move |longitude| ((latitude, longitude), 5000)))
+                .collect(),
+        );
+        let (start, sections, envelope) = data();
+        let draft = draft_scheduled(
+            start,
+            0.0,
+            0.0,
+            sections,
+            &envelope,
+            None,
+            Some((&mora, &weather, &weather)),
+        )
+        .unwrap();
+        assert!(draft.enroute_checked());
+        assert!(draft.requirements()[0].minimum_feet >= 5000.0);
+        assert!(draft.requirements()[1].minimum_feet >= 5000.0);
+        assert_eq!(draft.requirements()[0].maximum_feet, 6000.0);
+        assert_eq!(draft.requirements()[2].maximum_feet, 1000.0);
+        assert!(
+            draft.clone().protect(|_, _| false).is_err(),
+            "An enroute check cannot release terminal geometry"
+        );
+        let segments = draft.protect(|_, _| true).unwrap();
+        assert!(
+            segments[1]
+                .points
+                .iter()
+                .all(|point| point.altitude_feet >= 5000.0)
+        );
+        let (start, mut sections, envelope) = data();
+        sections[0].crossings[0].maximum_feet = 4000.0;
+        assert!(
+            draft_scheduled(
+                start,
+                0.0,
+                0.0,
+                sections,
+                &envelope,
+                None,
+                Some((&mora, &weather, &weather))
+            )
+            .err()
+            .unwrap()
+            .contains("ceiling")
+        );
+        let (start, sections, envelope) = data();
+        assert!(
+            draft_scheduled(
+                start,
+                0.0,
+                0.0,
+                sections,
+                &envelope,
+                None,
+                Some((&Mora::default(), &weather, &weather))
+            )
+            .is_err()
+        );
     }
 
     #[test]

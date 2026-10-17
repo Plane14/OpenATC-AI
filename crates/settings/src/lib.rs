@@ -3,13 +3,13 @@
 use serde::{Deserialize, Serialize};
 
 fn http_origin() -> String {
-    "http://127.0.0.1:11434".to_owned()
+    "http://127.0.0.1:8099".to_owned()
 }
 fn stt_origin() -> String {
-    "http://127.0.0.1:8000".to_owned()
+    http_origin()
 }
 fn tts_origin() -> String {
-    "http://127.0.0.1:8001".to_owned()
+    http_origin()
 }
 fn alloy() -> String {
     "alloy".to_owned()
@@ -394,7 +394,7 @@ impl Default for Settings {
             regional_traffic: 4,
             cargo_traffic: 2,
             ga_traffic: 5,
-            hear_traffic_radio: false,
+            hear_traffic_radio: true,
             talk_to_traffic: false,
             informal_pilot_chat: false,
             pilot_chat_humour: false,
@@ -403,7 +403,7 @@ impl Default for Settings {
             simbrief_id: String::new(),
             simulator_root: String::new(),
             ai_url: http_origin(),
-            ai_model: String::new(),
+            ai_model: "qwen2.5-7b".to_owned(),
             stt_url: stt_origin(),
             stt_model: whisper(),
             tts_url: tts_origin(),
@@ -444,16 +444,16 @@ impl Default for Settings {
             input_device: String::new(),
             output_device: String::new(),
             // Toggles.
-            ai_enabled: false,
+            ai_enabled: true,
             llm_phrase_variety: false,
-            copilot_replies: false,
-            copilot_tunes: false,
+            copilot_replies: true,
+            copilot_tunes: true,
             auto_tune_handoff: true,
             copilot_auto_respond: true,
             copilot_flies_ap: false,
-            controller_speech: false,
-            copilot_speech: false,
-            pilot_speech: false,
+            controller_speech: true,
+            copilot_speech: true,
+            pilot_speech: true,
             randomize_delivery: false,
             radio_effects: true,
             radio_bandpass: true,
@@ -699,7 +699,57 @@ mod tests {
 
     #[test]
     fn defaults_are_valid() {
-        Settings::default().validate().unwrap();
+        let settings = Settings::default();
+        settings.validate().unwrap();
+        let missing: Settings = serde_json::from_str("{}").unwrap();
+        for value in [settings, missing] {
+            assert_eq!(value.ai_url, "http://127.0.0.1:8099");
+            assert_eq!(value.stt_url, value.ai_url);
+            assert_eq!(value.tts_url, value.ai_url);
+            assert_eq!(value.ai_model, "qwen2.5-7b");
+            assert!(
+                value.ai_enabled
+                    && value.controller_speech
+                    && value.copilot_speech
+                    && value.pilot_speech
+            );
+            assert!(
+                value.copilot_replies
+                    && value.copilot_tunes
+                    && value.auto_tune_handoff
+                    && value.copilot_auto_respond
+            );
+            assert!(value.hear_traffic_radio);
+            assert!(
+                !value.copilot_flies_ap
+                    && !value.generated_traffic
+                    && !value.pilots_call_me
+                    && !value.informal_pilot_chat
+            );
+            assert!(
+                value.pilot_volume > 0.0
+                    && value.copilot_volume > 0.0
+                    && value.attendant_volume > 0.0
+                    && value.ground_volume > 0.0
+            );
+        }
+    }
+
+    #[test]
+    fn saved_service_addresses_and_speech_choices_survive_new_defaults() {
+        let saved = serde_json::json!({
+            "aiUrl":"http://remote-model:11434", "sttUrl":"http://remote-stt:8000",
+            "ttsUrl":"http://remote-voice:8001", "aiModel":"custom-model",
+            "aiEnabled":false, "controllerSpeech":false, "copilotSpeech":false,
+            "pilotSpeech":false, "copilotReplies":false, "copilotTunes":false,
+            "hearTrafficRadio":false
+        });
+        let settings: Settings = serde_json::from_value(saved.clone()).unwrap();
+        settings.validate().unwrap();
+        let persisted = serde_json::to_value(settings).unwrap();
+        for (key, value) in saved.as_object().unwrap() {
+            assert_eq!(&persisted[key], value, "Saved {key} changed");
+        }
     }
 
     #[test]

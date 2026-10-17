@@ -142,15 +142,11 @@ pub(crate) fn weather_location(
     state: &crate::EngineState,
     id: &str,
 ) -> Option<openatc_core::state::WeatherAirport> {
-    if let Some(airport) = [
-        state.airport.as_ref(),
-        state.arrival_airport.as_ref(),
-        state.generated.airport.as_deref(),
-        state.generated.destination.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|airport| airport.icao == id)
+    if let Some(airport) = [state.airport.as_ref(), state.arrival_airport.as_ref()]
+        .into_iter()
+        .flatten()
+        .chain(state.generated.operational_airports())
+        .find(|airport| airport.icao == id)
     {
         return Some(openatc_core::state::WeatherAirport {
             airport: id.into(),
@@ -259,8 +255,10 @@ pub async fn weather(AxumState(shared): AxumState<Shared>, Json(body): Json<Valu
         information.1 = (information.1 + 1) % 26;
     }
 
-    s.sim_weather
-        .insert(airport.to_owned(), (body, std::time::Instant::now()));
+    let airport = airport.to_owned();
+    let sample = (body, std::time::Instant::now());
+    s.generated.observe_weather(&airport, &sample);
+    s.sim_weather.insert(airport, sample);
     Json(json!({"accepted":true})).into_response()
 }
 /// Deterministic simulated ATIS. Never use online METAR or aircraft-local weather.

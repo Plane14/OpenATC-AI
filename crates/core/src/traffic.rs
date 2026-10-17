@@ -10,6 +10,7 @@ pub mod motion;
 pub mod procedures;
 pub mod profiles;
 pub mod resolved;
+pub mod separation;
 pub mod surface;
 pub mod trajectory;
 pub mod vertical;

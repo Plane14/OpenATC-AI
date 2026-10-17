@@ -1135,7 +1135,7 @@ impl Plugin for OpenAtc {
     }
 }
 
-/// Command handler routing the five plugin commands to the interface.
+/// Route registered simulator commands to the interface.
 struct TalkHandler {
     shared: Arc<Mutex<Shared>>,
     name: String,

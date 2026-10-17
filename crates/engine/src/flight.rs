@@ -1382,7 +1382,7 @@ fn approach_runway(name: &str) -> Option<&str> {
     (suffix.is_empty() || matches!(suffix, "X" | "Y" | "Z")).then_some(&name[1..end])
 }
 /// Turn a published procedure identifier into a readable approach name.
-fn approach_label(name: &str) -> String {
+pub(crate) fn approach_label(name: &str) -> String {
     let Some(runway) = approach_runway(name) else {
         return name.into();
     };

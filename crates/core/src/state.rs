@@ -72,7 +72,7 @@ pub struct GeneratedTraffic {
     /// Actual vertical movement, used by TCAS independently of visual pitch.
     #[serde(default)]
     pub vertical_speed_fpm: f64,
-    /// Body orientation can differ from ground track during pushback.
+    /// Body orientation can differ from ground track during pushback or in wind.
     #[serde(default)]
     pub body_heading_degrees: Option<f64>,
     /// Operational identity and geographic position.

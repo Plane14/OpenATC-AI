@@ -24,6 +24,8 @@ The Rust airport map uses earcutr 0.4.3 (ISC) to triangulate installed pavement 
 
 The Rust plugin vendors xplane 0.1.0-alpha.1 (MPL 2.0), with a corrected SDK dataref type-mask check. The installer includes its complete source in `source/xplane` and its license in `assets/licenses/xplane-MPL-2.0.txt`. Preserve these files when redistributing the plugin.
 
+The companion engine uses sevenz-rust2 0.23.0 (Apache-2.0) to read the user’s 7z-compressed DSF scenery on planning workers. Its notice is retained in `assets/licenses/sevenz-rust2-LICENSE.txt`; the default compression, encryption and optional codec features are disabled. DSF decoding and mesh checks are first-party Rust based on Laminar’s published file-format specification. No installed scenery data is redistributed.
+
 The Rust companion engine uses reqwest with default features disabled and rustls/webpki roots for HTTPS. It does not dynamically link OpenSSL; preserve the Rust TLS dependencies’ license notices when distributing.
 
 The Rust UI uses arboard (MIT/Apache-2.0) for native text clipboard access. Linux uses the Rust x11rb transport without linking Xlib into the plugin. Clipboard ownership lives until the UI closes.

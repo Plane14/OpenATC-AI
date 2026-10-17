@@ -84,6 +84,12 @@ mod tests {
         assert_eq!(default.airborne_detour_meters, 5000.0);
         assert_eq!(default.airborne_turn_rate_degrees_sec, 3.0);
         for (from, to) in [
+            ("network_airport_limit = 4", "network_airport_limit = 7"),
+            (
+                "network_candidate_limit = 16",
+                "network_candidate_limit = 33",
+            ),
+            ("network_radius_nm = 750.0", "network_radius_nm = nan"),
             (
                 "airborne_sample_meters = 250.0",
                 "airborne_sample_meters = 251.0",

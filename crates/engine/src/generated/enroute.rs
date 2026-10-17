@@ -25,7 +25,7 @@ pub(super) fn crossings(input: Request<'_>) -> Result<Vec<Fix>, String> {
     if !input.departure_weather.fresh() || !input.arrival_weather.fresh() {
         return Err("Enroute planning needs fresh endpoint weather".into());
     }
-    if !(5.0..=50.0).contains(&input.spacing_nm) || !(1..=128).contains(&input.budget) {
+    if !(5.0..=50.0).contains(&input.spacing_nm) || input.budget > 128 {
         return Err("Enroute crossing budget or spacing is invalid".into());
     }
     let start = input
@@ -42,7 +42,7 @@ pub(super) fn crossings(input: Request<'_>) -> Result<Vec<Fix>, String> {
         return Err("Enroute connection does not match the resolved terminal boundaries".into());
     }
     let distance = distance_nm(from, to);
-    if !distance.is_finite() || distance < 0.01 {
+    if !distance.is_finite() || (0.001..0.01).contains(&distance) {
         return Err("Enroute connection has no supported flight distance".into());
     }
     let count = (distance / input.spacing_nm).ceil() as usize;
@@ -71,6 +71,22 @@ pub(super) fn crossings(input: Request<'_>) -> Result<Vec<Fix>, String> {
         return Err(
             "Enroute terrain floor conflicts with the aircraft or terminal level limits".into(),
         );
+    }
+    if distance < 0.001 {
+        let mut joined = start.clone();
+        let mut entry = end.clone();
+        for crossing in [&mut joined, &mut entry] {
+            crossing.minimum_feet = crossing.minimum_feet.max(terrain_floor);
+            crossing.maximum_feet = crossing.maximum_feet.min(maximum);
+            if crossing.minimum_feet > crossing.maximum_feet {
+                return Err(
+                    "Coincident terminal boundary conflicts with terrain or ceiling".into(),
+                );
+            }
+        }
+        super::airborne::merge(&mut joined, &entry)?;
+        *input.departure.last_mut().unwrap() = joined;
+        return Ok(Vec::new());
     }
     let course = bearing(from, to);
     let mut result: Vec<Fix> = Vec::with_capacity(count);
@@ -145,6 +161,7 @@ pub(super) fn crossings(input: Request<'_>) -> Result<Vec<Fix>, String> {
             ground_knots: airspeed.ground_knots(maximum, bearing(previous, coordinate))?,
             airspeed: Some(airspeed),
             required_turn: None,
+            intercept: None,
         });
         previous = coordinate;
     }
@@ -197,6 +214,7 @@ mod tests {
             ground_knots: 100.0,
             airspeed: Some(speed),
             required_turn: None,
+            intercept: None,
         };
         let terminal = Terminal {
             enroute_from: [0.2, 0.2],
@@ -264,5 +282,58 @@ mod tests {
         let mut low = [fix(terminal.enroute_from, 500.0)];
         assert!(crossings(request!(&mut low, &grid, 20)).is_err());
         assert_eq!(low[0].minimum_feet, 500.0);
+        let mut shared = terminal.clone();
+        shared.enroute_to = shared.enroute_from;
+        shared.enroute_minimum_feet = 1000;
+        let arrival = [fix(shared.enroute_from, 6000.0)];
+        let mut departure = [arrival[0].clone()];
+        let result = crossings(Request {
+            terminal: &shared,
+            departure: &mut departure,
+            arrival: &arrival,
+            mora: &grid,
+            departure_weather: &departure_weather,
+            arrival_weather: &arrival_weather,
+            aircraft,
+            spacing_nm: 20.0,
+            budget: 0,
+        })
+        .unwrap();
+        assert!(result.is_empty());
+        assert_eq!(departure[0].minimum_feet, 6000.0);
+        let before = departure[0].clone();
+        let mut conflicting = arrival.clone();
+        conflicting[0].minimum_feet = 7000.0;
+        conflicting[0].maximum_feet = 8000.0;
+        assert!(
+            crossings(Request {
+                terminal: &shared,
+                departure: &mut departure,
+                arrival: &conflicting,
+                mora: &grid,
+                departure_weather: &departure_weather,
+                arrival_weather: &arrival_weather,
+                aircraft,
+                spacing_nm: 20.0,
+                budget: 20,
+            })
+            .is_err()
+        );
+        assert_eq!(departure[0].minimum_feet, before.minimum_feet);
+        assert_eq!(departure[0].maximum_feet, before.maximum_feet);
+        assert!(
+            crossings(Request {
+                terminal: &shared,
+                departure: &mut departure,
+                arrival: &arrival,
+                mora: &Mora(BTreeMap::new()),
+                departure_weather: &departure_weather,
+                arrival_weather: &arrival_weather,
+                aircraft,
+                spacing_nm: 20.0,
+                budget: 20,
+            })
+            .is_err()
+        );
     }
 }

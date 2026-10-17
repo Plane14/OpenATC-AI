@@ -14,6 +14,7 @@ use std::{
 };
 
 struct Liftoff {
+    id: u32,
     airport: String,
     runway: String,
     heading: f64,
@@ -38,6 +39,48 @@ pub(super) struct Monitor {
 }
 
 impl Monitor {
+    pub(super) fn departure_delay(
+        &self,
+        id: u32,
+        airport: &Airport,
+        runway: &str,
+        aircraft: &str,
+        latitude: f64,
+        longitude: f64,
+    ) -> f64 {
+        if !wake::applies(&airport.icao) {
+            return 0.0;
+        }
+        let Some(position) = runway_position(airport, runway, latitude, longitude) else {
+            return 240.0;
+        };
+        let follower = wake::category(aircraft);
+        self.departures
+            .iter()
+            .filter(|event| {
+                event.id != id
+                    && event.airport == airport.icao
+                    && wake::related_runways(airport, &event.runway, runway, event.category)
+            })
+            .map(|event| {
+                let kind = if openatc_core::navigation::turn(event.heading, position.3).abs() > 90.0
+                {
+                    Departure::Opposite
+                } else if position.0 > 152.4 {
+                    Departure::Intersection
+                } else {
+                    Departure::FullLength
+                };
+                let required = event
+                    .category
+                    .zip(follower)
+                    .and_then(|(a, b)| wake::departure_seconds(a, b, kind))
+                    .unwrap_or(240);
+                (f64::from(required) - (self.elapsed - event.at)).max(0.0)
+            })
+            .fold(0.0, f64::max)
+    }
+
     fn arrival_conflict(
         &mut self,
         t: &Telemetry,
@@ -183,7 +226,28 @@ pub(super) fn observe(state: &mut EngineState) {
     );
 
     if let Some(targets) = &t.traffic {
-        for target in targets.iter().take(126).filter(|p| p.id != 0) {
+        let own = TrafficTarget {
+            id: 0,
+            callsign: state.session.plan.callsign.clone(),
+            aircraft: if t.aircraft_icao.is_empty() {
+                state.session.plan.aircraft.clone()
+            } else {
+                t.aircraft_icao.clone()
+            },
+            latitude: t.latitude,
+            longitude: t.longitude,
+            altitude_feet: t.altitude_feet,
+            track_degrees: t.ground_track_degrees.unwrap_or(t.heading_degrees),
+            ground_speed_knots: Some(t.ground_speed_knots),
+            on_ground: t.on_ground,
+            ..Default::default()
+        };
+        let targets = targets
+            .iter()
+            .filter(|p| p.id != 0)
+            .take(126)
+            .chain(std::iter::once(&own));
+        for target in targets.clone() {
             let lifted = !target.on_ground
                 && monitor
                     .previous
@@ -196,6 +260,8 @@ pub(super) fn observe(state: &mut EngineState) {
                 .airport
                 .iter()
                 .chain(state.arrival_airport.iter())
+                .chain(state.generated.airport.iter().map(AsRef::as_ref))
+                .chain(state.generated.destination.iter().map(AsRef::as_ref))
                 .filter(|a| wake::applies(&a.icao))
             {
                 if let Some((runway, heading)) = airport.runways.iter().find_map(|r| {
@@ -219,6 +285,7 @@ pub(super) fn observe(state: &mut EngineState) {
                     ))
                 }) {
                     monitor.departures.push_back(Liftoff {
+                        id: target.id,
                         airport: airport.icao.clone(),
                         runway,
                         heading,
@@ -229,12 +296,7 @@ pub(super) fn observe(state: &mut EngineState) {
                 }
             }
         }
-        monitor.previous = targets
-            .iter()
-            .take(126)
-            .filter(|p| p.id != 0)
-            .map(|p| (p.id, p.clone()))
-            .collect();
+        monitor.previous = targets.map(|p| (p.id, p.clone())).collect();
     } else {
         monitor.previous.clear();
     }
@@ -251,42 +313,18 @@ pub(super) fn observe(state: &mut EngineState) {
     else {
         return;
     };
-    let Some(own) = runway_position(airport, &state.session.plan.runway, t.latitude, t.longitude)
-    else {
-        return;
-    };
-    let follower = wake::category(if t.aircraft_icao.is_empty() {
-        &state.session.plan.aircraft
-    } else {
-        &t.aircraft_icao
-    });
-    for event in &monitor.departures {
-        if event.airport != airport.icao {
-            continue;
-        }
-        if !wake::related_runways(
-            airport,
-            &event.runway,
-            &state.session.plan.runway,
-            event.category,
-        ) {
-            continue;
-        }
-        let kind = if openatc_core::navigation::turn(event.heading, own.3).abs() > 90.0 {
-            Departure::Opposite
-        } else if own.0 > 152.4 {
-            Departure::Intersection
+    state.session.departure_wake_seconds = monitor.departure_delay(
+        0,
+        airport,
+        &state.session.plan.runway,
+        if t.aircraft_icao.is_empty() {
+            &state.session.plan.aircraft
         } else {
-            Departure::FullLength
-        };
-        let required = event
-            .category
-            .zip(follower)
-            .and_then(|(a, b)| wake::departure_seconds(a, b, kind))
-            .unwrap_or(240);
-        let remaining = (f64::from(required) - (monitor.elapsed - event.at)).max(0.0);
-        state.session.departure_wake_seconds = state.session.departure_wake_seconds.max(remaining);
-    }
+            &t.aircraft_icao
+        },
+        t.latitude,
+        t.longitude,
+    );
 }
 
 #[cfg(test)]

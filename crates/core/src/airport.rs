@@ -121,6 +121,8 @@ pub struct Parking {
     pub size: String,
     /// Operations.
     pub operations: String,
+    /// Preferred operator ICAO codes from ramp metadata.
+    pub airlines: Vec<String>,
     /// Position.
     pub point: Point,
     /// Heading degrees.
@@ -379,6 +381,7 @@ fn demo_parking() -> Vec<Parking> {
             equipment: "jets".to_owned(),
             size: "C".to_owned(),
             operations: "airline".to_owned(),
+            airlines: Vec::new(),
             point: Point {
                 east: 0.0,
                 north: 430.0,
@@ -392,6 +395,7 @@ fn demo_parking() -> Vec<Parking> {
             equipment: "jets".to_owned(),
             size: "C".to_owned(),
             operations: "airline".to_owned(),
+            airlines: Vec::new(),
             point: Point {
                 east: 250.0,
                 north: 430.0,
@@ -401,10 +405,11 @@ fn demo_parking() -> Vec<Parking> {
         },
         Parking {
             name: "GA apron".to_owned(),
-            kind: "misc".to_owned(),
+            kind: "tie-down".to_owned(),
             equipment: "props".to_owned(),
             size: "A".to_owned(),
             operations: "general_aviation".to_owned(),
+            airlines: Vec::new(),
             point: Point {
                 east: -400.0,
                 north: 400.0,
@@ -1109,6 +1114,60 @@ fn pavement_faces(contours: &[Vec<Point>]) -> Vec<[Point; 3]> {
         .collect()
 }
 
+/// Add a verified physical pavement polygon, retaining its holes and Bezier controls.
+/// The caller is responsible for scenery ownership and exclusion checks.
+pub fn append_pavement(
+    airport: &mut Airport,
+    rings: &[Vec<(Point, Option<Point>)>],
+) -> Result<(), String> {
+    if rings.is_empty()
+        || rings.len() > 128
+        || rings.iter().map(Vec::len).sum::<usize>() > 4096
+        || rings.iter().any(|ring| ring.len() < 3)
+        || rings.iter().flatten().any(|(node, control)| {
+            std::iter::once(node).chain(control.iter()).any(|point| {
+                !point.east.is_finite()
+                    || !point.north.is_finite()
+                    || point.east.abs() > 200_000.0
+                    || point.north.abs() > 200_000.0
+            })
+        })
+    {
+        return Err("Supplementary pavement exceeds its geometry budget".into());
+    }
+    let contours = rings
+        .iter()
+        .map(|ring| {
+            let nodes = ring.iter().map(|(node, _)| *node).collect::<Vec<_>>();
+            let controls = ring.iter().map(|(_, control)| *control).collect::<Vec<_>>();
+            pavement_curve(&nodes, &controls)
+        })
+        .collect::<Vec<_>>();
+    let area = |points: &[Point]| {
+        points
+            .iter()
+            .zip(points.iter().cycle().skip(1))
+            .map(|(a, b)| a.east * b.north - b.east * a.north)
+            .sum::<f64>()
+            .abs()
+            * 0.5
+    };
+    let expected = area(&contours[0]) - contours.iter().skip(1).map(|ring| area(ring)).sum::<f64>();
+    let faces = pavement_faces(&contours);
+    let actual = faces.iter().map(|face| area(face)).sum::<f64>();
+    if !expected.is_finite()
+        || expected <= 0.0
+        || faces.is_empty()
+        || (expected - actual).abs() > 0.01f64.max(expected * 1e-7)
+        || airport.pavement_triangles.len() + faces.len() > 1_000_000
+    {
+        return Err("Supplementary pavement could not preserve its boundaries and holes".into());
+    }
+    airport.pavements.extend(contours);
+    airport.pavement_triangles.extend(faces);
+    Ok(())
+}
+
 /// Tessellate closed pavement curves; incoming handles mirror the outgoing handle.
 fn pavement_curve(nodes: &[Point], controls: &[Option<Point>]) -> Vec<Point> {
     let mut result = Vec::new();
@@ -1299,19 +1358,31 @@ impl AirportBuilder {
                 equipment,
                 size: String::new(),
                 operations: String::new(),
+                airlines: Vec::new(),
                 point,
                 heading,
             });
         }
     }
 
-    // Record 1301 fills in the size line for the stand above it.
+    // Record 1301 supplies size, operation and operator preferences for the preceding stand.
     fn size_parking(&mut self, fields: &[&str]) {
         if let Some(stand) = self.airport.parking.last_mut()
             && fields.len() >= 3
         {
             fields[1].clone_into(&mut stand.size);
             fields[2].clone_into(&mut stand.operations);
+            stand.airlines = fields
+                .iter()
+                .skip(3)
+                .take(128)
+                .filter(|code| {
+                    code.len() == 3 && code.bytes().all(|byte| byte.is_ascii_alphabetic())
+                })
+                .map(|code| code.to_ascii_uppercase())
+                .collect();
+            stand.airlines.sort();
+            stand.airlines.dedup();
         }
     }
 
@@ -1567,7 +1638,9 @@ pub fn load_airport_from_simulator(
         if !contains_airport {
             continue;
         }
-        airport = Some(load_airport(&text, icao)?);
+        let mut selected = load_airport(&text, icao)?;
+        selected.source = path.clone();
+        airport = Some(selected);
         break;
     }
     let mut airport = airport
@@ -2083,7 +2156,7 @@ pub fn crossing_vacated(airport: &Airport, route: &TaxiClearance, telemetry: &Te
 /// Keep arrival monitoring on Tower until the aircraft's extremities clear the runway.
 #[must_use]
 pub fn aircraft_on_runway(airport: &Airport, telemetry: &Telemetry) -> bool {
-    runway_occupied(airport, telemetry, None)
+    runway_occupied(airport, telemetry, None, None)
 }
 
 /// Apply the generated aircraft's validated editable dimensions to runway clearance.
@@ -2096,73 +2169,112 @@ pub fn aircraft_on_runway_for(
     if !(1.0..=150.0).contains(&profile.length) || !(1.0..=150.0).contains(&profile.wingspan) {
         return true;
     }
-    runway_occupied(airport, telemetry, Some(profile))
+    runway_occupied(airport, telemetry, Some(profile), None)
+}
+/// Check only the runway being reported vacated; another runway retains its own permission.
+#[must_use]
+pub fn aircraft_on_named_runway(airport: &Airport, name: &str, telemetry: &Telemetry) -> bool {
+    if !airport
+        .runways
+        .iter()
+        .any(|runway| runway.first_name == name || runway.second_name == name)
+    {
+        return true;
+    }
+    runway_occupied(airport, telemetry, None, Some(name))
+}
+/// Apply validated aircraft dimensions to the named runway's protection only.
+#[must_use]
+pub fn aircraft_on_named_runway_for(
+    airport: &Airport,
+    name: &str,
+    telemetry: &Telemetry,
+    profile: &crate::traffic::profiles::Aircraft,
+) -> bool {
+    if !(1.0..=150.0).contains(&profile.length)
+        || !(1.0..=150.0).contains(&profile.wingspan)
+        || !airport
+            .runways
+            .iter()
+            .any(|runway| runway.first_name == name || runway.second_name == name)
+    {
+        return true;
+    }
+    runway_occupied(airport, telemetry, Some(profile), Some(name))
 }
 fn runway_occupied(
     airport: &Airport,
     telemetry: &Telemetry,
     profile: Option<&crate::traffic::profiles::Aircraft>,
+    name: Option<&str>,
 ) -> bool {
     let here = airport_point(airport, telemetry.latitude, telemetry.longitude);
-    airport.runways.iter().any(|runway| {
-        let dx = runway.second.east - runway.first.east;
-        let dn = runway.second.north - runway.first.north;
-        let length = dx.hypot(dn);
-        if length < 100.0 {
-            return false;
-        }
-        let (fore_aft, lateral) = if let Some(profile) = profile {
-            let span = telemetry
-                .wingspan_meters
-                .filter(|s| s.is_finite() && (1.0..=150.0).contains(s))
-                .unwrap_or(profile.wingspan)
-                .max(profile.wingspan);
-            let angle = (telemetry.heading_degrees - dx.atan2(dn).to_degrees()).to_radians();
-            (
-                profile.length * angle.cos().abs() + span / 2.0 * angle.sin().abs(),
-                profile.length * angle.sin().abs() + span / 2.0 * angle.cos().abs(),
-            )
-        } else {
-            crate::traffic::footprint(
-                &telemetry.aircraft_icao,
-                telemetry.wingspan_meters,
-                telemetry.heading_degrees,
-                dx.atan2(dn).to_degrees(),
-            )
-        };
-        let east = here.east - runway.first.east;
-        let north = here.north - runway.first.north;
-        let along = (east * dx + north * dn) / length;
-        let across = (east * dn - north * dx).abs() / length;
-        let projection = runway_projection(here, runway.first, runway.second);
-        let delta = difference(here, projection);
-        let separation = flat_distance(&here, &projection);
-        let ray = Point {
-            east: projection.east + delta.east * 150.0 / separation.max(1.0),
-            north: projection.north + delta.north * 150.0 / separation.max(1.0),
-            height: 0.0,
-        };
-        let limit = airport
-            .taxi_hold_lines
-            .iter()
-            .filter_map(|line| {
-                let (t, _) = intersection(projection, ray, line[0], line[1])?;
-                let point = Point {
-                    east: projection.east + (ray.east - projection.east) * t,
-                    north: projection.north + (ray.north - projection.north) * t,
-                    height: 0.0,
-                };
-                let offset = flat_distance(&projection, &point);
-                let nearer_other = airport
-                    .runways
-                    .iter()
-                    .filter(|r| r.first_name != runway.first_name)
-                    .any(|r| segment_distance(point, r.first, r.second) < offset);
-                (!nearer_other).then_some(offset)
-            })
-            .fold(runway.width / 2.0 + 10.0, f64::max);
-        (-fore_aft - 10.0..=length + fore_aft + 10.0).contains(&along) && across <= limit + lateral
-    })
+    airport
+        .runways
+        .iter()
+        .filter(|runway| {
+            name.is_none_or(|name| runway.first_name == name || runway.second_name == name)
+        })
+        .any(|runway| {
+            let dx = runway.second.east - runway.first.east;
+            let dn = runway.second.north - runway.first.north;
+            let length = dx.hypot(dn);
+            if length < 100.0 {
+                return false;
+            }
+            let (fore_aft, lateral) = if let Some(profile) = profile {
+                let span = telemetry
+                    .wingspan_meters
+                    .filter(|s| s.is_finite() && (1.0..=150.0).contains(s))
+                    .unwrap_or(profile.wingspan)
+                    .max(profile.wingspan);
+                let angle = (telemetry.heading_degrees - dx.atan2(dn).to_degrees()).to_radians();
+                (
+                    profile.length * angle.cos().abs() + span / 2.0 * angle.sin().abs(),
+                    profile.length * angle.sin().abs() + span / 2.0 * angle.cos().abs(),
+                )
+            } else {
+                crate::traffic::footprint(
+                    &telemetry.aircraft_icao,
+                    telemetry.wingspan_meters,
+                    telemetry.heading_degrees,
+                    dx.atan2(dn).to_degrees(),
+                )
+            };
+            let east = here.east - runway.first.east;
+            let north = here.north - runway.first.north;
+            let along = (east * dx + north * dn) / length;
+            let across = (east * dn - north * dx).abs() / length;
+            let projection = runway_projection(here, runway.first, runway.second);
+            let delta = difference(here, projection);
+            let separation = flat_distance(&here, &projection);
+            let ray = Point {
+                east: projection.east + delta.east * 150.0 / separation.max(1.0),
+                north: projection.north + delta.north * 150.0 / separation.max(1.0),
+                height: 0.0,
+            };
+            let limit = airport
+                .taxi_hold_lines
+                .iter()
+                .filter_map(|line| {
+                    let (t, _) = intersection(projection, ray, line[0], line[1])?;
+                    let point = Point {
+                        east: projection.east + (ray.east - projection.east) * t,
+                        north: projection.north + (ray.north - projection.north) * t,
+                        height: 0.0,
+                    };
+                    let offset = flat_distance(&projection, &point);
+                    let nearer_other = airport
+                        .runways
+                        .iter()
+                        .filter(|r| r.first_name != runway.first_name)
+                        .any(|r| segment_distance(point, r.first, r.second) < offset);
+                    (!nearer_other).then_some(offset)
+                })
+                .fold(runway.width / 2.0 + 10.0, f64::max);
+            (-fore_aft - 10.0..=length + fore_aft + 10.0).contains(&along)
+                && across <= limit + lateral
+        })
 }
 
 /// Authorize one transverse published-network crossing, ending clear of that runway.
@@ -2172,6 +2284,34 @@ pub fn calculate_crossing_route(
     telemetry: &Telemetry,
     runway: &str,
     size: char,
+) -> Result<TaxiClearance, String> {
+    calculate_crossing_route_with(airport, telemetry, runway, size, None)
+}
+
+/// Generated crossings include the tail and the actual holding-line protection at their endpoint.
+pub fn calculate_crossing_route_for(
+    airport: &Airport,
+    telemetry: &Telemetry,
+    runway: &str,
+    profile: &crate::traffic::profiles::Aircraft,
+) -> Result<TaxiClearance, String> {
+    if !(1.0..=150.0).contains(&profile.length) || !(1.0..=150.0).contains(&profile.wingspan) {
+        return Err("Invalid crossing aircraft dimensions".into());
+    }
+    calculate_crossing_route_with(
+        airport,
+        telemetry,
+        runway,
+        profile.parking_size(),
+        Some(profile),
+    )
+}
+fn calculate_crossing_route_with(
+    airport: &Airport,
+    telemetry: &Telemetry,
+    runway: &str,
+    size: char,
+    profile: Option<&crate::traffic::profiles::Aircraft>,
 ) -> Result<TaxiClearance, String> {
     let fail = || crate::dialogue::say("crossing_route_unavailable", &[]);
     let r = airport
@@ -2263,13 +2403,37 @@ pub fn calculate_crossing_route(
     let (costs, previous) = shortest_paths(&graph, start);
     let target = costs
         .iter()
-        .filter(|(id, cost)| {
-            **cost < 500.0
-                && across(nodes[id]) * side < 0.0
-                && across(nodes[id]).abs() > r.width / 2.0 + 50.0
+        .filter_map(|(id, cost)| {
+            if *cost >= 500.0
+                || across(nodes[id]) * side >= 0.0
+                || across(nodes[id]).abs() <= r.width / 2.0 + 50.0
+            {
+                return None;
+            }
+            if let Some(profile) = profile {
+                let (path, _) = taxi_path(&nodes, &previous, start, *id);
+                let end = *path.last()?;
+                let before = *path.iter().rev().nth(1)?;
+                let observed = Telemetry {
+                    latitude: airport.reference_latitude + end.north / 111320.0,
+                    longitude: airport.reference_longitude
+                        + end.east / (111320.0 * airport.reference_latitude.to_radians().cos()),
+                    heading_degrees: (end.east - before.east)
+                        .atan2(end.north - before.north)
+                        .to_degrees()
+                        .rem_euclid(360.0),
+                    position_valid: true,
+                    on_ground: true,
+                    ..telemetry.clone()
+                };
+                if aircraft_on_named_runway_for(airport, runway, &observed, profile) {
+                    return None;
+                }
+            }
+            Some((*id, *cost))
         })
-        .min_by(|a, b| a.1.total_cmp(b.1))
-        .map(|(id, _)| *id)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(id, _)| id)
         .ok_or_else(fail)?;
     let (points, _via) = taxi_path(&nodes, &previous, start, target);
     if !points
@@ -2289,6 +2453,100 @@ pub fn calculate_crossing_route(
         reference_longitude: airport.reference_longitude,
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod generated_crossing_tests {
+    use super::*;
+    #[test]
+    fn crossing_endpoint_clears_the_tail_past_the_actual_holding_line() {
+        let point = |east, north| Point {
+            east,
+            north,
+            height: 0.0,
+        };
+        let mut airport = Airport {
+            icao: "TEST".into(),
+            runways: vec![Runway {
+                first_name: "18".into(),
+                second_name: "36".into(),
+                width: 60.0,
+                first: point(0.0, -1000.0),
+                second: point(0.0, 1000.0),
+                ..Default::default()
+            }],
+            taxi_hold_lines: vec![
+                [point(-140.0, -50.0), point(-140.0, 50.0)],
+                [point(140.0, -50.0), point(140.0, 50.0)],
+            ],
+            nodes: [-200.0, -140.0, 140.0, 200.0]
+                .into_iter()
+                .enumerate()
+                .map(|(id, east)| TaxiNode {
+                    id: id as i64,
+                    point: point(east, 0.0),
+                })
+                .collect(),
+            edges: (0..3)
+                .map(|id| TaxiEdge {
+                    first: id,
+                    second: id + 1,
+                    name: "T".into(),
+                    size: 'F',
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let profile = crate::traffic::profiles::aircraft("AT72").unwrap();
+        for (east, heading) in [(-200.0, 90.0), (200.0, 270.0)] {
+            let observed = Telemetry {
+                latitude: 0.0,
+                longitude: east / 111320.0,
+                heading_degrees: heading,
+                on_ground: true,
+                position_valid: true,
+                ..Default::default()
+            };
+            let legacy =
+                calculate_crossing_route(&airport, &observed, "36", profile.parking_size())
+                    .unwrap();
+            assert!((legacy.points.last().unwrap().east.abs() - 140.0).abs() < 1e-6);
+            let complete =
+                calculate_crossing_route_for(&airport, &observed, "36", profile).unwrap();
+            let end = *complete.points.last().unwrap();
+            assert!((end.east.abs() - 200.0).abs() < 1e-6);
+            let at_end = Telemetry {
+                longitude: end.east / 111320.0,
+                ..observed.clone()
+            };
+            assert!(!aircraft_on_named_runway_for(
+                &airport, "36", &at_end, profile
+            ));
+            let at_line = Telemetry {
+                longitude: end.east.signum() * 140.0 / 111320.0,
+                ..observed
+            };
+            assert!(aircraft_on_named_runway_for(
+                &airport, "36", &at_line, profile
+            ));
+        }
+        for edge in &mut airport.edges {
+            edge.one_way = true;
+        }
+        let wrong_way = Telemetry {
+            latitude: 0.0,
+            longitude: 200.0 / 111320.0,
+            heading_degrees: 270.0,
+            on_ground: true,
+            position_valid: true,
+            ..Default::default()
+        };
+        assert!(calculate_crossing_route_for(&airport, &wrong_way, "36", profile).is_err());
+        assert!(aircraft_on_named_runway_for(
+            &airport, "UNKNOWN", &wrong_way, profile
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -2325,5 +2583,23 @@ mod pavement_tests {
             })
             .sum();
         assert!((area - 64.0).abs() < 1e-8);
+    }
+}
+
+#[cfg(test)]
+mod ramp_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn operator_codes_are_normalized_without_turning_preferences_into_restrictions() {
+        let mut builder = AirportBuilder::default();
+        builder.airport = demo_airport();
+        builder.size_parking(&["1301", "C", "none", "sia", "SIA", "qfa", "BAD1"]);
+        let stand = builder.airport.parking.last().unwrap();
+        assert_eq!(stand.airlines, vec!["QFA", "SIA"]);
+        assert_eq!(stand.operations, "none");
+        let legacy: Parking =
+            serde_json::from_value(serde_json::json!({"name":"Legacy", "size":"C"})).unwrap();
+        assert!(legacy.airlines.is_empty());
     }
 }

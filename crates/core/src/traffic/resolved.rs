@@ -62,7 +62,10 @@ pub fn altitude_bounds(leg: &Leg, c: &Context<'_>) -> Result<(f64, f64), String>
             Some(one.unwrap().min(two.unwrap())),
             Some(one.unwrap().max(two.unwrap())),
         ),
-        "H" | "J" if one.is_some() && one == two => (one, one),
+        "H" if one.is_some() && one == two => (one, one),
+        // At the FACF, J's second altitude is a glide-slope intercept reference,
+        // not an upper crossing limit. The first altitude remains the published minimum.
+        "J" if one.is_some() && two.is_some() => (one, None),
         _ => {
             return Err(format!(
                 "Unsupported vertical descriptor at {}",
@@ -102,10 +105,11 @@ fn intercept(
     }
     let along = cross(delta, v) / divisor;
     let remaining = cross(u, delta) / divisor;
-    if !(0.001..=maximum_nm).contains(&along) || !(0.0..=maximum_nm).contains(&remaining) {
-        return Err(
-            "Published course intercept is behind the aircraft or outside its limit".into(),
-        );
+    // The limit bounds this intercept leg, not the following course-to-fix leg.
+    if !(0.001..=maximum_nm).contains(&along) || !remaining.is_finite() || remaining < 0.0 {
+        return Err(format!(
+            "Published course intercept is behind the aircraft or outside its limit (forward {along:.2} NM, remaining {remaining:.2} NM, limit {maximum_nm:.2} NM)"
+        ));
     }
     Ok(destination(from, heading, along))
 }
@@ -150,7 +154,7 @@ fn decode(
     for (index, leg) in legs.iter().enumerate() {
         if !matches!(
             leg.terminator.as_str(),
-            "IF" | "TF" | "DF" | "CF" | "CA" | "FA" | "VI"
+            "IF" | "TF" | "DF" | "CF" | "CA" | "FA" | "VA" | "VI" | "CI"
         ) {
             return Err(format!(
                 "{} uses unsupported {} geometry",
@@ -158,7 +162,7 @@ fn decode(
             ));
         }
         let (minimum_feet, mut maximum_feet) = altitude_bounds(leg, c)?;
-        if matches!(leg.terminator.as_str(), "CA" | "FA") {
+        if matches!(leg.terminator.as_str(), "CA" | "FA" | "VA") {
             maximum_feet = minimum_feet;
         }
         let preferred_feet = c.preferred_feet.clamp(minimum_feet, maximum_feet);
@@ -182,8 +186,20 @@ fn decode(
                     .unwrap_or(c.variation))
             .rem_euclid(360.0)
         });
-        let coordinate = if leg.terminator == "VI" {
-            let heading = course.ok_or("Heading-intercept leg has no course")?;
+        let mut interception = None;
+        let coordinate = if matches!(leg.terminator.as_str(), "VI" | "CI") {
+            let prescribed = course.ok_or("Heading-intercept leg has no course")?;
+            let heading = if leg.terminator == "VI" {
+                air::heading_wind(
+                    c.atmosphere.true_knots(indicated, preferred_feet)?,
+                    prescribed,
+                    c.wind_from,
+                    c.wind_knots,
+                )?
+                .1
+            } else {
+                prescribed
+            };
             let next = legs
                 .get(index + 1)
                 .filter(|next| next.terminator == "CF")
@@ -197,8 +213,16 @@ fn decode(
                     .course_variation(next, &c.airport.icao)
                     .unwrap_or(c.variation))
             .rem_euclid(360.0);
-            intercept(from, heading, fix, track, c.maximum_intercept_nm)?
-        } else if matches!(leg.terminator.as_str(), "CA" | "FA") {
+            interception = Some(super::trajectory::CourseIntercept {
+                target: fix,
+                target_course: track,
+                course: heading,
+                heading: (leg.terminator == "VI").then_some(prescribed),
+                maximum_nm: c.maximum_intercept_nm,
+            });
+            intercept(from, heading, fix, track, c.maximum_intercept_nm)
+                .map_err(|error| format!("{} to {}: {error}", leg.terminator, next.identifier))?
+        } else if matches!(leg.terminator.as_str(), "CA" | "FA" | "VA") {
             let heading = course.ok_or("Altitude-terminated leg has no course")?;
             if leg.terminator == "FA" {
                 let anchor = Points::runway(leg, c.airport)
@@ -208,15 +232,29 @@ fn decode(
                     return Err("Fix-to-altitude leg does not start at its published fix".into());
                 }
             }
+            if leg.terminator == "VA"
+                && result
+                    .last()
+                    .is_some_and(|crossing| crossing.minimum_feet != crossing.maximum_feet)
+            {
+                return Err("Heading-to-altitude leg needs a fixed incoming altitude".into());
+            }
             if minimum_feet <= altitude {
                 continue;
             }
             // Nominal movement uses one ground speed per leg. Use the same
             // endpoint TAS as the trajectory solver when locating this CA end.
             let tas = c.atmosphere.true_knots(indicated, minimum_feet)?;
-            let (speed, _) = air::wind(tas, heading, c.wind_from, c.wind_knots)?;
+            let (speed, track) = if leg.terminator == "VA" {
+                air::heading_wind(tas, heading, c.wind_from, c.wind_knots)?
+            } else {
+                (
+                    air::wind(tas, heading, c.wind_from, c.wind_knots)?.0,
+                    heading,
+                )
+            };
             let minutes = (minimum_feet - altitude) / c.climb_fpm;
-            destination(from, heading, speed * minutes / 60.0)
+            destination(from, track, speed * minutes / 60.0)
         } else {
             Points::runway(leg, c.airport)
                 .or_else(|| c.points.resolve(leg, &c.airport.icao))
@@ -240,7 +278,9 @@ fn decode(
         } else {
             bearing(from, coordinate)
         };
-        let arrival_heading = if matches!(leg.terminator.as_str(), "CF" | "CA" | "FA" | "VI") {
+        let arrival_heading = if matches!(leg.terminator.as_str(), "VI" | "VA") {
+            Some(track)
+        } else if matches!(leg.terminator.as_str(), "CF" | "CA" | "FA" | "CI") {
             Some(course.ok_or("Course leg has no published course")?)
         } else if leg.fly_over() {
             Some(track)
@@ -299,6 +339,7 @@ fn decode(
             } else if retain_boundary {
                 indicated_speeds.push(indicated);
                 result.push(Fix {
+                    intercept: interception,
                     airspeed: Some(super::trajectory::Airspeed {
                         indicated_knots: indicated,
                         atmosphere: c.atmosphere,
@@ -321,6 +362,7 @@ fn decode(
         }
         indicated_speeds.push(indicated);
         result.push(Fix {
+            intercept: interception,
             airspeed: Some(super::trajectory::Airspeed {
                 indicated_knots: indicated,
                 atmosphere: c.atmosphere,
@@ -366,6 +408,175 @@ mod tests {
             .unwrap()
             .remove(0)
     }
+    #[test]
+    fn heading_to_altitude_keeps_wind_drift_and_the_published_altitude() {
+        let airport = Airport::default();
+        let points = Points::default();
+        let atmosphere = Atmosphere::surface(1013.25, 15.0, 0.0).unwrap();
+        let context = Context {
+            airport: &airport,
+            points: &points,
+            atmosphere,
+            variation: 0.0,
+            wind_from: 90.0,
+            wind_knots: 30.0,
+            indicated_knots: 150.0,
+            maximum_intercept_nm: 20.0,
+            climb_fpm: 1000.0,
+            minimum_feet: 0.0,
+            maximum_feet: 20000.0,
+            preferred_feet: 10000.0,
+        };
+        let mut heading = leg("VA", "+", "01000");
+        heading.course = Some(0.0);
+        let start = Waypoint {
+            latitude: 43.0,
+            longitude: 7.0,
+            altitude_feet: 0.0,
+        };
+        let fixes = crossings(start, &[heading.clone()], &context).unwrap();
+        assert_eq!(fixes.len(), 1);
+        let altitude = atmosphere.geometric(1000.0, false).unwrap();
+        assert_eq!(fixes[0].minimum_feet, altitude);
+        assert_eq!(fixes[0].maximum_feet, altitude);
+        let expected = air::heading_wind(
+            atmosphere.true_knots(150.0, altitude).unwrap(),
+            0.0,
+            90.0,
+            30.0,
+        )
+        .unwrap();
+        assert!(
+            crate::navigation::turn(
+                bearing([start.latitude, start.longitude], fixes[0].coordinate),
+                expected.1
+            )
+            .abs()
+                < 1e-6
+        );
+        assert!((fixes[0].ground_knots - expected.0).abs() < 1e-6);
+        assert!(
+            (distance_nm([start.latitude, start.longitude], fixes[0].coordinate)
+                - expected.0 * altitude / 1000.0 / 60.0)
+                .abs()
+                < 1e-6
+        );
+        let mut course = heading.clone();
+        course.terminator = "CA".into();
+        let held = crossings(start, &[course], &context).unwrap();
+        assert!((held[0].coordinate[1] - start.longitude).abs() < 1e-8);
+        assert!((fixes[0].coordinate[1] - start.longitude).abs() > 0.001);
+        heading.course = None;
+        assert!(crossings(start, &[heading], &context).is_err());
+    }
+
+    #[test]
+    fn course_intercept_retains_the_published_ground_course_in_crosswind() {
+        let airport = Airport {
+            reference_latitude: 43.0,
+            reference_longitude: 7.0,
+            runways: vec![crate::airport::Runway {
+                first_name: "04".into(),
+                second_name: "22".into(),
+                first: crate::state::Point {
+                    east: 9260.0,
+                    north: 9260.0,
+                    height: 0.0,
+                },
+                second: crate::state::Point {
+                    east: 9360.0,
+                    north: 9260.0,
+                    height: 0.0,
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let points = Points::default();
+        let context = Context {
+            airport: &airport,
+            points: &points,
+            atmosphere: Atmosphere::surface(1013.25, 15.0, 0.0).unwrap(),
+            variation: 0.0,
+            wind_from: 90.0,
+            wind_knots: 30.0,
+            indicated_knots: 150.0,
+            maximum_intercept_nm: 20.0,
+            climb_fpm: 1000.0,
+            minimum_feet: 0.0,
+            maximum_feet: 2000.0,
+            preferred_feet: 1000.0,
+        };
+        let mut incoming = leg("CI", "", "");
+        incoming.course = Some(0.0);
+        let mut next = leg("CF", "", "");
+        next.course = Some(90.0);
+        next.identifier = "RW04".into();
+        next.section = "P".into();
+        next.subsection = "G".into();
+        let start = Waypoint {
+            latitude: 43.0,
+            longitude: 7.0,
+            altitude_feet: 1000.0,
+        };
+        let decoded = crossings(start, &[incoming.clone(), next.clone()], &context).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].arrival_heading, Some(0.0));
+        assert!((decoded[0].coordinate[1] - start.longitude).abs() < 1e-6);
+        assert!(decoded[0].coordinate[0] > start.latitude);
+        let tas = context
+            .atmosphere
+            .true_knots(150.0, decoded[0].preferred_feet)
+            .unwrap();
+        let expected = air::wind(tas, 0.0, 90.0, 30.0).unwrap();
+        assert!(expected.1.abs() > 5.0);
+        assert!((decoded[0].ground_knots - expected.0).abs() < 0.001);
+        let mut heading_leg = incoming.clone();
+        heading_leg.terminator = "VI".into();
+        let heading_decoded = crossings(start, &[heading_leg, next.clone()], &context).unwrap();
+        assert!(heading_decoded[0].coordinate[1] < start.longitude);
+        assert_eq!(heading_decoded[0].intercept.unwrap().heading, Some(0.0));
+        let envelope = super::super::trajectory::Envelope {
+            bank_degrees: 20.0,
+            turn_rate_degrees_sec: 3.0,
+            climb_fpm: 1000.0,
+            descent_fpm: 1000.0,
+            spacing_meters: 150.0,
+            maximum_detour_meters: 5000.0,
+        };
+        let solved =
+            super::super::trajectory::draft(start, 0.0, &heading_decoded, 90.0, &envelope).unwrap();
+        assert!(solved.clone().protect(|_, _| false).is_err());
+        let path = solved.protect(|_, _| true).unwrap();
+        let end = path[0].points.last().unwrap();
+        let before = path[0].points.iter().rev().nth(1).unwrap();
+        let track = bearing(
+            [before.latitude, before.longitude],
+            [end.latitude, end.longitude],
+        );
+        let tas = context
+            .atmosphere
+            .true_knots(150.0, end.altitude_feet)
+            .unwrap();
+        let (_, crab) = air::wind(tas, track, 90.0, 30.0).unwrap();
+        assert!(crate::navigation::turn(0.0, track + crab).abs() < 0.1);
+        assert!(end.longitude < start.longitude);
+        assert!(crate::navigation::turn(0.0, track).abs() > 5.0);
+        assert!(
+            (path[0].ground_knots - air::heading_wind(tas, 0.0, 90.0, 30.0).unwrap().0).abs()
+                < 0.02
+        );
+        assert!(crossings(start, &[incoming.clone()], &context).is_err());
+        let mut parallel = next.clone();
+        parallel.course = Some(0.0);
+        assert!(crossings(start, &[incoming.clone(), parallel], &context).is_err());
+        let mut behind = incoming.clone();
+        behind.course = Some(180.0);
+        assert!(crossings(start, &[behind, next.clone()], &context).is_err());
+        next.terminator = "TF".into();
+        assert!(crossings(start, &[incoming, next], &context).is_err());
+    }
+
     #[test]
     fn repeated_join_fix_intersects_limits_instead_of_dropping_them() {
         let airport = Airport {
@@ -544,6 +755,16 @@ mod tests {
             maximum_feet: 30000.0,
             preferred_feet: 10000.0,
         };
+        let mut facf = leg("IF", "J", "06000");
+        facf.altitude_two = Some(4000);
+        facf.altitude_two_is_flight_level = Some(true);
+        let (low, high) = altitude_bounds(&facf, &context).unwrap();
+        assert_eq!(low, atmosphere.geometric(6000.0, false).unwrap());
+        assert_eq!(high, context.maximum_feet);
+        facf.altitude_two_is_flight_level = None;
+        assert!(altitude_bounds(&facf, &context).is_err());
+        facf.altitude_two = None;
+        assert!(altitude_bounds(&facf, &context).is_err());
         let mut crossing = leg("TF", "B", "FL120");
         crossing.altitude_two = Some(8000);
         crossing.altitude_two_is_flight_level = Some(false);
@@ -592,6 +813,14 @@ mod intercept_tests {
         assert!((crate::arrival::bearing(intersection, fix) - 90.0).abs() < 0.1);
         assert!(super::intercept(origin, 180.0, fix, 90.0, 20.0).is_err());
         assert!(super::intercept(origin, 90.0, fix, 90.0, 20.0).is_err());
+        let far_fix =
+            crate::arrival::destination(crate::arrival::destination(origin, 0.0, 5.0), 90.0, 30.0);
+        let near = super::intercept(origin, 0.0, far_fix, 90.0, 20.0).unwrap();
+        assert!(crate::arrival::distance_nm(origin, near) < 6.0);
+        assert!(crate::arrival::distance_nm(near, far_fix) > 20.0);
+        let long_intercept =
+            crate::arrival::destination(crate::arrival::destination(origin, 0.0, 30.0), 90.0, 5.0);
+        assert!(super::intercept(origin, 0.0, long_intercept, 90.0, 20.0).is_err());
     }
 }
 

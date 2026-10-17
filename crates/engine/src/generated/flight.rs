@@ -3,9 +3,28 @@ use super::*;
 use openatc_core::stations::Station;
 use openatc_core::traffic::motion::{Route, Stage};
 
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct MissedInstruction {
+    pub fix: String,
+    pub geometric_feet: f64,
+    pub reported_feet: i32,
+    pub standard: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct SectorTransfer {
+    /// Nominal seconds remaining in this movement when the receiving sector begins.
+    pub remaining_seconds: f64,
+    pub station: Station,
+}
+
 #[derive(Clone)]
 pub(super) struct Clearance {
     pub station: Station,
+    /// Coordinated receiver sectors along this same movement; no additional movement grant.
+    pub transfers: Vec<SectorTransfer>,
+    /// Neighboring sectors accepting the separately cleared fallback under its limit controller.
+    pub coordinated_recovery: Vec<Station>,
     pub instruction: String,
     pub readback: String,
     /// Last initial-climb limit explicitly included in the takeoff instruction.
@@ -14,6 +33,121 @@ pub(super) struct Clearance {
     pub taxi_through: Option<usize>,
     /// Last airborne limit explicitly covered by this instruction and readback.
     pub airborne_through: Option<usize>,
+    /// Last rollout movement explicitly covered by a landing clearance on final.
+    pub landing_rollout: Option<usize>,
+    /// An amended missed level explicitly included in the approach instruction and readback.
+    pub missed: Option<MissedInstruction>,
+    /// Contingent hold at the end of this clearance's explicitly granted scope.
+    pub holding: Option<super::recovery::LimitHold>,
+}
+
+impl Clearance {
+    fn stations(&self) -> impl Iterator<Item = &Station> {
+        std::iter::once(&self.station)
+            .chain(self.transfers.iter().map(|transfer| &transfer.station))
+    }
+    pub fn station_after(&self, transfers: usize) -> &Station {
+        transfers
+            .checked_sub(1)
+            .and_then(|index| self.transfers.get(index))
+            .map_or(&self.station, |transfer| &transfer.station)
+    }
+    pub fn limit_station(&self) -> &Station {
+        self.station_after(self.transfers.len())
+    }
+}
+
+fn on_station(runtime: &Runtime, id: u32, frequency: Option<i32>, station: &Station) -> bool {
+    frequency == Some(station.khz)
+        && runtime.controllers.get(&id).is_none_or(|current| {
+            current.khz == station.khz
+                && current.name == station.name
+                && current.airport == station.airport
+                && current.service == station.service
+        })
+}
+
+fn sector_exchange(
+    runtime: &mut Runtime,
+    pose: &openatc_core::traffic::motion::Pose,
+    frame: &GeneratedTraffic,
+    prepared: &Arc<Prepared>,
+) -> Option<radio::Exchange> {
+    if let Some((plan, receiver)) = runtime.pending_sector_checkins.remove(&pose.id)
+        && Arc::ptr_eq(&plan, prepared)
+        && frame.target.com1_khz == Some(receiver.khz)
+    {
+        let slots = [
+            ("callsign", frame.target.callsign.clone()),
+            ("station", receiver.name.clone()),
+        ];
+        return Some(radio::Exchange {
+            id: pose.id,
+            segment: pose.segment,
+            station: receiver,
+            callsign: frame.target.callsign.clone(),
+            messages: vec![
+                (
+                    false,
+                    openatc_core::dialogue::say("pilot_station_checkin", &slots),
+                ),
+                (true, openatc_core::dialogue::say("flight_checkin", &slots)),
+            ],
+            next: 0,
+            due: Instant::now(),
+            grant: false,
+            tune_after: None,
+            sector_transfer: None,
+            recovery_from: None,
+            rejoin: false,
+        });
+    }
+    if pose.awaiting_clearance || pose.complete || pose.recovering {
+        return None;
+    }
+    let clearance = prepared.clearances.get(&pose.segment)?;
+    let count = runtime
+        .sector_transfers
+        .get(&(pose.id, pose.segment))
+        .copied()
+        .unwrap_or(0);
+    let transfer = clearance.transfers.get(count)?;
+    let lead = runtime.policy.as_ref()?.flight_clearance_lead_seconds;
+    if pose.seconds_to_limit > transfer.remaining_seconds + lead {
+        return None;
+    }
+    let sender = clearance.station_after(count);
+    if !on_station(runtime, pose.id, frame.target.com1_khz, sender) {
+        return None;
+    }
+    let slots = [
+        ("callsign", frame.target.callsign.clone()),
+        ("station", transfer.station.name.clone()),
+        (
+            "frequency",
+            format!("{:.3}", f64::from(transfer.station.khz) / 1000.0),
+        ),
+    ];
+    Some(radio::Exchange {
+        id: pose.id,
+        segment: pose.segment,
+        station: sender.clone(),
+        callsign: frame.target.callsign.clone(),
+        messages: vec![
+            (true, openatc_core::dialogue::say("flight_handoff", &slots)),
+            (
+                false,
+                openatc_core::dialogue::say("pilot_frequency_readback", &slots),
+            ),
+        ],
+        next: 0,
+        due: Instant::now(),
+        grant: false,
+        tune_after: Some(transfer.station.clone()),
+        sector_transfer: Some((prepared.clone(), count + 1)),
+        recovery_from: None,
+        rejoin: false,
+    })
 }
 
 /// The runway actually used, retained independently of controller wording.
@@ -26,6 +160,7 @@ pub(super) struct RunwayReport {
 #[derive(Clone)]
 pub(super) struct Prepared {
     pub route: Arc<Route>,
+    pub airspeeds: BTreeMap<usize, openatc_core::traffic::trajectory::Airspeed>,
     pub recovery: BTreeMap<usize, Arc<Route>>,
     pub clearances: BTreeMap<usize, Clearance>,
     /// Keyed by the first segment after the runway exit/crossing.
@@ -33,6 +168,101 @@ pub(super) struct Prepared {
 }
 
 impl Prepared {
+    /// Resume the existing checked route at its own contingent holding fix.
+    /// A missed-approach hold requires a newly planned approach rather than this suffix.
+    pub fn resume_after_limit(&self, source: usize) -> Result<Self, String> {
+        let held = self
+            .clearances
+            .get(&source)
+            .and_then(|c| c.holding.as_ref())
+            .filter(|hold| hold.boundary == source)
+            .ok_or("Flight has no contingent hold at this limit")?;
+        if self
+            .recovery
+            .get(&source)
+            .is_none_or(|route| !held.matches(route))
+        {
+            return Err("Contingent holding geometry no longer matches its clearance".into());
+        }
+        let first = source.checked_add(1).ok_or("Onward index overflow")?;
+        let route = Arc::new(self.route.suffix(first)?);
+        if route
+            .segment(0)
+            .is_none_or(|s| s.points.first() != Some(&held.position))
+        {
+            return Err("Onward route does not start at its cleared holding fix".into());
+        }
+        let mut clearances = BTreeMap::new();
+        for (&index, original) in self.clearances.range(first..) {
+            let mut clearance = original.clone();
+            clearance.initial_climb = None;
+            clearance.airborne_through = clearance
+                .airborne_through
+                .map(|end| {
+                    end.checked_sub(first)
+                        .ok_or("Invalid onward airborne scope")
+                })
+                .transpose()?;
+            clearance.taxi_through = clearance
+                .taxi_through
+                .map(|end| end.checked_sub(first).ok_or("Invalid onward taxi scope"))
+                .transpose()?;
+            clearance.landing_rollout = clearance
+                .landing_rollout
+                .map(|end| end.checked_sub(first).ok_or("Invalid onward landing scope"))
+                .transpose()?;
+            if let Some(hold) = &mut clearance.holding {
+                hold.boundary = hold
+                    .boundary
+                    .checked_sub(first)
+                    .ok_or("Invalid onward holding scope")?;
+            }
+            clearances.insert(index - first, clearance);
+        }
+        // The first remaining movement may have inherited a whole-SID or airborne clearance.
+        let inherited = self
+            .clearances
+            .range(..first)
+            .rev()
+            .find_map(|(&start, clearance)| {
+                clearance
+                    .airborne_through
+                    .filter(|end| (start..=*end).contains(&first))
+                    .or_else(|| {
+                        clearance
+                            .initial_climb
+                            .filter(|end| (2..=*end).contains(&first))
+                    })
+            });
+        if let Some(end) = inherited.filter(|end| *end > first) {
+            clearances
+                .get_mut(&0)
+                .ok_or("Onward flight has no first clearance")?
+                .airborne_through = Some(end - first);
+        }
+        let result = Self {
+            route,
+            airspeeds: self
+                .airspeeds
+                .range(first..)
+                .map(|(&index, speed)| (index - first, *speed))
+                .collect(),
+            clearances,
+            recovery: self
+                .recovery
+                .range(first..)
+                .map(|(&index, route)| (index - first, route.clone()))
+                .collect(),
+            vacated_reports: self
+                .vacated_reports
+                .range(first..)
+                .map(|(&index, report)| (index - first, report.clone()))
+                .collect(),
+        };
+        result.validate_onward()?;
+        Ok(result)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self
             .route
@@ -81,7 +311,24 @@ impl Prepared {
     }
 
     fn validate_route(&self, onward: bool) -> Result<(), String> {
+        for (&index, speed) in &self.airspeeds {
+            let segment = self
+                .route
+                .segment(index)
+                .filter(|segment| !segment.stage.on_ground())
+                .ok_or("Retained airspeed does not belong to an airborne movement")?;
+            if segment.points.windows(2).any(|pair| {
+                let track = openatc_core::arrival::bearing(
+                    [pair[0].latitude, pair[0].longitude],
+                    [pair[1].latitude, pair[1].longitude],
+                );
+                speed.ground_knots(pair[1].altitude_feet, track).is_err()
+            }) {
+                return Err("Retained airspeed or planning wind is invalid".into());
+            }
+        }
         let mut stages = Vec::new();
+        let mut missed_instruction: Option<&MissedInstruction> = None;
         for index in 0..512 {
             let Some(segment) = self.route.segment(index) else {
                 break;
@@ -100,19 +347,150 @@ impl Prepared {
                 {
                     return Err(format!("Invalid generated clearance at segment {index}"));
                 }
+                let mut remaining = self.route.nominal_seconds(index, index).unwrap_or(0.0);
+                if clearance.coordinated_recovery.len() > 32
+                    || clearance.coordinated_recovery.iter().any(|station| {
+                        !(118000..=136990).contains(&station.khz)
+                            || station.coverage.is_empty()
+                            || !(station.service == "Center"
+                                || station.services.iter().any(|service| service == "Center"))
+                    })
+                    || !clearance.coordinated_recovery.is_empty() && segment.stage.on_ground()
+                {
+                    return Err(format!(
+                        "Invalid recovery controller coordination at segment {index}"
+                    ));
+                }
+                for transfer in &clearance.transfers {
+                    if !matches!(segment.stage, Stage::Climb | Stage::Cruise | Stage::Descent)
+                        || !transfer.remaining_seconds.is_finite()
+                        || transfer.remaining_seconds <= 0.0
+                        || transfer.remaining_seconds >= remaining
+                        || !(118000..=136990).contains(&transfer.station.khz)
+                        || transfer.station.coverage.is_empty()
+                        || !(transfer.station.service == "Center"
+                            || transfer
+                                .station
+                                .services
+                                .iter()
+                                .any(|service| service == "Center"))
+                        || clearance.initial_climb.is_some()
+                        || clearance.airborne_through.is_some()
+                    {
+                        return Err(format!(
+                            "Invalid coordinated controller transfer at segment {index}"
+                        ));
+                    }
+                    remaining = transfer.remaining_seconds;
+                }
                 let services: &[&str] = match segment.stage {
                     Stage::LineUp | Stage::Takeoff | Stage::Rollout => &["Tower"],
                     Stage::TaxiIn | Stage::Crossing => &["Ground", "Tower"],
-                    Stage::Climb | Stage::Cruise | Stage::Descent | Stage::Holding => {
-                        &["Approach", "Center"]
-                    }
+                    Stage::Climb => &["Departure", "Approach", "Center"],
+                    Stage::Cruise | Stage::Descent | Stage::Holding => &["Approach", "Center"],
                     Stage::Approach | Stage::MissedApproach => &["Approach", "Tower"],
                     _ => &[],
                 };
-                if !services.contains(&clearance.station.service.as_str()) {
+                if !services.contains(&clearance.station.service.as_str())
+                    && !clearance
+                        .station
+                        .services
+                        .iter()
+                        .any(|service| services.contains(&service.as_str()))
+                {
                     return Err(format!(
                         "Wrong controller service for generated segment {index}"
                     ));
+                }
+            }
+            if let Some(instruction) = self
+                .clearances
+                .get(&index)
+                .and_then(|clearance| clearance.missed.as_ref())
+            {
+                if segment.stage != Stage::Approach
+                    || instruction.fix.is_empty()
+                    || instruction.fix.len() > 16
+                    || !instruction
+                        .fix
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                    || !instruction.geometric_feet.is_finite()
+                    || !(-3000.0..=65000.0).contains(&instruction.geometric_feet)
+                    || !(-2000..=60000).contains(&instruction.reported_feet)
+                {
+                    return Err("Invalid amended missed-approach contract".into());
+                }
+                missed_instruction = Some(instruction);
+            }
+            if let Some(hold) = self.clearances.get(&index).and_then(|c| c.holding.as_ref()) {
+                let clearance = &self.clearances[&index];
+                let expected = if index == 1 && segment.stage == Stage::Takeoff {
+                    clearance.initial_climb
+                } else if matches!(segment.stage, Stage::Climb | Stage::Cruise | Stage::Descent) {
+                    self.clearances
+                        .get(&1)
+                        .and_then(|c| c.initial_climb)
+                        .filter(|end| (2..=*end).contains(&index))
+                        .or_else(|| {
+                            self.clearances
+                                .range(..=index)
+                                .rev()
+                                .find_map(|(&start, c)| {
+                                    c.airborne_through
+                                        .filter(|end| (start..=*end).contains(&index))
+                                })
+                        })
+                        .or(Some(index))
+                } else {
+                    None
+                };
+                if expected != Some(hold.boundary)
+                    || hold.boundary < index
+                    || self.route.segment(hold.boundary).is_none_or(|limit| {
+                        !matches!(limit.stage, Stage::Climb | Stage::Cruise | Stage::Descent)
+                            || limit.points.last() != Some(&hold.position)
+                    })
+                    || self
+                        .recovery
+                        .get(&hold.boundary)
+                        .is_none_or(|route| !hold.matches(route))
+                {
+                    return Err("Contingent holding contract does not match its clearance limit and protected recovery".into());
+                }
+            }
+            if segment.stage != Stage::Approach {
+                missed_instruction = None;
+            }
+            if let Some(instruction) = missed_instruction {
+                if segment
+                    .points
+                    .iter()
+                    .any(|point| point.altitude_feet > instruction.geometric_feet + 1.0)
+                {
+                    return Err("Amended missed level is below its approach entry".into());
+                }
+                let recovery = self
+                    .recovery
+                    .get(&index)
+                    .ok_or("Amended missed clearance lacks a recovery")?;
+                if recovery
+                    .segment(0)
+                    .is_none_or(|segment| segment.stage != Stage::MissedApproach)
+                {
+                    return Err("Amended missed clearance has no published missed path".into());
+                }
+                let hold = (0..512)
+                    .map_while(|step| recovery.segment(step))
+                    .last()
+                    .filter(|segment| segment.stage == Stage::Holding)
+                    .ok_or("Amended missed clearance has no holding continuation")?;
+                if hold
+                    .points
+                    .iter()
+                    .any(|point| (point.altitude_feet - instruction.geometric_feet).abs() > 1.0)
+                {
+                    return Err("Missed recovery does not match its amended cleared level".into());
                 }
             }
             if !segment.stage.on_ground()
@@ -155,6 +533,8 @@ impl Prepared {
                     || next.station.khz != clearance.station.khz
                     || next.station.service != clearance.station.service
                     || next.station.name != clearance.station.name
+                    || next.missed != clearance.missed
+                    || next.holding != clearance.holding
                     || next.instruction != clearance.instruction
                     || next.readback != clearance.readback
                 {
@@ -207,7 +587,10 @@ impl Prepared {
                     .get(&index)
                     .ok_or("Airborne clearance has a missing movement")?;
                 if stages[index] != stages[start]
+                    || !next.transfers.is_empty()
+                    || !clearance.transfers.is_empty()
                     || next.airborne_through.is_some()
+                    || next.landing_rollout.is_some()
                     || next.taxi_through.is_some()
                     || next.initial_climb.is_some()
                     || self.vacated_reports.contains_key(&index)
@@ -219,6 +602,8 @@ impl Prepared {
                     || next.station.khz != clearance.station.khz
                     || next.station.service != clearance.station.service
                     || next.station.name != clearance.station.name
+                    || next.missed != clearance.missed
+                    || next.holding != clearance.holding
                     || next.instruction != clearance.instruction
                     || next.readback != clearance.readback
                 {
@@ -227,6 +612,74 @@ impl Prepared {
                             .into(),
                     );
                 }
+            }
+        }
+        for (&start, clearance) in &self.clearances {
+            let Some(end) = clearance.landing_rollout else {
+                continue;
+            };
+            if stages.get(start) != Some(&Stage::Approach)
+                || end <= start
+                || end >= stages.len()
+                || clearance.initial_climb.is_some()
+                || clearance.airborne_through.is_some()
+                || clearance.taxi_through.is_some()
+                || !(clearance.station.service == "Tower"
+                    || clearance
+                        .station
+                        .services
+                        .iter()
+                        .any(|service| service == "Tower"))
+                || self.route.segment(start).is_none_or(|segment| {
+                    segment.resources.iter().any(|resource| {
+                        !resource.starts_with("RUNWAY/")
+                            || self
+                                .route
+                                .segment(start + 1)
+                                .is_none_or(|rollout| !rollout.resources.contains(resource))
+                    })
+                })
+            {
+                return Err("Landing clearance has an invalid final or rollout limit".into());
+            }
+            for index in start + 1..=end {
+                let next = self
+                    .clearances
+                    .get(&index)
+                    .ok_or("Landing clearance lacks its rollout contract")?;
+                if stages[index] != Stage::Rollout
+                    || next.landing_rollout.is_some()
+                    || next.initial_climb.is_some()
+                    || next.taxi_through.is_some()
+                    || next.airborne_through.is_some()
+                    || next.station.airport != clearance.station.airport
+                    || next.station.khz != clearance.station.khz
+                    || next.station.service != clearance.station.service
+                    || next.station.name != clearance.station.name
+                    || next.missed != clearance.missed
+                    || next.instruction != clearance.instruction
+                    || next.readback != clearance.readback
+                    || self.vacated_reports.contains_key(&index)
+                {
+                    return Err(
+                        "Landing clearance crosses a separate runway or controller limit".into(),
+                    );
+                }
+                let resources = &self.route.segment(index).unwrap().resources;
+                let first = &self.route.segment(start + 1).unwrap().resources;
+                if !resources
+                    .iter()
+                    .any(|resource| resource.starts_with("RUNWAY/"))
+                    || !first
+                        .iter()
+                        .filter(|resource| resource.starts_with("RUNWAY/"))
+                        .all(|resource| resources.contains(resource))
+                {
+                    return Err("Landing rollout does not retain its protected runway".into());
+                }
+            }
+            if stages.get(end + 1) == Some(&Stage::Rollout) {
+                return Err("Landing clearance must include its complete rollout".into());
             }
         }
         for (index, pair) in stages.windows(2).enumerate() {
@@ -296,9 +749,70 @@ impl Prepared {
 
 #[derive(Clone)]
 pub(super) struct Rejoin {
+    previous: Arc<Prepared>,
     plan: Arc<Prepared>,
     source: usize,
     accepted: bool,
+}
+
+/// Reuse a protected onward route only after the aircraft has reported its contingent hold.
+pub(super) fn prepare_limit_rejoins(runtime: &mut Runtime) {
+    let poses = runtime.world.snapshot();
+    let held = poses
+        .iter()
+        .filter_map(|pose| pose.recovery_from.map(|source| (pose.id, source)))
+        .collect::<BTreeSet<_>>();
+    runtime.rejoin_attempts.retain(|key, owner| {
+        held.contains(key)
+            && runtime
+                .flights
+                .get(&key.0)
+                .is_some_and(|current| Arc::ptr_eq(current, owner))
+    });
+    let candidates = poses
+        .into_iter()
+        .filter_map(|pose| {
+            let source = pose.recovery_from?;
+            let previous = runtime.flights.get(&pose.id)?;
+            (pose.stage == Stage::Holding
+                && runtime.active_flights.contains(&pose.id)
+                && runtime.reported_recoveries.contains(&(pose.id, source))
+                && !runtime.rejoins.contains_key(&pose.id)
+                && previous
+                    .clearances
+                    .get(&source)
+                    .and_then(|c| c.holding.as_ref())
+                    .is_some_and(|hold| hold.boundary == source)
+                && !runtime
+                    .rejoin_attempts
+                    .get(&(pose.id, source))
+                    .is_some_and(|attempt| Arc::ptr_eq(attempt, previous)))
+            .then(|| (pose.id, source, previous.clone()))
+        })
+        .collect::<Vec<_>>();
+    for (id, source, previous) in candidates {
+        let result = previous
+            .resume_after_limit(source)
+            .and_then(|prepared| offer_rejoin(runtime, id, prepared));
+        if let Err(error) = result {
+            runtime.rejoin_attempts.insert((id, source), previous);
+            if runtime.warnings.len() < 128 {
+                runtime
+                    .warnings
+                    .push(format!("Traffic {id} remains holding: {error}"));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn rejoin_refusal(
+    runtime: &Runtime,
+    telemetry: &openatc_core::state::Telemetry,
+    id: u32,
+) -> Option<String> {
+    let rejoin = runtime.rejoins.get(&id)?;
+    super::separation::rejoin_check(runtime, telemetry, id, &rejoin.plan).err()
 }
 
 pub(super) fn offer_rejoin(
@@ -318,33 +832,69 @@ pub(super) fn offer_rejoin(
         .recovery_from
         .filter(|_| pose.stage == Stage::Holding)
         .ok_or("Aircraft is not following its recovery hold")?;
+    let previous = runtime
+        .flights
+        .get(&id)
+        .ok_or("Original flight is unavailable")?;
+    let prior_missed = previous
+        .clearances
+        .range(..=source)
+        .rev()
+        .find_map(|(_, clearance)| clearance.missed.as_ref());
+    if prior_missed.is_some() {
+        let first_approach = (0..512).find(|index| {
+            prepared
+                .route
+                .segment(*index)
+                .is_some_and(|segment| segment.stage == Stage::Approach)
+        });
+        if first_approach
+            .and_then(|index| prepared.clearances.get(&index))
+            .is_none_or(|clearance| clearance.missed.is_none())
+        {
+            return Err(
+                "Onward approach must explicitly retain or replace its amended missed clearance"
+                    .into(),
+            );
+        }
+    }
     if runtime.rejoins.contains_key(&id)
         || !runtime.active_flights.contains(&id)
         || runtime
             .frames
             .iter()
             .find(|frame| frame.target.id == id)
-            .is_none_or(|frame| frame.target.com1_khz != Some(prepared.clearances[&0].station.khz))
+            .is_none_or(|frame| {
+                !previous
+                    .clearances
+                    .values()
+                    .flat_map(Clearance::stations)
+                    .any(|station| on_station(runtime, id, frame.target.com1_khz, station))
+            })
     {
         return Err(
-            "Onward clearance needs the aircraft's current controller and a free request slot"
-                .into(),
+            "Onward clearance needs a known current controller and a free request slot".into(),
         );
     }
     let through = prepared.clearances[&0].airborne_through.unwrap_or(0);
     let mut probe = runtime.world.clone();
-    if !probe.leave_hold_at_fix(
-        probe.generation(),
-        id,
-        prepared.route.clone(),
-        prepared.recovery.clone(),
-        through,
-    ) {
-        return Err("Onward flight does not join the holding fix with a flyable recovery".into());
-    }
+    probe
+        .queue_hold_exit(
+            probe.generation(),
+            id,
+            prepared.route.clone(),
+            prepared.recovery.clone(),
+            through,
+        )
+        .map_err(|error| format!("Onward flight cannot leave its holding fix: {error}"))?;
     runtime.rejoins.insert(
         id,
         Rejoin {
+            previous: runtime
+                .flights
+                .get(&id)
+                .ok_or("Original flight is unavailable")?
+                .clone(),
             plan: Arc::new(prepared),
             source,
             accepted: false,
@@ -353,11 +903,29 @@ pub(super) fn offer_rejoin(
     Ok(())
 }
 
+pub(super) fn rejoin_blocked(
+    runtime: &Runtime,
+    telemetry: &openatc_core::state::Telemetry,
+    id: u32,
+) -> bool {
+    runtime.rejoins.get(&id).is_none_or(|rejoin| {
+        super::separation::rejoin_blocked(runtime, telemetry, id, &rejoin.plan)
+    })
+}
+
 pub(super) fn accept_rejoin(runtime: &mut Runtime, id: u32, source: usize) {
     let Some(rejoin) = runtime.rejoins.get(&id) else {
         return;
     };
     if rejoin.source != source || rejoin.accepted {
+        return;
+    }
+    if runtime
+        .frames
+        .iter()
+        .find(|frame| frame.target.id == id)
+        .is_none_or(|frame| frame.target.com1_khz != Some(rejoin.plan.clearances[&0].station.khz))
+    {
         return;
     }
     let through = rejoin.plan.clearances[&0].airborne_through.unwrap_or(0);
@@ -398,6 +966,10 @@ fn synchronise_rejoins(runtime: &mut Runtime) {
             .reported_recoveries
             .retain(|(aircraft, _)| *aircraft != id);
         runtime.handoff_targets.insert(id, 0);
+        runtime
+            .sector_transfers
+            .retain(|(aircraft, _), _| *aircraft != id);
+        runtime.pending_sector_checkins.remove(&id);
         runtime.flights.insert(id, plan);
         runtime.rejoins.remove(&id);
     }
@@ -406,10 +978,13 @@ fn synchronise_rejoins(runtime: &mut Runtime) {
 /// A discontinuous simulator clock invalidates outstanding airborne movement grants.
 pub(super) fn clock_changed(runtime: &mut Runtime) {
     runtime.rejoins.clear();
+    runtime.rejoin_attempts.clear();
+    runtime.cancelled_landings.clear();
+    runtime.pending_sector_checkins.clear();
     if runtime
         .exchange
         .as_ref()
-        .is_some_and(|exchange| exchange.rejoin)
+        .is_some_and(|exchange| exchange.rejoin || exchange.sector_transfer.is_some())
     {
         runtime.exchange = None;
     }
@@ -435,6 +1010,45 @@ pub(super) fn clock_changed(runtime: &mut Runtime) {
 /// A fallback changes route indices; outstanding normal-route messages and grants are stale.
 pub(super) fn synchronise_recoveries(runtime: &mut Runtime) {
     synchronise_rejoins(runtime);
+    let poses = runtime.world.snapshot();
+    runtime.cancelled_landings.retain(|(id, start)| {
+        runtime.active_flights.contains(id)
+            && poses
+                .iter()
+                .any(|pose| pose.id == *id && !pose.recovering && pose.segment <= *start)
+    });
+    let stale = runtime
+        .rejoins
+        .iter()
+        .filter_map(|(&id, rejoin)| {
+            let valid = runtime.active_flights.contains(&id)
+                && runtime
+                    .flights
+                    .get(&id)
+                    .is_some_and(|flight| Arc::ptr_eq(flight, &rejoin.previous))
+                && runtime.frames.iter().any(|frame| frame.target.id == id)
+                && poses.iter().any(|pose| {
+                    pose.id == id
+                        && pose.stage == Stage::Holding
+                        && !pose.complete
+                        && pose.recovery_from == Some(rejoin.source)
+                });
+            (!valid).then_some(id)
+        })
+        .collect::<Vec<_>>();
+    for id in stale {
+        runtime.rejoins.remove(&id);
+        runtime
+            .world
+            .cancel_hold_exit(runtime.world.generation(), id);
+        if runtime
+            .exchange
+            .as_ref()
+            .is_some_and(|exchange| exchange.id == id && exchange.rejoin)
+        {
+            runtime.exchange = None;
+        }
+    }
     let recovering: BTreeMap<_, _> = runtime
         .world
         .snapshot()
@@ -448,6 +1062,9 @@ pub(super) fn synchronise_recoveries(runtime: &mut Runtime) {
         .pending_checkins
         .retain(|(id, _)| !recovering.contains_key(id));
     runtime
+        .pending_sector_checkins
+        .retain(|id, _| !recovering.contains_key(id));
+    runtime
         .handoff_targets
         .retain(|id, _| !recovering.contains_key(id));
     if runtime.exchange.as_ref().is_some_and(|exchange| {
@@ -459,7 +1076,7 @@ pub(super) fn synchronise_recoveries(runtime: &mut Runtime) {
                             .rejoins
                             .get(&exchange.id)
                             .is_some_and(|rejoin| rejoin.source == *source && !rejoin.accepted))
-                || exchange.tune_after.is_some()
+                || exchange.tune_after.is_some() && !exchange.rejoin
         }) || exchange.recovery_from.is_some() && !recovering.contains_key(&exchange.id)
     }) {
         runtime.exchange = None;
@@ -511,11 +1128,35 @@ pub(super) fn acknowledge(runtime: &mut Runtime, id: u32, segment: usize) {
             runtime.approved_orders.insert((id, index));
         }
     }
+    if let Some(end) = clearance.landing_rollout {
+        for index in segment + 1..=end {
+            runtime.approved_orders.insert((id, index));
+        }
+    }
     if let Some(end) = clearance.taxi_through {
         for index in segment + 1..=end {
             runtime.approved_orders.insert((id, index));
         }
     }
+}
+
+pub(super) fn revoke_landing(runtime: &mut Runtime, id: u32, start: usize) {
+    let Some(end) = runtime
+        .flights
+        .get(&id)
+        .and_then(|plan| plan.clearances.get(&start))
+        .and_then(|clearance| clearance.landing_rollout)
+    else {
+        return;
+    };
+    for index in start..=end {
+        runtime.approved_orders.remove(&(id, index));
+    }
+    let generation = runtime.world.generation();
+    runtime.world.withdraw_continuation(generation, id, start);
+    runtime
+        .world
+        .withdraw_continuation(generation, id, start + 1);
 }
 
 fn validate_reports(runtime: &Runtime, prepared: &Prepared) -> Result<(), String> {
@@ -572,6 +1213,10 @@ pub(super) fn install(runtime: &mut Runtime, id: u32, prepared: &Prepared) -> Re
         }
     }
     runtime.world = world;
+    runtime
+        .sector_transfers
+        .retain(|(aircraft, _), _| *aircraft != id);
+    runtime.pending_sector_checkins.remove(&id);
     runtime.flights.insert(id, Arc::new(prepared.clone()));
     runtime
         .approved_orders
@@ -589,6 +1234,13 @@ pub(super) fn install(runtime: &mut Runtime, id: u32, prepared: &Prepared) -> Re
         .reported_recoveries
         .retain(|(aircraft, _)| *aircraft != id);
     runtime.rejoins.remove(&id);
+    runtime
+        .rejoin_attempts
+        .retain(|(aircraft, _), _| *aircraft != id);
+    runtime.cancelled_takeoffs.remove(&id);
+    runtime
+        .cancelled_landings
+        .retain(|(aircraft, _)| *aircraft != id);
     runtime.orders.remove(&id);
     runtime.active_flights.insert(id);
     runtime.handoff_targets.insert(id, 0);
@@ -619,7 +1271,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
         if !state.generated.active_flights.contains(&pose.id) {
             continue;
         }
-        let Some(prepared) = state.generated.flights.get(&pose.id) else {
+        let Some(prepared) = state.generated.flights.get(&pose.id).cloned() else {
             continue;
         };
         let Some(frame) = state
@@ -627,6 +1279,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
             .frames
             .iter()
             .find(|frame| frame.target.id == pose.id)
+            .cloned()
         else {
             continue;
         };
@@ -634,14 +1287,68 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
             let Some(source) = pose.recovery_from else {
                 continue;
             };
+            // Once the missed route has started, a delayed cancellation cannot say to continue approach.
+            state
+                .generated
+                .cancelled_landings
+                .retain(|(id, _)| *id != pose.id);
             if pose.stage == Stage::Holding
                 && let Some(rejoin) = state.generated.rejoins.get(&pose.id)
                 && !rejoin.accepted
                 && rejoin.source == source
+                && !super::separation::rejoin_blocked(
+                    &state.generated,
+                    &state.session.telemetry,
+                    pose.id,
+                    &rejoin.plan,
+                )
             {
                 let clearance = &rejoin.plan.clearances[&0];
-                if Some(clearance.station.khz) != frame.target.com1_khz {
-                    continue;
+                if !on_station(
+                    &state.generated,
+                    pose.id,
+                    frame.target.com1_khz,
+                    &clearance.station,
+                ) {
+                    let Some(old) = rejoin
+                        .previous
+                        .clearances
+                        .values()
+                        .flat_map(Clearance::stations)
+                        .find(|station| {
+                            on_station(&state.generated, pose.id, frame.target.com1_khz, station)
+                        })
+                    else {
+                        continue;
+                    };
+                    let slots = [
+                        ("callsign", frame.target.callsign.clone()),
+                        ("station", clearance.station.name.clone()),
+                        (
+                            "frequency",
+                            format!("{:.3}", f64::from(clearance.station.khz) / 1000.0),
+                        ),
+                    ];
+                    return Some(radio::Exchange {
+                        id: pose.id,
+                        segment: 0,
+                        station: old.clone(),
+                        callsign: frame.target.callsign.clone(),
+                        messages: vec![
+                            (true, openatc_core::dialogue::say("flight_handoff", &slots)),
+                            (
+                                false,
+                                openatc_core::dialogue::say("pilot_frequency_readback", &slots),
+                            ),
+                        ],
+                        next: 0,
+                        due: Instant::now(),
+                        grant: false,
+                        tune_after: Some(clearance.station.clone()),
+                        sector_transfer: None,
+                        recovery_from: Some(source),
+                        rejoin: true,
+                    });
                 }
                 return Some(radio::Exchange {
                     id: pose.id,
@@ -656,9 +1363,60 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                     due: Instant::now(),
                     grant: true,
                     tune_after: None,
+                    sector_transfer: None,
                     recovery_from: Some(source),
                     rejoin: true,
                 });
+            }
+            if pose.stage == Stage::Holding
+                && let Some(clearance) = prepared.clearances.get(&source)
+                && clearance
+                    .holding
+                    .as_ref()
+                    .is_some_and(|hold| hold.boundary == source)
+                && !state
+                    .generated
+                    .reported_recoveries
+                    .contains(&(pose.id, source))
+            {
+                let station = prepared
+                    .clearances
+                    .range(..=source)
+                    .rev()
+                    .flat_map(|(_, contract)| {
+                        std::iter::once(&contract.station)
+                            .chain(contract.transfers.iter().map(|transfer| &transfer.station))
+                    })
+                    .find(|station| {
+                        on_station(&state.generated, pose.id, frame.target.com1_khz, station)
+                    })
+                    .cloned();
+                if let Some(station) = station {
+                    state
+                        .generated
+                        .reported_recoveries
+                        .insert((pose.id, source));
+                    return Some(radio::Exchange {
+                        id: pose.id,
+                        segment: pose.segment,
+                        station,
+                        callsign: frame.target.callsign.clone(),
+                        messages: vec![(
+                            false,
+                            openatc_core::dialogue::say(
+                                "generated_pilot_limit_holding",
+                                &[("callsign", frame.target.callsign.clone())],
+                            ),
+                        )],
+                        next: 0,
+                        due: Instant::now(),
+                        grant: false,
+                        tune_after: None,
+                        sector_transfer: None,
+                        recovery_from: Some(source),
+                        rejoin: false,
+                    });
+                }
             }
             if pose.stage != Stage::MissedApproach
                 || prepared
@@ -710,6 +1468,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                 due: Instant::now(),
                 grant: false,
                 tune_after: None,
+                sector_transfer: None,
                 recovery_from: Some(source),
                 rejoin: false,
             };
@@ -718,6 +1477,61 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                 .reported_recoveries
                 .insert((pose.id, source));
             return Some(exchange);
+        }
+        if let Some((_, start)) = state
+            .generated
+            .cancelled_landings
+            .iter()
+            .find(|(id, _)| *id == pose.id)
+            .copied()
+        {
+            state.generated.cancelled_landings.remove(&(pose.id, start));
+            if let Some(clearance) = prepared.clearances.get(&start) {
+                return Some(radio::hold_landing(
+                    radio::Exchange {
+                        id: pose.id,
+                        segment: start,
+                        station: clearance.station.clone(),
+                        callsign: frame.target.callsign.clone(),
+                        messages: vec![],
+                        next: 0,
+                        due: Instant::now(),
+                        grant: false,
+                        tune_after: None,
+                        sector_transfer: None,
+                        recovery_from: None,
+                        rejoin: false,
+                    },
+                    true,
+                ));
+            }
+        }
+        if state.generated.cancelled_takeoffs.contains_key(&pose.id) {
+            let Some(clearance) = prepared.clearances.get(&1) else {
+                continue;
+            };
+            if Some(clearance.station.khz) != frame.target.com1_khz {
+                continue;
+            }
+            let wake = state.generated.cancelled_takeoffs.remove(&pose.id).unwrap();
+            return Some(radio::hold_takeoff(
+                radio::Exchange {
+                    id: pose.id,
+                    segment: 1,
+                    station: clearance.station.clone(),
+                    callsign: frame.target.callsign.clone(),
+                    messages: vec![],
+                    next: 0,
+                    due: Instant::now(),
+                    grant: false,
+                    tune_after: None,
+                    sector_transfer: None,
+                    recovery_from: None,
+                    rejoin: false,
+                },
+                true,
+                wake,
+            ));
         }
         if let Some(report) = prepared.vacated_reports.get(&pose.segment) {
             let previous = pose.segment - 1;
@@ -752,10 +1566,19 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                         .as_ref()
                         .and_then(|profiles| profiles.aircraft_for(&frame.target.aircraft))
                         .map_or_else(
-                            || openatc_core::airport::aircraft_on_runway(airport, &observed),
+                            || {
+                                openatc_core::airport::aircraft_on_named_runway(
+                                    airport,
+                                    &report.runway,
+                                    &observed,
+                                )
+                            },
                             |profile| {
-                                openatc_core::airport::aircraft_on_runway_for(
-                                    airport, &observed, profile,
+                                openatc_core::airport::aircraft_on_named_runway_for(
+                                    airport,
+                                    &report.runway,
+                                    &observed,
+                                    profile,
                                 )
                             },
                         )
@@ -781,6 +1604,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                     due: Instant::now(),
                     grant: false,
                     tune_after: None,
+                    sector_transfer: None,
                     recovery_from: None,
                     rejoin: false,
                 };
@@ -822,10 +1646,14 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                 due: Instant::now(),
                 grant: false,
                 tune_after: None,
+                sector_transfer: None,
                 recovery_from: None,
                 rejoin: false,
             };
             state.generated.pending_checkins.remove(&(pose.id, index));
+            return Some(exchange);
+        }
+        if let Some(exchange) = sector_exchange(&mut state.generated, &pose, &frame, &prepared) {
             return Some(exchange);
         }
         let current_handoff = state
@@ -836,7 +1664,21 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
             && prepared
                 .clearances
                 .get(&pose.segment)
-                .is_some_and(|clearance| Some(clearance.station.khz) != frame.target.com1_khz);
+                .is_some_and(|clearance| {
+                    !on_station(
+                        &state.generated,
+                        pose.id,
+                        frame.target.com1_khz,
+                        clearance.station_after(
+                            state
+                                .generated
+                                .sector_transfers
+                                .get(&(pose.id, pose.segment))
+                                .copied()
+                                .unwrap_or(0),
+                        ),
+                    )
+                });
         let index = if current_handoff || pose.awaiting_clearance {
             pose.segment
         } else if !pose.stage.on_ground() || pose.stage == Stage::Takeoff {
@@ -853,11 +1695,110 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
         } else {
             continue;
         };
-        let Some(clearance) = prepared.clearances.get(&index) else {
+        let Some(mut selected) = prepared.clearances.get(&index).cloned() else {
             continue;
         };
-        if state.generated.crossing_blocked(pose.id, index, &targets) {
-            if state.generated.approved_orders.remove(&(pose.id, index)) {
+        selected.station = selected
+            .station_after(
+                state
+                    .generated
+                    .sector_transfers
+                    .get(&(pose.id, index))
+                    .copied()
+                    .unwrap_or(0),
+            )
+            .clone();
+        let clearance = &selected;
+        let airborne_blocked = super::separation::blocked(
+            &state.generated,
+            &state.session.telemetry,
+            pose.id,
+            index,
+            clearance,
+        );
+        if state.generated.crossing_blocked(pose.id, index, &targets) || airborne_blocked {
+            let revoked = state.generated.approved_orders.remove(&(pose.id, index));
+            if clearance.landing_rollout.is_some() {
+                if revoked {
+                    revoke_landing(&mut state.generated, pose.id, index);
+                }
+                if revoked || state.generated.reported_holds.insert((pose.id, index)) {
+                    return Some(radio::hold_landing(
+                        radio::Exchange {
+                            id: pose.id,
+                            segment: index,
+                            station: clearance.station.clone(),
+                            callsign: frame.target.callsign.clone(),
+                            messages: vec![],
+                            next: 0,
+                            due: Instant::now(),
+                            grant: false,
+                            tune_after: None,
+                            sector_transfer: None,
+                            recovery_from: None,
+                            rejoin: false,
+                        },
+                        revoked,
+                    ));
+                }
+                continue;
+            }
+            if prepared
+                .route
+                .segment(index)
+                .is_some_and(|segment| segment.stage == Stage::Takeoff)
+            {
+                if revoked || state.generated.reported_holds.insert((pose.id, index)) {
+                    return Some(radio::hold_takeoff(
+                        radio::Exchange {
+                            id: pose.id,
+                            segment: index,
+                            station: clearance.station.clone(),
+                            callsign: frame.target.callsign.clone(),
+                            messages: vec![],
+                            next: 0,
+                            due: Instant::now(),
+                            grant: false,
+                            tune_after: None,
+                            sector_transfer: None,
+                            recovery_from: None,
+                            rejoin: false,
+                        },
+                        revoked,
+                        state
+                            .generated
+                            .departure_wake
+                            .get(&pose.id)
+                            .is_some_and(|seconds| *seconds > 0.0),
+                    ));
+                }
+                continue;
+            }
+            if airborne_blocked
+                && prepared
+                    .route
+                    .segment(index)
+                    .is_some_and(|segment| !segment.stage.on_ground())
+            {
+                if revoked || state.generated.reported_holds.insert((pose.id, index)) {
+                    return Some(radio::hold_airborne(radio::Exchange {
+                        id: pose.id,
+                        segment: index,
+                        station: clearance.station.clone(),
+                        callsign: frame.target.callsign.clone(),
+                        messages: vec![],
+                        next: 0,
+                        due: Instant::now(),
+                        grant: false,
+                        tune_after: None,
+                        sector_transfer: None,
+                        recovery_from: None,
+                        rejoin: false,
+                    }));
+                }
+                continue;
+            }
+            if revoked {
                 let runway = prepared
                     .vacated_reports
                     .get(&(index + 1))
@@ -873,6 +1814,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                         due: Instant::now(),
                         grant: false,
                         tune_after: None,
+                        sector_transfer: None,
                         recovery_from: None,
                         rejoin: false,
                     },
@@ -893,6 +1835,37 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
             probe.authorise_continuation(probe.generation(), pose.id, index, &blocked)
         };
         if !available {
+            if pose.awaiting_clearance
+                && prepared
+                    .route
+                    .segment(index)
+                    .is_some_and(|segment| segment.stage == Stage::TaxiIn)
+                && on_station(
+                    &state.generated,
+                    pose.id,
+                    frame.target.com1_khz,
+                    &clearance.station,
+                )
+                && state.generated.reported_holds.insert((pose.id, index))
+            {
+                return Some(radio::cancel_crossing(
+                    radio::Exchange {
+                        id: pose.id,
+                        segment: index,
+                        station: clearance.station.clone(),
+                        callsign: frame.target.callsign.clone(),
+                        messages: vec![],
+                        next: 0,
+                        due: Instant::now(),
+                        grant: false,
+                        tune_after: None,
+                        sector_transfer: None,
+                        recovery_from: None,
+                        rejoin: false,
+                    },
+                    None,
+                ));
+            }
             continue;
         }
         let Some(frame) = state
@@ -903,13 +1876,23 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
         else {
             continue;
         };
-        if frame.target.com1_khz != Some(clearance.station.khz) {
+        if !on_station(
+            &state.generated,
+            pose.id,
+            frame.target.com1_khz,
+            &clearance.station,
+        ) {
             let Some(old) = prepared
                 .clearances
                 .range(..=pose.segment)
                 .rev()
-                .map(|(_, clearance)| &clearance.station)
-                .find(|station| Some(station.khz) == frame.target.com1_khz)
+                .flat_map(|(_, clearance)| {
+                    std::iter::once(&clearance.station)
+                        .chain(clearance.transfers.iter().map(|transfer| &transfer.station))
+                })
+                .find(|station| {
+                    on_station(&state.generated, pose.id, frame.target.com1_khz, station)
+                })
                 .or_else(|| {
                     state
                         .stations
@@ -943,7 +1926,8 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                 next: 0,
                 due: Instant::now(),
                 grant: false,
-                tune_after: Some(clearance.station.khz),
+                tune_after: Some(clearance.station.clone()),
+                sector_transfer: None,
                 recovery_from: None,
                 rejoin: false,
             });
@@ -972,6 +1956,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
             due: Instant::now(),
             grant: true,
             tune_after: None,
+            sector_transfer: None,
             recovery_from: None,
             rejoin: false,
         });
@@ -1050,11 +2035,16 @@ mod tests {
                         index,
                         Clearance {
                             station,
+                            transfers: Vec::new(),
+                            coordinated_recovery: Vec::new(),
                             instruction: format!("Controller phase {index}."),
                             readback: format!("Pilot phase {index}."),
                             initial_climb: (index == 1).then_some(2),
                             taxi_through: None,
                             airborne_through: None,
+                            landing_rollout: None,
+                            missed: None,
+                            holding: None,
                         },
                     );
                 }
@@ -1097,7 +2087,7 @@ mod tests {
                     } else {
                         80.0
                     },
-                    resources: if *stage == Stage::Rollout {
+                    resources: if matches!(stage, Stage::LineUp | Stage::Takeoff | Stage::Rollout) {
                         vec!["RUNWAY/TEST/09/27".into()]
                     } else if stage.on_ground() {
                         vec![format!("PHASE/{index}")]
@@ -1109,6 +2099,7 @@ mod tests {
             })
             .collect();
         let prepared = Prepared {
+            airspeeds: BTreeMap::new(),
             route: Arc::new(Route::compile(segments, 4000.0, 4000.0).unwrap()),
             recovery,
             clearances,
@@ -1131,7 +2122,7 @@ mod tests {
                 second_name: "27".into(),
                 width: 45.0,
                 first: Point {
-                    east: 12000.0,
+                    east: 0.0,
                     ..Default::default()
                 },
                 second: Point {
@@ -1185,6 +2176,179 @@ mod tests {
         (state, prepared)
     }
 
+    #[test]
+    fn airborne_body_heading_keeps_wind_drift_out_of_tcas_ground_track() {
+        let (mut state, mut prepared) = fixture();
+        let speed = openatc_core::traffic::trajectory::Airspeed {
+            indicated_knots: 150.0,
+            atmosphere: openatc_core::traffic::air::Atmosphere::surface(1013.25, 15.0, 0.0)
+                .unwrap(),
+            wind_from: 0.0,
+            wind_knots: 20.0,
+        };
+        prepared.airspeeds = (2..=5).map(|index| (index, speed)).collect();
+        let mut invalid = prepared.clone();
+        invalid.airspeeds.insert(1, speed);
+        assert!(install(&mut state.generated, 1, &invalid).is_err());
+        assert!(state.generated.active_flights.is_empty());
+        install(&mut state.generated, 1, &prepared).unwrap();
+        let mut saw_airborne = false;
+        for second in 31..1000 {
+            if let Some(exchange) = &mut state.generated.exchange {
+                exchange.due = Instant::now();
+            }
+            super::super::radio_tick(&mut state);
+            state.session.telemetry.simulation_seconds = Some(f64::from(second));
+            super::super::advance(&mut state.generated, &state.session.telemetry);
+            let pose = &state.generated.world.snapshot()[0];
+            let frame = &state.generated.frames[0];
+            if pose.knots > 0.0 {
+                assert!(
+                    openatc_core::navigation::turn(pose.heading, frame.target.track_degrees).abs()
+                        < 1e-9
+                );
+                let body = frame.body_heading_degrees.unwrap();
+                if !pose.stage.on_ground() {
+                    let expected = openatc_core::traffic::air::heading_from_ground(
+                        pose.knots,
+                        pose.heading,
+                        0.0,
+                        20.0,
+                    )
+                    .unwrap();
+                    assert!(openatc_core::navigation::turn(expected, body).abs() < 1e-9);
+                    assert!(openatc_core::navigation::turn(pose.heading, body).abs() > 1.0);
+                    saw_airborne = true;
+                } else {
+                    assert!(openatc_core::navigation::turn(pose.heading, body).abs() < 1e-9);
+                }
+            }
+            if pose.complete && pose.stage == Stage::Turnaround {
+                break;
+            }
+        }
+        assert!(saw_airborne);
+        assert_eq!(state.generated.world.snapshot()[0].stage, Stage::Turnaround);
+        assert!(state.generated.world.snapshot()[0].complete);
+    }
+
+    #[test]
+    fn sector_contact_waits_for_readback_and_checkin_without_adding_movement_authority() {
+        for replace_route in [false, true] {
+            let (mut state, mut prepared) = fixture();
+            let sender = prepared.clearances[&3].station.clone();
+            let receiver = Station {
+                name: "Next Center".into(),
+                coverage: vec![openatc_core::stations::Coverage {
+                    floor: 0.0,
+                    ceiling: 50000.0,
+                    points: vec![[-1.0, -1.0], [-1.0, 1.0], [1.0, 1.0], [1.0, -1.0]],
+                }],
+                ..sender.clone()
+            };
+            let remaining = prepared.route.nominal_seconds(3, 3).unwrap() / 2.0;
+            prepared
+                .clearances
+                .get_mut(&3)
+                .unwrap()
+                .transfers
+                .push(SectorTransfer {
+                    remaining_seconds: remaining,
+                    station: receiver.clone(),
+                });
+            install(&mut state.generated, 1, &prepared).unwrap();
+            let generation = state.generated.world.generation();
+            for second in 31..500 {
+                let pose = state.generated.world.snapshot()[0].clone();
+                if pose.awaiting_clearance && pose.segment <= 3 {
+                    assert!(state.generated.world.authorise(
+                        generation,
+                        1,
+                        pose.segment,
+                        &BTreeSet::new()
+                    ));
+                }
+                if pose.segment < 3 {
+                    let _ = state.generated.world.authorise_continuation(
+                        generation,
+                        1,
+                        pose.segment + 1,
+                        &BTreeSet::new(),
+                    );
+                }
+                state.generated.world.advance(f64::from(second), false);
+                let pose = state.generated.world.snapshot()[0].clone();
+                if pose.segment == 3 && !pose.awaiting_clearance {
+                    break;
+                }
+            }
+            assert_eq!(state.generated.world.snapshot()[0].stage, Stage::Cruise);
+            state.generated.frames[0].target.com1_khz = Some(sender.khz);
+            state.generated.controllers.insert(1, sender.clone());
+            state.generated.approved_orders.insert((1, 3));
+            let authority = state.generated.approved_orders.clone();
+            let contact = exchange(&mut state).unwrap();
+            assert_eq!(contact.station.name, sender.name);
+            assert!(!contact.grant && contact.sector_transfer.is_some());
+            state.generated.exchange = Some(contact);
+            radio::tick(&mut state);
+            assert_eq!(state.generated.controllers[&1].name, sender.name);
+            if replace_route {
+                state
+                    .generated
+                    .flights
+                    .insert(1, Arc::new(prepared.clone()));
+            }
+            for _ in 0..2 {
+                if let Some(exchange) = &mut state.generated.exchange {
+                    exchange.due = Instant::now();
+                }
+                radio::tick(&mut state);
+            }
+            assert_eq!(state.generated.approved_orders, authority);
+            if replace_route {
+                assert_eq!(state.generated.controllers[&1].name, sender.name);
+                assert!(!state.generated.sector_transfers.contains_key(&(1, 3)));
+                assert!(state.generated.pending_sector_checkins.is_empty());
+            } else {
+                assert_eq!(state.generated.controllers[&1].name, receiver.name);
+                assert_eq!(state.generated.frames[0].target.com1_khz, Some(sender.khz));
+                assert_eq!(state.generated.sector_transfers[&(1, 3)], 1);
+                let checkin = exchange(&mut state).unwrap();
+                assert_eq!(checkin.station.name, receiver.name);
+                assert!(!checkin.messages[0].0 && checkin.messages[1].0);
+                assert!(!checkin.grant && checkin.tune_after.is_none());
+                assert!(state.generated.pending_sector_checkins.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn queued_flight_cannot_apply_its_takeoff_contract_to_a_surface_readback() {
+        let (mut state, prepared) = fixture();
+        state.generated.flights.insert(1, Arc::new(prepared));
+        assert!(!state.generated.active_flights.contains(&1));
+        state.generated.exchange = Some(radio::Exchange {
+            id: 1,
+            segment: 1,
+            station: state.stations[0].clone(),
+            callsign: "TEST123".into(),
+            messages: vec![],
+            next: 0,
+            due: Instant::now(),
+            grant: true,
+            tune_after: None,
+            sector_transfer: None,
+            recovery_from: None,
+            rejoin: false,
+        });
+        radio::tick(&mut state);
+        assert!(state.generated.approved_orders.contains(&(1, 1)));
+        assert!(!state.generated.active_flights.contains(&1));
+        assert!(state.generated.exchange.is_none());
+        assert!(state.generated.world.snapshot()[0].complete);
+    }
+
     #[tokio::test]
     async fn worker_clock_reset_cannot_restore_old_airborne_grants() {
         let (mut state, prepared) = fixture();
@@ -1236,6 +2400,7 @@ mod tests {
             due: Instant::now(),
             grant: true,
             tune_after: None,
+            sector_transfer: None,
             recovery_from: None,
             rejoin: false,
         });
@@ -1314,6 +2479,11 @@ mod tests {
                 }
             }
             let prepared = Prepared {
+                airspeeds: old
+                    .airspeeds
+                    .iter()
+                    .map(|(&index, speed)| (remap(index), *speed))
+                    .collect(),
                 route: Arc::new(Route::compile(segments, 4000.0, 4000.0).unwrap()),
                 clearances,
                 recovery,
@@ -1948,7 +3118,11 @@ mod tests {
             next: 0,
             due: Instant::now(),
             grant: true,
-            tune_after: Some(118675),
+            tune_after: Some(Station {
+                khz: 118675,
+                ..Default::default()
+            }),
+            sector_transfer: None,
             recovery_from: None,
             rejoin: false,
         });
@@ -1977,6 +3151,149 @@ mod tests {
         assert!(state.generated.pending_checkins.is_empty());
         assert_eq!(state.generated.frames[0].target.com1_khz, Some(120950));
         assert!(state.generated.world.snapshot()[0].recovering);
+    }
+
+    #[test]
+    fn cleared_limit_hold_reports_once_without_reviving_stale_onward_grants() {
+        use openatc_core::traffic::{
+            air::Atmosphere,
+            trajectory::{Airspeed, Fix},
+        };
+        let (mut state, mut prepared) = fixture();
+        let segment = prepared.route.segment(3).unwrap();
+        let end = *segment.points.last().unwrap();
+        let atmosphere = Atmosphere::surface(1013.25, 15.0, 0.0).unwrap();
+        let reference = Airspeed {
+            indicated_knots: 80.0 / atmosphere.true_knots(100.0, end.altitude_feet).unwrap()
+                * 100.0,
+            atmosphere,
+            wind_from: 0.0,
+            wind_knots: 0.0,
+        };
+        let fix = Fix {
+            coordinate: [end.latitude, end.longitude],
+            arrival_heading: Some(90.0),
+            minimum_feet: end.altitude_feet,
+            maximum_feet: end.altitude_feet,
+            preferred_feet: end.altitude_feet,
+            ground_knots: 80.0,
+            airspeed: Some(reference),
+            required_turn: None,
+            intercept: None,
+        };
+        let hold = super::super::recovery::LimitHold::at(
+            3,
+            segment,
+            &fix,
+            &super::super::recovery::HoldingPolicy {
+                minimum_indicated_knots: 40.0,
+                maximum_indicated_knots: 200.0,
+                bank_degrees: 25.0,
+                turn_rate_degrees_sec: 3.0,
+            },
+        )
+        .unwrap();
+        prepared.recovery.insert(
+            3,
+            Arc::new(hold.protect(4000.0, 4000.0, |_, _| true).unwrap()),
+        );
+        prepared.clearances.get_mut(&3).unwrap().holding = Some(hold.clone());
+        prepared.validate().unwrap();
+        let mut wrong_scope = prepared.clone();
+        wrong_scope.clearances.get_mut(&2).unwrap().holding = Some(hold);
+        assert!(wrong_scope.validate().is_err());
+        install(&mut state.generated, 1, &prepared).unwrap();
+        let generation = state.generated.world.generation();
+        assert!(
+            state
+                .generated
+                .world
+                .authorise(generation, 1, 0, &BTreeSet::new())
+        );
+        let mut reached = false;
+        let mut now = 30.0;
+        for second in 31..900 {
+            let pose = state.generated.world.snapshot()[0].clone();
+            if pose.awaiting_clearance && pose.segment < 3 {
+                assert!(state.generated.world.authorise(
+                    generation,
+                    1,
+                    pose.segment,
+                    &BTreeSet::new()
+                ));
+            }
+            if !pose.awaiting_clearance && pose.segment < 3 {
+                assert!(state.generated.world.authorise_continuation(
+                    generation,
+                    1,
+                    pose.segment + 1,
+                    &BTreeSet::new()
+                ));
+            }
+            now = f64::from(second);
+            state.generated.world.advance(now, false);
+            if state.generated.world.snapshot()[0].recovering {
+                reached = true;
+                break;
+            }
+        }
+        assert!(reached);
+        state.settings.hear_traffic_radio = true;
+        state.session.telemetry.com1_khz = 118675;
+        state.generated.frames[0].target.com1_khz = Some(118675);
+        state.generated.approved_orders.insert((1, 4));
+        state.generated.pending_checkins.insert((1, 4));
+        super::super::radio_tick(&mut state);
+        let exchange = state.generated.exchange.as_ref().unwrap();
+        assert_eq!(exchange.recovery_from, Some(3));
+        assert!(!exchange.grant && !exchange.rejoin && exchange.tune_after.is_none());
+        let report = state.session.transcript.last().unwrap();
+        assert!(report.background && report.text.contains("established in the hold"));
+        state.generated.exchange.as_mut().unwrap().due = Instant::now();
+        super::super::radio_tick(&mut state);
+        for _ in 0..3 {
+            super::super::radio_tick(&mut state);
+        }
+        assert_eq!(
+            state
+                .session
+                .transcript
+                .iter()
+                .filter(|entry| entry.text.contains("established in the hold"))
+                .count(),
+            1
+        );
+        assert!(state.generated.rejoins.contains_key(&1));
+        assert_eq!(state.generated.frames[0].target.com1_khz, Some(118675));
+        assert!(state.generated.approved_orders.is_empty());
+        assert!(state.generated.pending_checkins.is_empty());
+        assert!(state.generated.world.snapshot()[0].recovering);
+        for _ in 0..1600 {
+            if let Some(exchange) = &mut state.generated.exchange {
+                exchange.due = Instant::now();
+            }
+            super::super::radio_tick(&mut state);
+            now += 0.5;
+            state.session.telemetry.simulation_seconds = Some(now);
+            super::super::advance(&mut state.generated, &state.session.telemetry);
+            let pose = &state.generated.world.snapshot()[0];
+            if pose.stage == Stage::Turnaround && pose.complete {
+                break;
+            }
+        }
+        let pose = &state.generated.world.snapshot()[0];
+        assert_eq!(pose.stage, Stage::Turnaround, "{pose:?}");
+        assert!(pose.complete);
+        assert!(state.generated.rejoins.is_empty());
+        assert_eq!(
+            state
+                .session
+                .transcript
+                .iter()
+                .filter(|entry| entry.text.contains("established in the hold"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -2032,7 +3349,11 @@ mod tests {
                 next,
                 due: Instant::now(),
                 grant: true,
-                tune_after: Some(118675),
+                tune_after: Some(Station {
+                    khz: 118675,
+                    ..Default::default()
+                }),
+                sector_transfer: None,
                 recovery_from: None,
                 rejoin: false,
             });
@@ -2062,25 +3383,585 @@ mod tests {
         }
     }
 
+    fn wake_fixture() -> EngineState {
+        let (mut state, mut prepared) = fixture();
+        let old = prepared.route.clone();
+        let segments = (0..9)
+            .map(|index| {
+                let mut segment = old.segment(index).unwrap().clone();
+                if index == 1 {
+                    segment.resources = vec!["RUNWAY/KTEST/09/27".into()];
+                }
+                for resource in &mut segment.resources {
+                    *resource = resource.replace("RUNWAY/TEST/", "RUNWAY/KTEST/");
+                }
+                segment
+            })
+            .collect();
+        prepared.route = Arc::new(Route::compile(segments, 4000.0, 4000.0).unwrap());
+        for clearance in prepared.clearances.values_mut() {
+            clearance.station.airport = "KTEST".into();
+        }
+        prepared.vacated_reports.get_mut(&7).unwrap().airport = "KTEST".into();
+        let airport = Arc::make_mut(state.generated.airport.as_mut().unwrap());
+        airport.icao = "KTEST".into();
+        airport.runways[0].first.east = 0.0;
+        airport.runways[0].second.east = 3000.0;
+        state.session.plan.departure = "KTEST".into();
+        state.session.plan.runway = "09".into();
+        state.generated.frames[0].target.aircraft = "C172".into();
+        install(&mut state.generated, 1, &prepared).unwrap();
+        state
+    }
+
+    #[test]
+    fn crossing_airborne_traffic_withholds_takeoff_and_requires_a_fresh_readback_after_clearing() {
+        for arrival_stage in 0..3 {
+            let mut state = wake_fixture();
+            state.settings.hear_traffic_radio = true;
+            state.session.telemetry.com1_khz = 120950;
+            let mut now = 30.0;
+            let mut ready = false;
+            for _ in 0..100 {
+                let pose = &state.generated.world.snapshot()[0];
+                if pose.stage == Stage::Takeoff
+                    && pose.awaiting_clearance
+                    && state.generated.exchange.is_none()
+                {
+                    ready = true;
+                    break;
+                }
+                if let Some(exchange) = &mut state.generated.exchange {
+                    exchange.due = Instant::now();
+                }
+                super::super::radio_tick(&mut state);
+                now += 0.5;
+                state.session.telemetry.simulation_seconds = Some(now);
+                super::super::advance(&mut state.generated, &state.session.telemetry);
+            }
+            assert!(ready);
+            if arrival_stage > 0 {
+                super::super::radio_tick(&mut state);
+                let exchange = state.generated.exchange.as_ref().unwrap();
+                assert!(exchange.grant && exchange.segment == 1 && exchange.next == 1);
+            }
+            if arrival_stage == 2 {
+                for _ in 0..3 {
+                    state.generated.exchange.as_mut().unwrap().due = Instant::now();
+                    super::super::radio_tick(&mut state);
+                    if state.generated.approved_orders.contains(&(1, 1)) {
+                        break;
+                    }
+                }
+                assert!(state.generated.approved_orders.contains(&(1, 1)));
+                assert!(state.generated.approved_orders.contains(&(1, 2)));
+            }
+            state.session.telemetry.traffic = Some(vec![TrafficTarget {
+                id: 88,
+                callsign: "CROSS88".into(),
+                aircraft: "C172".into(),
+                latitude: 3.0 / 60.0,
+                longitude: 2.5 / 60.0,
+                altitude_feet: 1000.0,
+                ground_speed_knots: Some(120.0),
+                track_degrees: 180.0,
+                on_ground: false,
+                ..Default::default()
+            }]);
+            assert!(
+                !state.generated.crossing_blocked(
+                    1,
+                    1,
+                    &super::super::observed_targets(&state.generated, &state.session.telemetry)
+                ),
+                "This aircraft crosses the departure corridor beyond the runway monitor"
+            );
+            if arrival_stage == 2 {
+                now += 0.5;
+                state.session.telemetry.simulation_seconds = Some(now);
+                super::super::advance(&mut state.generated, &state.session.telemetry);
+                assert!(state.generated.cancelled_takeoffs.contains_key(&1));
+                assert!(!state.generated.approved_orders.contains(&(1, 1)));
+                assert!(!state.generated.approved_orders.contains(&(1, 2)));
+            }
+            for _ in 0..15 {
+                if let Some(exchange) = &mut state.generated.exchange {
+                    exchange.due = Instant::now();
+                }
+                super::super::radio_tick(&mut state);
+                now += 0.5;
+                state.session.telemetry.simulation_seconds = Some(now);
+                super::super::advance(&mut state.generated, &state.session.telemetry);
+                let pose = &state.generated.world.snapshot()[0];
+                assert_eq!(pose.stage, Stage::Takeoff);
+                assert_eq!(pose.knots, 0.0);
+                assert!(!state.generated.approved_orders.contains(&(1, 1)));
+                assert!(!state.generated.approved_orders.contains(&(1, 2)));
+            }
+            state.session.telemetry.traffic = Some(vec![]);
+            for _ in 0..2000 {
+                if let Some(exchange) = &mut state.generated.exchange {
+                    exchange.due = Instant::now();
+                }
+                super::super::radio_tick(&mut state);
+                now += 0.5;
+                state.session.telemetry.simulation_seconds = Some(now);
+                super::super::advance(&mut state.generated, &state.session.telemetry);
+                let pose = &state.generated.world.snapshot()[0];
+                assert!(!pose.recovering);
+                if pose.stage == Stage::Turnaround && pose.complete {
+                    break;
+                }
+            }
+            let pose = &state.generated.world.snapshot()[0];
+            assert_eq!(pose.stage, Stage::Turnaround, "{pose:?}");
+            assert!(pose.complete);
+            let takeoff_calls = state
+                .session
+                .transcript
+                .iter()
+                .filter(|entry| entry.text.contains("Controller phase 1."))
+                .count();
+            assert_eq!(takeoff_calls, if arrival_stage > 0 { 2 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn generated_departures_wait_for_observed_native_and_player_wake() {
+        for player_leads in [false, true] {
+            let mut state = wake_fixture();
+            let heavy = TrafficTarget {
+                id: 88,
+                callsign: "HEAVY88".into(),
+                aircraft: "B77W".into(),
+                ground_speed_knots: Some(180.0),
+                longitude: 0.01,
+                track_degrees: 90.0,
+                on_ground: true,
+                ..Default::default()
+            };
+            if player_leads {
+                state.session.telemetry.aircraft_icao = "B77W".into();
+                state.session.telemetry.longitude = 0.01;
+                state.session.telemetry.heading_degrees = 90.0;
+                state.session.telemetry.on_ground = true;
+                state.session.telemetry.traffic = Some(vec![]);
+            } else {
+                state.session.telemetry.traffic = Some(vec![heavy]);
+            }
+            state.session.telemetry.simulation_seconds = Some(31.0);
+            crate::traffic::observe(&mut state);
+            if player_leads {
+                state.session.telemetry.on_ground = false;
+            } else {
+                state.session.telemetry.traffic.as_mut().unwrap()[0].on_ground = false;
+            }
+            state.session.telemetry.simulation_seconds = Some(32.0);
+            crate::traffic::observe(&mut state);
+            assert_eq!(state.generated.departure_wake.get(&1), Some(&180.0));
+            // The observed leader leaves the runway while its wake interval remains active.
+            if player_leads {
+                state.session.telemetry.longitude = 0.2;
+                state.session.telemetry.altitude_feet = 4000.0;
+            } else {
+                let leader = &mut state.session.telemetry.traffic.as_mut().unwrap()[0];
+                leader.longitude = 0.2;
+                leader.altitude_feet = 4000.0;
+            }
+            for second in 33..1000 {
+                state.session.telemetry.simulation_seconds = Some(f64::from(second));
+                crate::traffic::observe(&mut state);
+                if let Some(exchange) = &mut state.generated.exchange {
+                    exchange.due = Instant::now();
+                }
+                super::super::radio_tick(&mut state);
+                super::super::advance(&mut state.generated, &state.session.telemetry);
+                let pose = &state.generated.world.snapshot()[0];
+                if second < 212 {
+                    assert!(
+                        matches!(pose.stage, Stage::LineUp | Stage::Takeoff)
+                            && (pose.stage != Stage::Takeoff || pose.knots == 0.0),
+                        "early roll at {second}: {pose:?}"
+                    );
+                }
+                assert!(!pose.recovering, "{pose:?}");
+                if pose.stage == Stage::Turnaround && pose.complete {
+                    break;
+                }
+            }
+            let pose = &state.generated.world.snapshot()[0];
+            assert_eq!(pose.stage, Stage::Turnaround, "{pose:?}");
+            assert!(pose.complete);
+        }
+    }
+
+    #[test]
+    fn wake_arriving_during_takeoff_readback_cancels_the_grant() {
+        let mut state = wake_fixture();
+        let mut now = 30.0;
+        let mut pending = false;
+        for _ in 0..100 {
+            if let Some(exchange) = &mut state.generated.exchange {
+                exchange.due = Instant::now();
+            }
+            super::super::radio_tick(&mut state);
+            if state.generated.exchange.as_ref().is_some_and(|exchange| {
+                exchange.segment == 1 && exchange.grant && exchange.next == exchange.messages.len()
+            }) {
+                pending = true;
+                break;
+            }
+            now += 1.0;
+            state.session.telemetry.simulation_seconds = Some(now);
+            super::super::advance(&mut state.generated, &state.session.telemetry);
+        }
+        assert!(pending);
+        assert!(!state.generated.approved_orders.contains(&(1, 1)));
+        let heavy = TrafficTarget {
+            id: 88,
+            aircraft: "B77W".into(),
+            callsign: "HEAVY88".into(),
+            longitude: 0.01,
+            track_degrees: 90.0,
+            on_ground: true,
+            ..Default::default()
+        };
+        state.session.telemetry.traffic = Some(vec![heavy]);
+        now += 1.0;
+        state.session.telemetry.simulation_seconds = Some(now);
+        crate::traffic::observe(&mut state);
+        now += 1.0;
+        state.session.telemetry.simulation_seconds = Some(now);
+        state.session.telemetry.traffic.as_mut().unwrap()[0].on_ground = false;
+        crate::traffic::observe(&mut state);
+        assert_eq!(state.generated.departure_wake.get(&1), Some(&180.0));
+        state.generated.exchange.as_mut().unwrap().due = Instant::now();
+        super::super::radio_tick(&mut state);
+        let cancellation = state.generated.exchange.as_ref().unwrap();
+        assert!(!cancellation.grant);
+        assert!(
+            cancellation.messages[0]
+                .1
+                .contains("cancel takeoff clearance")
+        );
+        assert!(!state.generated.approved_orders.contains(&(1, 1)));
+        for _ in 0..40 {
+            now += 1.0;
+            state.session.telemetry.simulation_seconds = Some(now);
+            crate::traffic::observe(&mut state);
+            if let Some(exchange) = &mut state.generated.exchange {
+                exchange.due = Instant::now();
+            }
+            super::super::radio_tick(&mut state);
+            super::super::advance(&mut state.generated, &state.session.telemetry);
+            let pose = &state.generated.world.snapshot()[0];
+            assert!(
+                pose.stage != Stage::Takeoff || pose.knots == 0.0,
+                "{pose:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn expired_wake_cannot_restore_an_old_takeoff_grant_while_radio_is_busy() {
+        let mut state = wake_fixture();
+        let mut now = 30.0;
+        for _ in 0..100 {
+            if let Some(exchange) = &mut state.generated.exchange {
+                exchange.due = Instant::now();
+            }
+            super::super::radio_tick(&mut state);
+            if state.generated.approved_orders.contains(&(1, 1)) {
+                break;
+            }
+            now += 1.0;
+            state.session.telemetry.simulation_seconds = Some(now);
+            super::super::advance(&mut state.generated, &state.session.telemetry);
+        }
+        assert!(state.generated.approved_orders.contains(&(1, 1)));
+        state.session.telemetry.traffic = Some(vec![TrafficTarget {
+            id: 88,
+            callsign: "HEAVY88".into(),
+            aircraft: "B77W".into(),
+            ground_speed_knots: Some(180.0),
+            longitude: 0.01,
+            track_degrees: 90.0,
+            on_ground: true,
+            ..Default::default()
+        }]);
+        state.session.telemetry.radio_busy = true;
+        now += 1.0;
+        state.session.telemetry.simulation_seconds = Some(now);
+        crate::traffic::observe(&mut state);
+        state.session.telemetry.traffic.as_mut().unwrap()[0].on_ground = false;
+        now += 1.0;
+        state.session.telemetry.simulation_seconds = Some(now);
+        crate::traffic::observe(&mut state);
+        assert!(state.generated.cancelled_takeoffs.contains_key(&1));
+        assert!(!state.generated.approved_orders.contains(&(1, 1)));
+        assert!(!state.generated.approved_orders.contains(&(1, 2)));
+        for _ in 0..220 {
+            now += 1.0;
+            state.session.telemetry.simulation_seconds = Some(now);
+            crate::traffic::observe(&mut state);
+            super::super::radio_tick(&mut state);
+            super::super::advance(&mut state.generated, &state.session.telemetry);
+            let pose = &state.generated.world.snapshot()[0];
+            assert!(
+                pose.stage != Stage::Takeoff || pose.knots == 0.0,
+                "{pose:?}"
+            );
+            assert!(state.generated.cancelled_takeoffs.contains_key(&1));
+        }
+        assert!(!state.generated.departure_wake.contains_key(&1));
+        state.session.telemetry.radio_busy = false;
+        super::super::radio_tick(&mut state);
+        let cancellation = state.generated.exchange.as_ref().unwrap();
+        assert!(!cancellation.grant);
+        assert!(
+            cancellation.messages[0]
+                .1
+                .contains("cancel takeoff clearance")
+        );
+        // Wake expiry does not clear an aircraft still inside the departure corridor.
+        for _ in 0..20 {
+            now += 1.0;
+            state.session.telemetry.simulation_seconds = Some(now);
+            crate::traffic::observe(&mut state);
+            if let Some(exchange) = &mut state.generated.exchange {
+                exchange.due = Instant::now();
+            }
+            super::super::radio_tick(&mut state);
+            super::super::advance(&mut state.generated, &state.session.telemetry);
+            let pose = &state.generated.world.snapshot()[0];
+            assert!(
+                pose.stage != Stage::Takeoff || pose.knots == 0.0,
+                "{pose:?}"
+            );
+        }
+        let leader = &mut state.session.telemetry.traffic.as_mut().unwrap()[0];
+        leader.longitude = 0.2;
+        leader.altitude_feet = 4000.0;
+        for _ in 0..900 {
+            now += 1.0;
+            state.session.telemetry.simulation_seconds = Some(now);
+            crate::traffic::observe(&mut state);
+            if let Some(exchange) = &mut state.generated.exchange {
+                exchange.due = Instant::now();
+            }
+            super::super::radio_tick(&mut state);
+            super::super::advance(&mut state.generated, &state.session.telemetry);
+            let pose = &state.generated.world.snapshot()[0];
+            assert!(!pose.recovering);
+            if pose.stage == Stage::Turnaround && pose.complete {
+                break;
+            }
+        }
+        let pose = &state.generated.world.snapshot()[0];
+        assert_eq!(pose.stage, Stage::Turnaround, "{pose:?}");
+        assert!(pose.complete);
+    }
+
+    #[test]
+    fn approaching_traffic_cancels_takeoff_before_roll_and_requires_a_fresh_readback() {
+        for after_readback in [false, true] {
+            let mut state = wake_fixture();
+            state
+                .generated
+                .policy
+                .as_mut()
+                .unwrap()
+                .runway_clearance_buffer_seconds = 120.0;
+            let incoming = TrafficTarget {
+                id: 88,
+                callsign: "ARR88".into(),
+                aircraft: "A320".into(),
+                longitude: -0.1,
+                altitude_feet: 2000.0,
+                track_degrees: 90.0,
+                ground_speed_knots: Some(200.0),
+                on_ground: false,
+                ..Default::default()
+            };
+            let airport = state.generated.airport.as_ref().unwrap();
+            assert!(
+                openatc_core::holding::blocked_targets(airport, "09", std::iter::once(&incoming))
+                    .is_none(),
+                "Arrival must be outside the fixed final radius"
+            );
+            assert!(
+                state
+                    .generated
+                    .crossing_blocked(1, 1, std::slice::from_ref(&incoming))
+            );
+            let mut now = 30.0;
+            let mut ready = false;
+            for _ in 0..100 {
+                if let Some(exchange) = &mut state.generated.exchange {
+                    exchange.due = Instant::now();
+                }
+                super::super::radio_tick(&mut state);
+                ready = if after_readback {
+                    state.generated.approved_orders.contains(&(1, 1))
+                } else {
+                    state.generated.exchange.as_ref().is_some_and(|exchange| {
+                        exchange.segment == 1
+                            && exchange.grant
+                            && exchange.next == exchange.messages.len()
+                    })
+                };
+                if ready {
+                    break;
+                }
+                now += 1.0;
+                state.session.telemetry.simulation_seconds = Some(now);
+                super::super::advance(&mut state.generated, &state.session.telemetry);
+            }
+            assert!(ready);
+            state.session.telemetry.traffic = Some(vec![incoming]);
+            if after_readback {
+                state.session.telemetry.radio_busy = true;
+                now += 1.0;
+                state.session.telemetry.simulation_seconds = Some(now);
+                super::super::advance(&mut state.generated, &state.session.telemetry);
+                assert_eq!(state.generated.cancelled_takeoffs.get(&1), Some(&false));
+                assert!(!state.generated.approved_orders.contains(&(1, 2)));
+                // Even after the traffic clears, the old grant must not restart a departure.
+                state.session.telemetry.traffic = Some(vec![]);
+                for _ in 0..80 {
+                    now += 1.0;
+                    state.session.telemetry.simulation_seconds = Some(now);
+                    super::super::radio_tick(&mut state);
+                    super::super::advance(&mut state.generated, &state.session.telemetry);
+                    let pose = &state.generated.world.snapshot()[0];
+                    assert!(
+                        pose.stage != Stage::Takeoff || pose.knots == 0.0,
+                        "{pose:?}"
+                    );
+                }
+                state.session.telemetry.radio_busy = false;
+            } else {
+                state.generated.exchange.as_mut().unwrap().due = Instant::now();
+            }
+            super::super::radio_tick(&mut state);
+            let cancellation = state.generated.exchange.as_ref().unwrap();
+            assert!(!cancellation.grant);
+            assert!(
+                cancellation.messages[0]
+                    .1
+                    .contains("cancel takeoff clearance")
+            );
+            assert!(cancellation.messages[0].1.contains("traffic"));
+            assert!(!cancellation.messages[0].1.contains("wake"));
+            assert!(!state.generated.approved_orders.contains(&(1, 1)));
+            state.session.telemetry.traffic = Some(vec![]);
+            for _ in 0..1200 {
+                now += 1.0;
+                state.session.telemetry.simulation_seconds = Some(now);
+                if let Some(exchange) = &mut state.generated.exchange {
+                    exchange.due = Instant::now();
+                }
+                super::super::radio_tick(&mut state);
+                super::super::advance(&mut state.generated, &state.session.telemetry);
+                let pose = &state.generated.world.snapshot()[0];
+                assert!(!pose.recovering, "{pose:?}");
+                if pose.stage == Stage::Turnaround && pose.complete {
+                    break;
+                }
+            }
+            let pose = &state.generated.world.snapshot()[0];
+            assert_eq!(pose.stage, Stage::Turnaround, "{pose:?}");
+            assert!(pose.complete);
+        }
+    }
+
+    #[test]
+    fn departure_and_combined_controllers_work_through_the_full_flight() {
+        for combined in [false, true] {
+            let (mut state, mut prepared) = fixture();
+            let station = &mut prepared.clearances.get_mut(&2).unwrap().station;
+            station.service = if combined { "Tower" } else { "Departure" }.into();
+            station.name = if combined {
+                "Test Tower/Departure"
+            } else {
+                "Test Departure"
+            }
+            .into();
+            station.services = if combined {
+                vec!["Tower".into(), "Departure".into()]
+            } else {
+                vec![]
+            };
+            if combined {
+                station.khz = 120950;
+            }
+            state.stations.push(station.clone());
+            install(&mut state.generated, 1, &prepared).unwrap();
+            for second in 31..900 {
+                if let Some(exchange) = &mut state.generated.exchange {
+                    exchange.due = Instant::now();
+                }
+                super::super::radio_tick(&mut state);
+                state.session.telemetry.simulation_seconds = Some(f64::from(second));
+                super::super::advance(&mut state.generated, &state.session.telemetry);
+                let pose = &state.generated.world.snapshot()[0];
+                assert!(!pose.recovering, "{combined}: {pose:?}");
+                if pose.stage == Stage::Turnaround && pose.complete {
+                    break;
+                }
+            }
+            let pose = &state.generated.world.snapshot()[0];
+            assert_eq!(pose.stage, Stage::Turnaround);
+            assert!(pose.complete);
+            let mut invalid = prepared.clone();
+            let station = &mut invalid.clearances.get_mut(&2).unwrap().station;
+            station.service = "Ground".into();
+            station.services.clear();
+            assert!(invalid.validate().is_err());
+        }
+    }
+
     #[test]
     fn recovery_hold_rejoins_after_readback_at_fix_then_reaches_parking() {
         let (mut state, mut prepared) = fixture();
-        let fix = prepared.route.segment(5).unwrap().points[0];
-        let hold = openatc_core::traffic::holding::Pattern {
-            fix,
-            inbound_degrees: 90.0,
-            right: true,
+        let segment = prepared.route.segment(4).unwrap();
+        let fix = *segment.points.last().unwrap();
+        let atmosphere =
+            openatc_core::traffic::air::Atmosphere::surface(1013.25, 15.0, 0.0).unwrap();
+        let requirement = openatc_core::traffic::trajectory::Fix {
+            coordinate: [fix.latitude, fix.longitude],
+            arrival_heading: Some(90.0),
+            minimum_feet: fix.altitude_feet,
+            maximum_feet: fix.altitude_feet,
+            preferred_feet: fix.altitude_feet,
             ground_knots: 80.0,
-            leg_seconds: 60.0,
-            bank_degrees: 25.0,
-            turn_rate_degrees_sec: 3.0,
-        }
-        .compile(|_, _| true)
+            required_turn: None,
+            intercept: None,
+            airspeed: Some(openatc_core::traffic::trajectory::Airspeed {
+                indicated_knots: 80.0 / atmosphere.true_knots(100.0, fix.altitude_feet).unwrap()
+                    * 100.0,
+                atmosphere,
+                wind_from: 0.0,
+                wind_knots: 0.0,
+            }),
+        };
+        let hold = super::super::recovery::LimitHold::at(
+            4,
+            segment,
+            &requirement,
+            &super::super::recovery::HoldingPolicy {
+                minimum_indicated_knots: 40.0,
+                maximum_indicated_knots: 200.0,
+                bank_degrees: 25.0,
+                turn_rate_degrees_sec: 3.0,
+            },
+        )
         .unwrap();
         prepared.recovery.insert(
             4,
-            Arc::new(Route::compile(vec![hold], 4000.0, 4000.0).unwrap()),
+            Arc::new(hold.protect(4000.0, 4000.0, |_, _| true).unwrap()),
         );
+        prepared.clearances.get_mut(&4).unwrap().holding = Some(hold);
         install(&mut state.generated, 1, &prepared).unwrap();
         let mut now = 30.0;
         for _ in 0..700 {
@@ -2115,30 +3996,8 @@ mod tests {
         state.generated.frames[0].target.com1_khz = Some(124500);
         state.session.telemetry.com1_khz = 124500;
         state.settings.hear_traffic_radio = true;
-        let mut clearances = BTreeMap::new();
-        for old in 5..8 {
-            let mut clearance = prepared.clearances[&old].clone();
-            clearance.initial_climb = None;
-            if old == 5 {
-                clearance.station = prepared.clearances[&4].station.clone();
-            }
-            clearances.insert(old - 5, clearance);
-        }
-        let onward = Prepared {
-            route: Arc::new(
-                Route::compile(
-                    (5..9)
-                        .map(|index| prepared.route.segment(index).unwrap().clone())
-                        .collect(),
-                    4000.0,
-                    4000.0,
-                )
-                .unwrap(),
-            ),
-            recovery: BTreeMap::from([(0, prepared.recovery[&5].clone())]),
-            clearances,
-            vacated_reports: BTreeMap::from([(2, prepared.vacated_reports[&7].clone())]),
-        };
+        let onward = prepared.resume_after_limit(4).unwrap();
+        assert_eq!(onward.clearances[&0].station.khz, 120950);
         let mut broken = onward.clone();
         broken.recovery.clear();
         assert!(offer_rejoin(&mut state.generated, 1, broken).is_err());
@@ -2146,7 +4005,7 @@ mod tests {
         offer_rejoin(&mut state.generated, 1, onward.clone()).unwrap();
         assert!(!state.generated.world.follows(1, &onward.route));
         assert_eq!(state.generated.world.snapshot()[0].position, before);
-        for _ in 0..6 {
+        for _ in 0..12 {
             if let Some(exchange) = &mut state.generated.exchange {
                 exchange.due = Instant::now();
             }
@@ -2162,6 +4021,28 @@ mod tests {
             &state.generated.flights[&1].route,
             &prepared.route
         ));
+        for invalidation in 0..3 {
+            let mut retired = state.generated.clone();
+            match invalidation {
+                0 => {
+                    retired.active_flights.remove(&1);
+                }
+                1 => {
+                    retired.frames.clear();
+                }
+                _ => {
+                    let replacement = (*retired.flights[&1]).clone();
+                    retired.flights.insert(1, Arc::new(replacement));
+                }
+            }
+            synchronise_recoveries(&mut retired);
+            assert!(retired.rejoins.is_empty());
+            for step in 1..=300 {
+                retired.world.advance(now + f64::from(step), false);
+            }
+            assert!(!retired.world.follows(1, &onward.route));
+            assert_eq!(retired.world.snapshot()[0].stage, Stage::Holding);
+        }
         let mut reset = state.generated.clone();
         assert_eq!(
             reset.world.advance(now - 1.0, false),

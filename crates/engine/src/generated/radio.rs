@@ -17,10 +17,74 @@ pub(super) struct Exchange {
     pub(super) next: usize,
     pub(super) due: Instant,
     pub(super) grant: bool,
-    pub(super) tune_after: Option<i32>,
+    pub(super) tune_after: Option<Station>,
+    pub(super) sector_transfer: Option<(Arc<super::flight::Prepared>, usize)>,
     /// Recovery reports cannot complete an exchange from the original route.
     pub(super) recovery_from: Option<usize>,
     pub(super) rejoin: bool,
+}
+
+pub(super) fn hold_takeoff(mut exchange: Exchange, cancelled: bool, wake: bool) -> Exchange {
+    let slots = [("callsign", exchange.callsign.clone())];
+    exchange.messages = vec![
+        (
+            true,
+            say(
+                match (cancelled, wake) {
+                    (true, true) => "generated_takeoff_wake_cancelled",
+                    (false, true) => "generated_takeoff_wake_hold",
+                    (true, false) => "generated_takeoff_traffic_cancelled",
+                    (false, false) => "generated_takeoff_traffic_hold",
+                },
+                &slots,
+            ),
+        ),
+        (false, say("pilot_traffic_hold", &slots)),
+    ];
+    exchange.next = 0;
+    exchange.due = Instant::now();
+    exchange.grant = false;
+    exchange.tune_after = None;
+    exchange
+}
+
+pub(super) fn hold_landing(mut exchange: Exchange, cancelled: bool) -> Exchange {
+    let slots = [("callsign", exchange.callsign.clone())];
+    exchange.messages = vec![
+        (
+            true,
+            say(
+                if cancelled {
+                    "generated_landing_cancelled"
+                } else {
+                    "arrival_continue_no_landing"
+                },
+                &slots,
+            ),
+        ),
+        (false, say("generated_landing_withheld_readback", &slots)),
+    ];
+    exchange.next = 0;
+    exchange.due = Instant::now();
+    exchange.grant = false;
+    exchange.tune_after = None;
+    exchange
+}
+
+pub(super) fn hold_airborne(mut exchange: Exchange) -> Exchange {
+    let slots = [("callsign", exchange.callsign.clone())];
+    exchange.messages = vec![
+        (true, say("generated_airborne_clearance_withheld", &slots)),
+        (
+            false,
+            say("generated_airborne_clearance_withheld_readback", &slots),
+        ),
+    ];
+    exchange.next = 0;
+    exchange.due = Instant::now();
+    exchange.grant = false;
+    exchange.tune_after = None;
+    exchange
 }
 
 pub(super) fn cancel_crossing(mut exchange: Exchange, runway: Option<&str>) -> Exchange {
@@ -85,42 +149,45 @@ fn station(state: &EngineState, airport: &Airport) -> Option<Station> {
 }
 
 fn departure_hold(state: &mut EngineState) {
-    let Some(airport) = &state.generated.airport else {
-        return;
-    };
-    let Some(tower) = state
-        .stations
-        .iter()
-        .find(|station| station.airport == airport.icao && station.service == "Tower")
-        .cloned()
-        .or_else(|| {
-            airport
-                .frequencies
-                .iter()
-                .find(|frequency| frequency.service == "Tower")
-                .map(|frequency| Station {
-                    airport: airport.icao.clone(),
-                    airport_name: airport.name.clone(),
-                    name: frequency.name.clone(),
-                    service: "Tower".into(),
-                    khz: frequency.khz,
-                    latitude: airport.reference_latitude,
-                    longitude: airport.reference_longitude,
-                    elevation_feet: airport.elevation_feet,
-                    ..Default::default()
-                })
-        })
-    else {
-        return;
-    };
-    let Some(ground) = station(state, airport) else {
-        return;
-    };
     for pose in
         state.generated.world.snapshot().into_iter().filter(|pose| {
             pose.complete && pose.stage == openatc_core::traffic::motion::Stage::TaxiOut
         })
     {
+        if !state.generated.departure_ready(pose.id) {
+            continue;
+        }
+        let Some(airport) = state.generated.departure_airport(pose.id) else {
+            continue;
+        };
+        let Some(tower) = state
+            .stations
+            .iter()
+            .find(|station| station.airport == airport.icao && station.service == "Tower")
+            .cloned()
+            .or_else(|| {
+                airport
+                    .frequencies
+                    .iter()
+                    .find(|frequency| frequency.service == "Tower")
+                    .map(|frequency| Station {
+                        airport: airport.icao.clone(),
+                        airport_name: airport.name.clone(),
+                        name: frequency.name.clone(),
+                        service: "Tower".into(),
+                        khz: frequency.khz,
+                        latitude: airport.reference_latitude,
+                        longitude: airport.reference_longitude,
+                        elevation_feet: airport.elevation_feet,
+                        ..Default::default()
+                    })
+            })
+        else {
+            continue;
+        };
+        let Some(ground) = station(state, &airport) else {
+            continue;
+        };
         if state.generated.tower_ready.contains(&pose.id) {
             if let Some(prepared) = state.generated.flights.get(&pose.id).cloned()
                 && let Err(error) = super::flight::install(&mut state.generated, pose.id, &prepared)
@@ -161,7 +228,7 @@ fn departure_hold(state: &mut EngineState) {
                 messages.push((true, say("flight_handoff", &slots)));
                 messages.push((false, say("pilot_frequency_readback", &slots)));
                 state.generated.tower_notified.insert(pose.id);
-                (ground.clone(), Some(tower.khz))
+                (ground.clone(), Some(tower.clone()))
             } else {
                 messages.push((
                     false,
@@ -188,7 +255,7 @@ fn departure_hold(state: &mut EngineState) {
                     ),
                 ));
                 state.generated.tower_ready.insert(pose.id);
-                (tower.clone(), Some(tower.khz))
+                (tower.clone(), Some(tower.clone()))
             };
         state.generated.exchange = Some(Exchange {
             id: pose.id,
@@ -200,6 +267,7 @@ fn departure_hold(state: &mut EngineState) {
             due: Instant::now(),
             grant: false,
             tune_after,
+            sector_transfer: None,
             recovery_from: None,
             rejoin: false,
         });
@@ -300,6 +368,7 @@ pub fn tick(state: &mut EngineState) {
         return;
     };
     if state.generated.exchange.is_none() {
+        super::flight::prepare_limit_rejoins(&mut state.generated);
         state.generated.exchange = super::flight::exchange(state);
     }
     if state.generated.exchange.is_none() {
@@ -310,6 +379,9 @@ pub fn tick(state: &mut EngineState) {
                     .approved_orders
                     .contains(&(pose.id, pose.segment))
         }) {
+            if !state.generated.departure_ready(pose.id) {
+                continue;
+            }
             let Some(order) = state
                 .generated
                 .orders
@@ -385,6 +457,7 @@ pub fn tick(state: &mut EngineState) {
                 due: Instant::now(),
                 grant: false,
                 tune_after: None,
+                sector_transfer: None,
                 recovery_from: None,
                 rejoin: false,
             });
@@ -399,6 +472,9 @@ pub fn tick(state: &mut EngineState) {
             .into_iter()
             .filter(|pose| pose.awaiting_clearance)
         {
+            if !state.generated.departure_ready(pose.id) {
+                continue;
+            }
             if state
                 .generated
                 .approved_orders
@@ -407,10 +483,10 @@ pub fn tick(state: &mut EngineState) {
                 continue;
             }
             if pose.stage == openatc_core::traffic::motion::Stage::Pushback {
-                let Some(airport) = &state.generated.airport else {
+                let Some(airport) = state.generated.departure_airport(pose.id) else {
                     continue;
                 };
-                let Some(station) = station(state, airport) else {
+                let Some(station) = station(state, &airport) else {
                     continue;
                 };
                 let Some(frame) = state
@@ -457,6 +533,7 @@ pub fn tick(state: &mut EngineState) {
                     due: Instant::now(),
                     grant: true,
                     tune_after: None,
+                    sector_transfer: None,
                     recovery_from: None,
                     rejoin: false,
                 });
@@ -551,6 +628,7 @@ pub fn tick(state: &mut EngineState) {
                         due: Instant::now(),
                         grant: false,
                         tune_after: None,
+                        sector_transfer: None,
                         recovery_from: None,
                         rejoin: false,
                     });
@@ -629,6 +707,7 @@ pub fn tick(state: &mut EngineState) {
                 due: Instant::now(),
                 grant: true,
                 tune_after: None,
+                sector_transfer: None,
                 recovery_from: None,
                 rejoin: false,
             });
@@ -644,15 +723,128 @@ pub fn tick(state: &mut EngineState) {
     let Some(mut exchange) = state.generated.exchange.take() else {
         return;
     };
+    if exchange.sector_transfer.as_ref().is_some_and(|(plan, _)| {
+        !state
+            .generated
+            .flights
+            .get(&exchange.id)
+            .is_some_and(|current| Arc::ptr_eq(plan, current))
+    }) {
+        return;
+    }
     if exchange.due > Instant::now() {
         state.generated.exchange = Some(exchange);
         return;
     }
     if exchange.next == exchange.messages.len() {
         if exchange.rejoin {
-            if let Some(source) = exchange.recovery_from {
+            if let Some(receiver) = exchange.tune_after.as_ref() {
+                if let Some(frame) = state
+                    .generated
+                    .frames
+                    .iter_mut()
+                    .find(|frame| frame.target.id == exchange.id)
+                {
+                    frame.target.com1_khz = Some(receiver.khz);
+                    state
+                        .generated
+                        .controllers
+                        .insert(exchange.id, receiver.clone());
+                }
+            } else if exchange.grant
+                && let Some(source) = exchange.recovery_from
+            {
+                if super::flight::rejoin_blocked(
+                    &state.generated,
+                    &state.session.telemetry,
+                    exchange.id,
+                ) {
+                    state.generated.exchange = Some(hold_airborne(exchange));
+                    return;
+                }
                 super::flight::accept_rejoin(&mut state.generated, exchange.id, source);
             }
+            return;
+        }
+        if exchange.grant
+            && state.generated.active_flights.contains(&exchange.id)
+            && state
+                .generated
+                .flights
+                .get(&exchange.id)
+                .and_then(|plan| plan.clearances.get(&exchange.segment))
+                .is_some_and(|clearance| {
+                    super::separation::blocked(
+                        &state.generated,
+                        &state.session.telemetry,
+                        exchange.id,
+                        exchange.segment,
+                        clearance,
+                    )
+                })
+        {
+            state
+                .generated
+                .reported_holds
+                .insert((exchange.id, exchange.segment));
+            let plan = &state.generated.flights[&exchange.id];
+            if plan
+                .route
+                .segment(exchange.segment)
+                .is_some_and(|s| s.stage == openatc_core::traffic::motion::Stage::Takeoff)
+            {
+                state.generated.exchange = Some(hold_takeoff(exchange, true, false));
+            } else if plan.clearances[&exchange.segment].landing_rollout.is_some() {
+                state.generated.exchange = Some(hold_landing(exchange, true));
+            } else {
+                state.generated.exchange = Some(hold_airborne(exchange));
+            }
+            return;
+        }
+        if exchange.grant
+            && state
+                .generated
+                .flights
+                .get(&exchange.id)
+                .and_then(|plan| plan.clearances.get(&exchange.segment))
+                .is_some_and(|clearance| clearance.landing_rollout.is_some())
+            && (state.session.telemetry.traffic.is_none()
+                || state.generated.crossing_blocked(
+                    exchange.id,
+                    exchange.segment,
+                    &super::observed_targets(&state.generated, &state.session.telemetry),
+                ))
+        {
+            super::flight::revoke_landing(&mut state.generated, exchange.id, exchange.segment);
+            state.generated.exchange = Some(hold_landing(exchange, true));
+            return;
+        }
+        if exchange.grant
+            && (state.session.telemetry.traffic.is_none()
+                || state.generated.crossing_blocked(
+                    exchange.id,
+                    exchange.segment,
+                    &super::observed_targets(&state.generated, &state.session.telemetry),
+                ))
+            && state
+                .generated
+                .flights
+                .get(&exchange.id)
+                .and_then(|flight| flight.route.segment(exchange.segment))
+                .is_some_and(|segment| {
+                    segment.stage == openatc_core::traffic::motion::Stage::Takeoff
+                })
+        {
+            state
+                .generated
+                .reported_holds
+                .insert((exchange.id, exchange.segment));
+            let wake = state
+                .generated
+                .departure_wake
+                .get(&exchange.id)
+                .is_some_and(|seconds| *seconds > 0.0);
+            state.generated.exchange = Some(hold_takeoff(exchange, true, wake));
             return;
         }
         if exchange.grant
@@ -681,15 +873,56 @@ pub fn tick(state: &mut EngineState) {
             state.generated.exchange = Some(cancel_crossing(exchange, runway));
             return;
         }
-        if let Some(frequency) = exchange.tune_after
+        if let Some((plan, _)) = exchange.sector_transfer.as_ref()
+            && (!state
+                .generated
+                .flights
+                .get(&exchange.id)
+                .is_some_and(|current| Arc::ptr_eq(plan, current))
+                || state
+                    .generated
+                    .world
+                    .snapshot()
+                    .iter()
+                    .any(|pose| pose.id == exchange.id && pose.recovering))
+        {
+            return;
+        }
+        if let Some(receiver) = exchange.tune_after.as_ref()
             && let Some(frame) = state
                 .generated
                 .frames
                 .iter_mut()
                 .find(|frame| frame.target.id == exchange.id)
         {
-            frame.target.com1_khz = Some(frequency);
-            if state.generated.active_flights.contains(&exchange.id) {
+            frame.target.com1_khz = Some(receiver.khz);
+            state
+                .generated
+                .controllers
+                .insert(exchange.id, receiver.clone());
+            if let Some((plan, count)) = exchange.sector_transfer.as_ref() {
+                if state
+                    .generated
+                    .flights
+                    .get(&exchange.id)
+                    .is_some_and(|current| Arc::ptr_eq(plan, current))
+                    && state
+                        .generated
+                        .world
+                        .snapshot()
+                        .iter()
+                        .any(|pose| pose.id == exchange.id && !pose.recovering)
+                {
+                    state
+                        .generated
+                        .sector_transfers
+                        .insert((exchange.id, exchange.segment), *count);
+                    state
+                        .generated
+                        .pending_sector_checkins
+                        .insert(exchange.id, (plan.clone(), receiver.clone()));
+                }
+            } else if state.generated.active_flights.contains(&exchange.id) {
                 state
                     .generated
                     .handoff_targets

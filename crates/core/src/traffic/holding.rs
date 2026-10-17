@@ -42,7 +42,39 @@ pub struct Pattern {
 pub struct Draft {
     segment: Segment,
 }
+
+/// A single direct-entry circuit; its final tangent joins the repeating pattern.
+#[derive(Clone)]
+pub struct EntryDraft {
+    segment: Segment,
+}
+impl EntryDraft {
+    /// Entry geometry needs the same independent check as the repeating holding pattern.
+    pub fn protect(
+        self,
+        protected: impl Fn(Waypoint, Waypoint) -> bool,
+    ) -> Result<Segment, String> {
+        if self
+            .segment
+            .points
+            .windows(2)
+            .any(|pair| !protected(pair[0], pair[1]))
+        {
+            return Err("Holding entry lacks verified terrain/airspace protection".into());
+        }
+        Ok(self.segment)
+    }
+}
 impl Draft {
+    /// Compare a cleared pattern with already protected movement without releasing its samples.
+    pub fn matches(&self, segment: &Segment) -> bool {
+        segment.stage == self.segment.stage
+            && segment.points == self.segment.points
+            && segment.knots == self.segment.knots
+            && segment.resources == self.segment.resources
+            && segment.dwell_seconds == self.segment.dwell_seconds
+    }
+
     /// No movement segment is returned if any part of the racetrack is unprotected.
     pub fn protect(
         self,
@@ -61,6 +93,101 @@ impl Draft {
 }
 
 impl Pattern {
+    /// Preserve a small incoming course difference by joining the outbound leg on the first circuit.
+    /// Other sectors need a separately planned parallel or teardrop entry.
+    pub fn direct_entry(&self, incoming: f64) -> Result<Option<EntryDraft>, String> {
+        let hold = self.draft()?.segment;
+        if !incoming.is_finite() {
+            return Err("Invalid holding entry course".into());
+        }
+        let difference = crate::navigation::turn(self.inbound_degrees, incoming).abs();
+        if difference <= 1.0 {
+            return Ok(None);
+        }
+        if difference > 30.0 {
+            return Err("Holding requires a separate parallel or teardrop entry".into());
+        }
+        let speed = self.ground_knots * 0.514444;
+        let radius = (speed.powi(2) / (9.80665 * self.bank_degrees.to_radians().tan()))
+            .max(speed / self.turn_rate_degrees_sec.to_radians());
+        let turns = (std::f64::consts::PI * radius / speed).ceil().max(90.0) as usize;
+        let length = speed * self.leg_seconds;
+        let steps = (length / 500.0).ceil().max(1.0) as usize;
+        let join = turns + (steps / 2).max(1);
+        let target = hold.points[join];
+        let angle = crate::arrival::bearing(
+            [self.fix.latitude, self.fix.longitude],
+            [target.latitude, target.longitude],
+        )
+        .to_radians();
+        let distance = crate::arrival::distance_nm(
+            [self.fix.latitude, self.fix.longitude],
+            [target.latitude, target.longitude],
+        ) * 1852.0;
+        let point = crate::state::Point {
+            east: distance * angle.sin(),
+            north: distance * angle.cos(),
+            height: 0.0,
+        };
+        let limit = length + radius * 4.0;
+        let curve = super::curves::connect(
+            super::curves::Pose {
+                point: crate::state::Point::default(),
+                heading: incoming,
+            },
+            super::curves::Pose {
+                point,
+                heading: (self.inbound_degrees + 180.0).rem_euclid(360.0),
+            },
+            &super::curves::Limits {
+                radius,
+                spacing: speed.min(250.0),
+                length: length + std::f64::consts::TAU * radius,
+                initial_turn: Some(if self.right {
+                    super::curves::Turn::Right
+                } else {
+                    super::curves::Turn::Left
+                }),
+            },
+            |a, b| {
+                [a.point, b.point]
+                    .iter()
+                    .all(|point| point.east.hypot(point.north) <= limit)
+            },
+        )?;
+        let mut points = curve
+            .into_iter()
+            .map(|sample| {
+                let point = sample.point;
+                let coordinate = crate::arrival::destination(
+                    [self.fix.latitude, self.fix.longitude],
+                    point.east.atan2(point.north).to_degrees(),
+                    point.east.hypot(point.north) / 1852.0,
+                );
+                Waypoint {
+                    latitude: coordinate[0],
+                    longitude: coordinate[1],
+                    altitude_feet: self.fix.altitude_feet,
+                }
+            })
+            .collect::<Vec<_>>();
+        points[0] = self.fix;
+        *points.last_mut().unwrap() = target;
+        points.extend_from_slice(&hold.points[join + 1..]);
+        if points.len() > 4096 {
+            return Err("Holding entry exceeds its sample budget".into());
+        }
+        Ok(Some(EntryDraft {
+            segment: Segment {
+                stage: Stage::MissedApproach,
+                points,
+                knots: self.ground_knots,
+                resources: Vec::new(),
+                dwell_seconds: 0.0,
+            },
+        }))
+    }
+
     /// Decode an explicit published HM leg; this does not approve entry or resolve an unspecified variation.
     pub fn published(
         leg: &super::procedures::Leg,
@@ -127,7 +254,7 @@ impl Pattern {
             || !(-180.0..=180.0).contains(&self.fix.longitude)
             || !(-2000.0..=60000.0).contains(&self.fix.altitude_feet)
             || !(0.0..360.0).contains(&self.inbound_degrees)
-            || !(40.0..=300.0).contains(&self.ground_knots)
+            || !(40.0..=600.0).contains(&self.ground_knots)
             || !(30.0..=180.0).contains(&self.leg_seconds)
             || !(5.0..=30.0).contains(&self.bank_degrees)
             || !(0.5..=3.0).contains(&self.turn_rate_degrees_sec)
@@ -224,6 +351,82 @@ impl Pattern {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn direct_entry_preserves_incoming_course_before_joining_the_repeatable_pattern() {
+        for right in [true, false] {
+            let pattern = Pattern {
+                fix: Waypoint {
+                    latitude: 43.0,
+                    longitude: 7.0,
+                    altitude_feet: 4000.0,
+                },
+                inbound_degrees: 296.0,
+                right,
+                ground_knots: 150.0,
+                leg_seconds: 60.0,
+                bank_degrees: 20.0,
+                turn_rate_degrees_sec: 3.0,
+            };
+            assert!(pattern.direct_entry(296.0).unwrap().is_none());
+            assert!(pattern.direct_entry(f64::NAN).is_err());
+            assert!(pattern.direct_entry(0.0).is_err());
+            for difference in [-15.0, -3.0, 3.0, 15.0] {
+                let draft = pattern.direct_entry(296.0 + difference).unwrap().unwrap();
+                assert!(draft.clone().protect(|_, _| false).is_err());
+                let entry = draft
+                    .protect(|a, b| a.altitude_feet == 4000.0 && b.altitude_feet == 4000.0)
+                    .unwrap();
+                assert_eq!(entry.stage, Stage::MissedApproach);
+                assert_eq!(entry.points.first(), Some(&pattern.fix));
+                assert_eq!(entry.points.last(), Some(&pattern.fix));
+                let incoming = crate::arrival::bearing(
+                    [entry.points[0].latitude, entry.points[0].longitude],
+                    [entry.points[1].latitude, entry.points[1].longitude],
+                );
+                assert!(crate::navigation::turn(296.0 + difference, incoming).abs() < 1.1);
+                let hold = pattern.compile(|_, _| true).unwrap();
+                let route = super::super::motion::Route::compile(vec![entry, hold], 1000.0, 1000.0)
+                    .unwrap();
+                route.validate_rates(3.0, 3.0).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn high_altitude_ground_speed_does_not_become_an_indicated_speed_limit() {
+        let atmosphere = super::super::air::Atmosphere::surface(1013.25, 15.0, 0.0).unwrap();
+        let altitude = atmosphere.geometric(35000.0, true).unwrap();
+        let ground = atmosphere.true_knots(230.0, altitude).unwrap();
+        assert!(ground > 300.0);
+        let pattern = Pattern {
+            fix: Waypoint {
+                latitude: 45.0,
+                longitude: 9.0,
+                altitude_feet: altitude,
+            },
+            inbound_degrees: 90.0,
+            right: true,
+            ground_knots: ground,
+            leg_seconds: 60.0,
+            bank_degrees: 25.0,
+            turn_rate_degrees_sec: 3.0,
+        };
+        let hold = pattern.compile(|_, _| true).unwrap();
+        assert_eq!(hold.knots, ground);
+        assert_eq!(hold.points[0], *hold.points.last().unwrap());
+        assert!(hold.points.len() <= 4096);
+        assert!(super::super::motion::Route::compile(vec![hold], 1000.0, 1000.0).is_ok());
+        assert!(pattern.compile(|_, _| false).is_err());
+        assert!(
+            Pattern {
+                ground_knots: 601.0,
+                ..pattern
+            }
+            .draft()
+            .is_err()
+        );
+    }
+
     #[test]
     fn slow_aircraft_hold_respects_standard_rate_instead_of_full_bank() {
         let pattern = Pattern {

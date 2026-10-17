@@ -277,6 +277,30 @@ mod tests {
             crate::traffic::holding::Pattern::published(&alternatives[0], position, &clearance)
                 .is_err()
         );
+        let mut high = alternatives[0].clone();
+        high.altitude_one = Some(35000);
+        high.speed_knots = Some(230.0);
+        let atmosphere = crate::traffic::air::Atmosphere::surface(1013.25, 15.0, 0.0).unwrap();
+        let altitude = atmosphere.geometric(35000.0, true).unwrap();
+        let mut high_clearance = crate::traffic::holding::Clearance {
+            level_feet: 35000,
+            geometric_feet: altitude,
+            indicated_knots: 230.0,
+            ground_knots: atmosphere.true_knots(230.0, altitude).unwrap(),
+            bank_degrees: 25.0,
+            turn_rate_degrees_sec: 3.0,
+        };
+        assert!(high_clearance.ground_knots > 300.0);
+        assert!(
+            crate::traffic::holding::Pattern::published(&high, position, &high_clearance)
+                .unwrap()
+                .compile(|_, _| true)
+                .is_ok()
+        );
+        high_clearance.indicated_knots = 231.0;
+        assert!(
+            crate::traffic::holding::Pattern::published(&high, position, &high_clearance).is_err()
+        );
         assert!(Catalogue::read(text.as_bytes(), &wanted, "2608").is_err());
         assert!(
             Catalogue::read(text.trim_end_matches("99\n").as_bytes(), &wanted, "2609").is_err()

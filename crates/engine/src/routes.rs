@@ -204,7 +204,12 @@ pub async fn full_state(AxumState(state): AxumState<Shared>) -> Json<Value> {
         ]
         .into_iter()
         .chain(tuned_airports)
-        {
+        .chain(
+            state
+                .generated
+                .operational_airports()
+                .map(|airport| &airport.icao),
+        ) {
             if !id.is_empty()
                 && !airports
                     .iter()

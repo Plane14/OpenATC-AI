@@ -98,6 +98,47 @@ pub fn supports_aircraft(stand: &Parking, aircraft: &crate::traffic::profiles::A
         })
 }
 
+/// Moving traffic cannot use starts reserved for miscellaneous player positioning.
+#[must_use]
+pub fn moving_supports(stand: &Parking, aircraft: &crate::traffic::profiles::Aircraft) -> bool {
+    !stand.kind.eq_ignore_ascii_case("misc") && supports_aircraft(stand, aircraft)
+}
+
+/// Operator and service preferences; physical size and equipment remain mandatory.
+#[derive(Clone, Debug, Default)]
+pub struct TrafficPreference {
+    /// Actual operating airline ICAO code, empty for a private registration.
+    pub operator: String,
+    /// Ramp operation category such as airline, cargo or general_aviation.
+    pub operation: String,
+}
+impl TrafficPreference {
+    /// Prefer matching ramps, then the closest suitable size; hangars are a last resort.
+    #[must_use]
+    pub fn rank(&self, stand: &Parking, size: char) -> (bool, u8, bool, u32) {
+        let airline = if !self.operator.is_empty()
+            && stand
+                .airlines
+                .iter()
+                .any(|code| code.eq_ignore_ascii_case(&self.operator))
+        {
+            0
+        } else if stand.airlines.is_empty() {
+            1
+        } else {
+            2
+        };
+        (
+            stand.kind.eq_ignore_ascii_case("hangar"),
+            airline,
+            !stand.operations.eq_ignore_ascii_case(&self.operation),
+            stand_size(stand).map_or(u32::MAX, |capacity| {
+                u32::from(capacity).saturating_sub(u32::from(size))
+            }),
+        )
+    }
+}
+
 fn span_limit(size: char) -> f64 {
     match size {
         'A' => 15.0,
@@ -180,6 +221,48 @@ pub fn endpoint_available(state: &State, telemetry: &Telemetry) -> Option<bool> 
 mod tests {
     use super::*;
     use crate::state::{Point, TrafficTarget};
+    #[test]
+    fn moving_ramp_preferences_keep_operator_service_and_physical_fit_separate() {
+        let preference = TrafficPreference {
+            operator: "SIA".into(),
+            operation: "airline".into(),
+        };
+        let aircraft = crate::traffic::profiles::aircraft("A320").unwrap();
+        let stand = Parking {
+            kind: "gate".into(),
+            equipment: "jets".into(),
+            size: "C".into(),
+            operations: "airline".into(),
+            airlines: vec!["sia".into()],
+            ..Default::default()
+        };
+        assert!(moving_supports(&stand, aircraft));
+        let mut generic = stand.clone();
+        generic.airlines.clear();
+        assert!(preference.rank(&stand, 'C') < preference.rank(&generic, 'C'));
+        let mut foreign = stand.clone();
+        foreign.airlines = vec!["QFA".into()];
+        assert!(preference.rank(&generic, 'C') < preference.rank(&foreign, 'C'));
+        let mut cargo = stand.clone();
+        cargo.operations = "cargo".into();
+        assert!(preference.rank(&stand, 'C') < preference.rank(&cargo, 'C'));
+        let mut none = generic.clone();
+        none.operations = "none".into();
+        assert!(moving_supports(&none, aircraft));
+        let mut small = stand.clone();
+        small.size = "B".into();
+        assert!(!moving_supports(&small, aircraft));
+        let mut propeller = stand.clone();
+        propeller.equipment = "props".into();
+        assert!(!moving_supports(&propeller, aircraft));
+        let mut hangar = stand.clone();
+        hangar.kind = "hangar".into();
+        assert!(preference.rank(&none, 'C') < preference.rank(&hangar, 'C'));
+        let mut misc = stand.clone();
+        misc.kind = "misc".into();
+        assert!(!moving_supports(&misc, aircraft));
+    }
+
     #[test]
     fn actual_aircraft_overrides_dispatch_and_never_uses_departure_stand() {
         let mut state = State::default();

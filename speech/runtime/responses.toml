@@ -17657,3 +17657,107 @@ say = ["{callsign}, your flight plan is incomplete or invalid. {reason} Check Pl
 [clearance_flight_plan_missing_fields]
 slots = ["fields"]
 say = ["Missing {fields}."]
+
+[generated_takeoff_wake_hold]
+slots = ["callsign"]
+say = ["{callsign}, hold position, wake turbulence."]
+
+[generated_takeoff_wake_cancelled]
+slots = ["callsign"]
+say = ["{callsign}, cancel takeoff clearance. Hold position, wake turbulence."]
+
+[generated_takeoff_traffic_hold]
+slots = ["callsign"]
+say = ["{callsign}, hold position, traffic on the runway or final approach."]
+
+[generated_takeoff_traffic_cancelled]
+slots = ["callsign"]
+say = ["{callsign}, cancel takeoff clearance. Hold position, conflicting traffic."]
+
+[generated_landing_cancelled]
+slots = ["callsign"]
+say = ["{callsign}, landing clearance cancelled. Continue approach, expect further instructions."]
+
+[generated_landing_withheld_readback]
+slots = ["callsign"]
+say = ["Continuing approach, landing clearance withheld, {callsign}."]
+
+[generated_contract_flight_level]
+slots = ["level"]
+say = ["flight level {level}"]
+
+[generated_contract_filed_route]
+slots = []
+say = ["the flight planned route"]
+
+[generated_contract_lineup]
+slots = ["callsign", "runway"]
+say = ["{callsign}, runway {runway}, line up and wait."]
+
+[generated_contract_lineup_readback]
+slots = ["callsign", "runway"]
+say = ["Runway {runway}, line up and wait, {callsign}."]
+
+[generated_contract_takeoff]
+slots = ["callsign", "runway", "sid", "altitude"]
+say = ["{callsign}, fly the {sid} departure. Initially climb to {altitude}. Runway {runway}, cleared for takeoff."]
+
+[generated_contract_takeoff_readback]
+slots = ["callsign", "runway", "sid", "altitude"]
+say = ["Fly the {sid} departure, initially climb to {altitude}, runway {runway}, cleared for takeoff, {callsign}."]
+
+[generated_contract_climb]
+slots = ["callsign", "route", "altitude", "speed"]
+say = ["{callsign}, follow {route}, climb and maintain {altitude}. Maintain {speed} knots."]
+
+[generated_contract_climb_readback]
+slots = ["callsign", "route", "altitude", "speed"]
+say = ["Following {route}, climbing to {altitude}, maintain {speed} knots, {callsign}."]
+
+[generated_contract_descent]
+slots = ["callsign", "route", "altitude", "speed"]
+say = ["{callsign}, follow {route}, descend and maintain {altitude}. Maintain {speed} knots."]
+
+[generated_contract_descent_readback]
+slots = ["callsign", "route", "altitude", "speed"]
+say = ["Following {route}, descending to {altitude}, maintain {speed} knots, {callsign}."]
+
+[generated_contract_level]
+slots = ["callsign", "route", "altitude", "speed"]
+say = ["{callsign}, follow {route}, maintain {altitude} and {speed} knots."]
+
+[generated_contract_level_readback]
+slots = ["callsign", "route", "altitude", "speed"]
+say = ["Following {route}, maintain {altitude} and {speed} knots, {callsign}."]
+
+[generated_contract_sid_climb_readback]
+slots = ["callsign", "sid", "altitude"]
+say = ["Climb via the {sid} departure, except maintain {altitude}, {callsign}."]
+
+[generated_missed_level_amendment]
+slots = ["altitude", "fix"]
+say = ["In the event of a missed approach, follow the published missed approach, climb and maintain {altitude}, hold at {fix} as published."]
+
+[generated_approach_amended_readback]
+slots = ["callsign", "approach", "altitude", "fix"]
+say = ["Cleared {approach} approach. If going around, follow the published missed approach, climb and maintain {altitude}, hold at {fix} as published, {callsign}."]
+
+[generated_limit_holding]
+slots = ["latitude", "longitude", "course", "altitude", "speed", "seconds"]
+say = ["If not cleared beyond the route clearance limit at latitude {latitude}, longitude {longitude}, hold there, right turns, inbound course {course} degrees magnetic, {seconds} second legs. Maintain {altitude}, maximum holding speed {speed} knots."]
+
+[generated_limit_holding_readback]
+slots = ["latitude", "longitude", "course", "altitude", "speed", "seconds"]
+say = ["If not cleared beyond the limit at latitude {latitude}, longitude {longitude}, hold there, right turns, inbound course {course} degrees magnetic, {seconds} second legs, maintain {altitude}, maximum {speed} knots."]
+
+[generated_pilot_limit_holding]
+slots = ["callsign"]
+say = ["{callsign}, established in the hold at the cleared limit, maintaining the assigned level."]
+
+[generated_airborne_clearance_withheld]
+slots = ["callsign"]
+say = ["{callsign}, onward clearance withheld due traffic. Continue as previously cleared; hold at your cleared limit if not further cleared."]
+
+[generated_airborne_clearance_withheld_readback]
+slots = ["callsign"]
+say = ["Continuing as previously cleared, will hold at the cleared limit if not further cleared, {callsign}."]

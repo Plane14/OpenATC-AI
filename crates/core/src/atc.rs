@@ -16,6 +16,7 @@ fn controllers(text: &str) -> Vec<Controller> {
     let mut controller = Controller::default();
     let mut volume = Coverage::default();
     for line in text.lines() {
+        let line = line.trim_start();
         let mut fields = line.split_whitespace();
         let Some(key) = fields.next() else { continue };
         let value = line[key.len()..].trim();
@@ -93,13 +94,19 @@ pub fn extend_index(root: &str, stations: &mut Vec<Station>) -> Result<(), Strin
             continue;
         }
         let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+        let mut file_facilities = BTreeSet::new();
+        let mut replaced_towers = BTreeSet::new();
         for c in controllers(&text) {
-            if c.frequencies.is_empty() || !seen.insert((c.id.clone(), c.service.clone())) {
+            let facility = (c.id.clone(), c.service.clone());
+            if c.frequencies.is_empty() || seen.contains(&facility) {
                 continue;
             }
+            // One navdata file can give a facility separate lower and upper sectors.
+            // Scenery priority replaces the facility only between files, not between its sectors.
+            file_facilities.insert(facility);
             let base = stations.iter().find(|s| s.airport == c.airport).cloned();
             // Tower navdata overrides the apt.dat Tower list, as in X-Plane.
-            if c.service == "Tower" && base.is_some() {
+            if c.service == "Tower" && base.is_some() && replaced_towers.insert(c.airport.clone()) {
                 stations.retain(|s| s.airport != c.airport || s.service != "Tower");
             }
             let mut station = base.unwrap_or_default();
@@ -130,16 +137,24 @@ pub fn extend_index(root: &str, stations: &mut Vec<Station>) -> Result<(), Strin
             station.coverage = c.volumes;
             for khz in c.frequencies {
                 if let Some(existing) = stations.iter_mut().find(|s| {
-                    s.airport == station.airport && s.service == station.service && s.khz == khz
+                    s.airport == station.airport
+                        && s.service == station.service
+                        && s.khz == khz
+                        && s.name == station.name
                 }) {
                     existing.name.clone_from(&station.name);
-                    existing.coverage.clone_from(&station.coverage);
+                    for volume in &station.coverage {
+                        if !existing.coverage.contains(volume) {
+                            existing.coverage.push(volume.clone());
+                        }
+                    }
                 } else {
                     station.khz = khz;
                     stations.push(station.clone());
                 }
             }
         }
+        seen.extend(file_facilities);
     }
     Ok(())
 }
@@ -148,6 +163,65 @@ pub fn extend_index(root: &str, stations: &mut Vec<Station>) -> Result<(), Strin
 mod tests {
     use super::*;
     use crate::{state::Telemetry, stations::nearby};
+    #[test]
+    fn sibling_sectors_survive_without_reviving_lower_priority_facilities() {
+        let root = std::env::temp_dir().join(format!("openatc-sectors-{}", std::process::id()));
+        let custom = root.join("Custom Scenery/Local/Earth nav data/atc.dat");
+        let master = root.join("Custom Data/1200 atc data/Earth nav data/atc.dat");
+        std::fs::create_dir_all(custom.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(master.parent().unwrap()).unwrap();
+        std::fs::write(
+            root.join("Custom Scenery/scenery_packs.ini"),
+            "SCENERY_PACK Custom Scenery/Local/\n",
+        )
+        .unwrap();
+        let sector = |name: &str, floor: i32, ceiling: i32| {
+            format!(
+                "CONTROLLER\nNAME {name}\nFACILITY_ID TEST\nROLE ctr\nCHAN 118030\nAIRSPACE_POLYGON_BEGIN {floor} {ceiling}\nPOINT -1 -1\nPOINT -1 1\nPOINT 1 1\nPOINT 1 -1\nAIRSPACE_POLYGON_END\nCONTROLLER_END\n"
+            )
+        };
+        std::fs::write(
+            &custom,
+            format!(
+                "{}{}",
+                sector("Lower", 0, 19500),
+                sector("Upper", 19500, 60000)
+            ),
+        )
+        .unwrap();
+        std::fs::write(&master, sector("Obsolete", 0, 60000)).unwrap();
+        let mut stations = Vec::new();
+        extend_index(root.to_str().unwrap(), &mut stations).unwrap();
+        assert_eq!(stations.len(), 2);
+        for (height, expected) in [(10000.0, "Lower Center"), (35000.0, "Upper Center")] {
+            let observed = Telemetry {
+                latitude: 0.0,
+                longitude: 0.0,
+                altitude_feet: height,
+                position_valid: true,
+                ..Default::default()
+            };
+            let covered = stations
+                .iter()
+                .filter(|station| {
+                    station
+                        .coverage
+                        .iter()
+                        .any(|volume| volume.contains(&observed))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(covered.len(), 1);
+            assert_eq!(covered[0].name, expected);
+            assert_eq!(covered[0].khz, 118030);
+        }
+        assert!(
+            stations
+                .iter()
+                .all(|station| !station.name.contains("Obsolete"))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn legacy_frequencies_restore_the_omitted_digit_without_changing_channels() {
         let parsed = controllers(

@@ -8,6 +8,7 @@ pub(super) struct Exit {
     pub vacated: Waypoint,
 }
 
+#[derive(Clone)]
 pub(super) struct Arrival {
     pub flare: Segment,
     pub parking: Parking,
@@ -23,6 +24,10 @@ pub(super) struct Request<'a> {
     pub policy: &'a Operations,
     pub observed: &'a [TrafficTarget],
     pub reserved: &'a BTreeSet<String>,
+    pub occupied_stand_cells: &'a BTreeSet<String>,
+    // A new parked footprint must not obstruct an earlier surface route.
+    pub parking_exclusions: &'a BTreeSet<String>,
+    pub preference: &'a openatc_core::parking::TrafficPreference,
 }
 pub(super) fn prepare(input: Request<'_>) -> Result<Arrival, String> {
     let knots = input
@@ -55,6 +60,9 @@ pub(super) fn prepare(input: Request<'_>) -> Result<Arrival, String> {
         input.policy,
         input.observed,
         input.reserved,
+        input.occupied_stand_cells,
+        input.parking_exclusions,
+        input.preference,
     )?;
     let mut segments = vec![flare.clone()];
     segments.extend(parking.exit.rollout.clone());
@@ -144,6 +152,7 @@ pub(super) fn plan(
         .map(|node| (node.id, node.point))
         .collect::<BTreeMap<_, _>>();
     let mut candidates = Vec::new();
+    let mut screened = [0usize; 4];
     for edge in airport
         .edges
         .iter()
@@ -160,15 +169,22 @@ pub(super) fn plan(
                 (entrance.east - start.east) * unit[0] + (entrance.north - start.north) * unit[1];
             let offset =
                 (entrance.east - start.east) * unit[1] - (entrance.north - start.north) * unit[0];
-            if offset.abs() > policy.surface_sample_meters * 2.0
-                || at < along + braking + radius * 2.0
-                || at + envelope >= length
-            {
+            if offset.abs() > policy.surface_sample_meters * 2.0 {
+                screened[0] += 1;
+                continue;
+            }
+            if at < along + braking + radius * 2.0 {
+                screened[1] += 1;
+                continue;
+            }
+            if at + envelope >= length {
+                screened[2] += 1;
                 continue;
             }
             if !airport.edges.iter().any(|runway_edge| {
                 runway_edge.runway && (runway_edge.first == first || runway_edge.second == first)
             }) {
+                screened[3] += 1;
                 continue;
             }
             let mut queue = std::collections::VecDeque::from([(second, vec![first, second])]);
@@ -213,6 +229,8 @@ pub(super) fn plan(
         }
     }
     candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let candidate_count = candidates.len();
+    let mut rejected = [0; 3];
     for (at, path) in candidates.into_iter().take(32) {
         let turn_start = Point {
             east: start.east + (at - radius * 2.0) * unit[0],
@@ -255,6 +273,7 @@ pub(super) fn plan(
             protected,
         );
         let Ok(turn) = result else {
+            rejected[0] += 1;
             continue;
         };
         // Rounded exits must end beyond the same holding line used by live radio reports.
@@ -266,6 +285,7 @@ pub(super) fn plan(
                 aircraft,
             )
         {
+            rejected[1] += 1;
             continue;
         }
         let waypoint = |point: Point| {
@@ -291,6 +311,7 @@ pub(super) fn plan(
             ));
         }
         if resources.len() > 32 {
+            rejected[2] += 1;
             continue;
         }
         let vacated = *points.last().unwrap();
@@ -318,12 +339,106 @@ pub(super) fn plan(
             vacated,
         });
     }
-    Err("No verified forward runway exit within the landing and taxi envelope".into())
+    Err(format!(
+        "No verified forward runway exit within the landing and taxi envelope ({candidate_count} mapped candidates; {} turn, {} runway-clearance, {} resource-budget rejections; {} off-axis, {} before stopping limit, {} past runway end, {} disconnected; touchdown {:.0} m, braking {:.0} m at {:.1} kt)",
+        rejected[0],
+        rejected[1],
+        rejected[2],
+        screened[0],
+        screened[1],
+        screened[2],
+        screened[3],
+        along,
+        braking,
+        touchdown_knots
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires installed airport scenery"]
+    fn louisville_forward_exits_keep_the_aircraft_stopping_envelope() {
+        let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
+        let airport = super::super::airport(&root, "KSDF").unwrap();
+        let policy = parse_operations(include_str!("../../../../traffic/operations.toml")).unwrap();
+        let data = openatc_core::arrival::ArrivalAirport::load(&root, airport.clone()).unwrap();
+        let handling = animation::builtin().unwrap();
+        let mut missing = Vec::new();
+        for code in ["B738", "B752", "C172"] {
+            let aircraft = openatc_core::traffic::profiles::aircraft(code).unwrap();
+            let handling = &handling[&aircraft.handling.unwrap()];
+            let mut accepted = 0;
+            for name in ["17L", "17R"] {
+                let runway = airport
+                    .runways
+                    .iter()
+                    .find(|runway| runway.first_name == name || runway.second_name == name)
+                    .unwrap();
+                let (first, second) = if runway.first_name == name {
+                    (runway.first, runway.second)
+                } else {
+                    (runway.second, runway.first)
+                };
+                let length = (second.east - first.east).hypot(second.north - first.north);
+                let point = Point {
+                    east: first.east + (second.east - first.east) * 300.0 / length,
+                    north: first.north + (second.north - first.north) * 300.0 / length,
+                    height: 0.0,
+                };
+                let surface = super::super::runway::Surface::new(
+                    &airport,
+                    name,
+                    &data.thresholds,
+                    policy.runway_slope_limit_percent,
+                )
+                .unwrap();
+                let location = position(&airport, point);
+                let touchdown = Waypoint {
+                    latitude: location[0],
+                    longitude: location[1],
+                    altitude_feet: surface.height(point),
+                };
+                match plan(
+                    &airport,
+                    name,
+                    touchdown,
+                    aircraft.approach_knots,
+                    aircraft,
+                    handling,
+                    &policy,
+                    &surface,
+                ) {
+                    Ok(exit) => {
+                        let points = &exit.rollout.last().unwrap().points;
+                        assert!(clear_of_runways(
+                            &airport,
+                            openatc_core::airport::airport_point(
+                                &airport,
+                                points[points.len() - 2].latitude,
+                                points[points.len() - 2].longitude
+                            ),
+                            openatc_core::airport::airport_point(
+                                &airport,
+                                exit.vacated.latitude,
+                                exit.vacated.longitude
+                            ),
+                            aircraft
+                        ));
+                        accepted += 1;
+                        eprintln!("KSDF {name} {code}: verified forward exit");
+                    }
+                    Err(error) => eprintln!("KSDF {name} {code}: {error}"),
+                }
+            }
+            if accepted == 0 {
+                missing.push(code);
+            }
+        }
+        assert!(missing.is_empty(), "No forward exit for {missing:?}");
+    }
+
     #[test]
     fn runway_exit_extends_beyond_the_holding_line_with_the_whole_aircraft() {
         let point = |east, north| Point {
@@ -428,6 +543,9 @@ mod tests {
             &policy,
             &[],
             &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &openatc_core::parking::TrafficPreference::default(),
         )
         .unwrap();
         let stand = airport
@@ -435,7 +553,7 @@ mod tests {
             .iter()
             .find(|stand| stand.name == arrival.stand)
             .unwrap();
-        assert!(openatc_core::parking::supports_aircraft(stand, aircraft));
+        assert!(openatc_core::parking::moving_supports(stand, aircraft));
         assert_eq!(arrival.exit.rollout[1].knots, handling.taxi_turn_knots);
         assert!(
             arrival
@@ -527,6 +645,9 @@ mod tests {
             &policy,
             &[],
             &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &openatc_core::parking::TrafficPreference::default(),
         )
         .unwrap();
         assert!(!arrival.stand.is_empty());
@@ -565,15 +686,97 @@ mod tests {
             &policy,
             &[],
             &reserved,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &openatc_core::parking::TrafficPreference::default(),
         )
         .unwrap();
         assert_ne!(alternative.stand, arrival.stand);
+        let mut branded = airport.clone();
+        for stand in &mut branded.parking {
+            stand.airlines = if stand.name == alternative.stand {
+                vec!["SIA".into()]
+            } else {
+                vec!["QFA".into()]
+            };
+        }
+        let preferred = parking(
+            &branded,
+            arrival.exit.clone(),
+            aircraft,
+            handling,
+            &policy,
+            &[],
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &openatc_core::parking::TrafficPreference {
+                operator: "sia".into(),
+                operation: "airline".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(preferred.stand, alternative.stand);
+        let occupied_cells = (0..512)
+            .map_while(|index| arrival.surface.route.segment(index))
+            .last()
+            .unwrap()
+            .resources
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let separated = parking(
+            &airport,
+            arrival.exit.clone(),
+            aircraft,
+            handling,
+            &policy,
+            &[],
+            &BTreeSet::new(),
+            &occupied_cells,
+            &BTreeSet::new(),
+            &openatc_core::parking::TrafficPreference::default(),
+        )
+        .unwrap();
+        assert_ne!(separated.stand, arrival.stand);
+        assert!(
+            (0..512)
+                .map_while(|index| separated.surface.route.segment(index))
+                .all(|segment| segment
+                    .resources
+                    .iter()
+                    .all(|resource| !occupied_cells.contains(resource)))
+        );
+        let corridor_safe = parking(
+            &airport,
+            arrival.exit.clone(),
+            aircraft,
+            handling,
+            &policy,
+            &[],
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &occupied_cells,
+            &openatc_core::parking::TrafficPreference::default(),
+        )
+        .unwrap();
+        assert_ne!(corridor_safe.stand, arrival.stand);
+        let goal = (0..512)
+            .map_while(|index| corridor_safe.surface.route.segment(index))
+            .last()
+            .unwrap();
+        assert!(
+            goal.resources
+                .iter()
+                .all(|resource| !occupied_cells.contains(resource))
+        );
         let occupied = TrafficTarget {
             id: 123,
             latitude: coordinate[0],
             longitude: coordinate[1],
             on_ground: true,
             aircraft: "A320".into(),
+            wingspan_meters: Some(aircraft.wingspan),
             ..Default::default()
         };
         let alternative = parking(
@@ -584,6 +787,9 @@ mod tests {
             &policy,
             &[occupied],
             &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &openatc_core::parking::TrafficPreference::default(),
         )
         .unwrap();
         assert_ne!(alternative.stand, arrival.stand);
@@ -600,7 +806,10 @@ mod tests {
                 handling,
                 &policy,
                 &[],
-                &all_reserved
+                &all_reserved,
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                &openatc_core::parking::TrafficPreference::default(),
             )
             .is_err()
         );
@@ -613,6 +822,7 @@ mod tests {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Parking {
     pub exit: Exit,
     pub surface: GroundPlan,
@@ -628,6 +838,9 @@ pub(super) fn parking(
     policy: &Operations,
     observed: &[TrafficTarget],
     reserved: &BTreeSet<String>,
+    occupied_stand_cells: &BTreeSet<String>,
+    parking_exclusions: &BTreeSet<String>,
+    preference: &openatc_core::parking::TrafficPreference,
 ) -> Result<Parking, String> {
     let from = openatc_core::airport::airport_point(
         airport,
@@ -648,20 +861,51 @@ pub(super) fn parking(
         [previous.latitude, previous.longitude],
         [exit.vacated.latitude, exit.vacated.longitude],
     );
+    let mut blocked_cells = occupied_stand_cells.clone();
+    for target in observed.iter().filter(|target| target.on_ground) {
+        if openatc_core::arrival::distance_nm(
+            [target.latitude, target.longitude],
+            [airport.reference_latitude, airport.reference_longitude],
+        ) <= policy.surface_monitor_radius_nm
+        {
+            blocked_cells.extend(super::cells(
+                airport,
+                openatc_core::airport::airport_point(airport, target.latitude, target.longitude),
+                target.wingspan_meters.unwrap_or(80.0) / 2.0,
+                policy.conflict_cell_meters,
+            ));
+        }
+    }
     let mut candidates = airport
         .parking
         .iter()
         .filter(|stand| {
             !reserved.contains(&stand.name)
-                && openatc_core::parking::supports_aircraft(stand, aircraft)
+                && openatc_core::parking::moving_supports(stand, aircraft)
+                && super::cells(
+                    airport,
+                    stand.point,
+                    aircraft.wingspan.max(aircraft.length) / 2.0,
+                    policy.conflict_cell_meters,
+                )
+                .is_disjoint(&blocked_cells)
+                && super::cells(
+                    airport,
+                    stand.point,
+                    aircraft.wingspan.max(aircraft.length) / 2.0,
+                    policy.conflict_cell_meters,
+                )
+                .is_disjoint(parking_exclusions)
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
         let distance = |stand: &openatc_core::airport::Parking| {
             (stand.point.east - from.east).hypot(stand.point.north - from.north)
         };
-        distance(left)
-            .total_cmp(&distance(right))
+        preference
+            .rank(left, aircraft.parking_size())
+            .cmp(&preference.rank(right, aircraft.parking_size()))
+            .then_with(|| distance(left).total_cmp(&distance(right)))
             .then_with(|| left.name.cmp(&right.name))
     });
     let nominal_airport = Airport {
@@ -683,6 +927,17 @@ pub(super) fn parking(
             observed,
         );
         if let Ok(surface) = result {
+            if (0..512)
+                .map_while(|index| surface.route.segment(index))
+                .any(|segment| {
+                    segment
+                        .resources
+                        .iter()
+                        .any(|resource| blocked_cells.contains(resource))
+                })
+            {
+                continue;
+            }
             return Ok(Parking {
                 exit,
                 surface,

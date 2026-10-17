@@ -60,8 +60,24 @@ pub struct Traffic {
     policy: Option<policy::Chat>,
 }
 
+pub(crate) fn departure_wake_delay(
+    state: &EngineState,
+    id: u32,
+    airport: &openatc_core::airport::Airport,
+    runway: &str,
+    aircraft: &str,
+    latitude: f64,
+    longitude: f64,
+) -> f64 {
+    state
+        .traffic
+        .wake
+        .departure_delay(id, airport, runway, aircraft, latitude, longitude)
+}
+
 pub fn observe(state: &mut EngineState) {
     wake::observe(state);
+    crate::generated::refresh_departure_wake(state);
     if state.session.telemetry.paused
         || state
             .traffic
@@ -76,6 +92,7 @@ pub fn observe(state: &mut EngineState) {
         .pilots
         .retain(|_, p| p.seen.elapsed() < Duration::from_secs(120));
     let Some(targets) = &state.session.telemetry.traffic else {
+        state.generated.observed_climbs(BTreeMap::new());
         return;
     };
     for target in targets
@@ -225,6 +242,19 @@ pub fn observe(state: &mut EngineState) {
             );
         }
     }
+    state.generated.observed_climbs(
+        state
+            .traffic
+            .pilots
+            .iter()
+            .filter_map(|(&id, pilot)| {
+                pilot
+                    .climb_fpm
+                    .filter(|_| pilot.seen.elapsed() < Duration::from_secs(5))
+                    .map(|rate| (id, rate))
+            })
+            .collect(),
+    );
 }
 
 pub(crate) fn pilot_voice(state: &EngineState, id: u32) -> String {

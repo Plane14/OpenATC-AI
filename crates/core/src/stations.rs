@@ -151,6 +151,37 @@ pub fn from_airport(a: &Airport) -> Vec<Station> {
         })
         .collect()
 }
+/// Test radio reception without cloning the station's coverage geometry.
+#[must_use]
+pub fn reception_distance(station: &Station, t: &Telemetry) -> Option<f64> {
+    if !t.position_valid {
+        return None;
+    }
+    let distance = distance_nm(t.latitude, t.longitude, station.latitude, station.longitude);
+    let cap = match station.service.as_str() {
+        "Tower" => 50.,
+        "ATIS" => 100.,
+        "Approach" | "Departure" | "Center" => 150.,
+        _ => 25.,
+    };
+    let height = (t.altitude_feet - station.elevation_feet).max(0.);
+    let horizon = 1.23 * (height.sqrt() + 50_f64.sqrt());
+    // Airport surface stations remain usable around their movement area.
+    let range = horizon.max(10.).min(cap);
+    let regional =
+        matches!(station.service.as_str(), "Approach" | "Center") && !station.coverage.is_empty();
+    let receivable = if regional {
+        distance <= range
+            || station
+                .coverage
+                .iter()
+                .any(|volume| volume.radio_distance_nm(t) <= cap)
+    } else {
+        distance <= range
+    };
+    receivable.then_some(distance)
+}
+
 /// Airport radio horizon and regional coverage networks. No terrain shielding claim.
 #[must_use]
 pub fn nearby(index: &[Station], t: &Telemetry) -> Vec<Station> {
@@ -159,28 +190,7 @@ pub fn nearby(index: &[Station], t: &Telemetry) -> Vec<Station> {
     }
     let mut result = Vec::new();
     for station in index {
-        let distance = distance_nm(t.latitude, t.longitude, station.latitude, station.longitude);
-        let cap = match station.service.as_str() {
-            "Tower" => 50.,
-            "ATIS" => 100.,
-            "Approach" | "Departure" | "Center" => 150.,
-            _ => 25.,
-        };
-        let height = (t.altitude_feet - station.elevation_feet).max(0.);
-        let horizon = 1.23 * (height.sqrt() + 50_f64.sqrt());
-        // Airport surface stations remain usable around their movement area.
-        let range = horizon.max(10.).min(cap);
-        let regional = matches!(station.service.as_str(), "Approach" | "Center")
-            && !station.coverage.is_empty();
-        if if regional {
-            distance <= range
-                || station
-                    .coverage
-                    .iter()
-                    .any(|volume| volume.radio_distance_nm(t) <= cap)
-        } else {
-            distance <= range
-        } {
+        if let Some(distance) = reception_distance(station, t) {
             let mut s = station.clone();
             s.distance_nm = distance;
             s.receivable = true;
@@ -327,7 +337,7 @@ pub fn station_serves(station: &Station, intent: &str) -> bool {
 }
 
 /// Published controller volume. Longitude is unwrapped around the aircraft.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Coverage {
     /// Lower MSL altitude in feet.
@@ -380,7 +390,16 @@ impl Coverage {
     }
     /// Whether telemetry lies inside the published horizontal and altitude bounds.
     pub fn contains(&self, t: &Telemetry) -> bool {
-        if self.points.len() < 3 || t.altitude_feet < self.floor || t.altitude_feet > self.ceiling {
+        if self.points.len() < 3
+            || !self.floor.is_finite()
+            || !self.ceiling.is_finite()
+            || self.floor > self.ceiling
+            || ![t.latitude, t.longitude, t.altitude_feet]
+                .iter()
+                .all(|value| value.is_finite())
+            || t.altitude_feet < self.floor
+            || t.altitude_feet > self.ceiling
+        {
             return false;
         }
         let origin = self.points[0][1];
@@ -391,6 +410,21 @@ impl Coverage {
         for current in &self.points {
             let x1 = longitude(previous[1]);
             let x2 = longitude(current[1]);
+            // Adjacent sectors share their boundary. Keep roundoff at an exact edge
+            // from creating an unassigned sliver between otherwise identical polygons.
+            let dx = x2 - x1;
+            let dy = current[0] - previous[0];
+            let length2 = dx * dx + dy * dy;
+            let along = if length2 > 0.0 {
+                (((aircraft_x - x1) * dx + (t.latitude - previous[0]) * dy) / length2)
+                    .clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if (aircraft_x - x1 - along * dx).hypot(t.latitude - previous[0] - along * dy) <= 1e-10
+            {
+                return true;
+            }
             if (previous[0] > t.latitude) != (current[0] > t.latitude)
                 && aircraft_x
                     < (x2 - x1) * (t.latitude - previous[0]) / (current[0] - previous[0]) + x1
@@ -434,6 +468,37 @@ pub fn assign_airport_capabilities(stations: &mut [Station]) {
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+    #[test]
+    fn adjacent_controller_edges_are_closed_but_real_gaps_remain_outside() {
+        let west = Coverage {
+            floor: 0.0,
+            ceiling: 60000.0,
+            points: vec![[-1.0, -1.0], [-1.0, 0.0], [1.0, 0.0], [1.0, -1.0]],
+        };
+        let east = Coverage {
+            points: vec![[-1.0, 0.0], [-1.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
+            ..west.clone()
+        };
+        let point = Telemetry {
+            latitude: 0.0,
+            longitude: 0.0,
+            altitude_feet: 30000.0,
+            ..Default::default()
+        };
+        assert!(west.contains(&point) && east.contains(&point));
+        assert!(!west.contains(&Telemetry {
+            longitude: 0.000001,
+            ..point.clone()
+        }));
+        assert!(!east.contains(&Telemetry {
+            longitude: -0.000001,
+            ..point.clone()
+        }));
+        assert!(!east.contains(&Telemetry {
+            altitude_feet: f64::NAN,
+            ..point
+        }));
+    }
     #[test]
     fn regional_volume_wraps_dateline_without_covering_opposite_hemisphere() {
         let volume = Coverage {

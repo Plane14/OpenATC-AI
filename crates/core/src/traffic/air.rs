@@ -128,9 +128,74 @@ pub fn wind(
     Ok((ground, (-cross / true_knots).asin().to_degrees()))
 }
 
+/// Ground speed and true track when a procedure prescribes heading rather than track.
+pub fn heading_wind(
+    true_knots: f64,
+    heading: f64,
+    wind_from: f64,
+    wind_knots: f64,
+) -> Result<(f64, f64), String> {
+    if !(35.0..=600.0).contains(&true_knots)
+        || !(0.0..=200.0).contains(&wind_knots)
+        || !heading.is_finite()
+        || !wind_from.is_finite()
+    {
+        return Err("Invalid traffic heading wind triangle".into());
+    }
+    let angle = heading.to_radians();
+    let wind = wind_from.to_radians();
+    let east = true_knots * angle.sin() - wind_knots * wind.sin();
+    let north = true_knots * angle.cos() - wind_knots * wind.cos();
+    let speed = east.hypot(north);
+    let forward = east * angle.sin() + north * angle.cos();
+    if !(5.0..=600.0).contains(&speed) || forward < 5.0 {
+        return Err("Wind leaves no supported forward heading movement".into());
+    }
+    Ok((speed, east.atan2(north).to_degrees().rem_euclid(360.0)))
+}
+
+/// True nose heading from the route's ground velocity and its retained planning wind.
+pub fn heading_from_ground(
+    ground_knots: f64,
+    track: f64,
+    wind_from: f64,
+    wind_knots: f64,
+) -> Result<f64, String> {
+    if !(5.0..=600.0).contains(&ground_knots)
+        || !(0.0..=200.0).contains(&wind_knots)
+        || !track.is_finite()
+        || !wind_from.is_finite()
+    {
+        return Err("Invalid ground velocity or planning wind".into());
+    }
+    let east = ground_knots * track.to_radians().sin() + wind_knots * wind_from.to_radians().sin();
+    let north = ground_knots * track.to_radians().cos() + wind_knots * wind_from.to_radians().cos();
+    if !(35.0..=600.0).contains(&east.hypot(north)) {
+        return Err("Ground velocity has no supported airspeed in this wind".into());
+    }
+    Ok(east.atan2(north).to_degrees().rem_euclid(360.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prescribed_heading_keeps_drift_instead_of_crabbing_to_a_track() {
+        for heading in [0.0, 90.0, 180.0, 270.0] {
+            for wind_from in [0.0, 80.0, 190.0, 270.0] {
+                let (ground, track) = heading_wind(150.0, heading, wind_from, 30.0).unwrap();
+                let (checked, crab) = wind(150.0, track, wind_from, 30.0).unwrap();
+                assert!((ground - checked).abs() < 1e-9);
+                assert!(crate::navigation::turn(heading, track + crab).abs() < 1e-9);
+                let nose = heading_from_ground(ground, track, wind_from, 30.0).unwrap();
+                assert!(crate::navigation::turn(heading, nose).abs() < 1e-9);
+            }
+        }
+        assert!(heading_wind(100.0, 0.0, 0.0, 150.0).is_err());
+        assert!(heading_wind(100.0, f64::NAN, 0.0, 10.0).is_err());
+        assert!(heading_wind(100.0, 0.0, f64::NAN, 10.0).is_err());
+    }
+
     #[test]
     fn altitude_references_round_trip_through_both_layers() {
         for (pressure, temperature) in [(1013.25, 15.0), (1023.0, 25.0), (990.0, -10.0)] {
