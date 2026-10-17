@@ -1,0 +1,14 @@
+Microsoft Visual C++ Runtime
+
+Windows distributions include Microsoft Visual C++ x64 release CRT and OpenMP
+redistributable libraries from the packaging machine's Visual Studio installation.
+These Microsoft components are separate from OpenATC's MIT-licensed source code
+and remain subject to Microsoft's applicable license and redistribution terms.
+
+Redistribution documentation:
+https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files
+
+Microsoft Visual Studio license terms:
+https://visualstudio.microsoft.com/license-terms/
+
+No Microsoft runtime binaries or Visual Studio tools are stored in this repository.

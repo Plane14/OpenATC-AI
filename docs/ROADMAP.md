@@ -4,7 +4,7 @@
 
 Generated traffic integration comes first, followed by traffic performance validation, remaining conversation quality, traffic coordination and optional pilot exchanges, the outstanding takeoff-callout timing investigation, and the wider plugin backlog. Debug checkpoint acceptance follows those items; release/build/publication leftovers remain the final catch-all. Coordination and movement-authority requirements remain prerequisites of safe generated-flight integration.
 
-The latest user flight confirms the reported window, speed-instruction, controller-message, crew, taxiway-speech and descent-readback repairs worked. The remaining reported flight issue is V2 audio timing after Rotate; preserve correct speed identities while checking delay and aircraft-specific callout policy. Installer/platform acceptance is delegated to community testers, including Intel and Apple Silicon Macs, and is not claimed complete.
+A completed Linux test flight confirms the reported window, speed-instruction, controller-message, crew, taxiway-speech and descent-readback repairs worked. Spoken V2 has been removed. Airspeed alive, 80 knots, V1 and Rotate precede Positive rate after confirmed airborne climb; native playback timing confirmation remains pending. Installer/platform acceptance is delegated to community testers, including Intel and Apple Silicon Macs, and is not claimed complete.
 
 ## Crew conversation pipeline — 16 October 2026
 
@@ -22,7 +22,7 @@ The latest Linux build includes the following repairs:
 - Avoid reporting a climb back to the ILS intercept altitude during final Tower check-in.
 - Retain editable crew pacing guidance, taxiway pronunciation, ATIS reception updates and independent takeoff-callout playback.
 
-The locked Linux release build, focused readback/descent tests and four HTTP flight-replay arrangements pass. The replays cover a published STAR speed restriction, descent, approach clearance, Tower transfer, landing, runway exit, crossing and parking. The user confirms the last-flight repairs worked, with V2 audio timing remaining under investigation. A ToLiss Nice–Milan flight through parking was completed successfully. Generated traffic and the wider AI pipeline remain in development; generated traffic is disabled by default.
+The locked Linux release build, focused readback/descent tests and four HTTP flight-replay arrangements pass. The replays cover a published STAR speed restriction, descent, approach clearance, Tower transfer, landing, runway exit, crossing and parking. The completed test flight confirms these repairs, with the corrected takeoff callout sequence awaiting a native recheck. A ToLiss Nice–Milan flight through parking was completed successfully. Generated traffic and the wider AI pipeline remain in development; generated traffic is disabled by default.
 
 Operational wording is in `speech/runtime/responses.toml`. Full-file overrides must retain the required situation IDs and slot contracts; compare customised files with the shipped defaults when upgrading.
 
@@ -38,7 +38,7 @@ Current Rust work includes native audio selection, plugin-owned engine lifecycle
 
 Still needed for a complete ATC system:
 
-- Native acceptance of preloaded copilot V1/VR/optional V2 callouts: verify actual ToLiss and default-aircraft speed sources, short-gap timing, rejection/reset, pause and output devices. Source trigger and crew replay tests do not close this acceptance item.
+- Native acceptance of preloaded copilot takeoff callouts: verify actual ToLiss and default-aircraft speed sources, short-gap timing, rejection/reset, pause and output devices. Source trigger and crew replay tests do not close this acceptance item.
 
 - Simulator runtime validation across X-Plane UI scales, multi-monitor and pop-out configurations; native SDK 4.4 graphics integration, non-ASCII keyboard entry.
 - Complete traffic separation, wake sequencing and plausible random traffic generation without real-world timetables. Native AI amount control, predictive taxi holds, whole-aircraft runway clearance, concurrent traffic advisories, limited jet approach spacing and simulated pilot weather/landing exchanges are implemented. FAA pair-specific departure/approach wake checks cover observed same/close-parallel runway traffic; intersecting paths and preceding low/missed approaches remain incomplete. These paths need live traffic-provider and performance acceptance.

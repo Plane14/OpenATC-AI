@@ -143,6 +143,9 @@ pub fn preflight(platform: &str) -> Result {
             )?;
         }
         fs::create_dir_all(bundle.join("licenses"))?;
+        if cfg!(target_os = "windows") {
+            crate::windows_runtime::install(&bundle)?;
+        }
         let launcher = if product == "plugin" {
             "openatc-install"
         } else {
@@ -388,6 +391,9 @@ pub fn package(product: &str, platform: &str, requested_version: &str) -> Result
         bundle.join(&executable_name),
     )?;
     executable(&bundle.join(&executable_name))?;
+    if cfg!(target_os = "windows") {
+        crate::windows_runtime::install(&bundle)?;
+    }
     write(&bundle.join("product.txt"), product)?;
     if product == "ai-server" {
         for name in ["openatc-ai", "openatc-stt"] {
@@ -512,7 +518,21 @@ fn windows(bundle: &Path, output: &Path, stem: &str, product: &str, version: &st
         );
         content = content.replace("[Files]\n", &format!("{signing}[Files]\n"));
     }
+    let mut extract_runtime = String::new();
     if product == "plugin" {
+        for entry in fs::read_dir(bundle)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "dll") {
+                content.push_str(&format!(
+                    "Source: \"{}\"; Flags: dontcopy\n",
+                    path.display()
+                ));
+                extract_runtime.push_str(&format!(
+                    "  ExtractTemporaryFile('{}');\n",
+                    path.file_name().unwrap().to_string_lossy()
+                ));
+            }
+        }
         content.push_str(&format!(
             "Source: \"{}\"; Flags: dontcopy\n",
             bundle.join("openatc-install.exe").display()
@@ -521,7 +541,12 @@ fn windows(bundle: &Path, output: &Path, stem: &str, product: &str, version: &st
     content.push_str(&format!("Source: \"{}\\*\"; DestDir: \"{{app}}\"; Flags: recursesubdirs createallsubdirs ignoreversion\n",bundle.display()));
     if product == "plugin" {
         content.push_str("[UninstallDelete]\nType: files; Name: \"{app}\\xplane-path.txt\"\n");
-        content.push_str(include_str!("../../packaging/installer/windows-plugin.iss"));
+        content.push_str(
+            &include_str!("../../packaging/installer/windows-plugin.iss").replace(
+                "  { Extract runtime before starting the discovery helper. }",
+                &extract_runtime,
+            ),
+        );
     } else {
         content.push_str("[Icons]\nName: \"{autoprograms}\\OpenATC AI Server\"; Filename: \"{app}\\openatc-launcher.exe\"\nName: \"{autoprograms}\\Configure OpenATC AI Server\"; Filename: \"{app}\\openatc-launcher.exe\"; Parameters: \"--configure-web\"\n");
     }

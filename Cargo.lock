@@ -2469,6 +2469,7 @@ version = "0.1.0"
 name = "openatc-plugin"
 version = "0.1.0"
 dependencies = [
+ "gl_generator",
  "glow",
  "imgui",
  "imgui-glow-renderer",

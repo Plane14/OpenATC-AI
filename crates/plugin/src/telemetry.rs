@@ -156,6 +156,23 @@ pub fn find_refs(data: &mut xplane::data::DataApi, log: &mut Vec<String>) -> Ref
 
 /// Read one telemetry snapshot with unit conversions.
 #[must_use]
+/// Read the takeoff instruments without collecting traffic or radio state.
+pub fn gather_callouts(refs: &Refs) -> openatc_core::state::Telemetry {
+    openatc_core::state::Telemetry {
+        on_ground: refs.ground.as_ref().is_none_or(|read| read() != 0),
+        ground_speed_knots: refs
+            .speed
+            .as_ref()
+            .map_or(0.0, |read| read() * 1.943_844_492),
+        indicated_speed_knots: optional_number(&refs.indicated_speed, true),
+        paused: refs.pause.as_ref().is_some_and(|read| read() != 0),
+        vertical_speed_fpm: refs.vertical_speed.as_ref().map_or(0.0, |read| read()),
+        height_agl_feet: refs.agl.as_ref().map_or(0.0, |read| read() * 3.280_839_895),
+        simulation_seconds: optional_number(&refs.simulation_seconds, true),
+        ..Default::default()
+    }
+}
+
 pub fn gather(refs: &Refs) -> openatc_core::state::Telemetry {
     let number = |value: &Option<Box<dyn Fn() -> f64>>| value.as_ref().map_or(0.0, |read| read());
     let flag = |value: &Option<Box<dyn Fn() -> i32>>| value.as_ref().map_or(0, |read| read());
@@ -211,6 +228,26 @@ fn optional_number(reader: &Option<Box<dyn Fn() -> f64>>, nonnegative: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn callout_sampling_leaves_unrelated_readers_untouched() {
+        let refs = Refs {
+            ground: Some(Box::new(|| 0)),
+            agl: Some(Box::new(|| 3.0)),
+            vertical_speed: Some(Box::new(|| 500.0)),
+            indicated_speed: Some(Box::new(|| 150.0)),
+            traffic: Some(Box::new(|| panic!("traffic must not be read by callouts"))),
+            ..Default::default()
+        };
+        let t = gather_callouts(&refs);
+        assert!(!t.on_ground);
+        assert!(t.height_agl_feet > 9.8 && t.height_agl_feet < 9.9);
+        assert_eq!(t.vertical_speed_fpm, 500.0);
+        assert_eq!(t.indicated_speed_knots, Some(150.0));
+        let missing = gather_callouts(&Refs::default());
+        assert!(missing.on_ground);
+        assert_eq!(missing.vertical_speed_fpm, 0.0);
+        assert!(missing.indicated_speed_knots.is_none());
+    }
 
     #[test]
     fn barometric_altitudes_stay_separate_from_geometric_position() {

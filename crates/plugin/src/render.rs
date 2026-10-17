@@ -65,6 +65,8 @@ pub struct RenderState {
     pub renderer: Option<imgui_glow_renderer::AutoRenderer>,
     /// GL bindings resolved from the host.
     pub gl: Option<glow::Context>,
+    legacy: Option<crate::legacy_gl::Renderer>,
+    init_attempts: u8,
     /// Whether the GL side initialized.
     pub ready: bool,
     /// Last frame time for delta clamping.
@@ -91,6 +93,8 @@ impl RenderState {
             imgui,
             renderer: None,
             gl: None,
+            legacy: None,
+            init_attempts: 0,
             ready: false,
             previous: Instant::now(),
             draw_fn: None,
@@ -102,8 +106,12 @@ impl RenderState {
         }
     }
 
+    pub fn ui_scale(&self) -> f32 {
+        self.ui_scale
+    }
+
     fn log(text: &str) {
-        if let Ok(line) = CString::new(text) {
+        if let Ok(line) = CString::new(format!("{}\n", text.trim_end())) {
             unsafe { xplane_sys::XPLMDebugString(line.as_ptr()) };
         }
     }
@@ -142,6 +150,10 @@ impl RenderState {
             return WindowActions::default();
         };
         if !self.ready {
+            if self.init_attempts >= 3 {
+                return WindowActions::default();
+            }
+            self.init_attempts += 1;
             self.ready = self.init_gl();
             if !self.ready {
                 return WindowActions::default();
@@ -175,16 +187,22 @@ impl RenderState {
             .draw_fn
             .as_mut()
             .map_or_else(WindowActions::default, |draw| draw(ui, frame));
-        if let Some(renderer) = self.renderer.as_mut() {
+        if let Some(renderer) = self.legacy.as_ref() {
+            unsafe {
+                xplane_sys::XPLMSetGraphicsState(0, 1, 0, 0, 1, 0, 0);
+                renderer.render(self.imgui.render());
+            }
+        } else if let Some(renderer) = self.renderer.as_mut() {
             unsafe { xplane_sys::XPLMSetGraphicsState(0, 1, 0, 0, 1, 0, 0) };
             if renderer.render(self.imgui.render()).is_err() {
                 Self::log("OpenATC AI: frame render failed");
             }
         }
         if self.keyboard_focus
-            && !self.imgui.io().want_text_input
+            && !actions.capture_keyboard
             && !self.imgui.io().mouse_down.iter().any(|down| *down)
         {
+            crate::debug_log("OpenATC input: releasing keyboard focus after widget input ended\n");
             unsafe { xplane_sys::XPLMTakeKeyboardFocus(std::ptr::null_mut()) };
             self.keyboard_focus = false;
         }
@@ -205,10 +223,33 @@ impl RenderState {
             };
             // Keep the library loaded while its function pointers remain in use.
             let library: &'static libloading::Library = Box::leak(Box::new(library));
+            #[cfg(target_os = "macos")]
+            {
+                match unsafe {
+                    crate::legacy_gl::Renderer::new(
+                        |name| crate::gl::symbol(library, name),
+                        &mut self.imgui,
+                    )
+                } {
+                    Ok(renderer) => {
+                        self.legacy = Some(renderer);
+                        Self::log("OpenATC AI: OpenGL 2.1 compatibility renderer ready\n");
+                        return true;
+                    }
+                    Err(error) => {
+                        Self::log(&format!("OpenATC AI: {error}\n"));
+                        return false;
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
             let gl = unsafe {
                 glow::Context::from_loader_function(|name| crate::gl::symbol(library, name))
             };
-            self.gl = Some(gl);
+            #[cfg(not(target_os = "macos"))]
+            {
+                self.gl = Some(gl);
+            }
         }
         if self.renderer.is_none() {
             let Some(gl) = self.gl.take() else {
@@ -244,6 +285,9 @@ impl RenderState {
             || status == xplane_sys::XPLMMouseStatus::Drag;
         self.imgui.io_mut().add_mouse_button_event(button, down);
         if !right && status == xplane_sys::XPLMMouseStatus::Down {
+            if !self.keyboard_focus {
+                crate::debug_log("OpenATC input: taking keyboard focus after window click\n");
+            }
             unsafe { xplane_sys::XPLMTakeKeyboardFocus(window) };
             self.keyboard_focus = true;
         }
@@ -285,6 +329,7 @@ impl RenderState {
         let io = self.imgui.io_mut();
         io.app_focus_lost = losing_focus != 0;
         if losing_focus != 0 {
+            crate::debug_log("OpenATC input: simulator reported keyboard focus lost\n");
             self.keyboard_focus = false;
             return;
         }

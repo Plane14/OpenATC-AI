@@ -14,7 +14,18 @@ vr_refs = ["toliss_airbus/performance/VR", "toliss_airbus/pfdoutputs/general/VR_
 v2_refs = ["toliss_airbus/performance/V2","sim/cockpit2/gauges/actuators/airspeed_bugs[2]"]
 v1_text = "V one"
 vr_text = "Rotate"
-v2_text = "V two"
 v1_vr_text = "V one. Rotate"
-log_labels = ["V1", "Rotate", "V2"]
+log_labels = ["V1", "Rotate"]
 log_template = "{callout} · {speed} kt"
+
+[roll]
+airspeed_alive_knots = 35.0
+eighty_knots = 80.0
+airspeed_alive_text = "Airspeed alive"
+eighty_knots_text = "80 knots"
+
+[positive]
+minimum_agl_feet = 5.0
+minimum_climb_fpm = 100.0
+confirmation_seconds = 0.3
+text = "Positive rate"

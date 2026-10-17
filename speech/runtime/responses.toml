@@ -17645,3 +17645,15 @@ say = ["descending to {altitude}", "continuing descent to {altitude}", "descendi
 [crew_conversation_unavailable]
 slots = []
 say = ["Crew conversation is unavailable. Please try again."]
+
+[clearance_flight_plan_not_filed]
+slots = ["callsign"]
+say = ["{callsign}, you have not filed a flight plan. Complete Planning, then request IFR clearance."]
+
+[clearance_flight_plan_incomplete]
+slots = ["callsign", "reason"]
+say = ["{callsign}, your flight plan is incomplete or invalid. {reason} Check Planning, then request IFR clearance."]
+
+[clearance_flight_plan_missing_fields]
+slots = ["fields"]
+say = ["Missing {fields}."]

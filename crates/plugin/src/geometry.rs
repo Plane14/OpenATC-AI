@@ -3,6 +3,35 @@ fn px(pixels: i32) -> f32 {
     pixels as f32
 }
 
+/// Prefer the display containing most of the window, then the nearest display.
+pub(crate) fn monitor_for(bounds: [i32; 4], monitors: &[[i32; 4]]) -> Option<[i32; 4]> {
+    monitors
+        .iter()
+        .copied()
+        .filter(|m| m[2] > m[0] && m[1] > m[3])
+        .max_by_key(|m| {
+            let width = (i64::from(bounds[2].min(m[2])) - i64::from(bounds[0].max(m[0]))).max(0);
+            let height = (i64::from(bounds[1].min(m[1])) - i64::from(bounds[3].max(m[3]))).max(0);
+            let dx =
+                i128::from(bounds[0]) + i128::from(bounds[2]) - i128::from(m[0]) - i128::from(m[2]);
+            let dy =
+                i128::from(bounds[1]) + i128::from(bounds[3]) - i128::from(m[1]) - i128::from(m[3]);
+            (i128::from(width) * i128::from(height), -(dx * dx + dy * dy))
+        })
+}
+
+/// Fit the window and its drag area inside a single monitor.
+pub(crate) fn fit_window(bounds: [i32; 4], monitors: &[[i32; 4]]) -> Option<[i32; 4]> {
+    let monitor = monitor_for(bounds, monitors)?;
+    let [left, top, right, bottom] = bounds.map(i64::from);
+    let [ml, mt, mr, mb] = monitor.map(i64::from);
+    let width = (right - left).max(1).min(mr - ml);
+    let height = (top - bottom).max(1).min(mt - mb);
+    let left = left.clamp(ml, mr - width);
+    let top = top.clamp(mb + height, mt);
+    Some([left, top, left + width, top - height].map(|v| i32::try_from(v).unwrap()))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FrameLayout {
     pub(crate) display_size: [f32; 2],
@@ -71,6 +100,34 @@ impl FrameLayout {
 #[cfg(test)]
 mod tests {
     use super::FrameLayout;
+
+    #[test]
+    fn offscreen_windows_fit_real_monitors_instead_of_desktop_gaps() {
+        let wide = [[0, 1440, 5120, 0]];
+        assert_eq!(
+            super::fit_window([5000, 1400, 5960, 640], &wide),
+            Some([4160, 1400, 5120, 640])
+        );
+        let diagonal = [[0, 1080, 1920, 0], [1920, 2160, 3840, 1080]];
+        let fitted = super::fit_window([100, 2100, 1060, 1340], &diagonal).unwrap();
+        assert!(diagonal.iter().any(|m| fitted[0] >= m[0]
+            && fitted[1] <= m[1]
+            && fitted[2] <= m[2]
+            && fitted[3] >= m[3]));
+        let negative = [[-3440, 1440, 0, 0]];
+        assert_eq!(
+            super::fit_window([40, 1000, 1000, 240], &negative),
+            Some([-960, 1000, 0, 240])
+        );
+        assert_eq!(
+            super::fit_window([40, 1000, 1000, 240], &[[0, 600, 800, 0]]),
+            Some([0, 600, 800, 0])
+        );
+        assert_eq!(
+            super::fit_window([40, 1000, 1000, 240], &[[0, 1080, 1920, 0]]),
+            Some([40, 1000, 1000, 240])
+        );
+    }
 
     const IDENTITY: [f32; 16] = [
         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,

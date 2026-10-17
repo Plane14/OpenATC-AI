@@ -71,6 +71,14 @@ pub(crate) fn install_plugin(sim: &Path, backup: bool) -> Result {
             plugin.join("bin").join(executable("open-atc-engine")),
         ),
     ];
+    if cfg!(target_os = "windows") {
+        for source in crate::windows_runtime::libraries()? {
+            let name = source.file_name().unwrap();
+            for folder in ["64", "bin"] {
+                entries.push((source.clone(), plugin.join(folder).join(name)));
+            }
+        }
+    }
     for name in [
         "radio-stations.toml",
         "regions.toml",
@@ -187,6 +195,9 @@ pub(crate) fn install_ai(destination: &Path) -> Result {
     }
     tree(&data, &bin.join("espeak-ng-data"))?;
     shared_libraries(&release, &bin)?;
+    if cfg!(target_os = "windows") {
+        crate::windows_runtime::install(&bin)?;
+    }
     tree(&repo().join("server"), &destination.join("server"))?;
     println!("Installed AI runtime: {}", bin.display());
     Ok(())
@@ -229,7 +240,11 @@ pub(crate) fn collect(product: &str, output: &Path) -> Result {
         }
         _ => return Err("Expected plugin or ai-server".into()),
     }
-    shared_libraries(&release, output)
+    shared_libraries(&release, output)?;
+    if cfg!(target_os = "windows") {
+        crate::windows_runtime::install(output)?;
+    }
+    Ok(())
 }
 pub(crate) fn audit(binary: &Path) -> Result {
     let result = Command::new("ldd").arg(binary).output()?;

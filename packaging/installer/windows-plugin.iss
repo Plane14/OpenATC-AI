@@ -34,6 +34,7 @@ end;
 procedure InitializeWizard;
 var Paths: TArrayOfString; I: Integer; Initial: String;
 begin
+  { Extract runtime before starting the discovery helper. }
   ExtractTemporaryFile('openatc-install.exe');
   XPlanePage := CreateInputDirPage(wpSelectDir, 'Choose X-Plane 12',
     'Select the simulator installation to update.',

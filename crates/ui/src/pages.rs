@@ -1013,14 +1013,14 @@ fn quick_request_text(
     let callsign = if intent == "clearance" {
         &interface.draft.callsign
     } else {
-        &state.plan.callsign
+        interface.transmission_callsign(state)
     };
     let text = if intent == "clearance" {
         openatc_core::dialogue::say(
             "pilot_request_ifr_clearance",
             &[
                 ("station", station.name.clone()),
-                ("callsign", callsign.clone()),
+                ("callsign", callsign.to_owned()),
                 (
                     "dest",
                     if interface.arrival.airport.icao == interface.draft.destination
@@ -1045,7 +1045,7 @@ fn quick_request_text(
             &format!("pilot_request_{intent}"),
             &[
                 ("station", station.name.clone()),
-                ("callsign", callsign.clone()),
+                ("callsign", callsign.to_owned()),
             ],
         )
     } else {
@@ -1195,7 +1195,7 @@ pub fn atc_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
             let crew = interface.crew_role();
             ui.text_disabled(format!(
                 "{}   /   {}",
-                state.plan.callsign,
+                interface.transmission_callsign(state),
                 if crew == "ground" {
                     "GROUND CREW"
                 } else if crew == "cabin" {
@@ -3858,6 +3858,73 @@ mod tests {
     }
 
     #[test]
+    fn planning_keeps_keyboard_capture_through_click_release_and_typing() {
+        let _guard = CONTEXT_LOCK.lock().unwrap();
+        let mut ctx = headless();
+        let mut interface = interface_with_airport();
+        interface.set_page(1);
+        for _ in 0..3 {
+            interface.draw(ctx.frame());
+            ctx.render();
+        }
+        let b = interface.plan_callsign_bounds;
+        assert!(b[2] > b[0]);
+        ctx.io_mut()
+            .add_mouse_pos_event([b[0] + 20.0, (b[1] + b[3]) * 0.5]);
+        interface.draw(ctx.frame());
+        ctx.render();
+        ctx.io_mut()
+            .add_mouse_button_event(imgui::MouseButton::Left, true);
+        let pressed = interface.draw(ctx.frame());
+        ctx.render();
+        assert!(pressed.capture_keyboard);
+        ctx.io_mut()
+            .add_mouse_button_event(imgui::MouseButton::Left, false);
+        let released = interface.draw(ctx.frame());
+        ctx.render();
+        assert!(released.capture_keyboard);
+        ctx.io_mut().add_input_character('R');
+        let typed = interface.draw(ctx.frame());
+        ctx.render();
+        assert!(typed.capture_keyboard);
+        assert!(interface.draft.callsign.contains('R'));
+    }
+
+    #[test]
+    fn toolbar_drag_works_in_full_compact_and_wrapped_layouts() {
+        let _guard = CONTEXT_LOCK.lock().unwrap();
+        for (width, compact) in [(960.0, false), (520.0, false), (520.0, true)] {
+            let mut ctx = headless();
+            let mut interface = interface_with_airport();
+            interface.compact = compact;
+            interface.window_size = [width, if compact { 240.0 } else { 760.0 }];
+            for _ in 0..3 {
+                interface.draw(ctx.frame());
+                ctx.render();
+            }
+            let b = interface.toolbar_drag_bounds;
+            assert!(b[2] - b[0] > 30.0);
+            let point = [(b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5];
+            ctx.io_mut().add_mouse_pos_event(point);
+            interface.draw(ctx.frame());
+            ctx.render();
+            ctx.io_mut()
+                .add_mouse_button_event(imgui::MouseButton::Left, true);
+            interface.draw(ctx.frame());
+            ctx.render();
+            ctx.io_mut()
+                .add_mouse_pos_event([point[0] + 25.0, point[1] + 12.0]);
+            let actions = interface.draw(ctx.frame());
+            ctx.render();
+            assert_eq!(
+                actions.drag_delta,
+                [25.0, 12.0],
+                "width={width}, compact={compact}"
+            );
+        }
+    }
+
+    #[test]
     fn chat_frequency_links_accept_only_decimal_com_frequencies() {
         for (text, expected) in [
             ("118.1", 118100),
@@ -4389,6 +4456,17 @@ mod tests {
         );
         assert!(text.contains("C-GTLT") && text.contains("KSNA"));
         assert!(!text.contains("VH-BIL"));
+        let radio_check = quick_request_text(
+            &interface,
+            &state,
+            Some(&station),
+            "radio_check",
+            "Radio check",
+        );
+        assert!(radio_check.contains("C-GTLT"));
+        assert!(!radio_check.contains("VH-BIL"));
+        state.clearance = Some(Clearance::default());
+        assert_eq!(interface.transmission_callsign(&state), "VH-BIL");
     }
 
     #[test]

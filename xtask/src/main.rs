@@ -3,6 +3,7 @@ mod checks;
 mod distribution;
 mod installer;
 mod release;
+mod windows_runtime;
 use std::{
     error::Error,
     path::{Path, PathBuf},

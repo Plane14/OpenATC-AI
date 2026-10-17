@@ -1380,6 +1380,11 @@ async fn record_response(
 
 async fn handle_request(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>) -> Response {
     let generation = shared.read().await.session_generation;
+    let planning_plan = body.get("planningFlightPlan").cloned();
+    let planning_callsign = body
+        .get("planningCallsign")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let mut request: Request = match serde_json::from_value(body) {
         Ok(request) => request,
         Err(_) => {
@@ -1406,6 +1411,20 @@ async fn handle_request(AxumState(shared): AxumState<Shared>, Json(body): Json<V
         request.waypoint = interpreted.waypoint;
     }
     request.role = role.clone();
+    if role == "atc"
+        && let Some(proposed) = planning_callsign
+    {
+        let mut state = shared.write().await;
+        if state.session_generation != generation {
+            return bad_request(openatc_core::dialogue::say(
+                "notice_flight_was_reset_previous_request_discarded_c0a5c48d",
+                &[],
+            ));
+        }
+        if let Some(callsign) = openatc_core::ops::planning_callsign(&state.session, &proposed) {
+            state.session.plan.callsign = callsign.to_ascii_uppercase();
+        }
+    }
     let settings = shared.read().await.settings.clone();
     if let Some(response) = crate::crew::request(&shared, &request).await {
         return response;
@@ -1477,6 +1496,47 @@ async fn handle_request(AxumState(shared): AxumState<Shared>, Json(body): Json<V
     }
     if role == "copilot" {
         return copilot_chat(&shared, &settings, &request).await;
+    }
+    if role == "atc" && request.intent == "clearance" {
+        let mut state = shared.write().await;
+        let feedback = match planning_plan {
+            Some(value) => match serde_json::from_value::<openatc_core::state::FlightPlan>(value) {
+                Ok(plan) => openatc_core::ops::flight_plan_clearance_feedback(&plan),
+                Err(_) => Some(openatc_core::dialogue::say(
+                    "clearance_flight_plan_incomplete",
+                    &[
+                        ("callsign", state.session.plan.callsign.clone()),
+                        ("reason", "Check the flight plan fields.".into()),
+                    ],
+                )),
+            },
+            None => openatc_core::ops::flight_plan_clearance_feedback(&state.session.plan),
+        }
+        .or_else(|| openatc_core::ops::flight_plan_clearance_feedback(&state.session.plan));
+        if state.session.clearance.is_none()
+            && let Some(message) = feedback
+        {
+            let stations =
+                openatc_core::stations::nearby(&state.stations, &state.session.telemetry);
+            if let Some(station) = state
+                .session
+                .telemetry
+                .frequency(request.radio)
+                .and_then(|frequency| openatc_core::stations::tuned(&stations, frequency))
+                .cloned()
+            {
+                let callsign = state.session.plan.callsign.clone();
+                let pilot_tag = SpeechTag {
+                    radio: Some(request.radio),
+                    voice: settings.pilot_voice.clone(),
+                    delivery: "standard".into(),
+                    speed: settings.pilot_speed,
+                    ..Default::default()
+                };
+                add_transmission(&mut state.session, &callsign, &request.text, &pilot_tag);
+                return clearance_rejection(&mut state, &station, request.radio, message);
+            }
+        }
     }
     if request.intent == "clearance" {
         let state = shared.read().await;
@@ -3041,6 +3101,96 @@ mod chatter_tests {
         );
     }
 
+    #[tokio::test]
+    async fn missing_and_incomplete_plans_receive_spoken_clearance_rejections() {
+        for scenario in [
+            "empty",
+            "partial",
+            "invalid",
+            "malformed",
+            "direct",
+            "stale",
+        ] {
+            let mut state = crate::test_state();
+            state.settings.simulator_root = "radio-plan-fixture".into();
+            state
+                .station_root
+                .clone_from(&state.settings.simulator_root);
+            state.settings.congestion = Congestion::Off;
+            state.voices_source.clone_from(&state.settings.tts_url);
+            state.voices_refreshed = Some(std::time::Instant::now());
+            state.session.telemetry.position_valid = true;
+            state.session.telemetry.com1_khz = 121400;
+            state.session.telemetry.com2_khz = Some(118700);
+            state.session.plan.callsign = "C-GTLT".into();
+            state.stations.push(openatc_core::stations::Station {
+                airport: "TEST".into(),
+                name: "Test Delivery".into(),
+                service: "Clearance".into(),
+                khz: 118700,
+                ..Default::default()
+            });
+            if scenario == "stale" {
+                state.session.plan.departure = "LFMN".into();
+                state.session.plan.destination = "LIMC".into();
+                state.session.plan.runway = "04R".into();
+            }
+            let filed_plan = state.session.plan.clone();
+            let mut draft = openatc_core::state::FlightPlan {
+                callsign: "C-GTLT".into(),
+                ..Default::default()
+            };
+            if scenario == "partial" {
+                draft.departure = "LFMN".into();
+            }
+            if scenario == "invalid" {
+                draft.departure = "LFMN".into();
+                draft.destination = "LIMC".into();
+                draft.runway = "04R".into();
+                draft.initial_altitude_feet = draft.cruise_feet + 1000;
+            }
+            let mut request = json!({"intent":"clearance", "text":"Test Delivery, C-GTLT, request IFR clearance", "role":"atc", "radio":"com2", "planningCallsign":"C-GTLT"});
+            if scenario != "direct" {
+                request["planningFlightPlan"] = if scenario == "malformed" {
+                    json!({"cruiseFeet":"bad"})
+                } else {
+                    serde_json::to_value(draft).unwrap()
+                };
+            }
+            let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
+            let response = handle_request(AxumState(shared.clone()), Json(request)).await;
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let response: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                response["result"]["accepted"], false,
+                "{scenario}: {response}"
+            );
+            let state = shared.read().await;
+            assert!(state.session.clearance.is_none());
+            assert_eq!(state.session.plan, filed_plan);
+            let reply = state.session.transcript.last().unwrap();
+            assert_eq!(reply.speaker, "ATC");
+            assert!(reply.text.starts_with("C-GTLT,"), "{}", reply.text);
+            assert!(
+                reply
+                    .text
+                    .contains(if matches!(scenario, "empty" | "direct" | "stale") {
+                        "not filed a flight plan"
+                    } else {
+                        "incomplete or invalid"
+                    }),
+                "{scenario}: {}",
+                reply.text
+            );
+            assert!(!reply.voice.is_empty());
+            assert_eq!(reply.radio, Some(openatc_core::state::Radio::Com2));
+            assert_eq!(reply.position, "Test Delivery");
+            assert_eq!(state.session.telemetry.com1_khz, 121400);
+        }
+    }
+
     #[test]
     fn rejected_request_keeps_the_receiving_radio_and_station_voice() {
         let mut state = crate::test_state();
@@ -3089,7 +3239,7 @@ mod chatter_tests {
             ..Default::default()
         });
         let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
-        let request = json!({"intent":"radio_check","role":"atc","radio":"com2"});
+        let request = json!({"intent":"radio_check","text":"Test Tower, C-GTLT, Radio check","role":"atc","radio":"com2","planningCallsign":"C-GTLT"});
         let response = handle_request(AxumState(shared.clone()), Json(request.clone())).await;
         assert!(response.status().is_success());
         let first = shared
@@ -3101,6 +3251,16 @@ mod chatter_tests {
             .unwrap()
             .clone();
         assert_eq!(first.position, "Test Tower");
+        assert_eq!(shared.read().await.session.plan.callsign, "C-GTLT");
+        assert!(
+            shared
+                .read()
+                .await
+                .session
+                .transcript
+                .iter()
+                .any(|entry| entry.speaker == "C-GTLT" && entry.text.contains("C-GTLT"))
+        );
         assert_eq!(first.radio, Some(openatc_core::state::Radio::Com2));
         assert_eq!(shared.read().await.session.telemetry.com1_khz, 121400);
         shared.write().await.session.telemetry.com1_khz = 118700;

@@ -1,4 +1,4 @@
-//! Preloaded cockpit callouts driven by observed indicated airspeed.
+//! Preloaded takeoff callouts from airspeed, weight on wheels and climb.
 use openatc_audio::Speech;
 use openatc_core::state::{PhaseCode, Telemetry};
 use serde::Deserialize;
@@ -20,7 +20,12 @@ struct Policy {
     v2_refs: Vec<String>,
     v1_text: String,
     vr_text: String,
-    v2_text: String,
+    #[serde(default, rename = "v2_text")]
+    _legacy_v2_text: Option<String>,
+    #[serde(default = "default_roll")]
+    roll: RollPolicy,
+    #[serde(default = "default_positive")]
+    positive: PositivePolicy,
     #[serde(default)]
     v1_vr_text: Option<String>,
     #[serde(default)]
@@ -28,6 +33,111 @@ struct Policy {
     #[serde(default)]
     log_template: Option<String>,
 }
+const V1: usize = 0;
+const ROTATE: usize = 1;
+const POSITIVE: usize = 2;
+const ALIVE: usize = 3;
+const EIGHTY: usize = 4;
+const COMBINED: usize = 5;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RollPolicy {
+    airspeed_alive_knots: f64,
+    eighty_knots: f64,
+    airspeed_alive_text: String,
+    eighty_knots_text: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PositivePolicy {
+    minimum_agl_feet: f64,
+    minimum_climb_fpm: f64,
+    confirmation_seconds: f64,
+    text: String,
+}
+fn bundled_section<T: serde::de::DeserializeOwned>(name: &str) -> T {
+    let value: toml::Value = toml::from_str(include_str!("../../../aircraft/callouts.toml"))
+        .expect("bundled callout policy");
+    value[name]
+        .clone()
+        .try_into()
+        .expect("bundled callout section")
+}
+fn default_roll() -> RollPolicy {
+    bundled_section("roll")
+}
+fn default_positive() -> PositivePolicy {
+    bundled_section("positive")
+}
+
+#[derive(Default)]
+struct Sequence {
+    fired: [bool; 5],
+    previous: Option<f64>,
+    roll_seen: bool,
+    climbing_since: Option<f64>,
+}
+impl Sequence {
+    fn update(
+        &mut self,
+        policy: &Policy,
+        telemetry: &Telemetry,
+        ias: f64,
+        speeds: [Option<f64>; 3],
+        now: f64,
+    ) -> Vec<usize> {
+        if telemetry.on_ground
+            && ias < policy.reset_below_knots
+            && telemetry.ground_speed_knots < policy.reset_below_knots
+        {
+            *self = Self::default();
+        }
+        let previous = self.previous.replace(ias);
+        let rising = previous.is_some_and(|previous| ias > previous);
+        if telemetry.on_ground && rising && ias >= policy.roll.airspeed_alive_knots {
+            self.roll_seen = true;
+        }
+        let mut calls = Vec::new();
+        if telemetry.on_ground && rising {
+            for (call, speed) in [
+                (ALIVE, Some(policy.roll.airspeed_alive_knots)),
+                (EIGHTY, Some(policy.roll.eighty_knots)),
+                (V1, speeds[0]),
+                (ROTATE, speeds[1]),
+            ] {
+                if speed.is_some_and(|speed| {
+                    !self.fired[call]
+                        && previous.is_some_and(|previous| previous < speed)
+                        && ias >= speed
+                }) {
+                    self.fired[call] = true;
+                    calls.push(call);
+                }
+            }
+        }
+        let climbing = self.roll_seen
+            && !telemetry.on_ground
+            && telemetry.height_agl_feet.is_finite()
+            && telemetry.height_agl_feet >= policy.positive.minimum_agl_feet
+            && telemetry.vertical_speed_fpm.is_finite()
+            && telemetry.vertical_speed_fpm >= policy.positive.minimum_climb_fpm;
+        if climbing {
+            let since = self.climbing_since.get_or_insert(now);
+            if now < *since {
+                *since = now;
+            }
+            if !self.fired[POSITIVE] && now - *since >= policy.positive.confirmation_seconds {
+                self.fired[POSITIVE] = true;
+                calls.push(POSITIVE);
+            }
+        } else {
+            self.climbing_since = None;
+        }
+        calls
+    }
+}
+
 #[derive(Default)]
 pub struct Runtime {
     audio: Speech,
@@ -36,10 +146,10 @@ pub struct Runtime {
     refs: Vec<Vec<crate::panel::Readings>>,
     ias: Vec<crate::panel::Readings>,
     voice_key: String,
-    fired: [bool; 3],
+    sequence: Sequence,
     pending: std::collections::VecDeque<(usize, std::time::Instant)>,
     playing: Option<usize>,
-    previous: Option<f64>,
+    clock: Option<std::time::Instant>,
     rebound: Option<std::time::Instant>,
     status: String,
     pub active: bool,
@@ -48,11 +158,11 @@ impl Runtime {
     pub fn reset(&mut self) {
         self.audio.clear_preloaded();
         self.pending.clear();
-        self.fired = [false; 3];
-        self.previous = None;
+        self.sequence = Sequence::default();
         self.playing = None;
         self.active = false;
         self.voice_key.clear();
+        self.clock = None;
     }
 
     pub fn update(
@@ -80,9 +190,20 @@ impl Runtime {
                         && p.reset_below_knots < p.minimum_knots
                         && (10.0..=2000.0).contains(&p.maximum_agl_feet)
                         && (0.1..=2.0).contains(&p.maximum_delay_seconds)
-                        && [&p.v1_text, &p.vr_text, &p.v2_text]
-                            .iter()
-                            .all(|t| !t.is_empty() && t.len() < 64)
+                        && (20.0..=60.0).contains(&p.roll.airspeed_alive_knots)
+                        && p.roll.eighty_knots == 80.0
+                        && (1.0..=50.0).contains(&p.positive.minimum_agl_feet)
+                        && (50.0..=500.0).contains(&p.positive.minimum_climb_fpm)
+                        && (0.1..=1.0).contains(&p.positive.confirmation_seconds)
+                        && [
+                            &p.v1_text,
+                            &p.vr_text,
+                            &p.positive.text,
+                            &p.roll.airspeed_alive_text,
+                            &p.roll.eighty_knots_text,
+                        ]
+                        .iter()
+                        .all(|t| !t.is_empty() && t.len() < 64)
                 });
             self.refs = self
                 .policy
@@ -100,8 +221,7 @@ impl Runtime {
                         .collect()
                 })
                 .unwrap_or_default();
-            self.fired = [false; 3];
-            self.previous = None;
+            self.sequence = Sequence::default();
             self.pending.clear();
             self.audio.clear_preloaded();
             self.voice_key.clear();
@@ -143,7 +263,9 @@ impl Runtime {
             [
                 p.v1_text.as_str(),
                 p.vr_text.as_str(),
-                p.v2_text.as_str(),
+                p.positive.text.as_str(),
+                p.roll.airspeed_alive_text.as_str(),
+                p.roll.eighty_knots_text.as_str(),
                 p.v1_vr_text.as_deref().unwrap_or("")
             ]
         );
@@ -157,18 +279,28 @@ impl Runtime {
             && telemetry.ground_speed_knots < p.reset_below_knots
             && state.phase != PhaseCode::Departure
         {
-            self.fired = [false; 3];
-            self.previous = None;
+            self.sequence = Sequence::default();
             self.pending.clear();
         }
         if !interface.engine.connected() || telemetry.paused {
             self.audio.stop_speech();
             self.pending.clear();
+            self.sequence.climbing_since = None;
+            self.sequence.previous = None;
             self.active = false;
             return;
         }
         if telemetry.on_ground && matches!(state.phase, PhaseCode::Taxi | PhaseCode::Departure) {
-            for (i, text) in [&p.v1_text, &p.vr_text, &p.v2_text].into_iter().enumerate() {
+            for (i, text) in [
+                &p.v1_text,
+                &p.vr_text,
+                &p.positive.text,
+                &p.roll.airspeed_alive_text,
+                &p.roll.eighty_knots_text,
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 self.audio.preload(
                     &i.to_string(),
                     &interface.engine.endpoint(),
@@ -183,7 +315,7 @@ impl Runtime {
                 .filter(|text| !text.is_empty() && text.len() < 64)
             {
                 self.audio.preload(
-                    "3",
+                    &COMBINED.to_string(),
                     &interface.engine.endpoint(),
                     text,
                     &settings.copilot_voice,
@@ -202,20 +334,24 @@ impl Runtime {
                     })
                 })
                 .collect();
-        let speeds: [Option<f64>; 3] = speeds.try_into().unwrap_or([None; 3]);
-        let valid = [(0, 1), (1, 2), (0, 2)]
-            .iter()
-            .all(|(a, b)| speeds[*a].zip(speeds[*b]).is_none_or(|(a, b)| a <= b));
+        let observed_speeds: [Option<f64>; 3] = speeds.try_into().unwrap_or([None; 3]);
+        let speeds = rotation_compatible_speeds(observed_speeds);
+        let valid = speeds[V1]
+            .zip(speeds[ROTATE])
+            .is_none_or(|(v1, vr)| v1 <= vr);
         let status = format!(
-            "V-speeds {:?}; cached {:?}; phase {:?}; ordered {valid}; fired {:?}; {}",
+            "V-speeds {:?}; usable {:?}; cache/fired slots [V1, Rotate, Positive rate, Airspeed alive, 80 knots]; cached {:?}; phase {:?}; ordered {valid}; fired {:?}; {}",
+            observed_speeds,
             speeds,
             [
                 self.audio.preloaded("0"),
                 self.audio.preloaded("1"),
-                self.audio.preloaded("2")
+                self.audio.preloaded("2"),
+                self.audio.preloaded("3"),
+                self.audio.preloaded("4")
             ],
             state.phase,
-            self.fired,
+            self.sequence.fired,
             self.audio.status()
         );
         if self.status != status {
@@ -225,12 +361,11 @@ impl Runtime {
         interface.callout_status = status;
         self.active = state.phase == PhaseCode::Departure
             && telemetry.height_agl_feet < p.maximum_agl_feet
-            && valid
-            && speeds.iter().any(Option::is_some);
+            && valid;
         if !self.active {
             self.audio.stop_speech();
             self.pending.clear();
-            self.previous = None;
+            self.sequence.previous = None;
             return;
         }
         let Some(ias) = self
@@ -246,8 +381,24 @@ impl Runtime {
         else {
             return;
         };
-        let crossed = crossings(self.previous, ias, speeds, self.fired);
-        self.previous = Some(ias);
+        if telemetry.on_ground
+            && ias < p.reset_below_knots
+            && telemetry.ground_speed_knots < p.reset_below_knots
+        {
+            self.audio.stop_speech();
+            self.pending.clear();
+            self.playing = None;
+        }
+        let now = telemetry
+            .simulation_seconds
+            .filter(|value| value.is_finite())
+            .unwrap_or_else(|| {
+                self.clock
+                    .get_or_insert_with(std::time::Instant::now)
+                    .elapsed()
+                    .as_secs_f64()
+            });
+        let crossed = self.sequence.update(p, telemetry, ias, speeds, now);
         if !self.audio.busy() {
             self.playing = None;
         }
@@ -257,26 +408,40 @@ impl Runtime {
                 .as_ref()
                 .is_some_and(|text| !text.is_empty() && text.len() < 64),
         );
-        let combined = rotation_clip == 3;
+        let combined = rotation_clip == COMBINED;
         for i in crossed {
+            let target = match i {
+                V1 | ROTATE => speeds[i],
+                ALIVE => Some(p.roll.airspeed_alive_knots),
+                EIGHTY => Some(p.roll.eighty_knots),
+                _ => None,
+            };
             crate::debug_log(&format!(
                 "OpenATC callout threshold: index={i} target={:?} IAS={ias:.1} AGL={:.1} busy={}\n",
-                speeds[i],
+                target,
                 telemetry.height_agl_feet,
                 self.audio.busy()
             ));
-            self.fired[i] = true;
             if combined && i == 0 {
                 continue;
             }
             if i == 1 {
-                // Rotate takes precedence over V1; V2 waits briefly for rotation to finish.
-                self.pending.retain(|(call, _)| *call != 0);
+                // Rotate takes precedence over an unfinished V1 clip.
+                self.pending.retain(|(call, _)| *call == POSITIVE);
                 if self.playing != Some(1) && self.audio.busy() {
                     self.audio.stop_speech();
+                    self.playing = None;
                 }
                 self.pending
                     .push_front((rotation_clip, std::time::Instant::now()));
+            } else if i == V1 {
+                self.pending
+                    .retain(|(call, _)| !matches!(*call, ALIVE | EIGHTY));
+                if matches!(self.playing, Some(ALIVE | EIGHTY)) {
+                    self.audio.stop_speech();
+                    self.playing = None;
+                }
+                self.pending.push_front((i, std::time::Instant::now()));
             } else {
                 self.pending.push_back((i, std::time::Instant::now()));
             }
@@ -313,14 +478,20 @@ impl Runtime {
     }
 }
 fn log_entries(policy: &Policy, speeds: [Option<f64>; 3], clip: usize) -> Vec<String> {
+    match clip {
+        POSITIVE => return vec![policy.positive.text.clone()],
+        ALIVE => return vec![policy.roll.airspeed_alive_text.clone()],
+        EIGHTY => return vec![policy.roll.eighty_knots_text.clone()],
+        _ => {}
+    }
     let bundled: toml::Value = toml::from_str(include_str!("../../../aircraft/callouts.toml"))
         .expect("bundled callout policy");
     let template = policy
         .log_template
         .as_deref()
         .unwrap_or_else(|| bundled["log_template"].as_str().unwrap());
-    let indices: &[usize] = if clip == 3 {
-        &[0, 1]
+    let indices: &[usize] = if clip == COMBINED {
+        &[V1, ROTATE]
     } else {
         std::slice::from_ref(&clip)
     };
@@ -341,132 +512,169 @@ fn log_entries(policy: &Policy, speeds: [Option<f64>; 3], clip: usize) -> Vec<St
         })
         .collect()
 }
+fn rotation_compatible_speeds(mut speeds: [Option<f64>; 3]) -> [Option<f64>; 3] {
+    if let Some(vr) = speeds[1] {
+        // Ignore a V1 or V2 setting that conflicts with the rotation speed.
+        if speeds[0].is_some_and(|v1| v1 > vr) {
+            speeds[0] = None;
+        }
+        if speeds[2].is_some_and(|v2| v2 < vr) {
+            speeds[2] = None;
+        }
+    }
+    speeds
+}
+
 fn rotation_clip(crossed: &[usize], combined_available: bool) -> usize {
     if combined_available && crossed.contains(&0) && crossed.contains(&1) {
-        3
+        COMBINED
     } else {
-        1
+        ROTATE
     }
-}
-fn crossings(
-    previous: Option<f64>,
-    current: f64,
-    speeds: [Option<f64>; 3],
-    fired: [bool; 3],
-) -> Vec<usize> {
-    let Some(previous) = previous.filter(|p| *p <= current) else {
-        return vec![];
-    };
-    speeds
-        .iter()
-        .enumerate()
-        .filter_map(|(i, speed)| {
-            speed
-                .filter(|speed| !fired[i] && previous < *speed && current >= *speed)
-                .map(|_| i)
-        })
-        .collect()
 }
 #[cfg(test)]
 mod tests {
+    use super::*;
+    fn policy() -> Policy {
+        toml::from_str(include_str!("../../../aircraft/callouts.toml")).unwrap()
+    }
+    fn ground() -> Telemetry {
+        Telemetry {
+            on_ground: true,
+            ground_speed_knots: 100.0,
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn speed_policy_excludes_toliss_display_pointers_and_retains_stock_bugs() {
-        let policy: super::Policy =
-            toml::from_str(include_str!("../../../aircraft/callouts.toml")).unwrap();
-        assert_eq!(policy.v1_refs[0], "toliss_airbus/performance/V1");
-        assert_eq!(policy.vr_refs[0], "toliss_airbus/performance/VR");
-        assert_eq!(policy.v2_refs[0], "toliss_airbus/performance/V2");
-        assert!(!policy.v1_refs.iter().any(|name| name == "AirbusFBW/V1"));
-        assert!(!policy.vr_refs.iter().any(|name| name == "AirbusFBW/VR"));
-        for (index, refs) in [&policy.v1_refs, &policy.vr_refs, &policy.v2_refs]
+    fn complete_roll_and_liftoff_never_announce_v2() {
+        let p = policy();
+        let speeds = [Some(123.0), Some(146.0), Some(148.0)];
+        let mut sequence = Sequence::default();
+        let mut calls = Vec::new();
+        for speed in [
+            0.0, 30.0, 35.0, 79.0, 80.0, 122.0, 123.0, 145.0, 146.0, 147.0, 148.0,
+        ] {
+            calls.extend(sequence.update(&p, &ground(), speed, speeds, speed));
+        }
+        assert_eq!(calls, vec![ALIVE, EIGHTY, V1, ROTATE]);
+        let airborne = Telemetry {
+            on_ground: false,
+            height_agl_feet: 10.0,
+            vertical_speed_fpm: 500.0,
+            ..ground()
+        };
+        assert!(
+            sequence
+                .update(&p, &airborne, 150.0, speeds, 150.0)
+                .is_empty()
+        );
+        assert_eq!(
+            sequence.update(&p, &airborne, 152.0, speeds, 150.4),
+            vec![POSITIVE]
+        );
+        assert!(
+            sequence
+                .update(&p, &airborne, 155.0, speeds, 151.0)
+                .is_empty()
+        );
+        let text: Vec<_> = [ALIVE, EIGHTY, V1, ROTATE, POSITIVE]
             .into_iter()
-            .enumerate()
-        {
-            assert!(refs.contains(&format!(
-                "sim/cockpit2/gauges/actuators/airspeed_bugs[{index}]"
-            )));
-        }
+            .flat_map(|clip| log_entries(&p, speeds, clip))
+            .collect();
         assert_eq!(
-            super::crossings(Some(123.0), 125.0, [Some(124.0), None, None], [false; 3]),
-            vec![0]
+            text,
+            [
+                "Airspeed alive",
+                "80 knots",
+                "V1 · 123 kt",
+                "Rotate · 146 kt",
+                "Positive rate"
+            ]
+        );
+        assert!(!text.iter().any(|text| text.contains("V2")));
+    }
+
+    #[test]
+    fn positive_rate_requires_an_observed_roll_and_sustained_airborne_climb() {
+        let p = policy();
+        let speeds = [Some(123.0), Some(146.0), Some(148.0)];
+        let mut sequence = Sequence::default();
+        let mut t = Telemetry {
+            height_agl_feet: 10.0,
+            vertical_speed_fpm: 500.0,
+            ..ground()
+        };
+        sequence.update(&p, &t, 30.0, speeds, 0.0);
+        sequence.update(&p, &t, 40.0, speeds, 0.1);
+        assert!(
+            sequence
+                .update(&p, &t, 150.0, speeds, 1.0)
+                .iter()
+                .all(|call| *call != POSITIVE)
+        );
+        t.on_ground = false;
+        t.height_agl_feet = 0.5;
+        assert!(sequence.update(&p, &t, 150.0, speeds, 1.5).is_empty());
+        t.height_agl_feet = 10.0;
+        t.vertical_speed_fpm = -50.0;
+        assert!(sequence.update(&p, &t, 151.0, speeds, 2.0).is_empty());
+        t.vertical_speed_fpm = 500.0;
+        assert!(sequence.update(&p, &t, 152.0, speeds, 3.0).is_empty());
+        t.on_ground = true;
+        sequence.update(&p, &t, 153.0, speeds, 3.2);
+        t.on_ground = false;
+        assert!(sequence.update(&p, &t, 154.0, speeds, 3.4).is_empty());
+        assert_eq!(sequence.update(&p, &t, 155.0, speeds, 3.8), vec![POSITIVE]);
+        let mut attached_airborne = Sequence::default();
+        assert!(
+            attached_airborne
+                .update(&p, &t, 155.0, speeds, 4.0)
+                .is_empty()
+        );
+        assert!(
+            attached_airborne
+                .update(&p, &t, 156.0, speeds, 5.0)
+                .is_empty()
         );
     }
+
     #[test]
-    fn reported_speeds_and_equal_rotation_keep_their_calls() {
-        let speeds = [Some(127.0), Some(146.0), Some(148.0)];
-        let mut fired = [false; 3];
-        for (previous, current, expected) in
-            [(126.0, 127.0, 0), (145.0, 146.0, 1), (147.0, 148.0, 2)]
-        {
-            let crossed = super::crossings(Some(previous), current, speeds, fired);
-            assert_eq!(crossed, vec![expected]);
-            fired[expected] = true;
-        }
-        assert!(super::crossings(Some(148.0), 149.0, speeds, fired).is_empty());
-        let crossed = super::crossings(
-            Some(145.0),
-            146.0,
-            [Some(146.0), Some(146.0), Some(148.0)],
-            [false; 3],
-        );
-        assert_eq!(crossed, vec![0, 1]);
-        assert_eq!(super::rotation_clip(&crossed, true), 3);
-        assert_eq!(super::rotation_clip(&[1], true), 1);
-        assert_eq!(super::rotation_clip(&crossed, false), 1);
-        let policy: super::Policy =
-            toml::from_str(include_str!("../../../aircraft/callouts.toml")).unwrap();
-        assert_eq!(super::log_entries(&policy, speeds, 0), vec!["V1 · 127 kt"]);
-        assert_eq!(
-            super::log_entries(&policy, speeds, 1),
-            vec!["Rotate · 146 kt"]
-        );
-        assert_eq!(super::log_entries(&policy, speeds, 2), vec!["V2 · 148 kt"]);
-        assert_eq!(
-            super::log_entries(&policy, [Some(146.0), Some(146.0), Some(148.0)], 3),
-            vec!["V1 · 146 kt", "Rotate · 146 kt"]
-        );
+    fn legacy_v2_wording_cannot_enable_a_v2_callout() {
+        let text = include_str!("../../../aircraft/callouts.toml");
+        let root = text.split("[roll]").next().unwrap().to_owned() + "v2_text = \"V two\"\n";
+        let p: Policy = toml::from_str(&root).unwrap();
+        assert_eq!(p.positive.text, "Positive rate");
+        assert_eq!(log_entries(&p, [None; 3], POSITIVE), vec!["Positive rate"]);
     }
+
     #[test]
-    fn close_speeds_fire_once_and_never_on_a_late_attach_or_rejected_takeoff() {
+    fn rejected_takeoff_rearms_and_missing_speed_bugs_do_not_disable_roll_calls() {
+        let p = policy();
+        let mut s = Sequence::default();
+        s.update(&p, &ground(), 30.0, [None; 3], 0.0);
         assert_eq!(
-            super::crossings(Some(129.0), 132.0, [None, Some(132.0), None], [false; 3]),
-            vec![1]
+            s.update(&p, &ground(), 80.0, [None; 3], 1.0),
+            vec![ALIVE, EIGHTY]
         );
-        assert!(
-            super::crossings(
-                None,
-                160.0,
-                [Some(130.0), Some(132.0), Some(140.0)],
-                [false; 3]
-            )
-            .is_empty()
-        );
-        assert_eq!(
-            super::crossings(
-                Some(129.0),
-                132.1,
-                [Some(130.0), Some(132.0), Some(140.0)],
-                [false; 3]
-            ),
-            vec![0, 1]
-        );
-        assert!(
-            super::crossings(
-                Some(132.1),
-                120.0,
-                [Some(130.0), Some(132.0), Some(140.0)],
-                [false; 3]
-            )
-            .is_empty()
-        );
-        assert!(
-            super::crossings(
-                Some(129.0),
-                133.0,
-                [Some(130.0), Some(132.0), Some(140.0)],
-                [true, true, false]
-            )
-            .is_empty()
-        );
+        let stopped = Telemetry::default();
+        s.update(&p, &stopped, 0.0, [None; 3], 2.0);
+        s.update(&p, &ground(), 30.0, [None; 3], 3.0);
+        assert_eq!(s.update(&p, &ground(), 35.0, [None; 3], 4.0), vec![ALIVE]);
+    }
+
+    #[test]
+    fn rotate_keeps_its_speed_source_and_combines_equal_v1() {
+        let p = policy();
+        assert_eq!(p.v1_refs[0], "toliss_airbus/performance/V1");
+        assert_eq!(p.vr_refs[0], "toliss_airbus/performance/VR");
+        assert_eq!(p.v2_refs[0], "toliss_airbus/performance/V2");
+        let speeds = rotation_compatible_speeds([Some(155.0), Some(146.0), Some(148.0)]);
+        assert_eq!(speeds, [None, Some(146.0), Some(148.0)]);
+        assert_eq!(rotation_clip(&[V1, ROTATE], true), COMBINED);
+        assert_eq!(rotation_clip(&[ROTATE], true), ROTATE);
+        let mut s = Sequence::default();
+        assert!(s.update(&p, &ground(), 160.0, speeds, 0.0).is_empty());
+        assert!(s.update(&p, &ground(), 161.0, speeds, 0.1).is_empty());
     }
 }

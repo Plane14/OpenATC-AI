@@ -8,6 +8,8 @@ Kokoro uses the [Kokoro-82M model](https://huggingface.co/hexgrad/Kokoro-82M) an
 
 Accelerated speech uses separately installed NVIDIA CUDA and cuDNN runtime libraries. These are NVIDIA-licensed components, not MIT application code or downloaded model weights. OpenATC's release package contains its ONNX provider libraries; users supply compatible GPU drivers and NVIDIA runtime libraries. Keep any runtime redistribution within the vendor's terms. Apple and Vulkan backends similarly depend on their platform runtimes.
 
+Windows packaging copies Microsoft C++ x64 release CRT and OpenMP DLLs from the build machine’s licensed Visual Studio redistributable directories. These Microsoft components retain their own redistribution terms, separate from the application’s MIT license; see `assets/licenses/Microsoft-runtime-NOTICE.txt`. Debug runtimes, system-directory DLLs and Visual Studio tools are not bundled. Runtime binaries are generated package contents, not repository assets.
+
 The Windows AI package includes the Vulkan loader so a missing system loader does not prevent CPU fallback from starting. Its upstream Apache-2.0 and permissive notices are retained in `assets/licenses/Vulkan-Loader-LICENSE.txt`; the pinned LunarG runtime archive notice is retained in `assets/licenses/VulkanRT-LICENSE.txt`. CI downloads and checksum-verifies the x64 runtime; its DLL and archive are not repository files. A loader does not supply a hardware driver's Vulkan implementation.
 
 The AI-server package includes this documentation and the project license notices. No model weights or personal provider keys are bundled. See [AI server setup](AI_SERVER.md) for the build features and required runtime files.
@@ -33,3 +35,7 @@ The Rust UI uses arboard (MIT/Apache-2.0) for native text clipboard access. Linu
 The vendored `xplane-sys` 4.0.109 bindings retain their upstream MIT/Apache-2.0 licenses. Their build script corrects the macOS framework search directive; the SDK files are unchanged.
 
 The maintained SDK binding patch generates only XPLM/XP functions, excluding Windows CRT declarations from the SDK's `C-unwind` ABI. The plugin launches its Windows companion as a detached process and loads OpenGL from the host's native library; Windows extension symbols use `wglGetProcAddress`. Windows engine configuration and logs default to `%LOCALAPPDATA%/openatc`, with `OPENATC_CONFIG_DIR` available as an override.
+
+## macOS compatibility drawing
+
+The Rust OpenGL 2.1 drawing path follows the fixed-pipeline approach of Dear ImGui’s [OpenGL 2 backend at v1.89.2](https://github.com/ocornut/imgui/blob/v1.89.2/backends/imgui_impl_opengl2.cpp), with per-command vertex offsets and saved host/client/matrix state. Its MIT notice is retained in `assets/licenses/imgui-opengl2-LICENSE.txt`. OpenGL function bindings are generated during the build by the pinned `gl_generator` crate; generated bindings stay in build output. The compatibility renderer is implemented in Rust.

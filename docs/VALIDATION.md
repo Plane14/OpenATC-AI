@@ -1,5 +1,57 @@
 # Validation
 
+## Takeoff roll and positive-rate callouts — 17 October 2026
+
+The callout sequence is Airspeed alive, 80 knots, V1, Rotate, then Positive rate. V2 is retained as a performance reading only; it is not preloaded, queued or announced. Legacy policy files can retain a `v2_text` entry without restoring V2 speech. Roll/climb wording and thresholds are editable in `aircraft/callouts.toml`.
+
+Positive rate requires an observed ground roll followed by no weight on wheels, at least 5 feet AGL and at least 100 ft/min climb sustained for 0.3 seconds. Ground-roll vertical-speed noise, a brief wheel bounce, descent, missing instruments or attaching while already airborne cannot trigger it. Rejected takeoffs re-arm after stopping. Missing V1/VR values do not prevent the roll or climb calls. Rotate retains priority over unfinished V1 audio; equal-speed crossings retain the combined clip.
+
+Callout sampling now runs in the lightweight per-frame callback, capped at 50 Hz, rather than the 2 Hz controller tick. It reads only IAS, ground speed, weight-on-wheels, AGL, vertical speed, pause and simulator time; traffic and radio readers are excluded. Controller update frequency is unchanged. The plugin suite passes 34 tests with two environment-specific tests skipped. Native simulator audio and performance remain to be checked.
+
+## Flight-plan clearance feedback — 17 October 2026
+
+Empty Planning drafts now receive a controller response addressed to the callsign: “you have not filed a flight plan.” Partial or invalid drafts receive an incomplete/invalid response with the missing fields or validation error. Drafts with valid airport codes and altitudes must also have a departure runway and a route or route fixes before automatic submission. Radio checks do not require a flight plan.
+
+The UI sends rejected drafts for a normal controller reply rather than stopping at a local notice. The engine checks the current Planning draft and the filed plan before issuing a clearance. Missing, partial, invalid and malformed request data, direct engine requests, and an empty draft alongside a previously filed plan are covered by the endpoint regression. Refusals retain the receiving radio, controller voice and callsign, and leave the filed plan and clearance unchanged. Core validation, UI submission and shipped-configuration checks pass. The locked Linux plugin/engine release build passes; native simulator playback still needs confirmation.
+
+## macOS alpha window report and source fixes — 17 October 2026
+
+A contributor reported window rendering, pop-in crashes and collapse/expand drift on a Mac Studio M4 Max running macOS 26.7.1 and X-Plane 12.4.4 beta 4, with ToLiss A319 and FlightFactor 777. They tested their proposed fixes in the simulator. The integrated version still needs a new Mac build and simulator check.
+
+macOS now selects a Rust OpenGL 2.1 compatibility renderer. It preserves host program/buffer bindings, server/client state and matrix stacks, uploads the font atlas with local pixel-store settings, handles Retina clipping and honours per-command vertex offsets above 65,536 vertices. Other platforms retain the existing glow renderer. Renderer initialization is capped at three attempts, with complete log lines. Compatibility bindings are generated during the build.
+
+Draw callbacks only queue window actions. A separate lightweight main-thread flight loop applies changes between frames, independently of the slower controller/traffic updates. Requests are owned by the window state rather than global stale window pointers; coalescing retains one-shot restore/height requests and accumulates movement. The loop is stopped before plugin shutdown. Native SDK height limits stay compact even while the interface enforces its expanded minimum. Monitor recovery uses the same compact limit. macOS popped-out windows use their native frame for movement and resizing.
+
+Validation: locked plugin suite 33 passed, two ignored; Linux release plugin build passed. Explicitly executed the ignored Mesa EGL regression under a real software OpenGL 2.1 context: over 80,000 vertices rendered, the final pixel checked, and viewport, projection, texture units, client texture unit, unpack row length, buffer bindings and depth state restored. On hosts with multiple EGL drivers, select Mesa with `__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json` and set `LIBGL_ALWAYS_SOFTWARE=1 MESA_GL_VERSION_OVERRIDE=2.1` for this test. This is actual GL 2.1 rendering evidence, not macOS simulator or Mac native-build acceptance.
+
+## Alpha feedback fixes and Windows runtime audit — 17 October 2026
+
+The actual published Windows server ZIP was downloaded and its SHA-256 matched the release digest. PE imports include MSVCP140, MSVCP140_1, VCRUNTIME140, VCRUNTIME140_1 and VCOMP140, while the archive lacks those files. This confirms a packaging omission independently of the unnamed tester error. Windows packaging now copies the licensed toolchain’s release CRT and OpenMP libraries beside each launcher, engine/plugin and speech program. The temporary Inno discovery helper receives runtime DLLs before execution. Installer preflight performs the same runtime availability check before long model builds, and both workflow Visual Studio imports preserve VCToolsRedistDir. A focused fixture verifies required-library failure, CRT/OpenMP discovery and exclusion of debug runtimes. No runtime binaries are added to source control.
+
+The earlier V2 playback policy has been replaced by the roll-and-positive-rate sequence described above. V1 and VR keep their actual performance values; V2 is diagnostic only.
+
+Final locked Linux plugin suite: 31 passed, one ignored. Packaging suite: 13 passed, one ignored. Final plugin, engine and packaging-tool release build passed. Earlier callsign/controller, UI input and monitor checks also passed. Clean Windows package startup, simulator input, ultrawide placement and native audio still need confirmation. The save/replay popup trigger and exact DLL name remain unreported.
+
+## Floating-window monitor recovery and V-speed validation — 17 October 2026
+
+Floating windows now fit an individual full-screen X-Plane monitor at creation and saved-bounds restoration, using boxel coordinates. Windowed mode falls back to the X-Plane desktop bounds. Display layouts are refreshed at most once per second by the window flight loop, and recovery waits until dragging ends. Minimum dimensions are capped to the selected display, so a smaller monitor can still contain the window. Popped-out OS windows and VR are not clamped against floating-window coordinates. Geometry checks cover ultrawide edges, negative monitor origins, empty space between diagonal monitors, smaller displays and unchanged valid bounds. The Windows ultrawide report still needs native confirmation.
+
+A V1 bug above Vr is rejected without suppressing Rotate. V2 is diagnostic only and does not trigger speech. Observed and usable values remain visible in diagnostics. The callout suite passes; the preceding full plugin suite passed 29 checks with one ignored, and the final Linux plugin release build passes. Native Windows testing remains pending.
+
+The repeated AI-server DLL report remains unidentified: the supplied text does not name the DLL. The verified Vulkan-loader staging fix is already present; optional CUDA-provider dependency failures can fall back to CPU, but that has not been established as the reported cause. A complete startup error line or screenshot is required before assigning a DLL fix.
+
+## First-alpha callsign, input and callout repairs — 17 October 2026
+
+Pre-clearance radio checks and the ATC callsign label now use the reviewed Planning callsign. Requests carry that identity to the engine, which applies it only while parked on the ground without an issued clearance. Filing a complete route remains separate. Focused tests cover edited/default identities, COM2 controller routing and transcript identity, plus rejection of malformed identities and changes after clearance or airborne starts.
+
+The host now retains keyboard focus for an active widget or keyboard capture, including the frame before ImGui updates its text-input flag. Headless tests cover field click, release and typing, and header dragging in full, compact and narrow/wrapped layouts. A hover hint identifies the drag area. Focus transitions are recorded without logging typed characters. This is protection against shortcut leakage, not proof of the reported X-Plane situation-save/replay-load popup cause; no first-party code directly invokes those save/load APIs. The tester has not yet identified the triggering action, and a native Windows simulator recheck remains necessary.
+
+Actual V1/VR/V2 performance values remain unchanged; only V1 and VR trigger speed callouts. Positive rate uses weight-on-wheels, AGL and climb telemetry. Existing callout tests cover speed identities, close/equal crossings and once-only scheduling. The shipped configuration tests pass. The locked Linux plugin/engine/tool release build passed; no Windows simulator or audio acceptance is inferred.
+
+## First Windows alpha tester reports — 17 October 2026
+
+Two testers report successful plugin/server installation and configuration, remote AI-server connection and button radio checks. One additionally confirms microphone and controller-voice tests, SimBrief import and the interface layout; the other has not checked audio yet. These are initial user reports, not a complete Windows flight or all-format installer acceptance. Callsign stuck at the default VH-BIL and recurring X-Plane situation-save/replay-load errors remain open. The developer also reports V2 audio after Rotate again; timing and aircraft-specific callout policy remain under investigation. No fix for these new reports is claimed.
+
 ## Intel Mac builds opt-in — 16 October 2026
 
 Both Intel Mac products are omitted from tag releases and manual all-platform builds; explicit manual macos-intel builds remain supported. Executed the exact matrix script for tagged all-platform and manual all-platform runs (six builds, three preflights), explicit Intel both-products (two builds, one preflight), and each Intel product separately (one build, one preflight). All passed. Publication additionally requires a push event, keeping manual tag-selected builds artifact-only. No hosted workflow was changed or cancelled; this takes effect after the user commits/pushes the workflow.
@@ -155,7 +207,7 @@ These are production constraint inputs, not a complete flyable flight factory or
 
 Complete-flight taxi clearances can now explicitly cover several contiguous physical TaxiIn segments with one readback. Validation rejects a span across another instruction, controller, crossing, runway report or parking limit. The entire covered corridor is reserved before transmission, without moving the aircraft, and only the completed readback grants its movements. A competing aircraft cannot reserve the downstream lane; movements beyond the stated limit remain available.
 
-Source checks: motion 11 passed, full-flight 7 passed, legacy generated 5 passed, 2 licensed-data tests ignored; release engine build passed. No installation or native acceptance. The actual production full-flight factory remains unwired and must construct these spans from real ground orders alongside protected airborne/recovery/landing planning. Generated traffic remains disabled by default; mixed-fleet and GA-VFR acceptance remains pending.
+Source checks: motion 11 passed, full-flight 7 passed, legacy generated 5 passed, 2 licensed-data tests ignored; release engine build passed. Native simulator testing remains pending. The actual production full-flight factory remains unwired and must construct these spans from real ground orders alongside protected airborne/recovery/landing planning. Generated traffic remains disabled by default; mixed-fleet and GA-VFR acceptance remains pending.
 
 ## Generated full-flight permissions and runway occupancy — 15 October 2026
 
@@ -167,7 +219,7 @@ The regression reproduces the former permission failure. Six checks pass, includ
 
 The complete-flight consumer now requires typed runway-exit reports and emits the existing editable pilot report once on the runway controller frequency before Ground handoff or taxi-in permission. Observed aircraft dimensions and published holding lines gate the report; unknown or occupied runway states cannot progress. Landing preparation uses that same clearance geometry for its graph endpoint and rounded exit, so a point just outside pavement cannot be mistaken for a fully vacated aircraft. Editable aircraft dimensions are retained instead of an unknown-ICAO fallback.
 
-Focused controller/movement/transcript checks pass 3; installed Nice A320 and Cannes C172 arrival-to-parking data fixtures pass 2. The separate holding-line check passes 1, covering the tail still inside the clearance boundary. Release engine build passes; diffcheck clean. Source only; no installation or native acceptance. The actual production full-flight factory, mixed operations including GA VFR, and native visibility/audio/FPS/platform scope remain unfinished. Generated traffic stays disabled by default. Reference: [FAA airport holding-position markings](https://www.faa.gov/air_traffic/publications/atpubs/aim_html/chap2_section_3.html).
+Focused controller/movement/transcript checks pass 3; installed Nice A320 and Cannes C172 arrival-to-parking data fixtures pass 2. The separate holding-line check passes 1, covering the tail still inside the clearance boundary. Release engine build passes; diffcheck clean. These are source-level checks; native simulator testing remains pending. The actual production full-flight factory, mixed operations including GA VFR, and native visibility/audio/FPS/platform scope remain unfinished. Generated traffic stays disabled by default. Reference: [FAA airport holding-position markings](https://www.faa.gov/air_traffic/publications/atpubs/aim_html/chap2_section_3.html).
 
 # Traffic crossing altitude and airspeed coupling — 15 October 2026
 
@@ -456,7 +508,7 @@ Holding-point follow-up: core tests cover an empty valid scan, missing traffic d
 
 Legacy-source cleanup: the Rust plugin/engine release build and core/engine/UI/plugin test suites pass after removal of top-level src/include and the old CMake targets. The isolated radio engine integration also passes. The Fedora helper passes shell syntax validation. The Cargo-based Linux package was built locally and checked for binaries, speech, source/license notices and SHA-256 integrity; the updated GitHub workflow has not yet run on GitHub.
 
-Root-workspace migration: the Linux plugin/engine release build, core/engine/UI/plugin tests, settings/platform/AI-core/audio tests, desktop compilation check, formatting, scoped Clippy, isolated radio integration and dependency audit pass from the repository root. The Linux archive was rebuilt with the new paths and verified for binary/docs/branding/lockfile presence and checksum. Python and Fedora script syntax checks pass. packages/ and target/ are listed in .gitignore, and vendor/xplane is explicitly allowed. No Git commands were used for the migration or readiness checks; index/staging and commit operations remain with the maintainer. GitHub CI and new live simulator acceptance were not run during this filesystem-only migration.
+Root-workspace migration: the Linux plugin/engine release build, core/engine/UI/plugin tests, settings/platform/AI-core/audio tests, desktop compilation check, formatting, scoped Clippy, isolated radio integration and dependency audit pass from the repository root. The Linux archive was rebuilt with the new paths and verified for binary/docs/branding/lockfile presence and checksum. Python and Fedora script syntax checks pass. packages/ and target/ are listed in .gitignore, and vendor/xplane is explicitly allowed. GitHub CI and live simulator checks were still pending after the workspace migration.
 
 ## Named positions and TTS recovery — 8 October 2026
 

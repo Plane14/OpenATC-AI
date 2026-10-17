@@ -57,6 +57,8 @@ pub struct WindowActions {
     pub close: bool,
     /// Pop-out toggle pressed.
     pub toggle_pop_out: bool,
+    /// Keep simulator shortcuts out while a widget owns keyboard input.
+    pub capture_keyboard: bool,
     /// Window drag distance this frame.
     pub drag_delta: [f32; 2],
     /// Bottom-right resize grip movement in UI pixels.
@@ -338,6 +340,8 @@ pub struct Interface {
     pub(crate) collapse_bounds: [f32; 4],
     #[cfg(test)]
     pub(crate) plan_callsign_bounds: [f32; 4],
+    #[cfg(test)]
+    pub(crate) toolbar_drag_bounds: [f32; 4],
     /// Notifies the simulator host to clear flight-local callbacks and guidance.
     pub flight_reset_generation: u64,
     can_pop_out: bool,
@@ -522,6 +526,8 @@ impl Interface {
             collapse_bounds: [0.0; 4],
             #[cfg(test)]
             plan_callsign_bounds: [0.0; 4],
+            #[cfg(test)]
+            toolbar_drag_bounds: [0.0; 4],
             flight_reset_generation: 0,
             can_pop_out: false,
             popped_out: false,
@@ -599,9 +605,16 @@ impl Interface {
             && (request.intent == "clearance"
                 || interpret_text(&request.text).intent == "clearance")
         {
-            if let Err(error) = openatc_core::ops::validate_flight_plan(&self.draft) {
-                self.notice = format!("Planning flight is incomplete: {error}");
+            if let Some(message) = openatc_core::ops::flight_plan_clearance_feedback(&self.draft) {
+                self.notice = message;
                 self.plan_notice.clone_from(&self.notice);
+                let mut body = serde_json::to_value(request).unwrap_or(serde_json::Value::Null);
+                body["intent"] = serde_json::json!("clearance");
+                body["planningFlightPlan"] =
+                    serde_json::to_value(&self.draft).unwrap_or(serde_json::Value::Null);
+                body["planningCallsign"] =
+                    serde_json::json!(self.transmission_callsign(&self.engine.state()));
+                self.engine.post("/request", body);
                 return;
             }
             if self.pending_clearance.is_some() {
@@ -629,12 +642,27 @@ impl Interface {
                 .frequency(request.radio)
                 .and_then(|frequency| openatc_core::stations::tuned(&nearby, frequency))
             {
-                request.text =
-                    format_typed_transmission(&station.name, &state.plan.callsign, &request.text);
+                request.text = format_typed_transmission(
+                    &station.name,
+                    self.transmission_callsign(&state),
+                    &request.text,
+                );
             }
         }
-        let body = serde_json::to_value(&request).unwrap_or(serde_json::Value::Null);
+        let mut body = serde_json::to_value(&request).unwrap_or(serde_json::Value::Null);
+        if !matches!(request.role.as_str(), "copilot" | "cabin" | "ground")
+            && let Some(callsign) =
+                openatc_core::ops::planning_callsign(&self.engine.state(), &self.draft.callsign)
+        {
+            body["planningCallsign"] = serde_json::json!(callsign);
+        }
         self.engine.post("/request", body);
+    }
+
+    /// Before filing, radio checks use the identity being reviewed in Planning.
+    pub fn transmission_callsign<'a>(&'a self, state: &'a State) -> &'a str {
+        openatc_core::ops::planning_callsign(state, &self.draft.callsign)
+            .unwrap_or(&state.plan.callsign)
     }
 
     /// Transmit the message box to ATC.
@@ -669,7 +697,7 @@ impl Interface {
                     if full.intent == "clearance" {
                         &self.draft.callsign
                     } else {
-                        &state.plan.callsign
+                        self.transmission_callsign(&state)
                     },
                     &full.text,
                 );
@@ -1805,6 +1833,10 @@ impl Interface {
                 self.resize_grip(ui);
             });
         let mut actions = std::mem::take(&mut self.window_actions);
+        // WantTextInput is updated on the following frame. Include the item
+        // activated by this click before the host decides to release focus.
+        actions.capture_keyboard =
+            ui.is_any_item_active() || ui.io().want_capture_keyboard || ui.io().want_text_input;
         if actions.close {
             self.save_settings();
         }
@@ -1995,6 +2027,14 @@ impl Interface {
             (ui.content_region_avail()[0] - right_buttons * 39.0 * scale - 7.0 * scale).max(1.0);
         let position = ui.cursor_screen_pos();
         ui.invisible_button("##drag-window", [drag_width, 32.0 * scale]);
+        #[cfg(test)]
+        {
+            let (a, b) = (ui.item_rect_min(), ui.item_rect_max());
+            self.toolbar_drag_bounds = [a[0], a[1], b[0], b[1]];
+        }
+        if ui.is_item_hovered() {
+            ui.tooltip_text("Drag here to move OpenATC AI");
+        }
         if ui.is_item_active() && ui.is_mouse_dragging(imgui::MouseButton::Left) {
             self.window_actions.drag_delta = ui.io().mouse_delta;
         }
@@ -2339,6 +2379,34 @@ mod layout_tests {
             interface.settings.window_bounds,
             Some([150, 1000, 1110, 240])
         );
+    }
+}
+
+#[cfg(test)]
+mod planning_submission_tests {
+    #[test]
+    fn clearance_checks_the_draft_before_automatic_filing() {
+        let mut interface = super::Interface::new("http://127.0.0.1:1");
+        interface.draft.callsign = "C-GTLT".into();
+        let request = openatc_core::state::Request {
+            role: "atc".into(),
+            intent: "clearance".into(),
+            text: "C-GTLT, request IFR clearance".into(),
+            ..Default::default()
+        };
+        interface.send(&request);
+        assert!(interface.notice.starts_with("C-GTLT,"));
+        assert!(interface.notice.contains("not filed a flight plan"));
+        assert!(interface.pending_clearance.is_none());
+        interface.draft.departure = "LFMN".into();
+        interface.send(&request);
+        assert!(interface.notice.contains("incomplete or invalid"));
+        assert!(interface.pending_clearance.is_none());
+        interface.draft.destination = "LIMC".into();
+        interface.draft.runway = "04R".into();
+        interface.send(&request);
+        assert!(interface.pending_clearance.is_some());
+        assert!(interface.notice.contains("Submitting"));
     }
 }
 

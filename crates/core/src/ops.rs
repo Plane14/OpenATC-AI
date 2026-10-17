@@ -436,6 +436,66 @@ pub fn update_flight_phase(state: &mut State, telemetry: &Telemetry) -> Result<(
     Ok(())
 }
 
+/// Allow callsign edits while parked, before a clearance is issued.
+pub fn planning_callsign<'a>(state: &crate::state::State, proposed: &'a str) -> Option<&'a str> {
+    let proposed = proposed.trim();
+    (state.phase == crate::state::PhaseCode::Parked
+        && state.telemetry.on_ground
+        && state.clearance.is_none()
+        && !proposed.is_empty()
+        && proposed.len() <= 30
+        && proposed
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b' '))
+    .then_some(proposed)
+}
+
+/// Explain why a Planning draft cannot be submitted for IFR clearance.
+pub fn flight_plan_clearance_feedback(plan: &FlightPlan) -> Option<String> {
+    let callsign = if plan.callsign.trim().is_empty() {
+        "Aircraft"
+    } else {
+        plan.callsign.trim()
+    };
+    if plan.departure.trim().is_empty()
+        && plan.destination.trim().is_empty()
+        && plan.runway.trim().is_empty()
+        && plan.fixes.is_empty()
+        && (plan.route.trim().is_empty() || plan.route.trim().eq_ignore_ascii_case("DCT"))
+    {
+        return Some(crate::dialogue::say(
+            "clearance_flight_plan_not_filed",
+            &[("callsign", callsign.to_owned())],
+        ));
+    }
+    let mut missing = Vec::new();
+    for (name, value) in [
+        ("callsign", plan.callsign.as_str()),
+        ("departure airport", plan.departure.as_str()),
+        ("destination airport", plan.destination.as_str()),
+        ("departure runway", plan.runway.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            missing.push(name);
+        }
+    }
+    if plan.route.trim().is_empty() && plan.fixes.is_empty() {
+        missing.push("route");
+    }
+    let reason = if missing.is_empty() {
+        validate_flight_plan(plan).err()?
+    } else {
+        crate::dialogue::say(
+            "clearance_flight_plan_missing_fields",
+            &[("fields", missing.join(", "))],
+        )
+    };
+    Some(crate::dialogue::say(
+        "clearance_flight_plan_incomplete",
+        &[("callsign", callsign.to_owned()), ("reason", reason)],
+    ))
+}
+
 /// Validate the flight plan fields.
 pub fn validate_flight_plan(plan: &FlightPlan) -> Result<(), String> {
     let airport_code = regex::Regex::new("[A-Z0-9]{4}")
@@ -839,6 +899,50 @@ pub fn read_acf_identity(path: &std::path::Path) -> Result<(String, String), Str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn flight_plan_feedback_distinguishes_empty_incomplete_and_valid_drafts() {
+        let mut plan = FlightPlan::default();
+        plan.callsign = "C-GTLT".into();
+        let missing = super::flight_plan_clearance_feedback(&plan).unwrap();
+        assert!(missing.starts_with("C-GTLT,"));
+        assert!(missing.contains("not filed a flight plan"));
+        plan.departure = "LFMN".into();
+        let incomplete = super::flight_plan_clearance_feedback(&plan).unwrap();
+        assert!(incomplete.contains("incomplete or invalid"));
+        assert!(incomplete.contains("destination airport"));
+        plan.destination = "LIMC".into();
+        plan.runway = "04R".into();
+        assert!(super::flight_plan_clearance_feedback(&plan).is_none());
+        plan.initial_altitude_feet = plan.cruise_feet + 1000;
+        assert!(
+            super::flight_plan_clearance_feedback(&plan)
+                .unwrap()
+                .contains("incomplete or invalid")
+        );
+    }
+
+    #[test]
+    fn planning_callsign_cannot_change_a_cleared_or_airborne_identity() {
+        let mut state = crate::state::State::default();
+        assert_eq!(super::planning_callsign(&state, " C-GTLT "), Some("C-GTLT"));
+        for invalid in [
+            "",
+            "\n",
+            "BAD\nSIGN",
+            "<callsign>",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ12345",
+        ] {
+            assert!(super::planning_callsign(&state, invalid).is_none());
+        }
+        state.clearance = Some(crate::state::Clearance::default());
+        assert!(super::planning_callsign(&state, "OTHER1").is_none());
+        state.clearance = None;
+        state.telemetry.on_ground = false;
+        assert!(super::planning_callsign(&state, "OTHER1").is_none());
+        state.telemetry.on_ground = true;
+        state.phase = crate::state::PhaseCode::Pushback;
+        assert!(super::planning_callsign(&state, "OTHER1").is_none());
+    }
     use super::super::state::{FlightPlan, PhaseCode, State, Telemetry};
     use super::*;
     use std::path::PathBuf;

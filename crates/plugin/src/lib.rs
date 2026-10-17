@@ -12,6 +12,7 @@ mod follow_me;
 mod generated_traffic;
 mod geometry;
 mod gl;
+mod legacy_gl;
 mod panel;
 mod render;
 mod supervise;
@@ -72,6 +73,7 @@ struct Shared {
 struct OpenAtc {
     shared: Arc<Mutex<Shared>>,
     flight_loop: Option<FlightLoop<LoopMarker>>,
+    window_loop: Option<FlightLoop<LoopMarker>>,
     heartbeat: Option<supervise::Heartbeat>,
     commands: Vec<(
         xplane::command::Command,
@@ -495,17 +497,6 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
             .as_ref()
             .and_then(|p| p.wingspan_meters);
     }
-    if let Some(t) = telemetry.as_ref() {
-        let aircraft = locked.panel.aircraft_path.clone();
-        let Shared {
-            interface,
-            callouts,
-            ..
-        } = &mut *locked;
-        if let Some(interface) = interface {
-            callouts.update(&mut xpapi.data, &aircraft, interface, t);
-        }
-    }
     let reset_changed = locked
         .interface
         .as_ref()
@@ -867,6 +858,7 @@ impl Plugin for OpenAtc {
         Ok(Self {
             shared,
             flight_loop: None,
+            window_loop: None,
             heartbeat: None,
             commands: Vec::new(),
             menu: None,
@@ -1002,6 +994,44 @@ impl Plugin for OpenAtc {
         );
         flight_loop.schedule_after(Duration::from_secs_f32(0.5));
         self.flight_loop = Some(flight_loop);
+        let window_shared = self.shared.clone();
+        let mut last_callout_sample = std::time::Instant::now();
+        let mut window_loop = xpapi.new_flight_loop(
+            FlightLoopPhase::BeforeFlightModel,
+            move |xpapi: &mut xplane::XPAPI,
+                  _state: &mut xplane::flight_loop::LoopState<LoopMarker>| {
+                let mut shared = window_shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Shared {
+                    window: Some(window),
+                    window_state: Some(state),
+                    ..
+                } = &mut *shared
+                {
+                    window.apply_pending(state);
+                }
+                // Callouts sample only their own instruments, independently of radio logic.
+                if last_callout_sample.elapsed() >= Duration::from_millis(20) {
+                    last_callout_sample = std::time::Instant::now();
+                    if let Some(telemetry) = shared.refs.as_ref().map(telemetry::gather_callouts) {
+                        let aircraft = shared.panel.aircraft_path.clone();
+                        let Shared {
+                            interface,
+                            callouts,
+                            ..
+                        } = &mut *shared;
+                        if let Some(interface) = interface {
+                            callouts.update(&mut xpapi.data, &aircraft, interface, &telemetry);
+                        }
+                    }
+                }
+                LoopResult::NextLoop
+            },
+            LoopMarker,
+        );
+        window_loop.schedule_immediate();
+        self.window_loop = Some(window_loop);
         self.heartbeat = Some(supervise::Heartbeat::start("http://127.0.0.1:8087"));
         self.shared
             .lock()
@@ -1012,6 +1042,7 @@ impl Plugin for OpenAtc {
     }
 
     fn disable(&mut self, _xpapi: &mut xplane::XPAPI) {
+        self.window_loop = None;
         self.flight_loop = None;
         self.heartbeat = None;
         let final_settings = {
