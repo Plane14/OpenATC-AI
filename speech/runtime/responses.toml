@@ -17793,3 +17793,23 @@ say = ["{callsign}, onward clearance withheld due traffic. Continue as previousl
 [generated_airborne_clearance_withheld_readback]
 slots = ["callsign"]
 say = ["Continuing as previously cleared, will hold at the cleared limit if not further cleared, {callsign}."]
+
+[ctaf_downwind]
+slots = ["airport", "callsign", "runway"]
+say = ["Traffic, {callsign}, {airport}, downwind, runway {runway}"]
+
+[ctaf_base]
+slots = ["airport", "callsign", "runway"]
+say = ["Traffic, {callsign}, {airport}, base, runway {runway}"]
+
+[ctaf_final]
+slots = ["airport", "callsign", "runway"]
+say = ["Traffic, {callsign}, {airport}, final, runway {runway}"]
+
+[ctaf_landing]
+slots = ["airport", "callsign", "runway"]
+say = ["Traffic, {callsign}, {airport}, landing, runway {runway}"]
+
+[ctaf_go_around]
+slots = ["airport", "callsign", "runway"]
+say = ["Traffic, {callsign}, {airport}, going around, runway {runway} occupied"]

@@ -46,6 +46,13 @@ impl Plan {
     }
 }
 
+/// Slots left for advisory aircraft in a scene that already holds `used` aircraft.
+fn advisory_capacity(used: usize) -> usize {
+    MAXIMUM_AIRCRAFT
+        .saturating_sub(used)
+        .min(MAXIMUM_ADVISORY_AIRCRAFT)
+}
+
 /// Untwowered fields with an advisory frequency near the player, nearest first.
 pub(super) fn fields(input: &Preparation, policy: &Operations) -> Vec<String> {
     let mut candidates = ctaf::candidates(&input.stations)
@@ -226,9 +233,7 @@ pub(super) fn prepare(scene: &mut Scene, input: &Preparation) {
     };
     let generation = scene.world.generation();
     let used = scene.flights.len().max(scene.frames.len());
-    let capacity = MAXIMUM_AIRCRAFT
-        .saturating_sub(used)
-        .min(MAXIMUM_ADVISORY_AIRCRAFT);
+    let capacity = advisory_capacity(used);
     if capacity == 0 {
         return;
     }
@@ -542,6 +547,15 @@ mod tests {
 
     fn policy() -> Operations {
         super::super::parse_operations(include_str!("../../../../traffic/operations.toml")).unwrap()
+    }
+
+    #[test]
+    fn advisory_traffic_fits_inside_the_scene_cap() {
+        assert_eq!(advisory_capacity(0), 2);
+        assert_eq!(advisory_capacity(61), 2);
+        assert_eq!(advisory_capacity(62), 1);
+        assert_eq!(advisory_capacity(63), 0);
+        assert_eq!(advisory_capacity(70), 0);
     }
 
     #[test]

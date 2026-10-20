@@ -141,10 +141,10 @@ impl Circuit {
 /// Every leg of the circuit carries its own call, so an aircraft announces the leg it is
 /// established on.
 const LEGS: [(&str, &str, usize); 4] = [
-    ("downwind", "downwind", 0),
-    ("base", "base", 1),
-    ("final", "final", 2),
-    ("landing", "landing", 3),
+    ("downwind", "ctaf_downwind", 0),
+    ("base", "ctaf_base", 1),
+    ("final", "ctaf_final", 2),
+    ("landing", "ctaf_landing", 3),
 ];
 
 /// Climb and descent performance used to check the pattern geometry.
@@ -377,13 +377,17 @@ impl Pattern {
             .map_err(|error| format!("CTAF pattern geometry: {error}"))?;
         let legs = LEGS
             .iter()
-            .map(|(leg, phrase, segment)| Leg {
+            .map(|(leg, key, segment)| Leg {
                 segment: segment + offset,
                 advisory: Advisory {
                     leg,
-                    text: format!(
-                        "Traffic, {callsign}, {}, {phrase}, runway {runway_name}",
-                        field.airport
+                    text: crate::dialogue::say(
+                        key,
+                        &[
+                            ("airport", field.airport.clone()),
+                            ("callsign", callsign.to_owned()),
+                            ("runway", runway_name.to_owned()),
+                        ],
                     ),
                 },
             })
@@ -490,9 +494,13 @@ impl Pattern {
     pub fn go_around(&self) -> Advisory {
         Advisory {
             leg: "final",
-            text: format!(
-                "Traffic, {}, {}, going around, runway {} occupied",
-                self.callsign, self.field.airport, self.runway
+            text: crate::dialogue::say(
+                "ctaf_go_around",
+                &[
+                    ("airport", self.field.airport.clone()),
+                    ("callsign", self.callsign.clone()),
+                    ("runway", self.runway.clone()),
+                ],
             ),
         }
     }

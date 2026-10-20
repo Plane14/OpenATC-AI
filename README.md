@@ -649,6 +649,7 @@ Generated flight clearances now accept published Departure controllers for climb
 - The pattern repeats: the aircraft climbs from the end of the landing roll, rejoins the downwind and flies the circuit again.
 - A runway held by the player or another aircraft at the final call produces a go-around instead of a landing.
 - These calls are heard only while that frequency is tuned, and are recorded as background information rather than as an instruction.
+- The wording is editable in the `ctaf_*` entries of `speech/runtime/responses.toml`.
 - Fields are selected from the published station index near the player, and at most two advisory aircraft are published.
 - This is source and installed-data behaviour; it has not been seen in the simulator.
 
