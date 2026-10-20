@@ -20,9 +20,14 @@ pub(super) struct Terminal {
     pub approach_transition: String,
     pub approach: Vec<Leg>,
     pub missed: Vec<Leg>,
+    /// Published manual termination closing the arrival, which needs an explicit amendment.
+    pub arrival_manual: Option<openatc_core::traffic::resolved::ManualTermination>,
+    /// Enter the approach directly from an enroute fix instead of flying a published STAR.
+    /// Used where a category has no arrival procedure inside its own operating envelope.
+    pub direct: bool,
 }
 
-fn supported(legs: &[Leg], missed: bool) -> bool {
+pub(super) fn supported(legs: &[Leg], missed: bool) -> bool {
     !legs.is_empty()
         && legs.len() <= 128
         && legs.iter().all(|leg| {
@@ -31,6 +36,26 @@ fn supported(legs: &[Leg], missed: bool) -> bool {
                 "IF" | "TF" | "DF" | "CF" | "CA" | "FA" | "VA" | "VI" | "CI"
             ) || (missed && leg.terminator == "HM")
         })
+}
+
+/// A route may also end at a published manual termination, provided every leg before it is
+/// computable. The manual transition then needs an explicit, read-back route amendment.
+fn manual_tail(legs: &[Leg]) -> Option<openatc_core::traffic::resolved::ManualTermination> {
+    let (last, prefix) = legs.split_last()?;
+    if !openatc_core::traffic::resolved::MANUAL_TERMINATORS
+        .contains(&last.terminator.as_str())
+    {
+        return None;
+    }
+    supported(prefix, false).then(|| openatc_core::traffic::resolved::ManualTermination {
+        terminator: last.terminator.clone(),
+        identifier: last.identifier.clone(),
+    })
+}
+
+/// A manually terminated arrival is planned only as an explicit amendment, never silently.
+fn amendable(legs: &[Leg]) -> bool {
+    supported(legs, false) || manual_tail(legs).is_some()
 }
 fn coordinate(leg: &Leg, airport: &Airport, points: &Points) -> Option<[f64; 2]> {
     Points::runway(leg, airport)
@@ -71,6 +96,8 @@ pub(super) struct Inputs<'a> {
     pub points: &'a Points,
     pub mora: &'a openatc_core::navigation::Mora,
     pub budget: usize,
+    /// Build approach-only candidates for a category that cannot fly the published STARs.
+    pub direct: bool,
 }
 
 /// Rank runway-compatible procedures with an explicit STAR-to-approach join.
@@ -161,16 +188,22 @@ pub(super) fn candidates(input: Inputs<'_>) -> Result<Vec<Terminal>, String> {
                 continue;
             };
             let legs = assemble(parts);
-            if !supported(&legs, false) {
+            if !amendable(&legs) {
                 continue;
             }
-            let Some(entry) = legs
+            // A manual termination publishes no coordinate, so the arrival ends at its last
+            // computable crossing and an explicit amendment bridges to the approach entry.
+            let manual = manual_tail(&legs);
+            let published = manual.as_ref().map_or(legs.as_slice(), |_| {
+                &legs[..legs.len().saturating_sub(1)]
+            });
+            let Some(entry) = published
                 .first()
                 .and_then(|leg| coordinate(leg, input.destination, input.points))
             else {
                 continue;
             };
-            let Some(exit) = legs
+            let Some(exit) = published
                 .last()
                 .and_then(|leg| coordinate(leg, input.destination, input.points))
             else {
@@ -214,7 +247,7 @@ pub(super) fn candidates(input: Inputs<'_>) -> Result<Vec<Terminal>, String> {
                     else {
                         continue;
                     };
-                    if openatc_core::arrival::distance_nm(exit, join) > 0.01 {
+                    if manual.is_none() && openatc_core::arrival::distance_nm(exit, join) > 0.01 {
                         continue;
                     }
                     arrivals.push((
@@ -227,9 +260,14 @@ pub(super) fn candidates(input: Inputs<'_>) -> Result<Vec<Terminal>, String> {
                         approach_transition,
                         assembled,
                         approach.missed.to_vec(),
+                        manual.clone(),
                     ));
                     arrivals.sort_by(|a, b| {
-                        a.0.total_cmp(&b.0)
+                        // Fully published arrivals rank ahead of amended ones, so a manual
+                        // termination is only used where no published route reaches the entry.
+                        a.9.is_some()
+                            .cmp(&b.9.is_some())
+                            .then_with(|| a.0.total_cmp(&b.0))
                             .then_with(|| a.1.cmp(&b.1))
                             .then_with(|| a.5.cmp(&b.5))
                             .then_with(|| a.6.cmp(&b.6))
@@ -240,7 +278,9 @@ pub(super) fn candidates(input: Inputs<'_>) -> Result<Vec<Terminal>, String> {
         }
     }
     arrivals.sort_by(|a, b| {
-        a.0.total_cmp(&b.0)
+        a.9.is_some()
+            .cmp(&b.9.is_some())
+            .then_with(|| a.0.total_cmp(&b.0))
             .then_with(|| a.1.cmp(&b.1))
             .then_with(|| a.5.cmp(&b.5))
             .then_with(|| a.6.cmp(&b.6))
@@ -268,6 +308,8 @@ pub(super) fn candidates(input: Inputs<'_>) -> Result<Vec<Terminal>, String> {
                     approach_transition: arrival.6.clone(),
                     approach: arrival.7.clone(),
                     missed: arrival.8.clone(),
+                    arrival_manual: arrival.9.clone(),
+                    direct: false,
                 },
             ));
             result.sort_by(|a, b| {
@@ -286,6 +328,103 @@ pub(super) fn candidates(input: Inputs<'_>) -> Result<Vec<Terminal>, String> {
             .then_with(|| a.1.approach_name.cmp(&b.1.approach_name))
     });
     result.truncate(input.budget);
+    // Aircraft without a published arrival inside their operating envelope can join the
+    // approach directly. The approach transition itself supplies the last published fix and
+    // its restrictions, so no STAR limit is removed and no higher altitude is invented.
+    let mut direct = Vec::new();
+    if input.direct {
+    for approach_name in &approach_names {
+        let transitions: BTreeSet<_> = input
+            .arrivals
+            .0
+            .keys()
+            .filter(|key| key.kind == "APPCH" && &key.name == approach_name)
+            .map(|key| key.transition.clone())
+            .collect();
+        for approach_transition in transitions {
+            let Ok(approach) = input
+                .arrivals
+                .approach(approach_name, &approach_transition)
+            else {
+                continue;
+            };
+            let assembled = approach
+                .transition
+                .iter()
+                .chain(approach.landing)
+                .cloned()
+                .collect::<Vec<_>>();
+            if !supported(&assembled, false) || !supported(approach.missed, true) {
+                continue;
+            }
+            if approach
+                .landing
+                .last()
+                .is_none_or(|leg| leg.identifier != format!("RW{}", input.arrival_runway))
+            {
+                continue;
+            }
+            if assembled.len() < 2
+                || !matches!(assembled[0].terminator.as_str(), "IF" | "TF")
+            {
+                continue;
+            }
+            let Some(entry) = coordinate(&assembled[0], input.destination, input.points) else {
+                continue;
+            };
+            // The initial fix publishes no course of its own. Keeping the following leg in
+            // the arrival gives the decoder a real course, and the approach resumes at that
+            // same published fix without changing any restriction.
+            let arrival = assembled[..2].to_vec();
+            let approach_legs = assembled[1..].to_vec();
+            for departure in &departures {
+                let Some(floor) = input.mora.corridor(departure.4, entry) else {
+                    continue;
+                };
+                direct.push((
+                    openatc_core::arrival::distance_nm(departure.4, entry),
+                    Terminal {
+                        enroute_from: departure.4,
+                        enroute_to: entry,
+                        enroute_minimum_feet: floor,
+                        departure_name: departure.1.clone(),
+                        departure_transition: departure.2.clone(),
+                        departure: departure.3.clone(),
+                        arrival_name: "Direct".to_owned(),
+                        arrival_transition: approach_transition.clone(),
+                        arrival: arrival.clone(),
+                        approach_name: approach_name.clone(),
+                        approach_transition: approach_transition.clone(),
+                        approach: approach_legs.clone(),
+                        missed: approach.missed.to_vec(),
+                        arrival_manual: None,
+                        direct: true,
+                    },
+                ));
+            }
+        }
+    }
+    // Keep one approach family ahead of the rest so a low published entry is not crowded
+    // out by several high-altitude variants of the same procedure.
+    direct.sort_by(|a, b| {
+        a.1.approach_name
+            .cmp(&b.1.approach_name)
+            .then_with(|| a.1.approach_transition.cmp(&b.1.approach_transition))
+            .then_with(|| a.0.total_cmp(&b.0))
+    });
+    // Keep a few departure pairings for each published approach entry so a vertical
+    // restriction on one transition cannot crowd every other variant out of the budget.
+    let mut per_entry = BTreeMap::<(String, String), usize>::new();
+    direct.retain(|(_, terminal)| {
+        let count = per_entry
+            .entry((terminal.approach_name.clone(), terminal.approach_transition.clone()))
+            .or_default();
+        *count += 1;
+        *count <= 3
+    });
+    direct.truncate(input.budget);
+    result.extend(direct);
+    }
     if result.is_empty() {
         return Err(format!(
             "No resolved runway-compatible SID/STAR/approach with a published recovery and connected approach entry ({} supported departure variants, {} joined arrival variants)",
@@ -319,6 +458,7 @@ mod tests {
             points: &points,
             mora: &openatc_core::navigation::Mora::load(&root),
             budget: 16,
+            direct: false,
         })
         .unwrap();
         assert!(
@@ -328,10 +468,111 @@ mod tests {
         );
         for route in result {
             assert_eq!(route.approach.last().unwrap().identifier, "RW17L");
-            assert_eq!(
-                coordinate(route.arrival.last().unwrap(), &destination, &points),
-                coordinate(route.approach.first().unwrap(), &destination, &points)
-            );
+            match &route.arrival_manual {
+                // A manual termination is never flown as published geometry: the last leg is
+                // the transition itself, and the approach entry is reached only by amendment.
+                None => assert_eq!(
+                    coordinate(route.arrival.last().unwrap(), &destination, &points),
+                    coordinate(route.approach.first().unwrap(), &destination, &points)
+                ),
+                Some(manual) => {
+                    assert_eq!(route.arrival.last().unwrap().terminator, manual.terminator);
+                    assert!(!route.approach.first().unwrap().identifier.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires installed licensed navigation data"]
+    fn installed_ga_candidates_join_the_approach_without_the_high_altitude_star() {
+        let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
+        let origin = airport(&root, "KMEM").unwrap();
+        let destination = airport(&root, "KSDF").unwrap();
+        let departures = Catalogue::load(std::path::Path::new(&root), "KMEM").unwrap();
+        let arrivals = Catalogue::load(std::path::Path::new(&root), "KSDF").unwrap();
+        let mut points = Points::requested(&[("KMEM", &departures), ("KSDF", &arrivals)]);
+        points.load(std::path::Path::new(&root)).unwrap();
+        let result = candidates(Inputs {
+            origin: &origin,
+            destination: &destination,
+            departure_runway: "36L",
+            arrival_runway: "17L",
+            departures: &departures,
+            arrivals: &arrivals,
+            points: &points,
+            mora: &openatc_core::navigation::Mora::load(&root),
+            budget: 16,
+            direct: true,
+        })
+        .unwrap();
+        let direct = result
+            .iter()
+            .find(|route| route.direct && route.approach_name == "I17L")
+            .expect("GA needs a direct I17L candidate");
+        assert_eq!(direct.arrival_name, "Direct");
+        assert_eq!(direct.arrival.last().unwrap().identifier, "SLGRR");
+        assert_eq!(
+            coordinate(direct.arrival.last().unwrap(), &destination, &points),
+            coordinate(direct.approach.first().unwrap(), &destination, &points),
+            "the direct arrival must join the published approach entry"
+        );
+        assert!(
+            !direct
+                .arrival
+                .iter()
+                .chain(&direct.approach)
+                .any(|leg| leg.identifier == "JIINN"),
+            "a light aircraft is not routed through the high-altitude STAR crossing"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires installed licensed navigation data"]
+    fn installed_manual_terminated_arrivals_are_offered_as_explicit_amendments() {
+        let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
+        let origin = airport(&root, "KSDF").unwrap();
+        let destination = airport(&root, "KMEM").unwrap();
+        let departures = Catalogue::load(std::path::Path::new(&root), "KSDF").unwrap();
+        let arrivals = Catalogue::load(std::path::Path::new(&root), "KMEM").unwrap();
+        let mut points = Points::requested(&[("KSDF", &departures), ("KMEM", &arrivals)]);
+        points.load(std::path::Path::new(&root)).unwrap();
+        let result = candidates(Inputs {
+            origin: &origin,
+            destination: &destination,
+            departure_runway: "17L",
+            arrival_runway: "36L",
+            departures: &departures,
+            arrivals: &arrivals,
+            points: &points,
+            mora: &openatc_core::navigation::Mora::load(&root),
+            budget: 16,
+            direct: false,
+        })
+        .unwrap();
+        // Memphis STARs commonly end in a manual transition, so this direction only produces
+        // candidates when such an arrival is kept as an amendment rather than discarded.
+        assert!(
+            result
+                .iter()
+                .any(|route| route.arrival_manual.is_some()),
+            "expected at least one manual-terminated arrival candidate"
+        );
+        for route in result {
+            if let Some(manual) = &route.arrival_manual {
+                assert!(openatc_core::traffic::resolved::MANUAL_TERMINATORS
+                    .contains(&manual.terminator.as_str()));
+                let published = &route.arrival[..route.arrival.len() - 1];
+                assert!(
+                    published
+                        .iter()
+                        .all(|leg| supported(std::slice::from_ref(leg), false))
+                );
+                assert!(
+                    !published.is_empty(),
+                    "an amendment needs published geometry to precede it"
+                );
+            }
         }
     }
 
@@ -355,6 +596,7 @@ mod tests {
             points: &points,
             mora: &openatc_core::navigation::Mora::load(&root),
             budget: 16,
+            direct: false,
         })
         .unwrap();
         assert!(result.len() <= 16);
@@ -368,7 +610,8 @@ mod tests {
                 arrivals: &arrivals,
                 points: &points,
                 mora: &Default::default(),
-                budget: 16
+                budget: 16,
+                direct: false
             })
             .is_err()
         );
@@ -392,3 +635,4 @@ mod tests {
         }
     }
 }
+

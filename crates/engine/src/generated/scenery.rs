@@ -14,13 +14,18 @@ use std::{
 const MAX_BYTES: usize = 128 * 1024 * 1024;
 const GRID: usize = 128;
 
+type TileKey = (i32, i32);
+type TileStack = Result<Vec<Arc<Tile>>, String>;
+
 /// The enabled stack is retained for one planning job; no runtime scenery-folder scans.
 pub(super) struct Terrain {
     packs: Vec<PathBuf>,
-    tiles: BTreeMap<(i32, i32), Result<Vec<Arc<Tile>>, String>>,
+    tiles: BTreeMap<TileKey, TileStack>,
     retained_bytes: usize,
     obstacle_seen: bool,
     library: library::Library,
+    terrain_checks: BTreeMap<[u64; 7], (Result<bool, String>, bool)>,
+    obstacle_checks: BTreeMap<[u64; 7], (Result<bool, String>, bool)>,
 }
 impl Terrain {
     pub fn new(root: &Path) -> Result<Self, String> {
@@ -61,6 +66,8 @@ impl Terrain {
             retained_bytes: 0,
             obstacle_seen: false,
             library,
+            terrain_checks: BTreeMap::new(),
+            obstacle_checks: BTreeMap::new(),
         })
     }
 
@@ -217,19 +224,8 @@ impl Terrain {
                     {
                         return Err("Scenery file bounds do not match its requested tile".into());
                     }
-                    added_bytes += tile.triangles.len() * std::mem::size_of::<[Vertex; 3]>()
-                        + tile
-                            .bins
-                            .iter()
-                            .map(|bin| bin.capacity() * std::mem::size_of::<u32>())
-                            .sum::<usize>()
-                        + tile.bins.capacity() * std::mem::size_of::<Vec<u32>>();
-                    added_bytes += tile.object_bytes();
-                    if self.retained_bytes + added_bytes > 256 * 1024 * 1024 {
-                        return Err("Terminal mesh cache exceeds 256 MiB".into());
-                    }
                     base = !tile.overlay;
-                    tiles.push(Arc::new(tile));
+                    tiles.push(tile);
                     if base {
                         break;
                     }
@@ -239,7 +235,39 @@ impl Terrain {
                         "No enabled physical base mesh for {latitude:+03}{longitude:+04}"
                     ));
                 }
-                Ok(tiles)
+                // Resolve every layer's networks and strings against the base mesh. An overlay
+                // carries roads and object strings but no physical terrain of its own, so the
+                // base layer is the surface they are draped over.
+                let base_index = tiles
+                    .iter()
+                    .position(|tile| !tile.overlay)
+                    .ok_or("Scenery stack has no physical base mesh")?;
+                let bounds = tiles[base_index].bounds;
+                let triangles = std::mem::take(&mut tiles[base_index].triangles);
+                let bins = std::mem::take(&mut tiles[base_index].bins);
+                for tile in &mut tiles {
+                    tile.resolve_networks(bounds, &triangles, &bins);
+                    tile.resolve_strings(bounds, &triangles, &bins);
+                }
+                tiles[base_index].triangles = triangles;
+                tiles[base_index].bins = bins;
+                for tile in &tiles {
+                    added_bytes += tile.triangles.len() * std::mem::size_of::<[Vertex; 3]>()
+                        + tile
+                            .bins
+                            .iter()
+                            .map(|bin| bin.capacity() * std::mem::size_of::<u32>())
+                            .sum::<usize>()
+                        + tile.bins.capacity() * std::mem::size_of::<Vec<u32>>()
+                        + tile.object_bytes();
+                }
+                // The tile budget is 24 stacks and each stack is bounded by the per-tile geometry
+                // and mesh budgets. The cache holds those stacks for one planning job; this cap
+                // keeps that retention below half a gigabyte.
+                if self.retained_bytes + added_bytes > 512 * 1024 * 1024 {
+                    return Err("Terminal mesh cache exceeds 512 MiB".into());
+                }
+                Ok(tiles.into_iter().map(Arc::new).collect())
             })();
             if result.is_ok() {
                 self.retained_bytes += added_bytes;
@@ -254,6 +282,29 @@ impl Terrain {
 
     /// Terrain-only result; callers must separately resolve obstacles and controller authority.
     pub fn terrain_clear(
+        &mut self,
+        from: Waypoint,
+        to: Waypoint,
+        margin: f64,
+    ) -> Result<bool, String> {
+        let key = corridor_key(from, to, margin);
+        if let Some((result, unresolved)) = self.terrain_checks.get(&key) {
+            self.obstacle_seen |= *unresolved;
+            return result.clone();
+        }
+        // Track this call's own unresolved discovery so the cached entry can reproduce it when
+        // another aircraft checks the same geometry.
+        let previous = self.obstacle_seen;
+        self.obstacle_seen = false;
+        let result = self.terrain_clear_inner(from, to, margin);
+        let unresolved = self.obstacle_seen;
+        self.obstacle_seen = previous | unresolved;
+        self.terrain_checks
+            .insert(key, (result.clone(), unresolved));
+        result
+    }
+
+    fn terrain_clear_inner(
         &mut self,
         from: Waypoint,
         to: Waypoint,
@@ -324,6 +375,27 @@ impl Terrain {
         to: Waypoint,
         radius: f64,
     ) -> Result<bool, String> {
+        let key = corridor_key(from, to, radius);
+        if let Some((result, unresolved)) = self.obstacle_checks.get(&key) {
+            self.obstacle_seen |= *unresolved;
+            return result.clone();
+        }
+        let previous = self.obstacle_seen;
+        self.obstacle_seen = false;
+        let result = self.obstacles_clear_inner(from, to, radius);
+        let unresolved = self.obstacle_seen;
+        self.obstacle_seen = previous | unresolved;
+        self.obstacle_checks
+            .insert(key, (result.clone(), unresolved));
+        result
+    }
+
+    fn obstacles_clear_inner(
+        &mut self,
+        from: Waypoint,
+        to: Waypoint,
+        radius: f64,
+    ) -> Result<bool, String> {
         if !(0.0..=100.0).contains(&radius)
             || [from, to].iter().any(|point| {
                 !point.latitude.is_finite()
@@ -337,21 +409,69 @@ impl Terrain {
         {
             return Err("Invalid aircraft obstacle envelope".into());
         }
+        // An object is stored with the tile that places it, so an object anchored in the next
+        // tile over that reaches into the corridor would otherwise be missed. Expand the stack by
+        // one tile each way, bounded by the existing tile budget. An absent neighbour holds no
+        // obstacles and is skipped, but a missing corridor tile is still an error.
+        let low_latitude = from.latitude.min(to.latitude).floor() as i32;
+        let high_latitude = from.latitude.max(to.latitude).floor() as i32;
+        let low_longitude = from.longitude.min(to.longitude).floor() as i32;
+        let high_longitude = from.longitude.max(to.longitude).floor() as i32;
         let mut stacks = Vec::new();
-        for latitude in from.latitude.min(to.latitude).floor() as i32
-            ..=from.latitude.max(to.latitude).floor() as i32
-        {
-            for longitude in from.longitude.min(to.longitude).floor() as i32
-                ..=from.longitude.max(to.longitude).floor() as i32
-            {
-                stacks.push(self.tile(latitude, longitude)?.to_vec());
+        for latitude in low_latitude - 1..=high_latitude + 1 {
+            for longitude in low_longitude - 1..=high_longitude + 1 {
+                let corridor = (low_latitude..=high_latitude).contains(&latitude)
+                    && (low_longitude..=high_longitude).contains(&longitude);
+                match self.tile(latitude, longitude) {
+                    Ok(stack) => stacks.push(stack.to_vec()),
+                    Err(error) if corridor => return Err(error),
+                    Err(_) => {}
+                }
             }
         }
+        let min_latitude = from.latitude.min(to.latitude) - radius / 111_320.0;
+        let max_latitude = from.latitude.max(to.latitude) + radius / 111_320.0;
+        let min_longitude = from.longitude.min(to.longitude) - radius / 111_320.0;
+        let max_longitude = from.longitude.max(to.longitude) + radius / 111_320.0;
+        // The rectangle above is the bounding box of the whole segment, so a long diagonal can
+        // retain many obstacles that lie well clear of the line. Measure the horizontal distance
+        // from the placement to the segment before touching its geometry; a placement farther
+        // away than the obstacle's own horizontal extent plus the aircraft envelope cannot
+        // intersect the corridor at any height.
+        let segment_latitude = from.latitude.to_radians().cos().max(0.01);
+        let project = |latitude: f64, longitude: f64| {
+            [
+                longitude * 111_320.0 * segment_latitude,
+                latitude * 111_320.0,
+            ]
+        };
+        let start = project(from.latitude, from.longitude);
+        let end = project(to.latitude, to.longitude);
         for stack in stacks {
             for tile in &stack {
                 self.obstacle_seen |= tile.unresolved_obstacles;
                 for obstacle in &tile.obstacles {
                     let placement = &obstacle.placement;
+                    // Skip obstacles that cannot reach the corridor. This keeps a dense tile
+                    // of small objects from being walked for every route segment.
+                    let reach = (obstacle.radius + radius + 2.0) / 111_320.0;
+                    let longitude_reach =
+                        reach / placement.coordinate[0].to_radians().cos().max(0.01);
+                    if placement.coordinate[0] + reach < min_latitude
+                        || placement.coordinate[0] - reach > max_latitude
+                        || placement.coordinate[1] + longitude_reach < min_longitude
+                        || placement.coordinate[1] - longitude_reach > max_longitude
+                    {
+                        continue;
+                    }
+                    let nearest = point_segment_distance(
+                        project(placement.coordinate[0], placement.coordinate[1]),
+                        start,
+                        end,
+                    );
+                    if nearest > obstacle.radius + radius + 2.0 {
+                        continue;
+                    }
                     let ground = stack
                         .iter()
                         .filter_map(|layer| layer.mesh_height(placement.coordinate))
@@ -361,9 +481,13 @@ impl Terrain {
                         continue;
                     };
                     // Four-plane placements may be absolute or use the DSF AGL placement comment.
-                    let anchor = placement
-                        .height
-                        .map_or(ground, |height| height.max(ground + height));
+                    let anchor = if obstacle.agl {
+                        ground
+                    } else {
+                        placement
+                            .height
+                            .map_or(ground, |height| height.max(ground + height))
+                    };
                     if !obstacle.clear(from, to, anchor, radius) {
                         return Ok(false);
                     }
@@ -518,9 +642,314 @@ struct Placement {
     heading: f64,
     height: Option<f64>,
 }
+/// A polygon footprint in the obstacle's local frame: x east, z south, in metres from the
+/// placement coordinate. Outer windings are solid and alternate with clear holes.
+struct Footprint {
+    /// Every winding, in the published order. Nesting depth decides whether a winding is ground
+    /// or a hole, so the ordinary even-odd rule applies to a point.
+    rings: Vec<Vec<[f64; 2]>>,
+    /// Local horizontal extent, used to reject a corridor before walking the windings.
+    bounds: [f64; 4],
+}
+impl Footprint {
+    /// Convert and validate a published forest footprint.
+    ///
+    /// The first non-empty winding is the outer boundary; later windings nest inside it and
+    /// alternate between holes and solid islands. Winding orientation is checked against that
+    /// nesting because a misclassified hole could clear a corridor that actually crosses trees.
+    /// A winding with no interior (fewer than three points or all points on one line) encloses
+    /// nothing, so the placement keeps its bounding box rather than being cleared.
+    fn new(
+        rings: &[Vec<[f64; 2]>],
+        origin: [f64; 2],
+        scale: f64,
+    ) -> Result<Option<Self>, String> {
+        if rings.is_empty() {
+            return Err("Forest footprint has no rings".into());
+        }
+        let mut valid: Vec<(Vec<[f64; 2]>, bool)> = Vec::with_capacity(rings.len());
+        let mut outer_empty = false;
+        for (position, ring) in rings.iter().enumerate() {
+            if !ring
+                .iter()
+                .all(|point| point.iter().all(|value| value.is_finite()))
+            {
+                return Err("Forest footprint has a non-finite coordinate".into());
+            }
+            let local = ring
+                .iter()
+                .map(|point| {
+                    [
+                        (point[1] - origin[1]) * scale,
+                        -(point[0] - origin[0]) * 111_320.0,
+                    ]
+                })
+                .collect::<Vec<_>>();
+            if ring_is_a_line(&local) {
+                outer_empty |= position == 0;
+                continue;
+            }
+            let mut twice_area = 0.0;
+            for index in 0..ring.len() {
+                let a = ring[index];
+                let b = ring[(index + 1) % ring.len()];
+                // Longitude is east and latitude is north.
+                twice_area += a[1] * b[0] - b[1] * a[0];
+            }
+            if !twice_area.is_finite() || twice_area.abs() < 1e-15 {
+                return Err("Forest footprint ring is not a simple area".into());
+            }
+            valid.push((local, twice_area > 0.0));
+        }
+        if valid.is_empty() {
+            return Ok(None);
+        }
+        if outer_empty {
+            return Err("Forest footprint outer ring has no area".into());
+        }
+        // The published outer orientation is not always counter-clockwise in shipped data, so
+        // each later winding is compared against the outer winding rather than an absolute sign.
+        let outer = valid[0].1;
+        let mut depth = vec![0usize; valid.len()];
+        for index in 1..valid.len() {
+            let interior = &valid[index].0;
+            let representative = interior[0];
+            let mut parent = None;
+            for candidate in 0..index {
+                if point_in_ring(representative, &valid[candidate].0)
+                    && bounding_box_contains(&valid[candidate].0, interior)
+                    && parent.is_none_or(|best| depth[best] < depth[candidate])
+                {
+                    parent = Some(candidate);
+                }
+            }
+            let Some(parent) = parent else {
+                return Err("Forest footprint winding is not contained by an earlier ring".into());
+            };
+            depth[index] = depth[parent] + 1;
+            let solid = depth[index].is_multiple_of(2);
+            if valid[index].1 != (solid == outer) {
+                return Err("Forest footprint winding has the wrong orientation for its nesting"
+                    .into());
+            }
+        }
+        let mut bounds = [
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        for (points, _) in &valid {
+            for point in points {
+                bounds[0] = bounds[0].min(point[0]);
+                bounds[1] = bounds[1].min(point[1]);
+                bounds[2] = bounds[2].max(point[0]);
+                bounds[3] = bounds[3].max(point[1]);
+            }
+        }
+        Ok(Some(Self {
+            rings: valid.into_iter().map(|(points, _)| points).collect(),
+            bounds,
+        }))
+    }
+
+    /// Whether a local horizontal point lies over solid ground. Windings alternate between
+    /// solid ground and holes, so a point inside an odd number of them is solid.
+    fn solid(&self, point: [f64; 2]) -> bool {
+        self.rings
+            .iter()
+            .filter(|ring| point_in_ring(point, ring))
+            .count()
+            % 2
+            == 1
+    }
+
+    /// Parameter interval of a local segment that passes over the footprint, including the
+    /// horizontal envelope carried by `padding`. An interval is preferred over a single answer
+    /// so the caller can compare height only where the obstacle actually reaches the corridor.
+    fn blocked(&self, from: [f64; 2], to: [f64; 2], padding: f64) -> Option<(f64, f64)> {
+        if segment_box_distance(from, to, self.bounds) > padding {
+            return None;
+        }
+        let delta = [to[0] - from[0], to[1] - from[1]];
+        let mut cuts = vec![0.0_f64, 1.0];
+        let mut near = false;
+        for ring in &self.rings {
+            for index in 0..ring.len() {
+                let a = ring[index];
+                let b = ring[(index + 1) % ring.len()];
+                if let Some(t) = segment_crossing(from, to, a, b) {
+                    cuts.push(t);
+                    near = true;
+                }
+                near |= point_segment_distance(from, a, b) <= padding
+                    || point_segment_distance(to, a, b) <= padding
+                    || point_segment_distance(a, from, to) <= padding
+                    || point_segment_distance(b, from, to) <= padding;
+            }
+        }
+        if cuts.len() > 4096 {
+            // A pathological winding that crosses the corridor thousands of times is treated as
+            // blocking the whole segment rather than spending unbounded time splitting it.
+            return Some((0.0, 1.0));
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        let mut low = f64::INFINITY;
+        let mut high = f64::NEG_INFINITY;
+        for pair in cuts.windows(2) {
+            let t = (pair[0] + pair[1]) * 0.5;
+            let point = [from[0] + delta[0] * t, from[1] + delta[1] * t];
+            if self.solid(point) {
+                low = low.min(pair[0]);
+                high = high.max(pair[1]);
+            }
+        }
+        if near {
+            // The envelope reaches some winding even where the centre line stays clear. Treating
+            // the whole segment as overlapped is conservative and keeps the cost linear.
+            return Some((0.0, 1.0));
+        }
+        (low <= high).then_some((low, high))
+    }
+}
+
+fn point_in_ring(point: [f64; 2], ring: &[[f64; 2]]) -> bool {
+    let mut inside = false;
+    let mut previous = ring.len() - 1;
+    for index in 0..ring.len() {
+        let a = ring[index];
+        let b = ring[previous];
+        if (a[1] > point[1]) != (b[1] > point[1]) {
+            let crossing = (b[0] - a[0]) * (point[1] - a[1]) / (b[1] - a[1]) + a[0];
+            if point[0] < crossing {
+                inside = !inside;
+            }
+        }
+        previous = index;
+    }
+    inside
+}
+
+fn bounding_box_contains(outer: &[[f64; 2]], inner: &[[f64; 2]]) -> bool {
+    let bounds = |ring: &[[f64; 2]]| {
+        ring.iter().fold(
+            [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY],
+            |mut bounds, point| {
+                bounds[0] = bounds[0].min(point[0]);
+                bounds[1] = bounds[1].min(point[1]);
+                bounds[2] = bounds[2].max(point[0]);
+                bounds[3] = bounds[3].max(point[1]);
+                bounds
+            },
+        )
+    };
+    let outer = bounds(outer);
+    let inner = bounds(inner);
+    inner[0] >= outer[0] && inner[1] >= outer[1] && inner[2] <= outer[2] && inner[3] <= outer[3]
+}
+
+fn ring_is_a_line(ring: &[[f64; 2]]) -> bool {
+    if ring.len() < 3 {
+        return true;
+    }
+    let origin = ring[0];
+    let Some(direction) = ring
+        .iter()
+        .skip(1)
+        .map(|point| [point[0] - origin[0], point[1] - origin[1]])
+        .find(|offset| offset[0] * offset[0] + offset[1] * offset[1] > 1e-12)
+    else {
+        return true;
+    };
+    let length = direction[0].hypot(direction[1]);
+    ring.iter().all(|point| {
+        let offset = [point[0] - origin[0], point[1] - origin[1]];
+        (direction[0] * offset[1] - direction[1] * offset[0]).abs() / length <= 1e-3
+    })
+}
+
+fn point_box_distance(point: [f64; 2], bounds: [f64; 4]) -> f64 {
+    let dx = (bounds[0] - point[0]).max(0.0).max(point[0] - bounds[2]);
+    let dz = (bounds[1] - point[1]).max(0.0).max(point[1] - bounds[3]);
+    dx.hypot(dz)
+}
+
+fn segment_box_distance(from: [f64; 2], to: [f64; 2], bounds: [f64; 4]) -> f64 {
+    let corners = [
+        [bounds[0], bounds[1]],
+        [bounds[2], bounds[1]],
+        [bounds[2], bounds[3]],
+        [bounds[0], bounds[3]],
+    ];
+    for index in 0..4 {
+        if segment_crossing(from, to, corners[index], corners[(index + 1) % 4]).is_some() {
+            return 0.0;
+        }
+    }
+    if point_box_distance(from, bounds) == 0.0 || point_box_distance(to, bounds) == 0.0 {
+        return 0.0;
+    }
+    corners
+        .iter()
+        .map(|corner| point_segment_distance(*corner, from, to))
+        .chain([
+            point_box_distance(from, bounds),
+            point_box_distance(to, bounds),
+        ])
+        .fold(f64::INFINITY, f64::min)
+}
+
+fn segment_crossing(from: [f64; 2], to: [f64; 2], a: [f64; 2], b: [f64; 2]) -> Option<f64> {
+    let r = [to[0] - from[0], to[1] - from[1]];
+    let s = [b[0] - a[0], b[1] - a[1]];
+    let denominator = r[0] * s[1] - r[1] * s[0];
+    if denominator.abs() < 1e-12 {
+        return None;
+    }
+    let offset = [a[0] - from[0], a[1] - from[1]];
+    let t = (offset[0] * s[1] - offset[1] * s[0]) / denominator;
+    let u = (offset[0] * r[1] - offset[1] * r[0]) / denominator;
+    (0.0..=1.0)
+        .contains(&t)
+        .then_some(t)
+        .filter(|_| (0.0..=1.0).contains(&u))
+}
+
+/// Exact corridor geometry key. Scenery is static while one preparation job runs, so a check
+/// already made for these waypoints returns the same result for every aircraft.
+fn corridor_key(from: Waypoint, to: Waypoint, parameter: f64) -> [u64; 7] {
+    [
+        from.latitude.to_bits(),
+        from.longitude.to_bits(),
+        from.altitude_feet.to_bits(),
+        to.latitude.to_bits(),
+        to.longitude.to_bits(),
+        to.altitude_feet.to_bits(),
+        parameter.to_bits(),
+    ]
+}
+
+fn point_segment_distance(point: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {    let edge = [b[0] - a[0], b[1] - a[1]];
+    let length = edge[0] * edge[0] + edge[1] * edge[1];
+    let t = if length > 0.0 {
+        (((point[0] - a[0]) * edge[0] + (point[1] - a[1]) * edge[1]) / length).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let nearest = [a[0] + edge[0] * t, a[1] + edge[1] * t];
+    (point[0] - nearest[0]).hypot(point[1] - nearest[1])
+}
+
 struct Obstacle {
     placement: Placement,
     geometry: Arc<Vec<object::Bounds>>,
+    /// Forests are checked against their published polygon instead of its bounding box.
+    footprint: Option<Arc<Footprint>>,
+    /// The published height is above ground rather than an absolute elevation.
+    agl: bool,
+    /// Greatest horizontal distance from the placement coordinate to any checked box corner.
+    radius: f64,
 }
 impl Obstacle {
     fn clear(&self, from: Waypoint, to: Waypoint, anchor: f64, radius: f64) -> bool {
@@ -540,6 +969,17 @@ impl Obstacle {
         let b = local(to);
         let padding =
             radius + 1.0 + 0.02 * a[0].abs().max(a[2].abs()).max(b[0].abs()).max(b[2].abs());
+        if let Some(footprint) = &self.footprint {
+            let Some(bounds) = self.geometry.first() else {
+                return true;
+            };
+            let Some((low, high)) = footprint.blocked([a[0], a[2]], [b[0], b[2]], padding) else {
+                return true;
+            };
+            let first = a[1] + (b[1] - a[1]) * low;
+            let last = a[1] + (b[1] - a[1]) * high;
+            return first.min(last) > anchor + bounds.high[1];
+        }
         self.geometry.iter().all(|bounds| {
             let mut low: f64 = 0.0;
             let mut high: f64 = 1.0;
@@ -572,6 +1012,416 @@ struct DrapedPolygon {
     rings: Vec<Vec<[f64; 4]>>,
 }
 
+/// Turn a published facade into an obstacle box.
+///
+/// The DSF polygon parameter is the building height in metres and the rings are its geographic
+/// footprint, so no geometry has to be invented. A concave building is covered by its bounding
+/// box, which errs toward reporting an obstruction rather than clearing one.
+fn facade_obstacle(facade: dsf::Facade) -> Result<Obstacle, String> {
+    facade_obstacle_in(facade, None)
+}
+
+/// Turn a published facade into an obstacle box, optionally anchoring it inside the tile that
+/// stores it. A facade footprint can cross a tile boundary, and the anchor has to sit on the
+/// mesh of the owning tile so its ground can be resolved.
+fn facade_obstacle_in(
+    facade: dsf::Facade,
+    bounds: Option<[f64; 4]>,
+) -> Result<Obstacle, String> {
+    if !facade.height_meters.is_finite() || !(0.0..=1000.0).contains(&facade.height_meters) {
+        return Err("Facade height is outside its published range".into());
+    }
+    let mut points = 0usize;
+    let mut low_latitude = f64::INFINITY;
+    let mut high_latitude = f64::NEG_INFINITY;
+    let mut low_longitude = f64::INFINITY;
+    let mut high_longitude = f64::NEG_INFINITY;
+    for ring in &facade.rings {
+        for point in ring {
+            points += 1;
+            if points > 100_000 {
+                return Err("Facade footprint exceeds its point budget".into());
+            }
+            if point.iter().any(|value| !value.is_finite()) {
+                return Err("Facade footprint has a non-finite coordinate".into());
+            }
+            low_latitude = low_latitude.min(point[0]);
+            high_latitude = high_latitude.max(point[0]);
+            low_longitude = low_longitude.min(point[1]);
+            high_longitude = high_longitude.max(point[1]);
+        }
+    }
+    if points == 0 {
+        return Err("Facade has no footprint".into());
+    }
+    let origin = match bounds {
+        Some(bounds) => [
+            ((low_latitude + high_latitude) * 0.5).clamp(bounds[2] + 1e-6, bounds[3] - 1e-6),
+            ((low_longitude + high_longitude) * 0.5).clamp(bounds[0] + 1e-6, bounds[1] - 1e-6),
+        ],
+        None => [low_latitude, low_longitude],
+    };
+    let scale = 111_320.0 * origin[0].to_radians().cos();
+    let mut low = [f64::INFINITY; 3];
+    let mut high = [f64::NEG_INFINITY; 3];
+    for ring in &facade.rings {
+        for point in ring {
+            let east = (point[1] - origin[1]) * scale;
+            let north = (point[0] - origin[0]) * 111_320.0;
+            low[0] = low[0].min(east);
+            low[2] = low[2].min(-north);
+            high[0] = high[0].max(east);
+            high[2] = high[2].max(-north);
+        }
+    }
+    if low[0] > high[0] || low[2] > high[2] {
+        return Err("Facade footprint has no area".into());
+    }
+    low[1] = 0.0;
+    high[1] = facade.height_meters;
+    // A forest fills the area its windings enclose, so the real footprint is carried through
+    // instead of covering every point inside its bounding box. Facades retain the box.
+    let footprint = if facade.forest {
+        Footprint::new(&facade.rings, origin, scale)?.map(Arc::new)
+    } else {
+        None
+    };
+    Ok(Obstacle {
+        placement: Placement {
+            resource: facade.resource,
+            coordinate: origin,
+            heading: 0.0,
+            // The parameter is height above ground, which is how obstacles are anchored.
+            height: Some(facade.height_meters),
+        },
+        geometry: Arc::new(vec![object::Bounds { low, high }]),
+        footprint,
+        agl: true,
+        radius: low[0].abs().max(high[0].abs()).max(low[2].abs()).max(high[2].abs()),
+    })
+}
+
+/// How far a network point must stand above the draped terrain before its section is treated as
+/// a bridge rather than a road lying on the ground.
+const BRIDGE_METERS: f64 = 2.0;
+
+/// Resolve one network chain against the mesh.
+///
+/// The third vector plane is a height above the draped terrain, not an absolute elevation, even
+/// though the DSF specification describes vertical values as metres above mean sea level. Across
+/// the installed global scenery the published value is 0 to 2 m over terrain that climbs past
+/// 4,000 m, so an absolute reading would place every road kilometres underground and miss every
+/// bridge. The elevation plane uses a signed-metre scale covering -32768..32767 m, so a road on
+/// the ground sits near zero. A run of points published above the threshold is a bridge and
+/// obstructs; a run on the terrain is ground and does not. Requiring physical terrain under every
+/// point keeps a section over water or an unknown gap unresolved rather than clearing it. A run
+/// is covered by its bounding box, matching the facade approach and erring toward an obstruction.
+fn bridge_obstacles(
+    bounds: [f64; 4],
+    triangles: &[[Vertex; 3]],
+    bins: &[Vec<u32>],
+    chain: &[[f64; 3]],
+) -> Result<Vec<Obstacle>, String> {
+    let mut ground = Vec::with_capacity(chain.len());
+    for point in chain {
+        ground.push(
+            mesh_height(bounds, triangles, bins, [point[0], point[1]])
+                .ok_or("Network chain crosses terrain with no physical mesh")?,
+        );
+    }
+    let mut bridges = Vec::new();
+    let mut at = 0usize;
+    while at < chain.len() {
+        if chain[at][2] <= BRIDGE_METERS {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while at < chain.len() && chain[at][2] > BRIDGE_METERS {
+            at += 1;
+        }
+        if at - start < 2 {
+            continue;
+        }
+        let section = &chain[start..at];
+        // Anchor the section at its own ground and carry the highest published clearance in the
+        // geometry, so the checked top is the deck at its real point rather than twice the
+        // clearance.
+        let top = section
+            .iter()
+            .zip(&ground[start..at])
+            .map(|(point, ground)| ground + point[2])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let height = top - ground[start];
+        if !height.is_finite() || !(0.0..=1000.0).contains(&height) {
+            return Err("Network bridge height is outside its published range".into());
+        }
+        bridges.push(bridge_obstacle(section, height)?);
+    }
+    Ok(bridges)
+}
+
+fn bridge_obstacle(points: &[[f64; 3]], height_meters: f64) -> Result<Obstacle, String> {
+    let origin = points[0];
+    let scale = 111_320.0 * origin[0].to_radians().cos();
+    let mut low = [f64::INFINITY; 3];
+    let mut high = [f64::NEG_INFINITY; 3];
+    for point in points {
+        if point.iter().any(|value| !value.is_finite()) {
+            return Err("Network bridge has a non-finite coordinate".into());
+        }
+        let east = (point[1] - origin[1]) * scale;
+        let north = (point[0] - origin[0]) * 111_320.0;
+        low[0] = low[0].min(east);
+        high[0] = high[0].max(east);
+        low[2] = low[2].min(-north);
+        high[2] = high[2].max(-north);
+    }
+    low[1] = 0.0;
+    high[1] = height_meters;
+    Ok(Obstacle {
+        placement: Placement {
+            resource: Arc::<str>::from("network"),
+            coordinate: [origin[0], origin[1]],
+            heading: 0.0,
+            height: None,
+        },
+        geometry: Arc::new(vec![object::Bounds { low, high }]),
+        footprint: None,
+        agl: false,
+        radius: low[0].abs().max(high[0].abs()).max(low[2].abs()).max(high[2].abs()),
+    })
+}
+
+/// Geometry of an airport ground polygon (`.agp`).
+///
+/// An AGP places catalogue objects at texture positions. `TEXTURE_SCALE` gives the texture size
+/// in pixels and `TEXTURE_WIDTH`/`TEXTURE_HEIGHT` the world size of that texture, so a pixel
+/// offset converts to metres. Positions are taken relative to `ANCHOR_PT`, or the centre of the
+/// placed tile when the definition has no anchor. One box covers every placed object plus its
+/// own horizontal reach, and the tallest object sets the height.
+fn agp_geometry(
+    pack: &Path,
+    library: Option<&library::Library>,
+    path: &Path,
+) -> Result<Vec<object::Bounds>, String> {
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| e.to_string())?;
+    if text.len() > 4 * 1024 * 1024 {
+        return Err("Airport ground polygon exceeds its input budget".into());
+    }
+    let mut lines = text
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or("").trim())
+        .filter(|line| !line.is_empty());
+    if !matches!(lines.next(), Some("A" | "I"))
+        || !matches!(lines.next(), Some("800" | "1000"))
+        || lines.next() != Some("AG_POINT")
+    {
+        return Err("Scenery ground polygon requires an AG_POINT definition".into());
+    }
+    let mut number = |fields: &mut std::str::SplitWhitespace| -> Result<f64, String> {
+        fields
+            .next()
+            .ok_or("Airport ground polygon field is missing")?
+            .parse::<f64>()
+            .map_err(|_| "Airport ground polygon has an invalid number".into())
+    };
+    let mut objects = Vec::new();
+    let mut vegetation = Vec::new();
+    let mut placed = Vec::new();
+    let mut width = 0.0_f64;
+    let mut height = 0.0_f64;
+    let mut scale = [0.0_f64; 2];
+    let mut tile = None;
+    let mut anchor = None;
+    for line in lines {
+        let mut fields = line.split_whitespace();
+        let command = fields.next();
+        match command {
+            Some("OBJECT") => {
+                let name = fields
+                    .next()
+                    .ok_or("Airport ground polygon object is missing")?;
+                if objects.len() >= 1024 {
+                    return Err("Airport ground polygon catalogue exceeds its budget".into());
+                }
+                objects.push(name.to_owned());
+            }
+            Some("VEGETATION") => {
+                let name = fields
+                    .last()
+                    .ok_or("Airport ground polygon vegetation is missing")?;
+                if vegetation.len() >= 256 {
+                    return Err("Airport ground polygon vegetation exceeds its budget".into());
+                }
+                vegetation.push(name.to_owned());
+            }
+            Some(command) if command.starts_with("OBJ_") => {
+                // OBJ_DRAPED and OBJ_GRADED place catalogue objects directly; OBJ_DELTA adds a
+                // published elevation offset before the object index.
+                let x = number(&mut fields)?;
+                let y = number(&mut fields)?;
+                number(&mut fields)?;
+                if command == "OBJ_DELTA" {
+                    number(&mut fields)?;
+                }
+                let index = number(&mut fields)?;
+                if !index.is_finite() || index < 0.0 || index > 1024.0 {
+                    return Err("Airport ground polygon object index is invalid".into());
+                }
+                if placed.len() >= 4096 {
+                    return Err("Airport ground polygon placements exceed their budget".into());
+                }
+                placed.push((x, y, index as usize));
+            }
+            Some("TEXTURE_WIDTH") => width = number(&mut fields)?,
+            Some("TEXTURE_HEIGHT") => height = number(&mut fields)?,
+            Some("TEXTURE_SCALE") => {
+                scale[0] = number(&mut fields)?;
+                scale[1] = number(&mut fields)?;
+            }
+            Some("TILE") => {
+                let mut values = [0.0_f64; 4];
+                for value in &mut values {
+                    *value = number(&mut fields)?;
+                }
+                tile = Some(values);
+            }
+            Some("ANCHOR_PT") => {
+                let x = number(&mut fields)?;
+                let y = number(&mut fields)?;
+                anchor = Some([x, y]);
+            }
+            _ => {}
+        }
+    }
+    let tile = tile.ok_or("Airport ground polygon has no placed tile")?;
+    // The shipped definitions sometimes publish only one texture dimension. The texture scale
+    // gives the aspect ratio, so the missing side follows from the published one.
+    if width == 0.0 && height > 0.0 && scale[0] > 0.0 && scale[1] > 0.0 {
+        width = height * scale[0] / scale[1];
+    }
+    if height == 0.0 && width > 0.0 && scale[0] > 0.0 && scale[1] > 0.0 {
+        height = width * scale[1] / scale[0];
+    }
+    if !width.is_finite()
+        || !height.is_finite()
+        || !(0.0..=10_000.0).contains(&width)
+        || !(0.0..=10_000.0).contains(&height)
+        || width <= 0.0
+        || height <= 0.0
+        || !scale.iter().all(|value| value.is_finite() && *value > 0.0)
+    {
+        return Err("Airport ground polygon has no usable extent".into());
+    }
+    let pixels = [width / scale[0], height / scale[1]];
+    if pixels
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0 || *value > 100.0)
+    {
+        return Err("Airport ground polygon has an invalid texture scale".into());
+    }
+    let tile_extent = [
+        (tile[2] - tile[0]).abs() / 2.0,
+        (tile[3] - tile[1]).abs() / 2.0,
+    ];
+    let (anchor, anchored) = match anchor {
+        Some(anchor) => (anchor, true),
+        None => (
+            [(tile[0] + tile[2]) / 2.0, (tile[1] + tile[3]) / 2.0],
+            false,
+        ),
+    };
+    if placed.is_empty() && vegetation.is_empty() {
+        return Err("Airport ground polygon places nothing".into());
+    }
+    let parent = path
+        .parent()
+        .ok_or("Airport ground polygon has no package directory")?;
+    let mut top = 0.0_f64;
+    let mut low = 0.0_f64;
+    let mut reach = 0.0_f64;
+    let mut extent = if anchored {
+        [0.0_f64; 2]
+    } else {
+        tile_extent
+    };
+    for (x, y, index) in placed {
+        let name = objects
+            .get(index)
+            .ok_or("Airport ground polygon references a missing object")?;
+        extent[0] = extent[0].max((x - anchor[0]).abs() * pixels[0]);
+        extent[1] = extent[1].max((y - anchor[1]).abs() * pixels[1]);
+        for bound in agp_object_geometry(pack, library, parent, name)? {
+            top = top.max(bound.high[1]);
+            low = low.min(bound.low[1]);
+            reach = reach.max(horizontal_reach(&bound));
+        }
+    }
+    if !vegetation.is_empty() {
+        // Vegetation is scattered across the placed tile, so the whole tile is covered.
+        extent[0] = extent[0].max(tile_extent[0]);
+        extent[1] = extent[1].max(tile_extent[1]);
+        for name in &vegetation {
+            let height = library
+                .and_then(|library| library.forest_height(pack, name).ok())
+                .ok_or("Airport ground polygon vegetation is unresolvable")?;
+            top = top.max(height);
+        }
+    }
+    Ok(vec![object::Bounds {
+        low: [-(extent[0] + reach), low, -(extent[1] + reach)],
+        high: [extent[0] + reach, top, extent[1] + reach],
+    }])
+}
+
+fn geometry_reach(geometry: &[object::Bounds]) -> f64 {
+    geometry
+        .iter()
+        .map(horizontal_reach)
+        .fold(0.0_f64, f64::max)
+}
+
+fn horizontal_reach(bound: &object::Bounds) -> f64 {
+    bound
+        .low
+        .iter()
+        .zip(bound.high)
+        .enumerate()
+        .filter(|(axis, _)| *axis != 1)
+        .map(|(_, (low, high))| low.abs().max(high.abs()))
+        .fold(0.0_f64, f64::max)
+}
+
+/// Resolve one object named by an `.agp` or string catalogue.
+fn agp_object_geometry(
+    pack: &Path,
+    library: Option<&library::Library>,
+    parent: &Path,
+    name: &str,
+) -> Result<Vec<object::Bounds>, String> {
+    let resources = if name.to_ascii_lowercase().starts_with("lib/") {
+        let relative = library::relative(name).map_err(|error| format!("{name}: {error}"))?;
+        library.map_or_else(
+            || Ok(vec![pack.join(relative)]),
+            |library| library.resources(pack, name),
+        )?
+    } else {
+        // A catalogue entry without a library path names a file beside the definition.
+        vec![library::nested(parent, name).map_err(|error| format!("{name}: {error}"))?]
+    };
+    let mut geometry = Vec::new();
+    for resource in resources {
+        geometry.extend(object::load(&resource).map_err(|error| format!("{name}: {error}"))?);
+    }
+    Ok(geometry)
+}
+
 pub(super) struct Tile {
     pub bounds: [f64; 4],
     pub overlay: bool,
@@ -580,6 +1430,11 @@ pub(super) struct Tile {
     obstacles: Vec<Obstacle>,
     draped_resources: BTreeSet<Arc<str>>,
     polygons: Vec<DrapedPolygon>,
+    facades: Vec<dsf::Facade>,
+    strings: Vec<dsf::StringPolygon>,
+    /// Vector network chains as latitude, longitude and published height above the draped
+    /// terrain, pending the terrain comparison that decides which sections are bridges.
+    networks: Vec<Vec<[f64; 3]>>,
     polygon_exclusions: Vec<[f64; 4]>,
     triangles: Vec<[Vertex; 3]>,
     bins: Vec<Vec<u32>>,
@@ -627,28 +1482,156 @@ impl Tile {
                     obstacle.geometry.capacity() * std::mem::size_of::<object::Bounds>()
                 })
                 .sum::<usize>()
+            + self
+                .obstacles
+                .iter()
+                .filter_map(|obstacle| obstacle.footprint.as_ref())
+                .map(|footprint| {
+                    footprint.rings.capacity() * std::mem::size_of::<Vec<[f64; 2]>>()
+                        + footprint
+                            .rings
+                            .iter()
+                            .map(|ring| ring.capacity() * std::mem::size_of::<[f64; 2]>())
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
     }
     fn mesh_height(&self, coordinate: [f64; 2]) -> Option<f64> {
-        let point = Waypoint {
-            latitude: coordinate[0],
-            longitude: coordinate[1],
-            altitude_feet: 0.0,
-        };
-        let cell = self.cell([coordinate[1], coordinate[0]]);
-        self.bins[cell[1] * GRID + cell[0]]
-            .iter()
-            .filter_map(|index| {
-                let triangle = &self.triangles[*index as usize];
-                let weights = barycentric(triangle, point)?;
-                (weights.iter().all(|weight| *weight >= -1e-9)).then(|| {
-                    triangle
-                        .iter()
-                        .map(|vertex| vertex.meters)
-                        .fold(f64::NEG_INFINITY, f64::max)
-                })
-            })
-            .reduce(f64::max)
+        mesh_height(self.bounds, &self.triangles, &self.bins, coordinate)
     }
+    /// Compare this tile's network chains against the physical mesh of the stack it belongs to.
+    ///
+    /// Airport overlay tiles publish roads but no mesh, so resolving them in isolation would
+    /// leave every overlay network unresolved. The mesh of the base layer covers the same tile
+    /// bounds and is what the road is actually draped over.
+    fn resolve_networks(
+        &mut self,
+        bounds: [f64; 4],
+        triangles: &[[Vertex; 3]],
+        bins: &[Vec<u32>],
+    ) {
+        let mut bridges = Vec::new();
+        let mut unknown = false;
+        for chain in std::mem::take(&mut self.networks) {
+            match bridge_obstacles(bounds, triangles, bins, &chain) {
+                Ok(mut found) => bridges.append(&mut found),
+                Err(_) => {
+                    unknown = true;
+                }
+            }
+        }
+        self.obstacles.append(&mut bridges);
+        self.unresolved_obstacles |= unknown;
+    }
+    fn resolve_strings(
+        &mut self,
+        bounds: [f64; 4],
+        triangles: &[[Vertex; 3]],
+        bins: &[Vec<u32>],
+    ) {
+        let mut created = Vec::new();
+        let mut unknown = false;
+        for string in std::mem::take(&mut self.strings) {
+            for ring in &string.rings {
+                if ring.is_empty() {
+                    continue;
+                }
+                for index in 0..ring.len() {
+                    let a = ring[index];
+                    let b = ring[(index + 1) % ring.len()];
+                    // A string can span kilometres. Each segment is cut into short pieces so its
+                    // box follows the published line instead of covering the whole diagonal.
+                    let scale = 111_320.0 * a[0].to_radians().cos();
+                    let full_east = (b[1] - a[1]) * scale;
+                    let full_north = (b[0] - a[0]) * 111_320.0;
+                    let pieces =
+                        ((full_east.hypot(full_north) / 1000.0).ceil() as usize).max(1);
+                    for piece in 0..pieces {
+                        let start = piece as f64 / pieces as f64;
+                        let end = (piece + 1) as f64 / pieces as f64;
+                        let from = [
+                            a[0] + (b[0] - a[0]) * start,
+                            a[1] + (b[1] - a[1]) * start,
+                        ];
+                        let to = [
+                            a[0] + (b[0] - a[0]) * end,
+                            a[1] + (b[1] - a[1]) * end,
+                        ];
+                        // A long facade ring can continue past the tile that stores it. The box
+                        // keeps its published position, but its anchor and ground are taken at
+                        // the nearest point inside the owning tile so the wall is not dropped;
+                        // the neighbouring tile carries the same definition for its own area.
+                        let anchor = [
+                            from[0].clamp(bounds[2] + 1e-6, bounds[3] - 1e-6),
+                            from[1].clamp(bounds[0] + 1e-6, bounds[1] - 1e-6),
+                        ];
+                        let sample = |point: [f64; 2]| {
+                            mesh_height(
+                                bounds,
+                                triangles,
+                                bins,
+                                [
+                                    point[0].clamp(bounds[2] + 1e-6, bounds[3] - 1e-6),
+                                    point[1].clamp(bounds[0] + 1e-6, bounds[1] - 1e-6),
+                                ],
+                            )
+                        };
+                        let Some(ground_a) = sample(anchor) else {
+                            unknown = true;
+                            continue;
+                        };
+                        let Some(ground_b) = sample(to) else {
+                            unknown = true;
+                            continue;
+                        };
+                        // A string repeats its catalogue along the segment. The checked box is
+                        // the piece widened by the widest placed object and carried up from its
+                        // own ground, so a long string does not borrow a hilltop height
+                        // elsewhere. The box is expressed relative to the clamped anchor.
+                        let shift = [
+                            (from[1] - anchor[1]) * scale,
+                            (from[0] - anchor[0]) * 111_320.0,
+                        ];
+                        let east = (to[1] - from[1]) * scale + shift[0];
+                        let north = (to[0] - from[0]) * 111_320.0 + shift[1];
+                        let reach = string.reach_meters;
+                        let low = [
+                            east.min(shift[0]) - reach,
+                            0.0,
+                            (-north).min(-shift[1]) - reach,
+                        ];
+                        let high = [
+                            east.max(shift[0]) + reach,
+                            (ground_a.max(ground_b) - ground_a) + string.height_meters,
+                            (-north).max(-shift[1]) + reach,
+                        ];
+                        if high[1] <= low[1] {
+                            continue;
+                        }
+                        created.push(Obstacle {
+                            placement: Placement {
+                                resource: string.resource.clone(),
+                                coordinate: anchor,
+                                heading: 0.0,
+                                height: None,
+                            },
+                            geometry: Arc::new(vec![object::Bounds { low, high }]),
+                            footprint: None,
+                            agl: false,
+                            radius: low[0]
+                                .abs()
+                                .max(high[0].abs())
+                                .max(low[2].abs())
+                                .max(high[2].abs()),
+                        });
+                    }
+                }
+            }
+        }
+        self.obstacles.append(&mut created);
+        self.unresolved_obstacles |= unknown;
+    }
+
     #[cfg(test)]
     pub fn load(path: &Path) -> Result<Self, String> {
         Self::load_with(path, None)
@@ -662,6 +1645,100 @@ impl Tile {
             .ok_or("Scenery tile has no package root")?;
         let mut loaded = BTreeMap::new();
         let mut geometry_bytes = 0;
+        // A tile can reference the same forest hundreds of times, so each definition is read
+        // once and its height reused.
+        let mut forest_heights: BTreeMap<Arc<str>, Option<f64>> = BTreeMap::new();
+        let mut retained_strings: Vec<dsf::StringPolygon> = Vec::new();
+        let mut facade_solid: BTreeMap<Arc<str>, Option<bool>> = BTreeMap::new();
+        for mut placed in std::mem::take(&mut tile.facades) {
+            if placed.forest {
+                // A forest's height is published by its tree definitions, so it is resolved
+                // through the same library stack. Without it the polygon stays unresolved.
+                let height = *forest_heights.entry(placed.resource.clone()).or_insert_with(|| {
+                    library
+                        .and_then(|library| library.forest_height(pack, &placed.resource).ok())
+                });
+                match height {
+                    Some(height) => placed.height_meters = height,
+                    None => {
+                        tile.unresolved_obstacles = true;
+                        continue;
+                    }
+                }
+            }
+            if !placed.forest {
+                // A definition with no roof is a fence or an open structure. Its obstacle is the
+                // wall along each ring, not the area the ring encloses, so it is resolved against
+                // the mesh in the same way as an object string.
+                let solid = library.is_none_or(|library| {
+                    if let Some(solid) = facade_solid.get(&placed.resource) {
+                        return solid.unwrap_or(true);
+                    }
+                    let solid = match library.facade_solid(pack, &placed.resource) {
+                        Ok(solid) => Some(solid),
+                        Err(_) => {
+                            tile.unresolved_obstacles = true;
+                            None
+                        }
+                    };
+                    facade_solid.insert(placed.resource.clone(), solid);
+                    solid.unwrap_or(true)
+                });
+                if !solid {
+                    if !placed.height_meters.is_finite()
+                        || !(0.0..=1000.0).contains(&placed.height_meters)
+                    {
+                        tile.unresolved_obstacles = true;
+                        continue;
+                    }
+                    retained_strings.push(dsf::StringPolygon {
+                        resource: placed.resource,
+                        rings: placed.rings,
+                        autogen: false,
+                        height_meters: placed.height_meters,
+                        reach_meters: 0.0,
+                    });
+                    continue;
+                }
+            }
+            match facade_obstacle_in(placed, Some(tile.bounds)) {
+                Ok(obstacle) => tile.obstacles.push(obstacle),
+                Err(_) => {
+                    tile.unresolved_obstacles = true;
+                }
+            }
+        }
+        let mut string_heights: BTreeMap<Arc<str>, Option<(f64, f64)>> = BTreeMap::new();
+        let mut string_objects: BTreeMap<String, Option<(f64, f64)>> = BTreeMap::new();
+        for mut string in std::mem::take(&mut tile.strings) {
+            let height = if let Some(height) = string_heights.get(&string.resource) {
+                *height
+            } else {
+                let height = library.and_then(|library| {
+                    library
+                        .string_height(
+                            pack,
+                            &string.resource,
+                            string.autogen,
+                            &mut string_objects,
+                        )
+                        .ok()
+                });
+                string_heights.insert(string.resource.clone(), height);
+                height
+            };
+            match height {
+                Some((height, reach)) => {
+                    string.height_meters = height;
+                    string.reach_meters = reach;
+                    retained_strings.push(string);
+                }
+                None => {
+                    tile.unresolved_obstacles = true;
+                }
+            }
+        }
+        tile.strings = retained_strings;
         for resource in &tile.draped_resources {
             if !library.is_some_and(|library| library.ground_only(pack, resource).unwrap_or(false))
             {
@@ -670,7 +1747,7 @@ impl Tile {
         }
         for placement in &tile.objects {
             if !loaded.contains_key(&placement.resource) {
-                if loaded.len() >= 256 {
+                if loaded.len() >= 4096 {
                     tile.unresolved_obstacles = true;
                     continue;
                 }
@@ -687,9 +1764,16 @@ impl Tile {
                     );
                     resources
                         .and_then(|resources| {
+                            let ground_polygon = Path::new(placement.resource.as_ref())
+                                .extension()
+                                .is_some_and(|extension| extension.eq_ignore_ascii_case("agp"));
                             let mut geometry = Vec::new();
                             for resource in resources {
-                                let part = object::load(&resource)?;
+                                let part = if ground_polygon {
+                                    agp_geometry(pack, library, &resource)?
+                                } else {
+                                    object::load(&resource)?
+                                };
                                 if (geometry.len() + part.len())
                                     * std::mem::size_of::<object::Bounds>()
                                     > 32 * 1024 * 1024
@@ -717,10 +1801,20 @@ impl Tile {
                 Some(Ok(geometry)) => tile.obstacles.push(Obstacle {
                     placement: placement.clone(),
                     geometry: geometry.clone(),
+                    footprint: None,
+                    agl: false,
+                    radius: geometry_reach(geometry),
                 }),
-                _ => tile.unresolved_obstacles = true,
+                Some(Err(_)) => {
+                    tile.unresolved_obstacles = true;
+                }
+                _ => {
+                    tile.unresolved_obstacles = true;
+                }
             }
         }
+        // Network chains are resolved against the mesh stack once the tile is placed in it: an
+        // airport overlay publishes roads without any physical mesh of its own.
         Ok(tile)
     }
 
@@ -863,6 +1957,45 @@ impl Tile {
     }
 }
 
+fn cell(bounds: [f64; 4], coordinate: [f64; 2]) -> [usize; 2] {
+    let bin = |value: f64, low: f64, high: f64| {
+        ((value - low) / (high - low) * GRID as f64)
+            .floor()
+            .clamp(0.0, (GRID - 1) as f64) as usize
+    };
+    [
+        bin(coordinate[0], bounds[0], bounds[1]),
+        bin(coordinate[1], bounds[2], bounds[3]),
+    ]
+}
+
+fn mesh_height(
+    bounds: [f64; 4],
+    triangles: &[[Vertex; 3]],
+    bins: &[Vec<u32>],
+    coordinate: [f64; 2],
+) -> Option<f64> {
+    let point = Waypoint {
+        latitude: coordinate[0],
+        longitude: coordinate[1],
+        altitude_feet: 0.0,
+    };
+    let cell = cell(bounds, [coordinate[1], coordinate[0]]);
+    bins[cell[1] * GRID + cell[0]]
+        .iter()
+        .filter_map(|index| {
+            let triangle = &triangles[*index as usize];
+            let weights = barycentric(triangle, point)?;
+            (weights.iter().all(|weight| *weight >= -1e-9)).then(|| {
+                triangle
+                    .iter()
+                    .map(|vertex| vertex.meters)
+                    .fold(f64::NEG_INFINITY, f64::max)
+            })
+        })
+        .reduce(f64::max)
+}
+
 fn barycentric(triangle: &[Vertex; 3], point: Waypoint) -> Option<[f64; 3]> {
     let [a, b, c] = triangle;
     let determinant = (b.latitude - c.latitude) * (a.longitude - c.longitude)
@@ -956,6 +2089,213 @@ mod tests {
         result.extend(atom(b"CMDS", commands));
         result.extend([0; 16]);
         result
+    }
+
+    /// A flat 100 m mesh tile carrying one vector network chain. Points are latitude, longitude
+    /// and published height above the draped terrain in metres. The elevation plane uses the same
+    /// signed-metre scale the global scenery publishes, where the full 32-bit range maps onto
+    /// -32768..32767 metres.
+    fn network_tile(points: &[[f64; 3]]) -> Vec<u8> {
+        const ELEVATION_SCALE: (f64, f64) = (65535.0, -32768.0);
+        let mut bytes = mesh_tile(0, 0, 100.0, false, false);
+        let mut pool = (points.len() as u32).to_le_bytes().to_vec();
+        pool.push(4);
+        for plane in 0..4 {
+            pool.push(0);
+            for point in points {
+                let value = match plane {
+                    0 => (point[1] / 2.0 * 4294967295.0).round() as u32,
+                    1 => (point[0] / 2.0 * 4294967295.0).round() as u32,
+                    2 => (((point[2] - ELEVATION_SCALE.1) / ELEVATION_SCALE.0).clamp(0.0, 1.0)
+                        * 4294967295.0)
+                        .round() as u32,
+                    _ => 0,
+                };
+                pool.extend(value.to_le_bytes());
+            }
+        }
+        let mut scale = Vec::new();
+        for (factor, offset) in [
+            (2.0f32, 0.0f32),
+            (2.0, 0.0),
+            (ELEVATION_SCALE.0 as f32, ELEVATION_SCALE.1 as f32),
+            (0.0, 0.0),
+        ] {
+            scale.extend(factor.to_le_bytes());
+            scale.extend(offset.to_le_bytes());
+        }
+        let mut geodata = atom(b"PO32", pool);
+        geodata.extend(atom(b"SC32", scale));
+        append(&mut bytes, b"GEOD", geodata);
+        let mut commands = vec![1, 0, 0, 9, points.len() as u8];
+        for index in 0..points.len() {
+            commands.extend((index as u16).to_le_bytes());
+        }
+        append(&mut bytes, b"CMDS", commands);
+        bytes
+    }
+
+    #[test]
+    fn a_network_section_above_the_terrain_becomes_a_bridge_obstacle() {
+        let root = std::env::temp_dir().join(format!(
+            "openatc-network-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let pack = root.join("Global Scenery/X-Plane 12 Global Scenery");
+        let path = pack.join("Earth nav data/+00+000/+00+000.dsf");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // A chain that rises 30 m above the 100 m mesh between two ground points.
+        std::fs::write(
+            &path,
+            network_tile(&[
+                [0.5, 0.1, 0.0],
+                [0.5, 0.3, 30.0],
+                [0.5, 0.5, 30.0],
+                [0.5, 0.7, 0.0],
+            ]),
+        )
+        .unwrap();
+        let mut terrain = Terrain::new(&root).unwrap();
+        let through = |feet| Waypoint {
+            latitude: 0.5,
+            longitude: 0.1,
+            altitude_feet: feet,
+        };
+        assert!(
+            !terrain
+                .obstacles_clear(through(400.0), Waypoint { longitude: 0.7, ..through(400.0) }, 0.0)
+                .unwrap(),
+            "A pass through the elevated section must be refused"
+        );
+        assert!(
+            terrain
+                .obstacles_clear(through(500.0), Waypoint { longitude: 0.7, ..through(500.0) }, 0.0)
+                .unwrap(),
+            "A pass above the elevated section must be cleared"
+        );
+        assert!(
+            !terrain.has_unresolved_obstacles(),
+            "A network on known terrain must not force an unresolved tile"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_network_on_the_terrain_is_not_an_obstacle_and_missing_terrain_refuses() {
+        let root = std::env::temp_dir().join(format!(
+            "openatc-network-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let pack = root.join("Global Scenery/X-Plane 12 Global Scenery");
+        let path = pack.join("Earth nav data/+00+000/+00+000.dsf");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // On the terrain throughout: ground, not a bridge.
+        std::fs::write(
+            &path,
+            network_tile(&[[0.5, 0.1, 0.0], [0.5, 0.5, 0.0], [0.5, 0.7, 0.0]]),
+        )
+        .unwrap();
+        let mut terrain = Terrain::new(&root).unwrap();
+        let from = Waypoint {
+            latitude: 0.5,
+            longitude: 0.1,
+            altitude_feet: 50.0,
+        };
+        let to = Waypoint {
+            longitude: 0.7,
+            ..from
+        };
+        assert!(terrain.obstacles_clear(from, to, 0.0).unwrap());
+        assert!(!terrain.has_unresolved_obstacles());
+        // A point outside the physical mesh leaves the tile unresolved rather than clearing it.
+        std::fs::write(
+            &path,
+            network_tile(&[[0.5, 0.5, 30.0], [0.5, 1.5, 30.0]]),
+        )
+        .unwrap();
+        let mut terrain = Terrain::new(&root).unwrap();
+        assert!(terrain.obstacles_clear(from, to, 0.0).unwrap());
+        assert!(
+            terrain.has_unresolved_obstacles(),
+            "Missing terrain under a network point must keep the tile unresolved"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_object_anchored_in_a_neighbouring_tile_is_checked_across_the_boundary() {
+        // A tower placed just inside +00+000 reaches east across the boundary into +00+001, so a
+        // corridor that stays inside +00+001 still has to see it.
+        let root = std::env::temp_dir().join(format!(
+            "openatc-overhang-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let pack = root.join("Global Scenery/X-Plane 12 Global Scenery");
+        let write = |latitude: i32, longitude: i32, bytes: Vec<u8>| {
+            let path = pack
+                .join("Earth nav data")
+                .join(format!(
+                    "{:+03}{:+04}",
+                    latitude.div_euclid(10) * 10,
+                    longitude.div_euclid(10) * 10
+                ))
+                .join(format!("{latitude:+03}{longitude:+04}.dsf"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        };
+        let mut tower = mesh_tile(0, 0, 100.0, false, false);
+        append(&mut tower, b"DEFN", atom(b"OBJT", b"tower.obj\0".to_vec()));
+        let mut pool = 1u32.to_le_bytes().to_vec();
+        pool.push(3);
+        // Longitude 0.99995, latitude 0.5, heading 0 degrees.
+        for value in [((0.99995_f64 * 65535.0).round() as u16), 32768u16, 0] {
+            pool.push(0);
+            pool.extend(value.to_le_bytes());
+        }
+        let mut scale = Vec::new();
+        for factor in [1.0f32, 1.0, 0.0] {
+            scale.extend(factor.to_le_bytes());
+            scale.extend(0.0f32.to_le_bytes());
+        }
+        let mut geodata = atom(b"POOL", pool);
+        geodata.extend(atom(b"SCAL", scale));
+        append(&mut tower, b"GEOD", geodata);
+        append(&mut tower, b"CMDS", vec![1, 1, 0, 3, 0, 7, 0, 0]);
+        write(0, 0, tower);
+        write(0, 1, mesh_tile(1, 0, 100.0, false, false));
+        std::fs::write(
+            pack.join("tower.obj"),
+            "I\n800\nOBJ\nPOINT_COUNTS 3 0 0 3\nVT -5 0 -2 0 1 0 0 0\nVT 25 12 -2 0 1 0 0 0\nVT 25 0 2 0 1 0 0 0\nIDX 0\nIDX 1\nIDX 2\nTRIS 0 3\n",
+        )
+        .unwrap();
+        let mut terrain = Terrain::new(&root).unwrap();
+        let from = Waypoint {
+            latitude: 0.5,
+            longitude: 1.00005,
+            altitude_feet: 360.0,
+        };
+        let to = Waypoint {
+            longitude: 1.00015,
+            ..from
+        };
+        assert_eq!(terrain.tile(0, 1).unwrap()[0].obstacles.len(), 0);
+        assert!(
+            !terrain.obstacles_clear(from, to, 0.0).unwrap(),
+            "An object overhanging from the neighbouring tile must block the corridor"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -1098,7 +2438,10 @@ mod tests {
         )
         .unwrap();
         let mut excluded = mesh_tile(0, 0, 0.0, true, false);
-        property(&mut excluded, b"sim/exclude_pol\00/0/1/1;0,0,1,0,1,1,0,1\0");
+        property(
+            &mut excluded,
+            b"sim/exclude_pol\x000/0/1/1;0,0,1,0,1,1,0,1\0",
+        );
         std::fs::write(higher.join(relative), excluded).unwrap();
         assert_eq!(
             Terrain::new(&root)
@@ -1323,8 +2666,8 @@ mod tests {
                 .unwrap()
         );
         assert!(
-            terrain.has_unresolved_obstacles(),
-            "Local geometry cannot stand in for full obstacle coverage"
+            !terrain.has_unresolved_obstacles(),
+            "A tile whose object placements all resolve must not be marked unresolved"
         );
         let library_pack = root.join("Custom Scenery/Variants");
         std::fs::create_dir_all(&library_pack).unwrap();
@@ -1372,18 +2715,90 @@ mod tests {
                 )
                 .unwrap()
         );
+        // One unloadable placement is enough to keep a tile unresolved even when its other
+        // placements resolve and produce real obstacles.
+        std::fs::write(
+            pack.join("tower.obj"),
+            "I\n800\nOBJ\nPOINT_COUNTS 3 0 0 3\nVT -2 0 -20 0 1 0 0 0\nVT 2 12 -20 0 1 0 0 0\nVT 0 0 20 0 1 0 0 0\nIDX 0\nIDX 1\nIDX 2\nTRIS 0 3\n",
+        )
+        .unwrap();
+        let mut mixed = bytes.clone();
+        let name = b"missing.obj\0";
+        let at = mixed.windows(4).position(|part| part == b"TJBO").unwrap();
+        let size = u32::from_le_bytes(mixed[at + 4..at + 8].try_into().unwrap()) as usize;
+        mixed.splice(at + size..at + size, name.iter().copied());
+        // The definition table and its enclosing atom both grow by the added name.
+        for key in [b"TJBO", b"NFED"] {
+            let at = mixed.windows(4).position(|part| part == key).unwrap();
+            let size = u32::from_le_bytes(mixed[at + 4..at + 8].try_into().unwrap()) as usize;
+            mixed[at + 4..at + 8]
+                .copy_from_slice(&((size + name.len()) as u32).to_le_bytes());
+        }
+        append(&mut mixed, b"CMDS", vec![3, 1, 7, 0, 0]);
+        std::fs::write(&path, &mixed).unwrap();
+        let partly = Tile::load(&path).unwrap();
+        assert_eq!(partly.obstacles.len(), 1);
+        assert!(
+            partly.unresolved_obstacles,
+            "A tile with an unresolvable placement must stay unresolved"
+        );
         let mut invalid = bytes.clone();
         let command = invalid.len() - 18;
         invalid[command..command + 2].copy_from_slice(&9u16.to_le_bytes());
         assert!(dsf::parse(&invalid).is_err());
+        std::fs::write(&path, &bytes).unwrap();
         std::fs::write(
             pack.join("tower.obj"),
-            "I\n800\nOBJ\nPOINT_COUNTS 0 0 0 0\nANIM_begin\n",
+            "I\n800\nOBJ\nPOINT_COUNTS 3 0 0 3\nVT 0 0 0 0 1 0 0 0\n",
         )
         .unwrap();
         let unresolved = Tile::load(&path).unwrap();
         assert!(unresolved.obstacles.is_empty());
         assert!(unresolved.unresolved_obstacles);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_airport_ground_polygon_covers_its_catalogue_as_one_box() {
+        let root = std::env::temp_dir().join(format!(
+            "openatc-agp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let pack = root.join("Global Scenery/X-Plane 12 Global Scenery");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(pack.join("tower.obj"), "I\n800\nOBJ\nPOINT_COUNTS 3 0 0 3\nVT -2 0 -20 0 1 0 0 0\nVT 2 12 -20 0 1 0 0 0\nVT 0 0 20 0 1 0 0 0\nIDX 0\nIDX 1\nIDX 2\nTRIS 0 3\n").unwrap();
+        std::fs::write(
+            pack.join("cars.agp"),
+            "A\n1000\nAG_POINT\nTEXTURE_WIDTH 20.0\nTEXTURE_HEIGHT 10.0\nTEXTURE_SCALE 128 128\nTILE 0 0 128 128\nOBJECT tower.obj\nOBJ_DRAPED 64 64 90 0 1 1\nANCHOR_PT 64 64\n",
+        )
+        .unwrap();
+        let bounds = agp_geometry(&pack, None, &pack.join("cars.agp")).unwrap();
+        assert_eq!(bounds.len(), 1);
+        assert_eq!(bounds[0].high[1], 12.0);
+        // The tower is 40 m deep, so its own reach sets the box when it sits on the anchor.
+        assert!(bounds[0].low[0] <= -20.0 && bounds[0].high[0] >= 20.0);
+        // A placement away from the anchor adds its texture offset to that reach.
+        std::fs::write(
+            pack.join("cars.agp"),
+            "A\n1000\nAG_POINT\nTEXTURE_WIDTH 20.0\nTEXTURE_HEIGHT 10.0\nTEXTURE_SCALE 128 128\nTILE 0 0 128 128\nOBJECT tower.obj\nOBJ_DRAPED 0 0 90 0 1 1\nANCHOR_PT 64 64\n",
+        )
+        .unwrap();
+        let offset = agp_geometry(&pack, None, &pack.join("cars.agp")).unwrap();
+        assert!(offset[0].high[0] >= 29.0);
+        assert!(offset[0].high[2] >= 24.0);
+        // A catalogue without a placed tile, without extents, or without objects refuses.
+        for broken in [
+            "A\n1000\nAG_POINT\nTEXTURE_WIDTH 20\nTEXTURE_HEIGHT 10\nOBJECT tower.obj\n",
+            "A\n1000\nAG_POINT\nTEXTURE_WIDTH 20\nTEXTURE_HEIGHT 10\nTEXTURE_SCALE 128 128\nTILE 0 0 128 128\n",
+            "A\n800\nOBJ\nPOINT_COUNTS 0 0 0 0\n",
+        ] {
+            std::fs::write(pack.join("cars.agp"), broken).unwrap();
+            assert!(agp_geometry(&pack, None, &pack.join("cars.agp")).is_err());
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1563,6 +2978,197 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn a_facade_becomes_a_checked_obstacle_with_its_published_height() {
+        // A terminal building roughly 100 m by 60 m, 35 m tall, near the reference point.
+        let ring = vec![
+            [0.0, 0.0],
+            [0.0, 0.0009],
+            [0.00054, 0.0009],
+            [0.00054, 0.0],
+        ];
+        let facade = |height| dsf::Facade {
+            resource: Arc::<str>::from("buildings.fac"),
+            rings: vec![ring.clone()],
+            height_meters: height,
+            forest: false,
+        };
+        let obstacle = facade_obstacle(facade(35.0)).expect("a valid facade is an obstacle");
+        // The aircraft may fly over it at 3000 ft but not through it at 50 ft.
+        let through = |feet| {
+            obstacle.clear(
+                Waypoint {
+                    latitude: 0.00027,
+                    longitude: -0.0005,
+                    altitude_feet: feet,
+                },
+                Waypoint {
+                    latitude: 0.00027,
+                    longitude: 0.0014,
+                    altitude_feet: feet,
+                },
+                0.0,
+                0.0,
+            )
+        };
+        assert!(!through(50.0), "a flight straight through the building was cleared");
+        assert!(through(3000.0), "a flight well above the building was refused");
+        // Height is the only thing that changes the answer, so it must come from the parameter.
+        assert!(facade_obstacle(facade(0.0)).is_ok());
+        // Implausible or absent geometry must refuse rather than clear the corridor.
+        assert!(facade_obstacle(facade(-1.0)).is_err());
+        assert!(facade_obstacle(facade(5000.0)).is_err());
+        assert!(facade_obstacle(facade(f64::NAN)).is_err());
+        assert!(facade_obstacle(dsf::Facade {
+            resource: Arc::<str>::from("empty.fac"),
+            rings: Vec::new(),
+            height_meters: 20.0,
+            forest: false,
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn a_forest_checks_its_polygon_rather_than_its_bounding_box() {
+        const LATITUDE: f64 = 43.0;
+        const LONGITUDE: f64 = 7.0;
+        let longitude = |east: f64| LONGITUDE + east / (111_320.0 * LATITUDE.to_radians().cos());
+        let latitude = |north: f64| LATITUDE + north / 111_320.0;
+        let ring = |points: &[(f64, f64)]| {
+            points
+                .iter()
+                .map(|(east, north)| [latitude(*north), longitude(*east)])
+                .collect::<Vec<_>>()
+        };
+        let forest = |rings| dsf::Facade {
+            resource: Arc::<str>::from("lib/vegetation/trees/deciduous/maple_medium.for"),
+            rings,
+            height_meters: 12.0,
+            forest: true,
+        };
+        let waypoint = |east: f64, north: f64, feet: f64| Waypoint {
+            latitude: latitude(north),
+            longitude: longitude(east),
+            altitude_feet: feet,
+        };
+
+        // A C-shaped forest open to the east. Its bounding box covers the whole square, but the
+        // notch between north 300 and 700 is genuinely clear.
+        let concave = ring(&[
+            (0.0, 0.0),
+            (1000.0, 0.0),
+            (1000.0, 300.0),
+            (300.0, 300.0),
+            (300.0, 700.0),
+            (1000.0, 700.0),
+            (1000.0, 1000.0),
+            (0.0, 1000.0),
+        ]);
+        let obstacle = facade_obstacle(forest(vec![concave])).expect("a forest is an obstacle");
+        assert!(
+            obstacle.clear(
+                waypoint(450.0, 500.0, 20.0),
+                waypoint(950.0, 500.0, 20.0),
+                0.0,
+                0.0
+            ),
+            "a corridor through the concavity was refused"
+        );
+        assert!(
+            !obstacle.clear(
+                waypoint(150.0, 100.0, 20.0),
+                waypoint(150.0, 900.0, 20.0),
+                0.0,
+                0.0
+            ),
+            "a corridor through the forest was cleared below the trees"
+        );
+        assert!(
+            obstacle.clear(
+                waypoint(150.0, 100.0, 200.0),
+                waypoint(150.0, 900.0, 200.0),
+                0.0,
+                0.0
+            ),
+            "a corridor well above the trees was refused"
+        );
+
+        // A hole is clear, while the ground around it still obstructs.
+        let outer = ring(&[(0.0, 0.0), (1000.0, 0.0), (1000.0, 1000.0), (0.0, 1000.0)]);
+        let hole = ring(&[
+            (300.0, 300.0),
+            (300.0, 700.0),
+            (700.0, 700.0),
+            (700.0, 300.0),
+        ]);
+        let holed = facade_obstacle(forest(vec![outer.clone(), hole])).expect("a holed forest");
+        assert!(
+            holed.clear(
+                waypoint(350.0, 500.0, 20.0),
+                waypoint(650.0, 500.0, 20.0),
+                0.0,
+                0.0
+            ),
+            "a corridor through a hole was refused"
+        );
+        assert!(
+            !holed.clear(
+                waypoint(100.0, 500.0, 20.0),
+                waypoint(900.0, 500.0, 20.0),
+                0.0,
+                0.0
+            ),
+            "a corridor crossing the forest around a hole was cleared"
+        );
+
+        // A footprint that cannot be nested consistently must refuse.
+        assert!(facade_obstacle(forest(vec![
+            outer.clone(),
+            ring(&[(300.0, 300.0), (700.0, 300.0), (700.0, 700.0), (300.0, 700.0)])
+        ]))
+        .is_err());
+        assert!(facade_obstacle(forest(vec![
+            outer.clone(),
+            ring(&[(1200.0, 1200.0), (1200.0, 1400.0), (1400.0, 1400.0)])
+        ]))
+        .is_err());
+        assert!(facade_obstacle(forest(vec![ring(&[
+            (0.0, 0.0),
+            (100.0, 100.0),
+            (100.0, 0.0),
+            (0.0, 100.0)
+        ])]))
+        .is_err());
+
+        // A single winding is the outer boundary even when shipped data winds it clockwise.
+        let reversed = outer.iter().rev().copied().collect::<Vec<_>>();
+        let clockwise = facade_obstacle(forest(vec![reversed])).expect("a single winding is outer");
+        assert!(!clockwise.clear(
+            waypoint(100.0, 500.0, 20.0),
+            waypoint(900.0, 500.0, 20.0),
+            0.0,
+            0.0
+        ));
+
+        // A winding with no interior encloses nothing, so the placement is kept conservatively
+        // as its bounding box rather than being treated as clear ground.
+        let sliver = facade_obstacle(forest(vec![ring(&[(0.0, 0.0), (1000.0, 0.0)])]))
+            .expect("a line winding keeps its box");
+        assert!(!sliver.clear(
+            waypoint(500.0, -10.0, 20.0),
+            waypoint(500.0, 10.0, 20.0),
+            0.0,
+            0.0
+        ));
+        assert!(sliver.clear(
+            waypoint(500.0, 100.0, 20.0),
+            waypoint(500.0, 900.0, 20.0),
+            0.0,
+            0.0
+        ));
+        assert!(facade_obstacle(forest(vec![ring(&[(0.0, 0.0); 3])])).is_ok());
+    }
+
+    #[test]
     fn mesh_checks_a_ridge_between_endpoints_and_does_not_bridge_unknown_gaps() {
         let vertex = |longitude, latitude, meters| Vertex {
             longitude,
@@ -1577,6 +3183,9 @@ mod tests {
             obstacles: Vec::new(),
             draped_resources: BTreeSet::new(),
             polygons: Vec::new(),
+            facades: Vec::new(),
+            strings: Vec::new(),
+            networks: Vec::new(),
             polygon_exclusions: Vec::new(),
             triangles: vec![
                 [
@@ -1638,7 +3247,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires installed licensed X-Plane scenery"]
-    fn installed_enabled_nice_stack_retains_unknown_obstacles() {
+    fn installed_enabled_nice_stack_resolves_and_refuses_a_low_pass() {
         let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
         let mut terrain = Terrain::new(Path::new(&root)).unwrap();
         let a = Waypoint {
@@ -1651,7 +3260,10 @@ mod tests {
             ..a
         };
         assert!(terrain.terrain_clear(a, b, 1000.0).unwrap());
-        assert!(terrain.has_unresolved_obstacles());
+        assert!(
+            !terrain.has_unresolved_obstacles(),
+            "the enabled Nice stack resolves every obstacle class in this corridor"
+        );
         assert!(
             !terrain
                 .terrain_clear(

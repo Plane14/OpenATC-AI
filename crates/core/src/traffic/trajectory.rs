@@ -635,7 +635,7 @@ fn compile_selected(
             },
             |_, _| true,
         ) }
-        .map_err(|error| format!("Airborne crossing {index}, radius {radius:.0} m, length {length:.0} m, headings {:.1}/{heading:.1}: {error}", from.heading))?;
+        .map_err(|error| format!("Airborne crossing {index}, radius {radius:.0} m, length {length:.0} m, headings {:.1}/{heading:.1}, ground speed {:.1} kt, preferred {:.0} ft within {:.0}..{:.0} ft, turn {:?}: {error}", from.heading, fix.ground_knots, fix.preferred_feet, fix.minimum_feet, fix.maximum_feet, fix.required_turn))?;
         let endpoint = samples.last().ok_or("Airborne connection is empty")?;
         let to = curves::Pose {
             point: endpoint.point,

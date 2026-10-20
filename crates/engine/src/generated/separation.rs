@@ -10,10 +10,10 @@ fn apply(world: &mut World, id: u32, index: usize, clearance: &flight::Clearance
         return false;
     };
     let generation = world.generation();
-    if let Some(end) = clearance.initial_climb {
-        if !world.authorise_airborne_until(generation, id, 2, end) {
-            return false;
-        }
+    if let Some(end) = clearance.initial_climb
+        && !world.authorise_airborne_until(generation, id, 2, end)
+    {
+        return false;
     }
     if let Some(end) = clearance.airborne_through {
         return world.authorise_airborne_until(generation, id, index, end);
@@ -291,10 +291,14 @@ mod tests {
             longitude: east / 60.0,
             altitude_feet: altitude,
         };
-        let mut runtime = Runtime::default();
-        runtime.policy =
-            Some(parse_operations(include_str!("../../../../traffic/operations.toml")).unwrap());
+        let mut runtime = Runtime {
+            policy: Some(
+                parse_operations(include_str!("../../../../traffic/operations.toml")).unwrap(),
+            ),
+            ..Default::default()
+        };
         let clearance = flight::Clearance {
+            amended_route: None,
             transfers: Vec::new(),
             coordinated_recovery: Vec::new(),
             station: Station {
@@ -359,6 +363,7 @@ mod tests {
                     recovery: BTreeMap::from([(0, recovery)]),
                     clearances: BTreeMap::from([(0, clearance.clone())]),
                     vacated_reports: BTreeMap::new(),
+                    amendment: None,
                 }),
             );
         }

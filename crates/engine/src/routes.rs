@@ -2486,7 +2486,12 @@ pub(crate) async fn atc_request(
         }
     }
     if request.intent == "direct" && !state.session.plan.fixes.is_empty() {
-        let next = state.flow.monitor.next_fix.max(1);
+        let next = openatc_core::navigation::route_ahead(
+            &state.session.plan.fixes,
+            state.flow.monitor.next_fix.max(1),
+            &state.session.telemetry,
+        );
+        state.flow.monitor.next_fix = next;
         let target = state
             .session
             .plan
@@ -3039,24 +3044,27 @@ mod chatter_tests {
             .await;
             assert!(response.status().is_success());
         }
-        let inputs = inputs.lock().unwrap();
-        assert_eq!(inputs.len(), 3);
-        assert!(inputs.iter().all(|input| {
-            input.contains("via Tango, Alfa, Alfa one, hold short of runway zero four left.")
-        }));
-        drop(inputs);
+        {
+            let inputs = inputs.lock().unwrap();
+            assert_eq!(inputs.len(), 3);
+            assert!(inputs.iter().all(|input| {
+                input.contains("via Tango, Alfa, Alfa one, hold short of runway zero four left.")
+            }));
+        }
         assert_eq!(shared.read().await.session.transcript[0].text, text);
         server.abort();
     }
 
     #[test]
     fn cockpit_voices_are_clean_while_received_radio_keeps_effects() {
-        let mut settings = Settings::default();
-        settings.radio_effects = true;
-        settings.radio_bandpass = true;
-        settings.radio_hiss = 0.4;
-        settings.radio_crackle = 0.3;
-        settings.radio_static = 0.2;
+        let mut settings = Settings {
+            radio_effects: true,
+            radio_bandpass: true,
+            radio_hiss: 0.4,
+            radio_crackle: 0.3,
+            radio_static: 0.2,
+            ..Default::default()
+        };
         let clean = json!({"hiss":0.0,"crackle":0.0,"static":0.0,"bandpass":false});
         for (speaker, received_radio) in [("pilot", false), ("copilot", false), ("copilot", true)] {
             assert_eq!(speech_effects(&settings, speaker, received_radio), clean);

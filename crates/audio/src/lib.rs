@@ -172,6 +172,9 @@ impl Drop for WarmContext {
 }
 
 /// Audio recording, playback and status for the interface.
+/// Prepared utterance samples by phrase, absent until that phrase has been synthesised.
+type PreparedSamples = Arc<Mutex<std::collections::BTreeMap<String, Option<Arc<Vec<f32>>>>>>;
+
 pub struct Speech {
     context: *mut MaContext,
     capture: Arc<Mutex<Capture>>,
@@ -196,7 +199,7 @@ pub struct Speech {
     preload_retry: Arc<Mutex<std::collections::BTreeMap<String, std::time::Instant>>>,
     warming: Option<std::sync::mpsc::Receiver<WarmContext>>,
     warming_failed_at: Option<std::time::Instant>,
-    prepared: Arc<Mutex<std::collections::BTreeMap<String, Option<Arc<Vec<f32>>>>>>,
+    prepared: PreparedSamples,
 }
 
 impl Default for Speech {

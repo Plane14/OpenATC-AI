@@ -72,6 +72,9 @@ impl Default for Buffer {
 }
 #[derive(Default)]
 pub struct Tcas {
+    /// Slots actually filled with a target this cycle; slots beyond this must not be
+    /// advertised to the simulator, or it receives targets with no identity.
+    used: usize,
     owned: bool,
     attempted: bool,
     original_count: i32,
@@ -113,10 +116,7 @@ impl Tcas {
             }
             self.original_count = active;
             self.owned = true;
-            unsafe {
-                xp::XPLMSetDatai(references.override_tcas as xp::XPLMDataRef, 1);
-                xp::XPLMSetActiveAircraftCount(references.capacity as i32 + 1);
-            }
+            unsafe { xp::XPLMSetDatai(references.override_tcas as xp::XPLMDataRef, 1) };
             self.references = Some(references);
         }
         if frames == self.source {
@@ -211,6 +211,16 @@ impl Tcas {
             }
             slot += 1;
         }
+        self.used = slot;
+        // Only the aircraft actually provided may be advertised. Reserving the whole capacity
+        // leaves empty slots carrying mode S id 0, which the simulator reports as targets with
+        // no identity and then refuses to track.
+        if self.used == 0 {
+            self.release();
+            self.attempted = true;
+            return;
+        }
+        unsafe { xp::XPLMSetActiveAircraftCount(self.used as i32 + 1) };
     }
     /// Refresh cached targets each frame so the SDK does not expire them between samples.
     pub fn refresh(&mut self) {
@@ -225,7 +235,10 @@ impl Tcas {
             return;
         }
         let refs = self.references.as_ref().unwrap();
-        let capacity = refs.capacity as i32;
+        let capacity = self.used.min(refs.capacity) as i32;
+        if capacity == 0 {
+            return;
+        }
         unsafe {
             xp::XPLMSetDatavi(
                 refs.ids as xp::XPLMDataRef,

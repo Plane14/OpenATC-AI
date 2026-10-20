@@ -131,6 +131,8 @@ pub struct EngineState {
     pub speech_source: String,
     /// Config directory holding settings/controllers/session JSON.
     pub config_dir: PathBuf,
+    /// Directory holding the engine executable, used to resolve shipped prompts.
+    pub exe_dir: PathBuf,
     /// Handoff and clearance expectations awaiting pilot compliance.
     pub expectations: Vec<openatc_core::compliance::Expectation>,
     /// Shared HTTP client for AI/STT/TTS upstreams.
@@ -195,15 +197,34 @@ fn mtime(path: &std::path::Path) -> std::time::SystemTime {
 
 /// Settings hot-reload; live radio weather comes exclusively from the plugin.
 async fn weather_loop(shared: Shared) {
-    let mut settings_stamp = {
+    let (mut settings_stamp, mut prompts_stamp) = {
         let state = shared.read().await;
-        mtime(&state.config_dir.join("settings.json"))
+        (
+            mtime(&state.config_dir.join("settings.json")),
+            crate::support::prompt_stamp(&state.config_dir, &state.exe_dir),
+        )
     };
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         reload_settings_if_changed(&shared, &mut settings_stamp).await;
+        reload_prompts_if_changed(&shared, &mut prompts_stamp).await;
         // Weather transmissions use simulator observations only. Internet
         // METAR fetches remain available as explicitly labelled planning data.
+    }
+}
+
+/// Reload an edited prompt catalogue without interrupting an in-flight exchange.
+async fn reload_prompts_if_changed(shared: &Shared, stamp: &mut std::time::SystemTime) {
+    let (config_dir, exe_dir) = {
+        let state = shared.read().await;
+        (state.config_dir.clone(), state.exe_dir.clone())
+    };
+    match crate::support::watch_prompts(&config_dir, &exe_dir, stamp) {
+        Ok(Some(fresh)) => {
+            shared.write().await.prompts = fresh;
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("Role prompt reload rejected: {error}"),
     }
 }
 
@@ -309,7 +330,13 @@ async fn main() {
     {
         controllers = saved;
     }
-    let prompts = support::load_prompts(&config_dir, &exe_dir);
+    let prompts = match support::load_prompts(&config_dir, &exe_dir) {
+        Ok(prompts) => prompts,
+        Err(error) => {
+            eprintln!("Role prompt catalogue rejected: {error}");
+            std::process::exit(1);
+        }
+    };
     let regions_path = support::resolve_regions_file(&config_dir, &exe_dir);
     let regions = if regions_path.is_empty() {
         BTreeMap::new()
@@ -399,6 +426,7 @@ async fn main() {
         speech,
         speech_source,
         config_dir,
+        exe_dir,
         expectations: Vec::new(),
         client: reqwest::Client::new(),
     }));
@@ -518,12 +546,13 @@ fn test_state() -> EngineState {
         vertical_policy: Default::default(),
         mora: Default::default(),
         controllers: Controllers::default(),
-        prompts: support::load_prompts(&config_dir, &config_dir),
+        prompts: support::load_prompts(&config_dir, &config_dir).expect("bundled role prompts"),
         pronunciation: Arc::new(Default::default()),
         regions: BTreeMap::new(),
         regions_path: String::new(),
         speech: Default::default(),
         speech_source: String::new(),
+        exe_dir: config_dir.clone(),
         config_dir,
         expectations: Vec::new(),
         client: reqwest::Client::new(),

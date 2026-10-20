@@ -48,8 +48,33 @@ pub fn leg(fixes: &[RouteFix], next: usize, t: &Telemetry) -> Option<Leg> {
     })
 }
 
-/// Recover missed telemetry sequencing only when established on a later straight STAR leg.
-/// This observes route progress; it does not authorise a shortcut or infer missed crossing levels.
+/// The first leg that is still ahead of the aircraft. A vector or direct-to must
+/// never target a fix the aircraft has already passed, even when it is off course.
+pub fn route_ahead(fixes: &[RouteFix], next: usize, t: &Telemetry) -> usize {
+    let mut next = next.max(1).min(fixes.len().saturating_sub(1).max(1));
+    while next + 1 < fixes.len() {
+        let Some(fix) = fixes.get(next) else {
+            break;
+        };
+        let captured = crate::ops::distance_nm(
+            t.latitude,
+            t.longitude,
+            fix.latitude,
+            fix.longitude,
+        ) < 0.05;
+        let passed = !fix.fly_over
+            && (leg(fixes, next, t).is_some_and(|leg| leg.along >= 1.0)
+                || fix_passed_on_outbound(fixes, next, t));
+        if captured || passed {
+            next += 1;
+        } else {
+            break;
+        }
+    }
+    next.min(fixes.len().saturating_sub(1))
+}
+
+/// Recover missed telemetry sequencing only when established on a later straight STAR leg./// This observes route progress; it does not authorise a shortcut or infer missed crossing levels.
 pub fn established_star_leg(fixes: &[RouteFix], next: usize, t: &Telemetry) -> Option<usize> {
     let source = &fixes.get(next)?.constraint_source;
     if !source.starts_with("STAR ") || !t.position_valid {
@@ -132,7 +157,10 @@ fn procedure_order(
             .map(|approach| vec![approach.transition, approach.landing])
     };
     let Ok(parts) = parts else {
-        return Some(Default::default());
+        // An incomplete assembly must not become an empty order that silently
+        // discards every restriction. The caller falls back to the common,
+        // runway and named-transition records.
+        return None;
     };
     let mut order = std::collections::BTreeMap::new();
     let mut index = 0;
@@ -258,10 +286,74 @@ pub fn load_constraints(plan: &mut FlightPlan, kind: &str, text: &str) {
         }
     }
 }
+/// Record an unpublished transition and use an unambiguous published name or
+/// the common route plus runway transition. The procedure is never dropped.
+fn apply_transition_fallback(
+    plan: &mut FlightPlan,
+    kind: &str,
+    catalogue: &crate::traffic::procedures::Catalogue,
+) {
+    let (name, runway, transition) = if kind == "SID" {
+        (&plan.sid, &plan.runway, plan.sid_transition.clone())
+    } else if kind == "STAR" {
+        (&plan.star, &plan.arrival_runway, plan.star_transition.clone())
+    } else {
+        return;
+    };
+    if name.is_empty()
+        || transition.is_empty()
+        || transition.starts_with("RW")
+        || transition == "ALL"
+    {
+        return;
+    }
+    let published = catalogue.0.keys().any(|key| {
+        key.kind == kind && key.name == *name && key.transition == transition
+    });
+    if published {
+        return;
+    }
+    let replacement = catalogue
+        .0
+        .iter()
+        .find(|(key, legs)| {
+            key.kind == kind
+                && key.name == *name
+                && if kind == "SID" {
+                    legs.last()
+                        .is_some_and(|leg| leg.identifier.eq_ignore_ascii_case(&transition))
+                } else {
+                    legs.first()
+                        .is_some_and(|leg| leg.identifier.eq_ignore_ascii_case(&transition))
+                }
+        })
+        .map(|(key, _)| key.transition.clone());
+    let label = if kind == "SID" { "SID" } else { "STAR" };
+    let note = if let Some(replacement) = replacement {
+        if kind == "SID" {
+            plan.sid_transition.clone_from(&replacement);
+        } else {
+            plan.star_transition.clone_from(&replacement);
+        }
+        format!(
+            "{label} {name}: transition {transition} is not published; using the {replacement} transition."
+        )
+    } else {
+        format!(
+            "{label} {name}: transition {transition} is not published; using the common route and runway {runway} transition."
+        )
+    };
+    if !plan.procedure_notice.is_empty() {
+        plan.procedure_notice.push(' ');
+    }
+    plan.procedure_notice.push_str(&note);
+}
+
 /// Load terminal constraints from the same custom/default navdata priority as X-Plane.
 pub fn enrich(plan: &mut FlightPlan, root: &str) {
     plan.fixes.retain(|fix| !fix.procedure_generated);
     plan.sid_has_vectors = false;
+    plan.procedure_notice.clear();
     for fix in &mut plan.fixes {
         if fix.constraint_source.ends_with("/ installed CIFP") {
             fix.minimum_altitude_feet = None;
@@ -287,6 +379,9 @@ pub fn enrich(plan: &mut FlightPlan, root: &str) {
             format!("{root}/Resources/default data/CIFP/{id}.dat")
         };
         if let Ok(text) = std::fs::read_to_string(path) {
+            if let Ok(catalogue) = crate::traffic::procedures::Catalogue::parse(&text) {
+                apply_transition_fallback(plan, kind, &catalogue);
+            }
             if ["SID", "STAR", "APPCH"].contains(&kind) {
                 let fix_path = [
                     format!("{root}/Custom Data/earth_fix.dat"),
@@ -530,6 +625,45 @@ mod tests {
         assert_eq!(plan.fixes[0].maximum_speed_knots, Some(230.0));
     }
     #[test]
+    fn an_unpublished_star_transition_keeps_the_common_route_restrictions() {
+        let mut plan = FlightPlan {
+            destination: "TEST".into(),
+            star: "TEST1".into(),
+            star_transition: "KERAX".into(),
+            arrival_runway: "35R".into(),
+            fixes: vec![RouteFix {
+                identifier: "INTERNAL".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let row = |sequence, transition, identifier| {
+            let mut fields = vec![""; 28];
+            fields[0] = sequence;
+            fields[2] = "TEST1";
+            fields[3] = transition;
+            fields[4] = identifier;
+            fields[5] = "LI";
+            fields[11] = "TF";
+            fields[22] = "-";
+            fields[23] = "FL120";
+            format!("STAR:{};", fields.join(","))
+        };
+        let text = [
+            row("010", "ENTRY", "ENTRYFX"),
+            row("020", "", "INTERNAL"),
+            row("030", "RW35R", "RUNWAY"),
+        ]
+        .join("\n");
+        load_constraints(&mut plan, "STAR", &text);
+        assert_eq!(
+            plan.fixes[0].maximum_altitude_feet,
+            Some(12000),
+            "The bogus SimBrief transition dropped every STAR restriction"
+        );
+    }
+
+    #[test]
     fn internal_star_fixes_receive_constraints_without_duplicate_insertion() {
         let mut plan = FlightPlan {
             destination: "TEST".into(),
@@ -614,6 +748,54 @@ mod tests {
         enrich(&mut plan, &root);
         assert_eq!(plan.fixes.len(), count);
     }
+    #[test]
+    fn an_unpublished_transition_is_reported_in_the_plan_and_not_dropped() {
+        let root = std::env::temp_dir().join(format!(
+            "openatc-transition-notice-{}",
+            std::process::id()
+        ));
+        let cifp = root.join("Custom Data/CIFP/TEST.dat");
+        std::fs::create_dir_all(cifp.parent().unwrap()).unwrap();
+        let row = |sequence, transition, identifier| {
+            let mut fields = vec![""; 29];
+            fields[0] = sequence;
+            fields[2] = "TEST1";
+            fields[3] = transition;
+            fields[4] = identifier;
+            fields[5] = "LI";
+            fields[11] = "TF";
+            fields[22] = "-";
+            fields[23] = "FL120";
+            format!("SID:{};", fields.join(","))
+        };
+        std::fs::write(
+            &cifp,
+            [
+                row("010", "RW09", "RUNWAY"),
+                row("020", "", "INTERNAL"),
+                row("030", "NORTH", "EXITFX"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let mut plan = FlightPlan {
+            departure: "TEST".into(),
+            sid: "TEST1".into(),
+            sid_transition: "VIPPA".into(),
+            runway: "09".into(),
+            fixes: vec![RouteFix {
+                identifier: "INTERNAL".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        enrich(&mut plan, root.to_str().unwrap());
+        assert!(plan.procedure_notice.contains("VIPPA"), "{}", plan.procedure_notice);
+        assert!(plan.procedure_notice.contains("common route"));
+        assert_eq!(plan.fixes[0].maximum_altitude_feet, Some(12000));
+        std::fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn projection_and_turn_wrap() {
         let fixes = vec![
@@ -955,5 +1137,39 @@ mod mora_tests {
         ] {
             assert_eq!(grid.corridor(from, to), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod route_ahead_tests {
+    use super::*;
+    use crate::state::{RouteFix, Telemetry};
+
+    fn fix(identifier: &str, longitude: f64) -> RouteFix {
+        RouteFix {
+            identifier: identifier.into(),
+            longitude,
+            path_terminator: "TF".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_vector_target_advances_past_a_fix_the_aircraft_has_left_behind() {
+        let fixes = vec![fix("ORIGIN", 0.0), fix("PASSED", 0.2), fix("AHEAD", 0.6)];
+        let t = Telemetry {
+            position_valid: true,
+            latitude: 0.05,
+            longitude: 0.4,
+            heading_degrees: 90.0,
+            ground_track_degrees: Some(90.0),
+            ..Default::default()
+        };
+        assert_eq!(route_ahead(&fixes, 1, &t), 2);
+        let t = Telemetry {
+            longitude: 0.1,
+            ..t
+        };
+        assert_eq!(route_ahead(&fixes, 1, &t), 1);
     }
 }

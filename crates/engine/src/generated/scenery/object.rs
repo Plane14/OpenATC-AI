@@ -8,16 +8,19 @@ pub(super) struct Bounds {
 }
 
 pub(super) fn load(path: &Path) -> Result<Vec<Bounds>, String> {
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     std::fs::File::open(path)
         .map_err(|e| e.to_string())?
         .take(32 * 1024 * 1024 + 1)
-        .read_to_string(&mut text)
+        .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if text.len() > 32 * 1024 * 1024 {
+    if bytes.len() > 32 * 1024 * 1024 {
         return Err("Scenery object exceeds its input budget".into());
     }
-    parse(&text)
+    // Scenery packages are authored on several platforms and some carry non-UTF-8 bytes in
+    // comments or names. Replacement characters cannot move geometry, so the byte stream is
+    // decoded lossily and any real geometry damage still fails the directive parse.
+    parse(&String::from_utf8_lossy(&bytes))
 }
 
 fn parse(text: &str) -> Result<Vec<Bounds>, String> {
@@ -36,11 +39,79 @@ fn parse(text: &str) -> Result<Vec<Bounds>, String> {
     let mut indices = Vec::<usize>::new();
     let mut bounds = Vec::new();
     let mut counts = None;
+    // Terrain alignment rotates an object onto the local ground slope. The published geometry
+    // stays the same, so the horizontal footprint is widened by the object's own height, which
+    // contains a tilt through any angle up to vertical.
+    let mut tilted = false;
+    // Animation can move a part of the object. Rotations are contained by the object's static
+    // extent; translation keys are added on top of that.
+    let mut animated = false;
+    let mut translation = 0.0_f64;
     for line in lines {
         let mut fields = line.split_whitespace();
         let command = fields.next().unwrap();
-        if command.starts_with("ANIM_") || matches!(command, "GLOBAL_tilt" | "SLOPE_LIMIT") {
-            return Err("Scenery object has unresolved animation or terrain alignment".into());
+        if command.starts_with("ANIM_") {
+            animated = true;
+            let values = fields
+                .clone()
+                .filter_map(|value| value.parse::<f64>().ok())
+                .collect::<Vec<_>>();
+            // ANIM_trans publishes start and end offsets; ANIM_trans_key publishes one position
+            // per key. Both are in object metres.
+            let positions = if command == "ANIM_trans" {
+                values.get(..6).map(|values| vec![&values[..3], &values[3..6]])
+            } else if command == "ANIM_trans_key" {
+                values.get(1..4).map(|values| vec![&values[..3]])
+            } else {
+                None
+            };
+            for position in positions.into_iter().flatten() {
+                if position.iter().all(|value| value.is_finite()) {
+                    translation = translation
+                        .max(position.iter().map(|value| value * value).sum::<f64>().sqrt());
+                }
+            }
+            continue;
+        }
+        if matches!(command, "GLOBAL_tilt" | "SLOPE_LIMIT" | "TILTED") {
+            tilted = true;
+            continue;
+        }
+        // Shading, material and export-name directives describe how a surface is drawn, not
+        // where it is. They cannot move geometry, so an obstacle check can safely ignore them
+        // rather than refusing a building that merely mentions a specular finish.
+        if matches!(
+            command,
+            "NORMAL_METALNESS"
+                | "SPECULAR"
+                | "WEATHER_TRANSPARENT"
+                | "SUPER_ROUGHNESS"
+                | "SNOW_ALBEDO_LUMA"
+                | "DITHER_ALPHA"
+                | "NORMAL_TRANSLUCENCY"
+                | "smoke_black"
+                | "smoke_white"
+                | "EXPORT"
+                | "EXPORT_EXCLUDE" 
+                | "EXPORT_EXTEND"
+                | "SHADOW"
+                | "SHADOW_BLUR"
+                | "TWO_SIDED"
+                | "NO_BLEND"
+                | "BLEND_GLASS"
+                | "GLOBAL_specular"
+                | "GLOBAL_no_blend"
+                | "GLOBAL_cockpit_lit"
+                | "GLOBAL_shadow_blend"
+                | "GLOBAL_slope_align"
+                | "GLOBAL_specular_ratio"
+                | "LIGHT_FLASH"
+                | "LIGHT_PARAM"
+                | "LIGHT_SPILL_CUSTOM"
+                | "LIGHT_CUSTOM"
+                | "OBJ_8"
+        ) {
+            continue;
         }
         let mut number = || {
             fields
@@ -136,10 +207,68 @@ fn parse(text: &str) -> Result<Vec<Bounds>, String> {
             _ => return Err(format!("Unresolved OBJ8 directive {command}")),
         }
     }
-    let counts = counts.ok_or("OBJ8 point counts are missing")?;
+    let Some(counts) = counts else {
+        // A definition that carries nothing but its header describes no geometry and therefore
+        // no obstacle. One that declares vertices or primitives without counts is truncated.
+        return if vertices.is_empty()
+            && line_vertices.is_empty()
+            && indices.is_empty()
+            && bounds.is_empty()
+        {
+            Ok(Vec::new())
+        } else {
+            Err("OBJ8 point counts are missing".into())
+        };
+    };
     if vertices.len() != counts[0] || line_vertices.len() != counts[1] || indices.len() != counts[3]
     {
         return Err("OBJ8 tables do not match declared counts".into());
+    }
+    if bounds.is_empty() {
+        return Ok(Vec::new());
+    }
+    if animated {
+        // A rotation about a pivot inside the object cannot take a vertex further than three
+        // times the object's static reach from its origin: the vertex, the pivot and the pivot's
+        // rotated image are each bounded by that reach. Published translations add to the reach.
+        let reach = vertices
+            .iter()
+            .chain(&line_vertices)
+            .map(|point| point.iter().map(|value| value * value).sum::<f64>().sqrt())
+            .fold(0.0_f64, f64::max);
+        let radius = 3.0 * reach + translation;
+        if !radius.is_finite() || radius > 100_000.0 {
+            return Err("OBJ8 animation exceeds its shape budget".into());
+        }
+        return Ok(vec![Bounds {
+            low: [-radius; 3],
+            high: [radius; 3],
+        }]);
+    }
+    if tilted {
+        for bound in &mut bounds {
+            let height = bound.high[1] - bound.low[1];
+            bound.low[0] -= height;
+            bound.high[0] += height;
+            bound.low[2] -= height;
+            bound.high[2] += height;
+        }
+    }
+    // A detailed model can carry hundreds of thousands of primitives. Once a model is that
+    // detailed its individual triangles add nothing to an obstruction check, so it is replaced
+    // by the single box that contains all of them. That keeps the retained geometry bounded
+    // while still reporting an obstruction everywhere the model is drawn.
+    const DETAIL_LIMIT: usize = 4096;
+    if bounds.len() > DETAIL_LIMIT {
+        let mut low = [f64::INFINITY; 3];
+        let mut high = [f64::NEG_INFINITY; 3];
+        for bound in &bounds {
+            for axis in 0..3 {
+                low[axis] = low[axis].min(bound.low[axis]);
+                high[axis] = high[axis].max(bound.high[axis]);
+            }
+        }
+        bounds = vec![Bounds { low, high }];
     }
     Ok(bounds)
 }
@@ -150,19 +279,30 @@ mod tests {
     const OBJECT: &str = "I\n800\nOBJ\nPOINT_COUNTS 4 0 0 3\nVT 0 0 0 0 1 0 0 0\nVT 2 12 0 0 1 0 0 0\nVT 0 0 3 0 1 0 0 0\nVT 900 900 900 0 1 0 0 0\nIDX 0\nIDX 1\nIDX 2\nTRIS 0 3\n";
 
     #[test]
-    fn static_obstacles_use_drawn_primitives_and_reject_unresolved_transforms() {
+    fn static_obstacles_use_drawn_primitives_and_bound_motion_conservatively() {
         let geometry = parse(OBJECT).unwrap();
         assert_eq!(geometry.len(), 1);
         assert_eq!(geometry[0].low, [0.0; 3]);
         assert_eq!(geometry[0].high, [2.0, 12.0, 3.0]);
-        for extra in [
-            "ANIM_rotate 0 1 0 0 90 0 1 sim/test",
-            "GLOBAL_tilt",
-            "SLOPE_LIMIT -1 1 -1 1",
-            "UNRECOGNISED_GEOMETRY",
-        ] {
-            assert!(parse(&format!("{OBJECT}{extra}\n")).is_err());
-        }
+        assert!(parse(&format!("{OBJECT}UNRECOGNISED_GEOMETRY\n")).is_err());
+        // Terrain alignment widens the footprint by the object height so a tilted part stays
+        // inside the checked volume.
+        let tilted = parse(&format!("{OBJECT}TILTED\n")).unwrap();
+        assert_eq!(tilted[0].low, [-12.0, 0.0, -12.0]);
+        assert_eq!(tilted[0].high, [14.0, 12.0, 15.0]);
+        // An animated part is contained by a box around the object's static reach. The fourth
+        // vertex is deliberately far away, so the envelope has to include it.
+        let animated = parse(&format!("{OBJECT}ANIM_rotate 0 1 0 0 90 0 1 sim/test\n")).unwrap();
+        assert_eq!(animated.len(), 1);
+        let reach = 900.0 * 3.0_f64.sqrt();
+        assert!(animated[0].low[0] <= -3.0 * reach);
+        assert!(animated[0].high[0] >= 3.0 * reach);
+        // A published translation adds to that envelope rather than being discarded.
+        let moving = parse(&format!(
+            "{OBJECT}ANIM_trans 0 0 0 5000 0 0 0 0 none\n"
+        ))
+        .unwrap();
+        assert!(moving[0].high[0] >= 5000.0);
         for invalid in [
             OBJECT.replace("IDX 2", "IDX 9"),
             OBJECT.replace("TRIS 0 3", "TRIS 0 6"),
@@ -171,5 +311,26 @@ mod tests {
         ] {
             assert!(parse(&invalid).is_err());
         }
+    }
+
+    #[test]
+    fn an_empty_object_definition_has_no_geometry() {
+        assert!(parse("A\n800\nOBJ\n").unwrap().is_empty());
+        assert!(parse("A\n800\nOBJ\nVT 0 0 0 0 1 0 0 0\n").is_err());
+    }
+
+    #[test]
+    fn a_highly_detailed_model_is_reduced_to_one_containing_box() {
+        let triangles = 4097usize;
+        let mut text = format!("I\n800\nOBJ\nPOINT_COUNTS 2 0 0 {}\n", triangles * 3);
+        text.push_str("VT 0 0 0 0 1 0 0 0\nVT 4 9 1 0 1 0 0 0\n");
+        for index in 0..triangles * 3 {
+            text.push_str(&format!("IDX {}\n", index % 2));
+        }
+        text.push_str(&format!("TRIS 0 {}\n", triangles * 3));
+        let geometry = parse(&text).unwrap();
+        assert_eq!(geometry.len(), 1);
+        assert_eq!(geometry[0].low, [0.0, 0.0, 0.0]);
+        assert_eq!(geometry[0].high, [4.0, 9.0, 1.0]);
     }
 }

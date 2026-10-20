@@ -1152,10 +1152,16 @@ impl TalkHandler {
     }
 }
 
+impl TalkHandler {
+    fn action(&self) -> Option<Action> {
+        action_for(&self.name)
+    }
+}
+
 impl xplane::command::CommandHandler for TalkHandler {
     fn command_begin(&mut self, _x: &mut xplane::XPAPI) -> xplane::command::CommandHandlerResult {
-        match self.name.as_str() {
-            "openatc/toggle_window" => {
+        match self.action() {
+            Some(Action::ToggleWindow) => {
                 if let Ok(mut shared) = self.shared.lock() {
                     let opening = shared
                         .window
@@ -1169,7 +1175,7 @@ impl xplane::command::CommandHandler for TalkHandler {
                     }
                 }
             }
-            "openatc/talk" => {
+            Some(Action::Talk) => {
                 debug_log("OpenATC AI: openatc/talk recording");
                 self.with_interface(|interface| interface.talk_push_to_talk(true, false));
                 if let Ok(shared) = self.shared.lock()
@@ -1178,7 +1184,7 @@ impl xplane::command::CommandHandler for TalkHandler {
                     window.set_visible(true);
                 }
             }
-            "openatc/talk_copilot" => {
+            Some(Action::TalkCopilot) => {
                 debug_log("OpenATC AI: openatc/talk_copilot recording");
                 self.with_interface(|interface| interface.talk_push_to_talk(true, true));
                 if let Ok(shared) = self.shared.lock()
@@ -1187,7 +1193,7 @@ impl xplane::command::CommandHandler for TalkHandler {
                     window.set_visible(true);
                 }
             }
-            "openatc/transmit_com1" | "openatc/transmit_com2" => {
+            Some(Action::Transmit) => {
                 let radio = if self.name == "openatc/transmit_com2" {
                     openatc_core::state::Radio::Com2
                 } else {
@@ -1195,11 +1201,11 @@ impl xplane::command::CommandHandler for TalkHandler {
                 };
                 self.with_interface(|interface| interface.radio_push_to_talk(true, radio));
             }
-            "openatc/mic_push_to_talk" => {
+            Some(Action::MicPushToTalk) => {
                 debug_log("OpenATC AI: openatc/mic_push_to_talk recording");
                 self.with_interface(|interface| interface.mic_push_to_talk(true));
             }
-            "openatc/copy_error" => self.with_interface(|interface| {
+            Some(Action::CopyError) => self.with_interface(|interface| {
                 let notice = interface.last_notice();
                 debug_log(&format!(
                     "OpenATC AI error report: {}",
@@ -1210,7 +1216,9 @@ impl xplane::command::CommandHandler for TalkHandler {
                     }
                 ));
             }),
-            _ => {}
+            // Every registered binding maps to an action; an unknown name cannot reach here
+            // because setup only registers the commands listed in COMMANDS.
+            None => {}
         }
         xplane::command::CommandHandlerResult::AllowXPlaneProcessing
     }
@@ -1263,32 +1271,58 @@ impl xplane::menu::ClickHandler for ToggleItem {
     }
 }
 
+/// What a registered binding does. Both halves of a push-to-talk command share one action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    ToggleWindow,
+    Talk,
+    TalkCopilot,
+    Transmit,
+    MicPushToTalk,
+    CopyError,
+}
+
+fn action_for(name: &str) -> Option<Action> {
+    Some(match name {
+        "openatc/toggle_window" => Action::ToggleWindow,
+        "openatc/talk" => Action::Talk,
+        "openatc/talk_copilot" => Action::TalkCopilot,
+        "openatc/transmit_com1" | "openatc/transmit_com2" => Action::Transmit,
+        "openatc/mic_push_to_talk" => Action::MicPushToTalk,
+        "openatc/copy_error" => Action::CopyError,
+        _ => return None,
+    })
+}
+
+/// Every simulator binding this plugin registers, with its user-facing description.
+const COMMANDS: [(&str, &str); 7] = [
+    ("openatc/toggle_window", "Toggle OpenATC AI window"),
+    (
+        "openatc/transmit_com1",
+        "Transmit COM1 — hold to speak, release to transmit",
+    ),
+    (
+        "openatc/transmit_com2",
+        "Transmit COM2 — hold to speak, release to transmit",
+    ),
+    (
+        "openatc/talk",
+        "Hold to talk on the radio, release to transmit",
+    ),
+    (
+        "openatc/talk_copilot",
+        "Hold to talk to the copilot, release to transmit",
+    ),
+    (
+        "openatc/mic_push_to_talk",
+        "Hold to record microphone, release to transcribe",
+    ),
+    ("openatc/copy_error", "Write the current error to Log.txt"),
+];
+
 /// Register radio, crew and window bindings plus the Plugins menu entry.
 fn setup_commands(plugin: &mut OpenAtc, xpapi: &mut xplane::XPAPI) {
-    for (name, description) in [
-        ("openatc/toggle_window", "Toggle OpenATC AI window"),
-        (
-            "openatc/transmit_com1",
-            "Transmit COM1 — hold to speak, release to transmit",
-        ),
-        (
-            "openatc/transmit_com2",
-            "Transmit COM2 — hold to speak, release to transmit",
-        ),
-        (
-            "openatc/talk",
-            "Hold to talk on the radio, release to transmit",
-        ),
-        (
-            "openatc/talk_copilot",
-            "Hold to talk to the copilot, release to transmit",
-        ),
-        (
-            "openatc/mic_push_to_talk",
-            "Hold to record microphone, release to transcribe",
-        ),
-        ("openatc/copy_error", "Write the current error to Log.txt"),
-    ] {
+    for (name, description) in COMMANDS {
         if let Ok(mut command) = xpapi.command.try_new(name, description) {
             let handler = TalkHandler {
                 shared: plugin.shared.clone(),
@@ -1315,3 +1349,35 @@ fn setup_commands(plugin: &mut OpenAtc, xpapi: &mut xplane::XPAPI) {
 }
 
 xplane_plugin!(OpenAtc);
+
+#[cfg(test)]
+mod binding_tests {
+    use super::{action_for, COMMANDS};
+
+    #[test]
+    fn every_registered_binding_has_a_handler() {
+        // A binding that is registered but not handled would silently do nothing when a user
+        // pressed it, so the two lists must not be able to drift apart.
+        for (name, description) in COMMANDS {
+            assert!(
+                action_for(name).is_some(),
+                "{name} is registered as \"{description}\" but has no handler"
+            );
+            assert!(!name.is_empty() && !description.is_empty());
+        }
+        assert_eq!(COMMANDS.len(), 7, "bindings changed; update the documentation");
+        assert!(action_for("openatc/not_a_binding").is_none());
+    }
+
+    #[test]
+    fn both_radio_transmit_bindings_share_one_action_and_keep_their_own_receiver() {
+        assert_eq!(
+            action_for("openatc/transmit_com1"),
+            action_for("openatc/transmit_com2")
+        );
+        assert_ne!(
+            action_for("openatc/transmit_com1"),
+            action_for("openatc/talk")
+        );
+    }
+}

@@ -29,6 +29,8 @@ impl Surface {
     }
 }
 
+// Each value is an independent planning input; the call sites already name them.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn plan(
     airport: &Airport,
     runway_name: &str,

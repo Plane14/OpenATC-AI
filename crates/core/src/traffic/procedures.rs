@@ -196,18 +196,32 @@ impl Catalogue {
         if let Some((_, legs)) = common.first() {
             result.push(legs.as_slice());
         }
-        if !transition.is_empty() {
-            if transition.starts_with("RW") {
-                return Err("Enroute departure transition cannot be a runway".into());
-            }
-            let selected: Vec<_> = routes
+        if !transition.is_empty() && !transition.starts_with("RW") {
+            let exact: Vec<_> = routes
                 .iter()
                 .filter(|(key, _)| key.transition == transition)
                 .collect();
-            if selected.len() != 1 {
-                return Err("Enroute departure transition is missing or ambiguous".into());
+            let by_terminal_fix: Vec<_> = routes
+                .iter()
+                .filter(|(_, legs)| {
+                    legs.last()
+                        .is_some_and(|leg| leg.identifier.eq_ignore_ascii_case(transition))
+                })
+                .collect();
+            let selected = if exact.len() == 1 {
+                Some(exact[0])
+            } else if exact.is_empty() && by_terminal_fix.len() == 1 {
+                // SimBrief and many charts name a SID by its last fix rather
+                // than the CIFP transition name. Accept that when it is unique.
+                Some(by_terminal_fix[0])
+            } else {
+                None
+            };
+            // A name that is not a published transition still leaves the
+            // common route and runway transition; the procedure is not dropped.
+            if let Some((_, legs)) = selected {
+                result.push(legs.as_slice());
             }
-            result.push(selected[0].1.as_slice());
         }
         if result.iter().any(|legs| legs.is_empty())
             || result.iter().map(|legs| legs.len()).sum::<usize>() > 512
@@ -223,11 +237,7 @@ impl Catalogue {
         runway: &str,
         transition: &str,
     ) -> Result<Vec<&[Leg]>, String> {
-        if name.is_empty()
-            || runway.is_empty()
-            || transition.starts_with("RW")
-            || transition == "ALL"
-        {
+        if name.is_empty() || runway.is_empty() {
             return Err("Arrival needs a procedure, runway and optional enroute transition".into());
         }
         let routes: Vec<_> = self
@@ -266,15 +276,32 @@ impl Catalogue {
             return Err("Arrival common segment is ambiguous".into());
         }
         let mut result = Vec::new();
-        if !transition.is_empty() {
-            let selected: Vec<_> = routes
+        if !transition.is_empty() && !transition.starts_with("RW") && transition != "ALL" {
+            let exact: Vec<_> = routes
                 .iter()
                 .filter(|(key, _)| key.transition == transition)
                 .collect();
-            if selected.len() != 1 {
-                return Err("Enroute arrival transition is missing or ambiguous".into());
+            let by_entry_fix: Vec<_> = routes
+                .iter()
+                .filter(|(_, legs)| {
+                    legs.first()
+                        .is_some_and(|leg| leg.identifier.eq_ignore_ascii_case(transition))
+                })
+                .collect();
+            let selected = if exact.len() == 1 {
+                Some(exact[0])
+            } else if exact.is_empty() && by_entry_fix.len() == 1 {
+                // A STAR is commonly named by its entry fix, which may only
+                // appear inside a differently named CIFP transition.
+                Some(by_entry_fix[0])
+            } else {
+                None
+            };
+            // An unrecognised transition falls back to the common route and
+            // the runway transition; dropping the procedure is not acceptable.
+            if let Some((_, legs)) = selected {
+                result.push(legs.as_slice());
             }
-            result.push(selected[0].1.as_slice());
         }
         if let Some((_, legs)) = common.first() {
             result.push(legs.as_slice());
@@ -497,13 +524,69 @@ mod tests {
         assert_eq!(identifiers("35R"), ["FIRST", "COMMON", "EXACT"]);
         assert_eq!(identifiers("35L"), ["FIRST", "COMMON", "SHARED"]);
         assert!(catalogue.arrival("TEST1", "17L", "ENTRY").is_err());
-        assert!(catalogue.arrival("TEST1", "35R", "UNKNOWN").is_err());
+        let unknown = catalogue.arrival("TEST1", "35R", "UNKNOWN").unwrap();
+        assert_eq!(
+            unknown
+                .iter()
+                .map(|legs| legs[0].identifier.clone())
+                .collect::<Vec<_>>(),
+            ["COMMON", "EXACT"],
+            "An unpublished transition must keep the common and runway route"
+        );
+        let by_entry = catalogue.arrival("TEST1", "35R", "FIRST").unwrap();
+        assert_eq!(
+            by_entry
+                .iter()
+                .map(|legs| legs[0].identifier.clone())
+                .collect::<Vec<_>>(),
+            ["FIRST", "COMMON", "EXACT"],
+            "A STAR named by its entry fix keeps its published transition"
+        );
         let all = Catalogue::parse(&row("STAR", "5", "ALL", "ANY")).unwrap();
         assert_eq!(
             all.arrival("TEST1", "04L", "").unwrap()[0][0].identifier,
             "ANY"
         );
     }
+    #[test]
+    fn an_unpublished_sid_transition_still_keeps_the_runway_and_common_route() {
+        let row = |route, transition, identifier| {
+            let mut fields = vec![""; 38];
+            fields[0] = "010";
+            fields[1] = route;
+            fields[2] = "TEST1";
+            fields[3] = transition;
+            fields[4] = identifier;
+            fields[5] = "LI";
+            fields[6] = "E";
+            fields[11] = "TF";
+            format!("SID:{};", fields.join(","))
+        };
+        let text = [
+            row("2", "RW09", "RUNWAY"),
+            row("3", "", "COMMON"),
+            row("4", "NORTH", "EXITFX"),
+        ]
+        .join("\n");
+        let catalogue = Catalogue::parse(&text).unwrap();
+        let fallback = catalogue.departure("TEST1", "09", "VIPPA").unwrap();
+        assert_eq!(
+            fallback
+                .iter()
+                .map(|legs| legs[0].identifier.clone())
+                .collect::<Vec<_>>(),
+            ["RUNWAY", "COMMON"]
+        );
+        let by_terminal = catalogue.departure("TEST1", "09", "EXITFX").unwrap();
+        assert_eq!(
+            by_terminal
+                .iter()
+                .map(|legs| legs[0].identifier.clone())
+                .collect::<Vec<_>>(),
+            ["RUNWAY", "COMMON", "EXITFX"]
+        );
+    }
+
     #[test]
     fn repeated_missed_fixes_and_timed_holds_keep_their_sequence() {
         let row = |sequence, terminator, description, distance| {

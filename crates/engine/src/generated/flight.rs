@@ -11,6 +11,29 @@ pub(super) struct MissedInstruction {
     pub standard: bool,
 }
 
+/// An explicit controller amendment replacing a published manual termination.
+///
+/// A manual termination publishes no flyable geometry, so the onward lateral path exists only
+/// as an issued instruction with its read-back. The published procedure, its terminator and its
+/// manual transition point are retained here so the amendment can be checked against the source.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RouteAmendment {
+    /// Published procedure whose manual termination is amended.
+    pub procedure: String,
+    /// Published transition of that procedure.
+    pub transition: String,
+    /// Path terminator that ends the published computable geometry.
+    pub terminator: String,
+    /// Published manual transition point closing that geometry.
+    pub manual_fix: String,
+    /// Explicitly amended target fix the controller directs the flight to.
+    pub target: String,
+    /// Approach procedure the amended target belongs to.
+    pub approach: String,
+    /// Coordinate of the amended target, so the flown path can be checked against it.
+    pub target_coordinate: [f64; 2],
+}
+
 #[derive(Clone)]
 pub(super) struct SectorTransfer {
     /// Nominal seconds remaining in this movement when the receiving sector begins.
@@ -37,6 +60,8 @@ pub(super) struct Clearance {
     pub landing_rollout: Option<usize>,
     /// An amended missed level explicitly included in the approach instruction and readback.
     pub missed: Option<MissedInstruction>,
+    /// An explicit lateral amendment included in this clearance's instruction and readback.
+    pub amended_route: Option<RouteAmendment>,
     /// Contingent hold at the end of this clearance's explicitly granted scope.
     pub holding: Option<super::recovery::LimitHold>,
 }
@@ -61,9 +86,7 @@ fn on_station(runtime: &Runtime, id: u32, frequency: Option<i32>, station: &Stat
     frequency == Some(station.khz)
         && runtime.controllers.get(&id).is_none_or(|current| {
             current.khz == station.khz
-                && current.name == station.name
-                && current.airport == station.airport
-                && current.service == station.service
+                && current.name.trim().eq_ignore_ascii_case(station.name.trim())
         })
 }
 
@@ -165,6 +188,8 @@ pub(super) struct Prepared {
     pub clearances: BTreeMap<usize, Clearance>,
     /// Keyed by the first segment after the runway exit/crossing.
     pub vacated_reports: BTreeMap<usize, RunwayReport>,
+    /// Lateral amendment this flight was planned with; its clearance must carry the directive.
+    pub amendment: Option<RouteAmendment>,
 }
 
 impl Prepared {
@@ -242,6 +267,8 @@ impl Prepared {
         }
         let result = Self {
             route,
+            // A resumed suffix inherits the amended target it was already flying to.
+            amendment: self.amendment.clone(),
             airspeeds: self
                 .airspeeds
                 .range(first..)
@@ -329,6 +356,7 @@ impl Prepared {
         }
         let mut stages = Vec::new();
         let mut missed_instruction: Option<&MissedInstruction> = None;
+        let mut amended_route: Option<&RouteAmendment> = None;
         for index in 0..512 {
             let Some(segment) = self.route.segment(index) else {
                 break;
@@ -423,6 +451,34 @@ impl Prepared {
                 }
                 missed_instruction = Some(instruction);
             }
+            // An amended route replaces a published manual termination, so the instruction and
+            // read-back must both name the amended target before that movement can be flown.
+            if let Some(amendment) = self
+                .clearances
+                .get(&index)
+                .and_then(|clearance| clearance.amended_route.as_ref())
+            {
+                let names = |text: &str| {
+                    amendment.target.len() > 16
+                        || !amendment
+                            .target
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                        || !text.contains(&amendment.target)
+                };
+                let clearance = &self.clearances[&index];
+                if segment.stage != Stage::Approach
+                    || amendment.procedure.trim().is_empty()
+                    || amendment.approach.trim().is_empty()
+                    || !openatc_core::traffic::resolved::MANUAL_TERMINATORS
+                        .contains(&amendment.terminator.as_str())
+                    || names(&clearance.instruction)
+                    || names(&clearance.readback)
+                {
+                    return Err("Invalid amended route contract".into());
+                }
+                amended_route = Some(amendment);
+            }
             if let Some(hold) = self.clearances.get(&index).and_then(|c| c.holding.as_ref()) {
                 let clearance = &self.clearances[&index];
                 let expected = if index == 1 && segment.stage == Stage::Takeoff {
@@ -461,6 +517,24 @@ impl Prepared {
             }
             if segment.stage != Stage::Approach {
                 missed_instruction = None;
+                amended_route = None;
+            }
+            if let Some(amendment) = amended_route {
+                // The flown path must actually arrive at the amended target before the
+                // cleared movement; an issued instruction alone grants no lateral deviation.
+                let reached = (0..=index).any(|step| {
+                    self.route.segment(step).is_some_and(|route| {
+                        route.points.iter().any(|point| {
+                            openatc_core::arrival::distance_nm(
+                                [point.latitude, point.longitude],
+                                amendment.target_coordinate,
+                            ) < 0.001
+                        })
+                    })
+                });
+                if !reached {
+                    return Err("Amended route does not reach its cleared target".into());
+                }
             }
             if let Some(instruction) = missed_instruction {
                 if segment
@@ -514,6 +588,34 @@ impl Prepared {
                 return Err("Departure movements reappear after the takeoff segment".into());
             }
         }
+        // A planned amendment only exists as a cleared, read-back lateral change, so the
+        // approach it belongs to cannot be flown without its directive, and no clearance
+        // may announce a different amended target.
+        if self.amendment.is_some() {
+            let approach = |index: usize| {
+                self.route
+                    .segment(index)
+                    .is_some_and(|segment| segment.stage == Stage::Approach)
+            };
+            for clearance in self.clearances.values() {
+                if clearance.amended_route.as_ref().is_some_and(|directive| {
+                    directive != self.amendment.as_ref().expect("checked above")
+                }) {
+                    return Err(
+                        "Approach clearance announces a different amended target".into(),
+                    );
+                }
+            }
+            if !self
+                .clearances
+                .iter()
+                .any(|(index, clearance)| approach(*index) && clearance.amended_route.is_some())
+            {
+                return Err(
+                    "Amended approach clearance does not carry its planned directive".into(),
+                );
+            }
+        }
         for (&start, clearance) in &self.clearances {
             let Some(end) = clearance.taxi_through else {
                 continue;
@@ -521,12 +623,12 @@ impl Prepared {
             if end <= start || end >= stages.len() || stages[start] != Stage::TaxiIn {
                 return Err("Taxi clearance has an invalid movement limit".into());
             }
-            for index in start + 1..=end {
+            for (index, stage) in stages.iter().enumerate().take(end + 1).skip(start + 1) {
                 let next = self
                     .clearances
                     .get(&index)
                     .ok_or("Taxi clearance has a missing movement")?;
-                if stages[index] != Stage::TaxiIn
+                if *stage != Stage::TaxiIn
                     || self.vacated_reports.contains_key(&index)
                     || next.taxi_through.is_some()
                     || next.station.airport != clearance.station.airport
@@ -642,12 +744,12 @@ impl Prepared {
             {
                 return Err("Landing clearance has an invalid final or rollout limit".into());
             }
-            for index in start + 1..=end {
+            for (index, stage) in stages.iter().enumerate().take(end + 1).skip(start + 1) {
                 let next = self
                     .clearances
                     .get(&index)
                     .ok_or("Landing clearance lacks its rollout contract")?;
-                if stages[index] != Stage::Rollout
+                if *stage != Stage::Rollout
                     || next.landing_rollout.is_some()
                     || next.initial_climb.is_some()
                     || next.taxi_through.is_some()
@@ -1159,7 +1261,7 @@ pub(super) fn revoke_landing(runtime: &mut Runtime, id: u32, start: usize) {
         .withdraw_continuation(generation, id, start + 1);
 }
 
-fn validate_reports(runtime: &Runtime, prepared: &Prepared) -> Result<(), String> {
+pub(super) fn validate_reports(runtime: &Runtime, prepared: &Prepared) -> Result<(), String> {
     for (index, report) in &prepared.vacated_reports {
         let airport = runtime
             .surface_airport(&report.airport)
@@ -1189,14 +1291,12 @@ fn validate_reports(runtime: &Runtime, prepared: &Prepared) -> Result<(), String
 pub(super) fn install(runtime: &mut Runtime, id: u32, prepared: &Prepared) -> Result<(), String> {
     prepared.validate()?;
     validate_reports(runtime, prepared)?;
-    let Some(pose) = runtime
+    let pose = runtime
         .world
         .snapshot()
         .into_iter()
         .find(|pose| pose.id == id)
-    else {
-        return Err("Generated aircraft no longer exists".into());
-    };
+        .ok_or("Generated aircraft no longer exists")?;
     if pose.stage != Stage::TaxiOut || !pose.complete || !runtime.tower_ready.contains(&id) {
         return Err("Generated aircraft has not completed taxi and Tower check-in".into());
     }
@@ -1248,12 +1348,9 @@ pub(super) fn install(runtime: &mut Runtime, id: u32, prepared: &Prepared) -> Re
 }
 
 pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
-    if state.session.telemetry.traffic.is_none() {
-        return None;
-    }
     let blocked = super::external_surface_cells(&state.generated, &state.session.telemetry);
     let profiles = state.traffic_profiles.current();
-    let targets = super::observed_targets(&state.generated, &state.session.telemetry);
+    let targets = super::external_targets(&state.generated, &state.session.telemetry);
     let mut poses = state.generated.world.snapshot();
     poses.sort_by(|left, right| {
         let deadline = |pose: &openatc_core::traffic::motion::Pose| {
@@ -2034,6 +2131,7 @@ mod tests {
                     clearances.insert(
                         index,
                         Clearance {
+                            amended_route: None,
                             station,
                             transfers: Vec::new(),
                             coordinated_recovery: Vec::new(),
@@ -2099,6 +2197,7 @@ mod tests {
             })
             .collect();
         let prepared = Prepared {
+            amendment: None,
             airspeeds: BTreeMap::new(),
             route: Arc::new(Route::compile(segments, 4000.0, 4000.0).unwrap()),
             recovery,
@@ -2111,10 +2210,13 @@ mod tests {
                 },
             )]),
         };
-        let mut runtime = Runtime::default();
-        runtime.epoch = Some(state.session_generation);
-        runtime.policy =
-            Some(parse_operations(include_str!("../../../../traffic/operations.toml")).unwrap());
+        let mut runtime = Runtime {
+            epoch: Some(state.session_generation),
+            policy: Some(
+                parse_operations(include_str!("../../../../traffic/operations.toml")).unwrap(),
+            ),
+            ..Default::default()
+        };
         runtime.airport = Some(Arc::new(Airport {
             icao: "TEST".into(),
             runways: vec![openatc_core::airport::Runway {
@@ -2230,6 +2332,88 @@ mod tests {
         assert!(saw_airborne);
         assert_eq!(state.generated.world.snapshot()[0].stage, Stage::Turnaround);
         assert!(state.generated.world.snapshot()[0].complete);
+    }
+
+    #[test]
+    fn a_queued_generated_follower_never_withholds_the_departure_ahead() {
+        let (mut state, prepared) = fixture();
+        state.session.telemetry.traffic = Some(Vec::new());
+        let model = state.generated.frames[0].model.clone();
+        state.generated.frames.push(GeneratedTraffic {
+            target: TrafficTarget {
+                id: 2,
+                callsign: "FOLLOW123".into(),
+                aircraft: String::new(),
+                latitude: 30.0 / 111_320.0,
+                longitude: -100.0 / 111_320.0,
+                altitude_feet: 0.0,
+                track_degrees: 90.0,
+                on_ground: true,
+                ground_speed_knots: Some(0.0),
+                wingspan_meters: Some(30.0),
+                ..Default::default()
+            },
+            vertical_speed_fpm: 0.0,
+            body_heading_degrees: Some(90.0),
+            model,
+            animation: Animation::default(),
+        });
+        install(&mut state.generated, 1, &prepared).unwrap();
+        let all = super::super::observed_targets(&state.generated, &state.session.telemetry);
+        let external =
+            super::super::external_targets(&state.generated, &state.session.telemetry);
+        assert!(
+            state.generated.crossing_blocked(1, 1, &all),
+            "fixture must put the follower inside the runway protection envelope"
+        );
+        assert!(!state.generated.crossing_blocked(1, 1, &external));
+        let mut airborne = false;
+        for second in 31..900 {
+            if let Some(exchange) = &mut state.generated.exchange {
+                exchange.due = Instant::now();
+            }
+            super::super::radio_tick(&mut state);
+            state.session.telemetry.simulation_seconds = Some(f64::from(second));
+            super::super::advance(&mut state.generated, &state.session.telemetry);
+            let pose = &state.generated.world.snapshot()[0];
+            airborne |= pose.stage == Stage::Climb && !pose.awaiting_clearance;
+            if airborne {
+                break;
+            }
+        }
+        assert!(
+            airborne,
+            "departure was withheld by the queued generated aircraft: poses={:?}, holds={:?}",
+            state.generated.world.snapshot(),
+            state.generated.reported_holds
+        );
+        assert!(!state.generated.cancelled_takeoffs.contains_key(&1));
+    }
+
+    #[test]
+    fn surface_movement_is_not_gated_on_the_tcas_feed() {
+        let (mut state, prepared) = fixture();
+        state.session.telemetry.traffic = None;
+        install(&mut state.generated, 1, &prepared).unwrap();
+        let mut moved = false;
+        for second in 31..300 {
+            if let Some(exchange) = &mut state.generated.exchange {
+                exchange.due = Instant::now();
+            }
+            super::super::radio_tick(&mut state);
+            state.session.telemetry.simulation_seconds = Some(f64::from(second));
+            super::super::advance(&mut state.generated, &state.session.telemetry);
+            let pose = &state.generated.world.snapshot()[0];
+            moved |= pose.stage == Stage::Takeoff;
+            if moved {
+                break;
+            }
+        }
+        assert!(
+            moved,
+            "the aircraft never left the line-up without a TCAS feed: {:?}",
+            state.generated.world.snapshot()
+        );
     }
 
     #[test]
@@ -2479,6 +2663,7 @@ mod tests {
                 }
             }
             let prepared = Prepared {
+                amendment: None,
                 airspeeds: old
                     .airspeeds
                     .iter()

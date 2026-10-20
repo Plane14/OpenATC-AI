@@ -32,22 +32,22 @@ impl SocialMemory {
                 continue;
             }
             let mut evidence = quote.to_owned();
-            if quote.chars().count() < 40 {
-                if let Some(source) = sources.iter().find(|source| source.contains(quote)) {
-                    let index = source.find(quote).unwrap();
-                    let start = source[..index]
-                        .rfind(['.', '!', '?', '\n'])
-                        .map_or(0, |index| index + 1);
-                    let end = source[index + quote.len()..]
-                        .char_indices()
-                        .find(|(_, c)| matches!(c, '.' | '!' | '?' | '\n'))
-                        .map_or(source.len(), |(offset, c)| {
-                            index + quote.len() + offset + c.len_utf8()
-                        });
-                    let sentence = source[start..end].trim();
-                    if sentence.chars().count() <= 240 {
-                        evidence = sentence.to_owned();
-                    }
+            if quote.chars().count() < 40
+                && let Some(source) = sources.iter().find(|source| source.contains(quote))
+            {
+                let index = source.find(quote).unwrap();
+                let start = source[..index]
+                    .rfind(['.', '!', '?', '\n'])
+                    .map_or(0, |index| index + 1);
+                let end = source[index + quote.len()..]
+                    .char_indices()
+                    .find(|(_, c)| matches!(c, '.' | '!' | '?' | '\n'))
+                    .map_or(source.len(), |(offset, c)| {
+                        index + quote.len() + offset + c.len_utf8()
+                    });
+                let sentence = source[start..end].trim();
+                if sentence.chars().count() <= 240 {
+                    evidence = sentence.to_owned();
                 }
             }
             quotes.retain(|previous| previous != &evidence);

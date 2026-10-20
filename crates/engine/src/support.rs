@@ -40,8 +40,36 @@ struct PromptFile {
     copilot_chat: String,
 }
 
+/// Role prompts a catalogue must define. `crew_response` is deliberately not
+/// listed: older catalogues predate it and a bundled default covers its absence.
+const REQUIRED_ROLE_PROMPTS: [&str; 7] = [
+    "atc_reply",
+    "crew_actions",
+    "cabin",
+    "ground",
+    "copilot_readback",
+    "intent_classify",
+    "copilot_chat",
+];
+
 fn default_crew_response() -> String {
     include_str!("../../../prompts/crew_response.txt").to_owned()
+}
+
+/// Name every role a supplied catalogue leaves undefined. A present but partial
+/// file is an operator error, not a reason to silently drop its roles.
+fn missing_role_prompts(text: &str) -> Result<(), String> {
+    let table: toml::Table = toml::from_str(text).map_err(|error| error.to_string())?;
+    let missing: Vec<&str> = REQUIRED_ROLE_PROMPTS
+        .iter()
+        .copied()
+        .filter(|key| !table.contains_key(*key))
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("missing role prompts: {}", missing.join(", ")))
+    }
 }
 
 impl PromptFile {
@@ -126,8 +154,9 @@ pub fn fill_prompt(text: &str, callsign: &str) -> String {
 
 /// Load prompts: env override, then config dir, then exe-relative, else the
 /// shipped texts compiled in. A directory only wins when it holds cabin.txt.
-#[must_use]
-pub fn load_prompts(config_dir: &Path, exe_dir: &Path) -> Prompts {
+/// A present but incomplete `prompts.toml` is refused with the missing roles
+/// rather than quietly discarding the operator's catalogue.
+pub fn load_prompts(config_dir: &Path, exe_dir: &Path) -> Result<Prompts, String> {
     let mut prompts = toml::from_str::<PromptFile>(include_str!("../../../prompts/prompts.toml"))
         .expect("bundled role prompts")
         .into_prompts("built-in".into())
@@ -139,21 +168,16 @@ pub fn load_prompts(config_dir: &Path, exe_dir: &Path) -> Prompts {
     candidates.push(config_dir.join("prompts"));
     candidates.push(exe_dir.join("../prompts"));
     for candidate in candidates {
-        if let Ok(text) = std::fs::read_to_string(candidate.join("prompts.toml")) {
-            match toml::from_str::<PromptFile>(&text)
-                .map_err(|error| error.to_string())
+        let path = candidate.join("prompts.toml");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let mut loaded = missing_role_prompts(&text)
+                .and_then(|()| {
+                    toml::from_str::<PromptFile>(&text).map_err(|error| error.to_string())
+                })
                 .and_then(|file| file.into_prompts(candidate.to_string_lossy().into_owned()))
-            {
-                Ok(mut loaded) => {
-                    loaded.guidance = Guidance::load(&candidate.join("interaction.toml"));
-                    return loaded;
-                }
-                Err(error) => eprintln!(
-                    "Invalid role prompt catalogue {}: {error}",
-                    candidate.display()
-                ),
-            }
-            continue;
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            loaded.guidance = Guidance::load(&candidate.join("interaction.toml"));
+            return Ok(loaded);
         }
         if read_prompt_file(&candidate, "cabin.txt").is_empty() {
             continue;
@@ -177,7 +201,55 @@ pub fn load_prompts(config_dir: &Path, exe_dir: &Path) -> Prompts {
         }
         break;
     }
-    prompts
+    Ok(prompts)
+}
+
+/// Latest modification time across every file that can change the active prompt catalogue.
+/// Missing files contribute the epoch, so creating or deleting an override is a change.
+#[must_use]
+pub fn prompt_stamp(config_dir: &Path, exe_dir: &Path) -> std::time::SystemTime {
+    let mut candidates = Vec::new();
+    if let Some(dir) = std::env::var_os("OPENATC_PROMPTS_DIR") {
+        candidates.push(PathBuf::from(dir));
+    }
+    candidates.push(config_dir.join("prompts"));
+    candidates.push(exe_dir.join("../prompts"));
+    let mut stamp = std::time::SystemTime::UNIX_EPOCH;
+    for candidate in candidates {
+        for name in [
+            "prompts.toml",
+            "interaction.toml",
+            "atc_reply.txt",
+            "crew_actions.txt",
+            "crew_response.txt",
+            "cabin.txt",
+            "ground.txt",
+            "copilot_readback.txt",
+            "copilot_chat.txt",
+            "intent_classify.txt",
+        ] {
+            let time = std::fs::metadata(candidate.join(name))
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            stamp = stamp.max(time);
+        }
+    }
+    stamp
+}
+
+/// Reload the catalogue when one of its files changed. A rejected catalogue leaves the
+/// running prompts untouched; the caller reports the error and keeps operating.
+pub fn watch_prompts(
+    config_dir: &Path,
+    exe_dir: &Path,
+    stamp: &mut std::time::SystemTime,
+) -> Result<Option<Prompts>, String> {
+    let latest = prompt_stamp(config_dir, exe_dir);
+    if latest == *stamp {
+        return Ok(None);
+    }
+    *stamp = latest;
+    load_prompts(config_dir, exe_dir).map(Some)
 }
 
 /// Resolve the speech library dir: env override, then exe-relative.
@@ -276,6 +348,188 @@ mod prompt_tests {
         assert!(file.into_prompts("bad".into()).is_err());
         assert!(toml::from_str::<PromptFile>(&format!("{text}\nunknown = true")).is_err());
     }
+
+    #[test]
+    fn edited_prompt_catalogue_reloads_and_a_partial_edit_keeps_the_running_copy() {
+        let directory =
+            std::env::temp_dir().join(format!("openatc-reload-{}", rand::random::<u64>()));
+        let catalogue = directory.join("prompts");
+        std::fs::create_dir_all(&catalogue).unwrap();
+        let shipped = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prompts/prompts.toml"),
+        )
+        .unwrap();
+        let path = catalogue.join("prompts.toml");
+        std::fs::write(&path, &shipped).unwrap();
+        let mut stamp = std::time::SystemTime::UNIX_EPOCH;
+        let first = watch_prompts(&directory, &directory, &mut stamp)
+            .unwrap()
+            .unwrap();
+        assert!(first.atc.contains("controller working flight"));
+        assert!(
+            watch_prompts(&directory, &directory, &mut stamp)
+                .unwrap()
+                .is_none(),
+            "an unchanged catalogue must not be rebuilt"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(
+            &path,
+            shipped.replace(
+                "You are the controller working flight",
+                "You are the controller working flight (edited)",
+            ),
+        )
+        .unwrap();
+        let edited = watch_prompts(&directory, &directory, &mut stamp)
+            .unwrap()
+            .unwrap();
+        assert!(edited.atc.contains("(edited)"));
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&path, "atc_reply = 'incomplete'\n").unwrap();
+        let error = watch_prompts(&directory, &directory, &mut stamp)
+            .err()
+            .unwrap();
+        assert!(error.contains("missing role prompts"), "{error}");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn incomplete_catalogue_names_every_missing_role_instead_of_falling_back() {
+        let directory =
+            std::env::temp_dir().join(format!("openatc-prompts-{}", rand::random::<u64>()));
+        let catalogue = directory.join("prompts");
+        std::fs::create_dir_all(&catalogue).unwrap();
+        let path = catalogue.join("prompts.toml");
+        std::fs::write(&path, "atc_reply = 'incomplete'\n").unwrap();
+        let error = load_prompts(&directory, &directory).err().unwrap();
+        assert!(error.contains("prompts.toml"), "{error}");
+        for role in [
+            "cabin",
+            "ground",
+            "copilot_readback",
+            "intent_classify",
+            "copilot_chat",
+        ] {
+            assert!(error.contains(role), "missing {role} in: {error}");
+        }
+        let complete = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../prompts/prompts.toml"),
+        )
+        .unwrap();
+        std::fs::write(&path, format!("{complete}\nunknown = 'x'\n")).unwrap();
+        assert!(
+            load_prompts(&directory, &directory)
+                .err()
+                .unwrap()
+                .contains("unknown")
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod prompt_coverage_tests {
+    use super::*;
+
+    /// Guidance keys the engine composes at run time rather than naming literally.
+    const COMPOSED_GUIDANCE_KEYS: [&str; 12] = [
+        "atc_clearance",
+        "atc_ground",
+        "atc_tower",
+        "atc_approach",
+        "atc_departure",
+        "atc_center",
+        "crew_actions_ground",
+        "crew_actions_cabin",
+        "crew_actions_copilot",
+        "crew_situation_before_departure",
+        "crew_situation_airborne",
+        "crew_situation_after_landing",
+    ];
+
+    /// Collect the literals passed to `guidance.get("...")` across the engine
+    /// sources, so a renamed or dropped prompt key fails here rather than at run time.
+    fn literal_guidance_keys() -> std::collections::BTreeSet<String> {
+        let mut keys = std::collections::BTreeSet::new();
+        let mut directories = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(&directory).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else if path.extension().and_then(std::ffi::OsStr::to_str) == Some("rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    let mut search = 0;
+                    while let Some(found) = text[search..].find("guidance") {
+                        let after = search + found + "guidance".len();
+                        if let Some(rest) = text[after..].trim_start().strip_prefix(".get(\"")
+                            && let Some(end) = rest.find('"')
+                        {
+                            let key = &rest[..end];
+                            if !key.is_empty()
+                                && key.chars().all(|c| {
+                                    c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'
+                                })
+                            {
+                                keys.insert(key.to_owned());
+                            }
+                        }
+                        search = after;
+                    }
+                }
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn bundled_guidance_defines_exactly_the_keys_the_engine_uses() {
+        let mut expected = literal_guidance_keys();
+        assert!(!expected.is_empty(), "source scan found no guidance keys");
+        expected.extend(COMPOSED_GUIDANCE_KEYS.iter().map(|key| (*key).to_owned()));
+        let table: toml::Table =
+            toml::from_str(include_str!("../../../prompts/interaction.toml")).unwrap();
+        let defined: std::collections::BTreeSet<String> = table.keys().cloned().collect();
+        let missing: Vec<&String> = expected.difference(&defined).collect();
+        assert!(
+            missing.is_empty(),
+            "code uses guidance keys absent from interaction.toml: {missing:?}"
+        );
+        let unused: Vec<&String> = defined.difference(&expected).collect();
+        assert!(
+            unused.is_empty(),
+            "interaction.toml defines guidance keys no code path reads: {unused:?}"
+        );
+        let guidance = Guidance::default();
+        for key in &expected {
+            assert!(
+                !guidance.get(key).trim().is_empty(),
+                "empty guidance for {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_role_prompts_define_exactly_the_loaded_fields() {
+        let table: toml::Table =
+            toml::from_str(include_str!("../../../prompts/prompts.toml")).unwrap();
+        let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "atc_reply",
+                "cabin",
+                "copilot_chat",
+                "copilot_readback",
+                "crew_actions",
+                "crew_response",
+                "ground",
+                "intent_classify",
+            ]
+        );
+    }
 }
 
 /// Shared instruction strings; missing fields retain bundled TOML defaults.
@@ -294,19 +548,39 @@ impl Guidance {
         let Ok(text) = std::fs::read_to_string(path) else {
             return result;
         };
-        let overrides = toml::from_str::<std::collections::BTreeMap<String, String>>(&text);
-        match overrides {
-            Ok(values)
-                if text.len() <= 65536
-                    && values.iter().all(|(key, value)| {
-                        result.0.contains_key(key)
-                            && !value.trim().is_empty()
-                            && value.len() <= 16384
-                    }) =>
-            {
-                result.0.extend(values)
+        if text.len() > 65536 {
+            eprintln!("Shared prompt instructions too large: {}", path.display());
+            return result;
+        }
+        let overrides = match toml::from_str::<std::collections::BTreeMap<String, String>>(&text) {
+            Ok(values) => values,
+            Err(error) => {
+                eprintln!(
+                    "Invalid shared prompt instructions {}: {error}",
+                    path.display()
+                );
+                return result;
             }
-            _ => eprintln!("Invalid shared prompt instructions: {}", path.display()),
+        };
+        // A sparse override file may carry a key this build no longer reads, or
+        // an empty value. Report each and keep the remaining overrides rather
+        // than discarding the whole file.
+        for (key, value) in overrides {
+            if !result.0.contains_key(&key) {
+                eprintln!(
+                    "Unknown shared prompt instruction {key} in {}",
+                    path.display()
+                );
+                continue;
+            }
+            if value.trim().is_empty() || value.len() > 16384 {
+                eprintln!(
+                    "Ignoring empty or oversized shared prompt instruction {key} in {}",
+                    path.display()
+                );
+                continue;
+            }
+            result.0.insert(key, value);
         }
         result
     }
@@ -331,6 +605,26 @@ mod guidance_tests {
         assert_eq!(
             Guidance::default().get("speech_rules"),
             include_str!("../../../prompts/speech_rules.txt").trim()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stale_or_empty_overrides_do_not_discard_the_valid_framing() {
+        let directory =
+            std::env::temp_dir().join(format!("openatc-guidance-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("interaction.toml");
+        std::fs::write(
+            &path,
+            "examples = 'Custom example guidance'\nretired_key = 'stale'\ncrew_context = '   '\n",
+        )
+        .unwrap();
+        let loaded = Guidance::load(&path);
+        assert_eq!(loaded.get("examples"), "Custom example guidance");
+        assert_eq!(
+            loaded.get("crew_context"),
+            Guidance::default().get("crew_context")
         );
         std::fs::remove_dir_all(directory).unwrap();
     }

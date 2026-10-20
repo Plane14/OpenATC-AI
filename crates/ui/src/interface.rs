@@ -864,7 +864,19 @@ impl Interface {
                 }
             }
             self.plan_notice = if reply.success {
-                "Flight plan accepted by OpenATC AI.".to_owned()
+                let notice = reply
+                    .data
+                    .get("plan")
+                    .and_then(|plan| plan.get("procedureNotice"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                if notice.is_empty() {
+                    "Flight plan accepted by OpenATC AI.".to_owned()
+                } else {
+                    self.draft.procedure_notice.clone_from(&notice);
+                    notice
+                }
             } else {
                 reply.error
             };

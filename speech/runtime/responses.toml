@@ -1321,6 +1321,10 @@ say = ["Taxi to the holding point for runway {runway}. Hold short of runway {run
 slots = ["destination"]
 say = ["Taxi to {destination}.", "Continue taxi to {destination}.", "Proceed to {destination}."]
 
+[taxi_route_without_named_taxiways]
+slots = []
+say = ["Taxi unavailable; the taxiway route has no published names. Hold position and request progressive taxi.", "Unable to issue a named taxi route from the installed data. Request progressive taxi.", "The taxi route could not be named from the airport data. Hold position and advise."]
+
 [parking_taxi_readback_correct]
 slots = []
 say = ["Readback correct.", "Correct readback.", "Roger.", "Readback correct, continue taxi."]
@@ -1438,6 +1442,22 @@ say = ["Expect {altitude}."]
 [flight_takeoff]
 slots = ["callsign", "runway", "weather", "climb", "expected"]
 say = ["{callsign}, {weather} {climb} {expected} Runway {runway}, cleared for takeoff."]
+
+[flight_line_up_and_wait]
+slots = ["callsign", "runway"]
+say = ["{callsign}, runway {runway}, line up and wait.", "{callsign}, line up and wait runway {runway}, traffic departing."]
+
+[flight_hold_short_landing]
+slots = ["callsign", "runway"]
+say = ["{callsign}, hold short of runway {runway}, traffic on short final.", "{callsign}, hold short runway {runway}, landing traffic."]
+
+[pilot_line_up_and_wait_readback]
+slots = ["callsign", "runway"]
+say = ["Line up and wait runway {runway}, {callsign}."]
+
+[pilot_hold_short_readback]
+slots = ["callsign", "runway"]
+say = ["Holding short of runway {runway}, {callsign}."]
 
 [arrival_airport_unavailable]
 slots = []
@@ -16656,6 +16676,10 @@ say = ["{callsign}, continue climb to {altitude}.", "{callsign}, continue climbi
 slots = ["altitude", "callsign"]
 say = ["{callsign}, descend and maintain {altitude}.", "{callsign}, descend to {altitude}.", "{callsign}, descend now, maintain {altitude}.", "{callsign}, cleared to descend to {altitude}.", "{callsign}, descend to and maintain {altitude}.", "{callsign}, descend and maintain {altitude}."]
 
+[automatic_maintain]
+slots = ["altitude", "callsign"]
+say = ["{callsign}, maintain {altitude}.", "{callsign}, maintain {altitude} as cleared.", "{callsign}, continue at {altitude}.", "{callsign}, level at {altitude}.", "{callsign}, maintain {altitude} until further advised."]
+
 [automatic_continue_descent]
 slots = ["altitude", "callsign"]
 say = ["{callsign}, continue descent to {altitude}.", "{callsign}, continue descending, maintain {altitude}.", "{callsign}, continue your descent to {altitude}.", "{callsign}, cleared to continue descent to {altitude}.", "{callsign}, continue descent, maintain {altitude}.", "{callsign}, continue descending to {altitude}."]
@@ -17737,6 +17761,14 @@ say = ["Climb via the {sid} departure, except maintain {altitude}, {callsign}."]
 [generated_missed_level_amendment]
 slots = ["altitude", "fix"]
 say = ["In the event of a missed approach, follow the published missed approach, climb and maintain {altitude}, hold at {fix} as published."]
+
+[generated_manual_route_amendment]
+slots = ["procedure", "transition", "manual_fix", "target"]
+say = ["The {procedure} {transition} arrival ends at a published manual transition, {manual_fix}. Cleared direct {target} as published, IFR."]
+
+[generated_manual_route_readback]
+slots = ["callsign", "procedure", "transition", "target"]
+say = ["Cleared direct {target}, {procedure} {transition}, IFR, {callsign}."]
 
 [generated_approach_amended_readback]
 slots = ["callsign", "approach", "altitude", "fix"]

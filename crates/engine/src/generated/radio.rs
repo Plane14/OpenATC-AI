@@ -276,41 +276,15 @@ fn departure_hold(state: &mut EngineState) {
 }
 
 fn blocked(state: &EngineState, id: u32, order: &openatc_core::state::TaxiClearance) -> bool {
-    if state.session.telemetry.traffic.is_none() {
-        return true;
-    }
     if order.crossing_runway.is_empty() {
         return false;
     }
     let Some(airport) = state.generated.surface_airport(&order.airport) else {
         return true;
     };
-    let mut targets = state.session.telemetry.traffic.clone().unwrap_or_default();
-    let identities: BTreeSet<_> = state
-        .generated
-        .frames
-        .iter()
-        .map(|frame| frame.target.id)
-        .collect();
-    targets.retain(|target| !identities.contains(&target.id));
-    targets.extend(
-        state
-            .generated
-            .frames
-            .iter()
-            .map(|frame| frame.target.clone()),
-    );
-    let own = &state.session.telemetry;
-    targets.push(TrafficTarget {
-        latitude: own.latitude,
-        longitude: own.longitude,
-        aircraft: own.aircraft_icao.clone(),
-        altitude_feet: own.altitude_feet,
-        track_degrees: own.heading_degrees,
-        on_ground: own.on_ground,
-        wingspan_meters: own.wingspan_meters,
-        ..Default::default()
-    });
+    // Generated conflicts are held by the movement world; only observed traffic can add a
+    // runway-occupancy conflict here.
+    let targets = super::external_targets(&state.generated, &state.session.telemetry);
     let Some(policy) = &state.generated.policy else {
         return true;
     };
@@ -342,10 +316,12 @@ fn blocked(state: &EngineState, id: u32, order: &openatc_core::state::TaxiCleara
 
 pub fn tick(state: &mut EngineState) {
     super::flight::synchronise_recoveries(&mut state.generated);
+    super::ctaf::announce(state);
     if !state.settings.generated_traffic
         || state.generated.epoch != Some(state.session_generation)
         || state.generated.simulation_job.is_some()
         || state.generated.preparation_job.is_some()
+        || state.generated.turnaround_job.is_some()
         || state.session.telemetry.paused
         || state.session.telemetry.radio_busy
         || state.pending_copilot_reply.is_some()
@@ -808,24 +784,22 @@ pub fn tick(state: &mut EngineState) {
                 .get(&exchange.id)
                 .and_then(|plan| plan.clearances.get(&exchange.segment))
                 .is_some_and(|clearance| clearance.landing_rollout.is_some())
-            && (state.session.telemetry.traffic.is_none()
-                || state.generated.crossing_blocked(
-                    exchange.id,
-                    exchange.segment,
-                    &super::observed_targets(&state.generated, &state.session.telemetry),
-                ))
+            && state.generated.crossing_blocked(
+                exchange.id,
+                exchange.segment,
+                &super::external_targets(&state.generated, &state.session.telemetry),
+            )
         {
             super::flight::revoke_landing(&mut state.generated, exchange.id, exchange.segment);
             state.generated.exchange = Some(hold_landing(exchange, true));
             return;
         }
         if exchange.grant
-            && (state.session.telemetry.traffic.is_none()
-                || state.generated.crossing_blocked(
-                    exchange.id,
-                    exchange.segment,
-                    &super::observed_targets(&state.generated, &state.session.telemetry),
-                ))
+            && state.generated.crossing_blocked(
+                exchange.id,
+                exchange.segment,
+                &super::external_targets(&state.generated, &state.session.telemetry),
+            )
             && state
                 .generated
                 .flights
@@ -857,12 +831,11 @@ pub fn tick(state: &mut EngineState) {
                 .is_some_and(|segment| {
                     segment.stage == openatc_core::traffic::motion::Stage::Crossing
                 })
-            && (state.session.telemetry.traffic.is_none()
-                || state.generated.crossing_blocked(
-                    exchange.id,
-                    exchange.segment,
-                    &super::observed_targets(&state.generated, &state.session.telemetry),
-                ))
+            && state.generated.crossing_blocked(
+                exchange.id,
+                exchange.segment,
+                &super::external_targets(&state.generated, &state.session.telemetry),
+            )
         {
             let runway = state
                 .generated

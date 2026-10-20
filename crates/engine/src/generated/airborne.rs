@@ -12,6 +12,7 @@ pub(super) struct Decoded {
     pub missed: Option<super::recovery::Draft>,
     pub final_missed: std::collections::BTreeMap<usize, std::sync::Arc<super::recovery::Draft>>,
     pub missed_instruction: Option<super::flight::MissedInstruction>,
+    pub amendment: Option<super::flight::RouteAmendment>,
     pub departure: Vec<Fix>,
     pub enroute: Vec<Fix>,
     pub arrival: Vec<Fix>,
@@ -106,7 +107,7 @@ pub(super) fn resolve(input: Request<'_>) -> Result<Decoded, String> {
         arrival_ceiling,
         input.aircraft.approach_knots,
     );
-    let arrival = resolved::boundary_crossings(
+    let (mut arrival, manual) = resolved::amended_crossings(
         Waypoint {
             latitude: input.terminal.enroute_to[0],
             longitude: input.terminal.enroute_to[1],
@@ -115,20 +116,76 @@ pub(super) fn resolve(input: Request<'_>) -> Result<Decoded, String> {
         &input.terminal.arrival,
         &arrival_context,
     )?;
-    let entry = arrival.last().ok_or("Resolved arrival is empty")?;
-    let approach = resolved::boundary_crossings(
+    let entry = arrival.last().ok_or("Resolved arrival is empty")?.clone();
+    // A manually terminated arrival never reaches the approach entry, so the approach is
+    // decoded from its own published entry and the bridge is only flown under an amendment.
+    let amended_target = match &manual {
+        None => None,
+        Some(_) => {
+            let leg = input
+                .terminal
+                .approach
+                .first()
+                .ok_or("Approach has no published entry leg")?;
+            let position = openatc_core::traffic::coordinates::Points::runway(
+                leg,
+                input.destination,
+            )
+            .or_else(|| input.points.resolve(leg, &input.destination.icao))
+            .ok_or("Amended arrival has no resolvable approach entry fix")?;
+            Some((leg, position.coordinate))
+        }
+    };
+    let mut approach = resolved::boundary_crossings(
         Waypoint {
-            latitude: entry.coordinate[0],
-            longitude: entry.coordinate[1],
+            latitude: amended_target.map_or(entry.coordinate[0], |(_, target)| target[0]),
+            longitude: amended_target.map_or(entry.coordinate[1], |(_, target)| target[1]),
             altitude_feet: entry.preferred_feet,
         },
         &input.terminal.approach,
         &arrival_context,
     )?;
     let first = approach.first().ok_or("Resolved approach is empty")?;
-    if openatc_core::arrival::distance_nm(entry.coordinate, first.coordinate) >= 0.001 {
+    if manual.is_none()
+        && openatc_core::arrival::distance_nm(entry.coordinate, first.coordinate) >= 0.001
+    {
         return Err("Resolved STAR and approach no longer share their published entry".into());
     }
+    // Keep the published band across the amended bridge: the amendment changes the lateral
+    // path only, so every retained crossing restriction stays in force until the approach's
+    // own restrictions apply at the amended target.
+    let amendment = match manual {
+        None => None,
+        Some(manual) => {
+            let target = first.coordinate;
+            if openatc_core::arrival::distance_nm(entry.coordinate, target) < 0.001 {
+                return Err("Amended arrival does not reach its published approach entry".into());
+            }
+            arrival.push(Fix {
+                intercept: None,
+                airspeed: entry.airspeed,
+                coordinate: target,
+                arrival_heading: first.arrival_heading,
+                minimum_feet: entry.minimum_feet,
+                maximum_feet: entry.maximum_feet,
+                preferred_feet: entry.preferred_feet,
+                ground_knots: entry.ground_knots,
+                required_turn: first.required_turn.or(entry.required_turn),
+            });
+            Some(super::flight::RouteAmendment {
+                procedure: input.terminal.arrival_name.clone(),
+                transition: input.terminal.arrival_transition.clone(),
+                terminator: manual.terminator,
+                manual_fix: manual.identifier,
+                target: amended_target
+                    .map(|(leg, _)| leg.identifier.clone())
+                    .unwrap_or_default(),
+                approach: input.terminal.approach_name.clone(),
+                target_coordinate: target,
+            })
+        }
+    };
+    prefer_descent(&mut arrival, &mut approach);
     let budget = 128usize.saturating_sub(departure.len() + arrival.len() + approach.len());
     let enroute = super::enroute::crossings(super::enroute::Request {
         terminal: input.terminal,
@@ -155,11 +212,34 @@ pub(super) fn resolve(input: Request<'_>) -> Result<Decoded, String> {
         missed: None,
         final_missed: Default::default(),
         missed_instruction: None,
+        amendment,
         departure,
         enroute,
         arrival,
         approach,
     })
+}
+
+/// Plan toward the approach instead of preferring cruise height at every unrestricted arrival fix.
+/// These are solver preferences; published bounds and subsequent clearance/protection checks remain authoritative.
+fn prefer_descent(arrival: &mut [Fix], approach: &mut [Fix]) {
+    let Some(last) = approach.last() else {
+        return;
+    };
+    // The final approach leg frequently publishes no altitude of its own, so anchoring on its
+    // preference holds the aircraft at its ceiling through the whole arrival and inflates every
+    // turn radius. The binding published floor at the end of the approach is the real target;
+    // the joint level and turn solver still raises the level wherever that descent is not
+    // achievable, and no published limit is changed here.
+    let floor = approach
+        .iter()
+        .map(|fix| fix.minimum_feet)
+        .fold(f64::INFINITY, f64::min);
+    let mut next = last.preferred_feet.min(floor);
+    for fix in arrival.iter_mut().chain(approach.iter_mut()).rev() {
+        next = next.clamp(fix.minimum_feet, fix.maximum_feet);
+        fix.preferred_feet = next;
+    }
 }
 
 /// Aircraft-specific production planning context; candidate attempts have no world side effects.
@@ -182,6 +262,8 @@ pub(super) struct Planner<'a> {
     pub occupied_stand_cells: &'a std::collections::BTreeSet<String>,
     pub parking_exclusions: &'a std::collections::BTreeSet<String>,
     pub preference: &'a openatc_core::parking::TrafficPreference,
+    /// A category with no usable published arrival may join the approach directly.
+    pub allow_direct: bool,
 }
 impl Planner<'_> {
     /// Select only after the published crossing connects through landing and parking.
@@ -218,9 +300,17 @@ impl Planner<'_> {
             trajectory::Airspeed,
             Result<super::landing::Arrival, String>,
         )> = Vec::new();
-        let mut order =
-            (0..candidates.len().min(self.policy.terminal_candidate_limit)).collect::<Vec<_>>();
-        order.sort_by_key(|index| (usage.get(index).copied().unwrap_or(0), *index));
+        let mut order = (0..candidates.len())
+            .filter(|index| self.allow_direct || !candidates[*index].direct)
+            .collect::<Vec<_>>();
+        order.sort_by_key(|index| {
+            (
+                !(self.allow_direct && candidates[*index].direct),
+                usage.get(index).copied().unwrap_or(0),
+                *index,
+            )
+        });
+        order.truncate(self.policy.terminal_candidate_limit);
         for candidate in order {
             let terminal = &candidates[candidate];
             attempted += 1;
@@ -659,13 +749,26 @@ pub(super) fn merge(previous: &mut Fix, next: &Fix) -> Result<(), String> {
     }
     // Do not discard a minimum-speed restriction by selecting the slower of two joins.
     // A speed change at the same point needs an upstream, aircraft-specific deceleration plan.
+    // The two sections meet at one point but are planned from their own airport samples, so
+    // only the intended speed has to agree; the joined crossing keeps the sample of the leg
+    // it terminates, and the arrival crossings after it keep theirs.
     match (previous.airspeed, next.airspeed) {
-        (Some(a), Some(b)) if a == b => {}
+        (Some(a), Some(b)) => {
+            if (a.indicated_knots - b.indicated_knots).abs() > 1e-6 {
+                return Err(
+                    "Coincident flight sections change airspeed without a deceleration plan"
+                        .into(),
+                );
+            }
+        }
         (None, None) if (previous.ground_knots - next.ground_knots).abs() <= 1e-6 => {}
-        _ => {
+        (Some(_), None) | (None, Some(_)) => {
             return Err(
-                "Coincident flight sections have incompatible airspeed or weather inputs".into(),
+                "Coincident flight sections disagree on whether the path has an airspeed".into(),
             );
+        }
+        (None, None) => {
+            return Err("Coincident flight sections have incompatible ground speeds".into());
         }
     }
     previous.minimum_feet = minimum;
@@ -679,6 +782,91 @@ pub(super) fn merge(previous: &mut Fix, next: &Fix) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coincident_sections_join_on_speed_intent_and_still_refuse_a_real_speed_change() {
+        let atmosphere = |pressure| {
+            openatc_core::traffic::air::Atmosphere::surface(pressure, 15.0, 0.0)
+                .expect("surface atmosphere")
+        };
+        let crossing = |pressure, indicated, ground| Fix {
+            coordinate: [36.0, -86.0],
+            arrival_heading: Some(270.0),
+            minimum_feet: 2000.0,
+            maximum_feet: 20000.0,
+            preferred_feet: 6000.0,
+            ground_knots: ground,
+            airspeed: Some(openatc_core::traffic::trajectory::Airspeed {
+                indicated_knots: indicated,
+                atmosphere: atmosphere(pressure),
+                wind_from: 0.0,
+                wind_knots: 0.0,
+            }),
+            required_turn: None,
+            intercept: None,
+        };
+        // Each section is planned from its own airport sample, so the join almost never sees
+        // identical weather. That is not a speed change and must not refuse the connection.
+        let mut departure = crossing(1013.25, 250.0, 260.0);
+        let mut arrival = crossing(1010.0, 250.0, 258.0);
+        assert!(merge(&mut departure, &arrival).is_ok());
+        assert_eq!(departure.minimum_feet, 2000.0);
+        assert!(departure.airspeed.is_some());
+        // A genuine speed change at the same point still needs an upstream deceleration plan.
+        let mut departure = crossing(1013.25, 250.0, 260.0);
+        let mut faster = crossing(1010.0, 280.0, 290.0);
+        assert!(
+            merge(&mut departure, &faster)
+                .unwrap_err()
+                .contains("change airspeed without a deceleration plan")
+        );
+        // One section having a real airspeed and the other none is not a joinable pair.
+        let mut departure = crossing(1013.25, 250.0, 260.0);
+        let mut fixed = crossing(1010.0, 250.0, 258.0);
+        fixed.airspeed = None;
+        assert!(merge(&mut departure, &fixed).is_err());
+    }
+    #[test]
+    fn arrival_preferences_follow_the_approach_without_changing_published_limits() {
+        let fix = |minimum, maximum, preferred| Fix {
+            coordinate: [1.0, 2.0],
+            arrival_heading: Some(90.0),
+            minimum_feet: minimum,
+            maximum_feet: maximum,
+            preferred_feet: preferred,
+            ground_knots: 150.0,
+            airspeed: None,
+            required_turn: None,
+            intercept: None,
+        };
+        let mut arrival = vec![fix(8000.0, 42000.0, 42000.0), fix(3000.0, 10000.0, 10000.0)];
+        let mut approach = vec![fix(3000.0, 3000.0, 3000.0), fix(50.0, 50.0, 50.0)];
+        let before = arrival.iter().chain(&approach).cloned().collect::<Vec<_>>();
+        prefer_descent(&mut arrival, &mut approach);
+        assert_eq!(
+            arrival
+                .iter()
+                .chain(&approach)
+                .map(|fix| fix.preferred_feet)
+                .collect::<Vec<_>>(),
+            vec![8000.0, 3000.0, 3000.0, 50.0]
+        );
+        for (old, new) in before.iter().zip(arrival.iter().chain(&approach)) {
+            assert_eq!(
+                (old.minimum_feet, old.maximum_feet),
+                (new.minimum_feet, new.maximum_feet)
+            );
+            assert_eq!(old.coordinate, new.coordinate);
+            assert_eq!(old.ground_knots, new.ground_knots);
+            assert_eq!(old.arrival_heading, new.arrival_heading);
+        }
+        // A lower published band remains intact even when the next fix requires a climb.
+        arrival[1].maximum_feet = 2000.0;
+        arrival[1].minimum_feet = 2000.0;
+        prefer_descent(&mut arrival, &mut approach);
+        assert_eq!(arrival[1].preferred_feet, 2000.0);
+        assert_eq!(approach[0].preferred_feet, 3000.0);
+    }
 
     #[test]
     fn fleet_terminal_inputs_keep_restrictions_and_lower_runway_thresholds() {
@@ -751,6 +939,8 @@ mod tests {
                 .collect(),
         );
         let terminal = super::super::routing::Terminal {
+            arrival_manual: None,
+            direct: false,
             enroute_from: Points::runway(&departure, &origin).unwrap().coordinate,
             enroute_to: Points::runway(&arrival, &destination).unwrap().coordinate,
             enroute_minimum_feet: 1000,

@@ -61,17 +61,20 @@ pub fn prompt(state: &EngineState, role: &str, request: &str) -> String {
             })
             .take(6)
             .collect();
-        return format!(
-            "{}",
-            state.prompts.guidance.get("atc_context").replace("{{facts}}", &json!({"role":role,"phase":state.session.phase,"telemetry":state.session.telemetry,
+        return state
+            .prompts
+            .guidance
+            .get("atc_context")
+            .replace("{{facts}}", &json!({"role":role,"phase":state.session.phase,"telemetry":state.session.telemetry,
                 "plan":plan,"clearance":state.session.clearance,"taxiClearance":state.session.taxi_clearance,
-                "controllers":owners,"recentTransmissionsNewestFirst":recent}).to_string())
-        );
+                "controllers":owners,"recentTransmissionsNewestFirst":recent}).to_string());
     }
     let recent = conversation(state, role, 6, 1024);
-    format!(
-        "{}",
-        state.prompts.guidance.get("crew_context").replace("{{facts}}", &json!({
+    state
+        .prompts
+        .guidance
+        .get("crew_context")
+        .replace("{{facts}}", &json!({
             "role":role,"recentConversationNewestFirst":recent,"conversationEvidence":state.crew.social.context(role,request),"phase":format!("{:?}",state.session.phase),"telemetry":state.session.telemetry,
             "plan":plan,"clearance":state.session.clearance,
             "taxiClearance":state.session.taxi_clearance,"controllers":owners,
@@ -80,7 +83,6 @@ pub fn prompt(state: &EngineState, role: &str, request: &str) -> String {
             "simulatedCabin":state.cabin,
             "mission":state.session.mission,
         }).to_string())
-    )
 }
 
 /// Select exchanges for one recipient before applying the common history budget.

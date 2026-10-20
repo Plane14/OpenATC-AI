@@ -42,7 +42,10 @@ pub(super) fn prepare(input: Request<'_>) -> Result<Arrival, String> {
         input.policy.surface_sample_meters,
     )?;
     let touchdown = *flare.points.last().ok_or("Flare has no touchdown")?;
-    let exit = plan(
+    let mut selected = None;
+    let mut attempts = 0;
+    let mut reason = None;
+    let result = plan_select(
         input.airport,
         &input.surface.runway,
         touchdown,
@@ -51,28 +54,56 @@ pub(super) fn prepare(input: Request<'_>) -> Result<Arrival, String> {
         input.handling,
         input.policy,
         input.surface,
-    )?;
-    let parking = parking(
-        input.airport,
-        exit,
-        input.aircraft,
-        input.handling,
-        input.policy,
-        input.observed,
-        input.reserved,
-        input.occupied_stand_cells,
-        input.parking_exclusions,
-        input.preference,
-    )?;
-    let mut segments = vec![flare.clone()];
-    segments.extend(parking.exit.rollout.clone());
-    segments.extend((0..512).map_while(|index| parking.surface.route.segment(index).cloned()));
-    // One compilation verifies all joins and rate limits before this arrival is retained.
-    openatc_core::traffic::motion::Route::compile(
-        segments,
-        input.aircraft.climb_fpm,
-        input.aircraft.descent_fpm,
-    )?;
+        |exit| {
+            // Bound complete exit-to-stand searches independently of the runway's graph size.
+            if attempts >= 8 {
+                return false;
+            }
+            attempts += 1;
+            let candidate = (|| {
+                let parking = parking(
+                    input.airport,
+                    exit.clone(),
+                    input.aircraft,
+                    input.handling,
+                    input.policy,
+                    input.observed,
+                    input.reserved,
+                    input.occupied_stand_cells,
+                    input.parking_exclusions,
+                    input.preference,
+                )?;
+                let mut segments = vec![flare.clone()];
+                segments.extend(parking.exit.rollout.clone());
+                segments.extend(
+                    (0..512).map_while(|index| parking.surface.route.segment(index).cloned()),
+                );
+                openatc_core::traffic::motion::Route::compile(
+                    segments,
+                    input.aircraft.climb_fpm,
+                    input.aircraft.descent_fpm,
+                )?;
+                Ok::<_, String>(parking)
+            })();
+            match candidate {
+                Ok(parking) => {
+                    selected = Some(parking);
+                    true
+                }
+                Err(error) => {
+                    reason = Some(error);
+                    false
+                }
+            }
+        },
+    );
+    if let Err(error) = result {
+        return Err(match reason {
+            Some(reason) => format!("{error}; {attempts} exit-to-stand searches: {reason}"),
+            None => error,
+        });
+    }
+    let parking = selected.ok_or("Landing exit lost its checked parking route")?;
     Ok(Arrival { flare, parking })
 }
 
@@ -99,6 +130,126 @@ fn clear_of_runways(
     )
 }
 
+/// Decide whether an aircraft can leave a runway through a verified forward exit.
+/// The same screening and turn construction used by [`plan`] is applied to a nominal
+/// threshold crossing, so runway assignment and landing planning share one source of truth.
+pub(super) fn vacatable(
+    airport: &Airport,
+    runway_name: &str,
+    aircraft: &openatc_core::traffic::profiles::Aircraft,
+    handling: &animation::Handling,
+    policy: &Operations,
+    surface: &super::runway::Surface,
+    environment: &super::environment::Environment,
+) -> Result<(), String> {
+    if !surface.matches(airport, runway_name) {
+        return Err("Landing runway surface is unavailable".into());
+    }
+    let threshold = surface.threshold;
+    let height = surface.height(surface.point(threshold)) + handling.flare_height_feet.max(50.0);
+    let knots = environment.runway_speed(airport, runway_name, aircraft.approach_knots, height)?;
+    vacatable_at_speed(
+        airport,
+        runway_name,
+        aircraft,
+        handling,
+        policy,
+        surface,
+        knots,
+    )
+}
+
+/// Run the shared exit screen with an explicit final-approach ground speed.
+pub(super) fn vacatable_at_speed(
+    airport: &Airport,
+    runway_name: &str,
+    aircraft: &openatc_core::traffic::profiles::Aircraft,
+    handling: &animation::Handling,
+    policy: &Operations,
+    surface: &super::runway::Surface,
+    ground_knots: f64,
+) -> Result<(), String> {
+    let runway = airport
+        .runways
+        .iter()
+        .find(|runway| runway.first_name == runway_name || runway.second_name == runway_name)
+        .ok_or("Landing runway is unavailable")?;
+    let (start, end) = if runway.first_name == runway_name {
+        (runway.first, runway.second)
+    } else {
+        (runway.second, runway.first)
+    };
+    let length = (end.east - start.east).hypot(end.north - start.north);
+    if !surface.matches(airport, runway_name) || length - surface.threshold < aircraft.runway {
+        return Err("Landing runway or stopping envelope is insufficient".into());
+    }
+    let point = surface.point(surface.threshold);
+    let coordinate = position(airport, point);
+    let crossing = Waypoint {
+        latitude: coordinate[0],
+        longitude: coordinate[1],
+        altitude_feet: surface.height(point) + handling.flare_height_feet.max(50.0),
+    };
+    let flare = surface.flare(
+        airport,
+        crossing,
+        -3.0,
+        ground_knots,
+        handling,
+        policy.surface_sample_meters,
+    )?;
+    let touchdown = *flare.points.last().ok_or("Flare has no touchdown")?;
+    plan(
+        airport,
+        runway_name,
+        touchdown,
+        ground_knots,
+        aircraft,
+        handling,
+        policy,
+        surface,
+    )
+    .map(|_| ())
+}
+
+/// Choose the first runway end, in the supplied preference order, that the type can leave.
+/// The error names every candidate and the reason it was rejected.
+pub(super) fn vacatable_runway(
+    airport: &Airport,
+    candidates: &[(String, super::runway::Surface)],
+    aircraft: &openatc_core::traffic::profiles::Aircraft,
+    handling: &animation::Handling,
+    policy: &Operations,
+    ground_knots: f64,
+) -> Result<String, String> {
+    let mut rejected = Vec::new();
+    for (name, surface) in candidates {
+        match vacatable_at_speed(
+            airport,
+            name,
+            aircraft,
+            handling,
+            policy,
+            surface,
+            ground_knots,
+        ) {
+            Ok(()) => return Ok(name.clone()),
+            Err(reason) => rejected.push(format!("{name}: {reason}")),
+        }
+    }
+    Err(format!(
+        "No arrival runway can be vacated by {}: {}",
+        aircraft.name,
+        if rejected.is_empty() {
+            "no runway surfaces are available".to_owned()
+        } else {
+            rejected.join("; ")
+        }
+    ))
+}
+
+// This joins the landing geometry and the aircraft envelope; both are needed verbatim.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn plan(
     airport: &Airport,
     runway_name: &str,
@@ -108,6 +259,31 @@ pub(super) fn plan(
     handling: &animation::Handling,
     policy: &Operations,
     surface: &super::runway::Surface,
+) -> Result<Exit, String> {
+    plan_select(
+        airport,
+        runway_name,
+        touchdown,
+        touchdown_knots,
+        aircraft,
+        handling,
+        policy,
+        surface,
+        |_| true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_select(
+    airport: &Airport,
+    runway_name: &str,
+    touchdown: Waypoint,
+    touchdown_knots: f64,
+    aircraft: &openatc_core::traffic::profiles::Aircraft,
+    handling: &animation::Handling,
+    policy: &Operations,
+    surface: &super::runway::Surface,
+    mut onward: impl FnMut(&Exit) -> bool,
 ) -> Result<Exit, String> {
     let runway = airport
         .runways
@@ -153,6 +329,21 @@ pub(super) fn plan(
         .collect::<BTreeMap<_, _>>();
     let mut candidates = Vec::new();
     let mut screened = [0usize; 4];
+    let landing_runway_edges = BTreeSet::from([
+        runway.first_name.clone(),
+        runway.second_name.clone(),
+        format!("{}/{}", runway.first_name, runway.second_name),
+        format!("{}/{}", runway.second_name, runway.first_name),
+    ]);
+    // A node is an exit entrance only where a taxiway meets this runway.
+    // Unnamed runway edges stay eligible and are resolved by the alignment test.
+    let on_landing_runway = |id: i64| {
+        airport.edges.iter().any(|edge| {
+            edge.runway
+                && (edge.first == id || edge.second == id)
+                && (edge.name.is_empty() || landing_runway_edges.contains(&edge.name))
+        })
+    };
     for edge in airport
         .edges
         .iter()
@@ -165,6 +356,10 @@ pub(super) fn plan(
             let (Some(entrance), Some(_exit)) = (nodes.get(&first), nodes.get(&second)) else {
                 continue;
             };
+            if !on_landing_runway(first) {
+                screened[3] += 1;
+                continue;
+            }
             let at =
                 (entrance.east - start.east) * unit[0] + (entrance.north - start.north) * unit[1];
             let offset =
@@ -179,12 +374,6 @@ pub(super) fn plan(
             }
             if at + envelope >= length {
                 screened[2] += 1;
-                continue;
-            }
-            if !airport.edges.iter().any(|runway_edge| {
-                runway_edge.runway && (runway_edge.first == first || runway_edge.second == first)
-            }) {
-                screened[3] += 1;
                 continue;
             }
             let mut queue = std::collections::VecDeque::from([(second, vec![first, second])]);
@@ -230,7 +419,7 @@ pub(super) fn plan(
     }
     candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
     let candidate_count = candidates.len();
-    let mut rejected = [0; 3];
+    let mut rejected = [0; 4];
     for (at, path) in candidates.into_iter().take(32) {
         let turn_start = Point {
             east: start.east + (at - radius * 2.0) * unit[0],
@@ -315,7 +504,7 @@ pub(super) fn plan(
             continue;
         }
         let vacated = *points.last().unwrap();
-        return Ok(Exit {
+        let exit = Exit {
             rollout: vec![
                 Segment {
                     stage: Stage::Rollout,
@@ -337,13 +526,18 @@ pub(super) fn plan(
                 },
             ],
             vacated,
-        });
+        };
+        if onward(&exit) {
+            return Ok(exit);
+        }
+        rejected[3] += 1;
     }
     Err(format!(
-        "No verified forward runway exit within the landing and taxi envelope ({candidate_count} mapped candidates; {} turn, {} runway-clearance, {} resource-budget rejections; {} off-axis, {} before stopping limit, {} past runway end, {} disconnected; touchdown {:.0} m, braking {:.0} m at {:.1} kt)",
+        "No verified forward runway exit within the landing and taxi envelope ({candidate_count} mapped candidates; {} turn, {} runway-clearance, {} resource-budget rejections, {} onward-route rejections; {} off-axis, {} before stopping limit, {} past runway end, {} disconnected; touchdown {:.0} m, braking {:.0} m at {:.1} kt)",
         rejected[0],
         rejected[1],
         rejected[2],
+        rejected[3],
         screened[0],
         screened[1],
         screened[2],
@@ -437,6 +631,259 @@ mod tests {
             }
         }
         assert!(missing.is_empty(), "No forward exit for {missing:?}");
+    }
+
+    #[test]
+    fn exit_screening_references_only_the_landing_runway() {
+        let point = |east, north| Point {
+            east,
+            north,
+            height: 0.0,
+        };
+        let node = |id, east, north| openatc_core::airport::TaxiNode {
+            id,
+            point: point(east, north),
+        };
+        let edge = |first, second, runway, name: &str| openatc_core::airport::TaxiEdge {
+            first,
+            second,
+            runway,
+            name: name.into(),
+            size: 'F',
+            ..Default::default()
+        };
+        let airport = Airport {
+            icao: "TEST".into(),
+            // Narrow pavement makes the aligned candidate's turn fail after screening,
+            // so the diagnostic counters remain observable.
+            runways: vec![openatc_core::airport::Runway {
+                first_name: "09".into(),
+                second_name: "27".into(),
+                width: 5.0,
+                first: point(0.0, 0.0),
+                second: point(2000.0, 0.0),
+                ..Default::default()
+            }],
+            nodes: vec![
+                node(1, 0.0, 0.0),
+                node(2, 2000.0, 0.0),
+                node(3, 1500.0, 0.0),
+                node(4, 1500.0, 100.0),
+                node(5, 200.0, 0.0),
+                node(6, 200.0, 100.0),
+                node(7, 1500.0, 300.0),
+                node(8, 0.0, 300.0),
+                node(9, 500.0, 900.0),
+                node(10, 600.0, 900.0),
+                node(11, 1500.0, 400.0),
+                node(13, 1500.0, 20.0),
+                node(14, 1500.0, 80.0),
+                node(15, 1996.0, 0.0),
+                node(16, 1996.0, 60.0),
+                node(17, 1600.0, 20.0),
+            ],
+            edges: vec![
+                edge(1, 5, true, "09/27"),
+                edge(5, 3, true, "09/27"),
+                edge(3, 15, true, "09/27"),
+                edge(15, 2, true, "09/27"),
+                edge(13, 17, true, "09/27"),
+                edge(7, 8, true, "09L/27R"),
+                edge(3, 4, false, "T1"),
+                edge(5, 6, false, "T2"),
+                edge(7, 11, false, "T3"),
+                edge(9, 10, false, "T4"),
+                edge(13, 14, false, "T5"),
+                edge(15, 16, false, "T6"),
+            ],
+            ..Default::default()
+        };
+        let thresholds = [
+            openatc_core::arrival::Threshold {
+                runway: "09".into(),
+                elevation_feet: 0.0,
+            },
+            openatc_core::arrival::Threshold {
+                runway: "27".into(),
+                elevation_feet: 0.0,
+            },
+        ];
+        let surface = super::super::runway::Surface::new(&airport, "09", &thresholds, 2.0).unwrap();
+        let coordinate = position(&airport, surface.point(50.0));
+        let touchdown = Waypoint {
+            latitude: coordinate[0],
+            longitude: coordinate[1],
+            altitude_feet: surface.height(surface.point(50.0)),
+        };
+        let aircraft = openatc_core::traffic::profiles::aircraft("C172").unwrap();
+        let builtin = animation::builtin().unwrap();
+        let policy = parse_operations(include_str!("../../../../traffic/operations.toml")).unwrap();
+        let error = match plan(
+            &airport,
+            "09",
+            touchdown,
+            65.0,
+            aircraft,
+            &builtin[&animation::Kind::Piston],
+            &policy,
+            &surface,
+        ) {
+            Ok(_) => panic!("Expected the exit screening to reject the fixture"),
+            Err(error) => error,
+        };
+        // The aligned entrance beyond the stopping distance is still a candidate.
+        assert!(error.contains("1 mapped candidates"), "{error}");
+        // The parallel-runway and remote taxi nodes are not landing-runway entrances.
+        assert!(error.contains("1 off-axis"), "{error}");
+        assert!(error.contains("1 before stopping limit"), "{error}");
+        assert!(error.contains("1 past runway end"), "{error}");
+        assert!(error.contains("8 disconnected"), "{error}");
+    }
+
+    #[test]
+    fn arrival_runway_selection_requires_a_reachable_forward_exit() {
+        let point = |east, north| Point {
+            east,
+            north,
+            height: 0.0,
+        };
+        let node = |id, east, north| openatc_core::airport::TaxiNode {
+            id,
+            point: point(east, north),
+        };
+        let edge = |first, second, runway, name: &str| openatc_core::airport::TaxiEdge {
+            first,
+            second,
+            runway,
+            name: name.into(),
+            size: 'F',
+            ..Default::default()
+        };
+        // The first runway's only entrance is inside the runway-end envelope. The second
+        // runway repeats that geometry or offers an entrance beyond the stopping limit.
+        let fixture = |second_feasible: bool| {
+            let airport = Airport {
+                icao: "TEST".into(),
+                runways: vec![
+                    openatc_core::airport::Runway {
+                        first_name: "09".into(),
+                        second_name: "27".into(),
+                        width: 45.0,
+                        first: point(0.0, 0.0),
+                        second: point(2969.0, 0.0),
+                        ..Default::default()
+                    },
+                    openatc_core::airport::Runway {
+                        first_name: "09L".into(),
+                        second_name: "27R".into(),
+                        width: 45.0,
+                        first: point(0.0, 500.0),
+                        second: point(2969.0, 500.0),
+                        ..Default::default()
+                    },
+                ],
+                nodes: vec![
+                    node(1, 0.0, 0.0),
+                    node(2, 2955.0, 0.0),
+                    node(3, 2969.0, 0.0),
+                    node(4, 2955.0, 100.0),
+                    node(5, 0.0, 500.0),
+                    node(6, if second_feasible { 2600.0 } else { 2955.0 }, 500.0),
+                    node(7, 2969.0, 500.0),
+                    node(8, if second_feasible { 2600.0 } else { 2955.0 }, 600.0),
+                ],
+                edges: vec![
+                    edge(1, 2, true, "09/27"),
+                    edge(2, 3, true, "09/27"),
+                    edge(2, 4, false, "T1"),
+                    edge(5, 6, true, "09L/27R"),
+                    edge(6, 7, true, "09L/27R"),
+                    edge(6, 8, false, "T2"),
+                ],
+                pavement_triangles: vec![
+                    [
+                        point(-100.0, -100.0),
+                        point(3100.0, -100.0),
+                        point(3100.0, 800.0),
+                    ],
+                    [
+                        point(-100.0, -100.0),
+                        point(3100.0, 800.0),
+                        point(-100.0, 800.0),
+                    ],
+                ],
+                ..Default::default()
+            };
+            let thresholds = [
+                openatc_core::arrival::Threshold {
+                    runway: "09".into(),
+                    elevation_feet: 0.0,
+                },
+                openatc_core::arrival::Threshold {
+                    runway: "27".into(),
+                    elevation_feet: 0.0,
+                },
+                openatc_core::arrival::Threshold {
+                    runway: "09L".into(),
+                    elevation_feet: 0.0,
+                },
+                openatc_core::arrival::Threshold {
+                    runway: "27R".into(),
+                    elevation_feet: 0.0,
+                },
+            ];
+            let policy =
+                parse_operations(include_str!("../../../../traffic/operations.toml")).unwrap();
+            let surfaces = ["09", "09L"]
+                .into_iter()
+                .map(|name| {
+                    (
+                        name.to_owned(),
+                        super::super::runway::Surface::new(
+                            &airport,
+                            name,
+                            &thresholds,
+                            policy.runway_slope_limit_percent,
+                        )
+                        .unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            (airport, surfaces, policy)
+        };
+        let aircraft = openatc_core::traffic::profiles::aircraft("B763").unwrap();
+        let handling = animation::builtin().unwrap();
+        let handling = &handling[&aircraft.handling.unwrap()];
+        let (airport, surfaces, policy) = fixture(true);
+        assert_eq!(
+            vacatable_runway(
+                &airport,
+                &surfaces,
+                aircraft,
+                handling,
+                &policy,
+                aircraft.approach_knots
+            )
+            .unwrap(),
+            "09L"
+        );
+        let (airport, surfaces, policy) = fixture(false);
+        let error = vacatable_runway(
+            &airport,
+            &surfaces,
+            aircraft,
+            handling,
+            &policy,
+            aircraft.approach_knots,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("No arrival runway can be vacated"),
+            "{error}"
+        );
+        assert!(error.contains("09:"), "{error}");
+        assert!(error.contains("09L:"), "{error}");
+        assert!(error.contains("past runway end"), "{error}");
     }
 
     #[test]
@@ -830,6 +1277,8 @@ pub(super) struct Parking {
 }
 
 /// Reserve only after the caller has committed the complete flight and its gate resource.
+// Stand selection needs the airport, aircraft, policy and all three exclusion sets separately.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn parking(
     airport: &Airport,
     exit: Exit,
@@ -925,6 +1374,7 @@ pub(super) fn parking(
             policy,
             true,
             observed,
+            true,
         );
         if let Ok(surface) = result {
             if (0..512)

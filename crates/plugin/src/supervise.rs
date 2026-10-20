@@ -102,26 +102,37 @@ impl Supervisor {
         self.fruitless = 0;
     }
 
-    /// Maybe spawn the engine. Returns a fault line for the UI when the
-    /// engine repeatedly exits.
-    pub fn poll(&mut self, connected: bool, log: &mut Vec<String>) -> String {
+    /// Record the connection state and decide whether a launch is due now.
+    ///
+    /// Split from `poll` so the grace period and backoff can be checked without resolving a
+    /// real engine binary, which needs the simulator's plugin entry points.
+    fn should_launch(&mut self, connected: bool, now: Instant) -> bool {
         if connected {
             self.mark_connected();
-            return String::new();
+            return false;
         }
-        let now = Instant::now();
         if self.disconnected_since.is_none() {
             self.disconnected_since = Some(now);
-            return String::new();
+            return false;
         }
         if now - self.disconnected_since.unwrap_or(now) < GRACE {
-            return String::new();
+            return false;
         }
         let backoff = Duration::from_secs(5 * (1 << self.failures.min(3)));
         if self.last_attempt.is_some_and(|at| now - at < backoff) {
-            return String::new();
+            return false;
         }
         self.last_attempt = Some(now);
+        true
+    }
+
+    /// Maybe spawn the engine. Returns a fault line for the UI when the
+    /// engine repeatedly exits.
+    pub fn poll(&mut self, connected: bool, log: &mut Vec<String>) -> String {
+        let now = Instant::now();
+        if !self.should_launch(connected, now) {
+            return String::new();
+        }
         let binary = self.binary.clone().unwrap_or_else(|| {
             let path = plugin_file_path()
                 .and_then(|file| {
@@ -311,6 +322,66 @@ fn engine_log_path() -> String {
 }
 
 #[cfg(test)]
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn a_connected_engine_is_never_respawned_and_the_grace_period_protects_a_dropout() {
+        let mut supervisor = Supervisor::new();
+        let now = Instant::now();
+        // Connected: nothing to do at all.
+        assert!(!supervisor.should_launch(true, now));
+        // First disconnect only starts the clock.
+        assert!(!supervisor.should_launch(false, now));
+        assert!(supervisor.disconnected_since.is_some());
+        // A brief link drop inside the grace period must not restart the engine.
+        assert!(!supervisor.should_launch(false, now + Duration::from_secs(1)));
+        // Once the engine has really been away, a launch is due.
+        assert!(supervisor.should_launch(false, now + GRACE + Duration::from_secs(1)));
+        assert!(supervisor.last_attempt.is_some());
+    }
+
+    #[test]
+    fn repeated_launches_back_off_instead_of_spinning() {
+        let mut supervisor = Supervisor::new();
+        let now = Instant::now();
+        assert!(!supervisor.should_launch(false, now));
+        let due = now + GRACE + Duration::from_secs(1);
+        assert!(supervisor.should_launch(false, due));
+        let attempted = supervisor.last_attempt.expect("a launch was attempted");
+        // Immediately after a launch, and again inside the backoff, nothing is due. The
+        // backoff starts at five seconds and grows with each failure.
+        assert!(!supervisor.should_launch(false, due + Duration::from_secs(1)));
+        assert!(!supervisor.should_launch(false, due + Duration::from_secs(4)));
+        assert_eq!(
+            supervisor.last_attempt,
+            Some(attempted),
+            "the engine was relaunched without waiting"
+        );
+        // The backoff grows with each failure, so a broken install eventually stops retrying
+        // hard rather than spawning continuously.
+        assert!(supervisor.should_launch(false, due + Duration::from_secs(60)));
+        supervisor.failures = 4;
+        let later = due + Duration::from_secs(120);
+        assert!(supervisor.should_launch(false, later));
+        assert!(!supervisor.should_launch(false, later + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn a_reconnect_stops_the_respawn_timer() {
+        let mut supervisor = Supervisor::new();
+        let now = Instant::now();
+        assert!(!supervisor.should_launch(false, now));
+        // The engine comes back before the grace period elapses.
+        assert!(!supervisor.should_launch(true, now + Duration::from_secs(1)));
+        assert!(supervisor.disconnected_since.is_none());
+        // Losing it again restarts the clock rather than resuming an old one.
+        assert!(!supervisor.should_launch(false, now + Duration::from_secs(2)));
+        assert!(!supervisor.should_launch(false, now + Duration::from_secs(3)));
+    }
+}
+
 mod heartbeat_tests {
     use super::*;
     use std::io::{Read, Write};

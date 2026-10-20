@@ -784,7 +784,7 @@ async fn converse(shared: &Shared, role: &str, request: &str, points: &[String])
         if repeated && attempt == 0 {
             preserved_reply = Some(candidate.reply.clone());
             let state = shared.read().await;
-            prompt.push_str("\n");
+            prompt.push('\n');
             prompt.push_str(state.prompts.guidance.get("crew_dialogue_retry"));
             prompt.push_str(
                 &json!({"rejectedJoke":candidate.joke,"retainReply":candidate.reply}).to_string(),
@@ -1099,8 +1099,8 @@ fn valid_narration(reply: &str, fallback: &str, protected: &[String]) -> bool {
             .filter_map(|part| part.trim_matches('.').parse::<f64>().ok())
             .collect::<Vec<_>>()
     };
-    let actual = numbers(&reply);
-    if numbers(&outcomes)
+    let actual = numbers(reply);
+    if numbers(outcomes.as_str())
         .iter()
         .any(|number| !actual.contains(number))
     {
@@ -2485,9 +2485,11 @@ mod conversation_routing_tests {
                 async {Json(json!({"choices":[{"message":{"content":"{\"kind\":\"follow_up\"}"}}]}))}
             }))).await.unwrap();
         });
-        let mut settings = openatc_settings::Settings::default();
-        settings.ai_url = origin;
-        settings.ai_model = "test".into();
+        let settings = openatc_settings::Settings {
+            ai_url: origin,
+            ai_model: "test".into(),
+            ..Default::default()
+        };
         let joke = "Why did the pie fly? It wanted a window seat!";
         let spoken = format!("All set. {joke} How is the flight going?");
         let result = pace_crew_reply_with_joke(
@@ -2880,9 +2882,11 @@ mod conversation_routing_tests {
                 }
             }))).await.unwrap();
         });
-        let mut settings = openatc_settings::Settings::default();
-        settings.ai_url = format!("http://{address}");
-        settings.ai_model = "test".into();
+        let settings = openatc_settings::Settings {
+            ai_url: format!("http://{address}"),
+            ai_model: "test".into(),
+            ..Default::default()
+        };
         let client = reqwest::Client::new();
         let text = "Understood, Captain. I'll leave you to it. How is the flight going?";
         assert_eq!(
@@ -2932,9 +2936,11 @@ mod conversation_routing_tests {
                 Json(json!({"choices":[{"message":{"content":json!({"kind":kind}).to_string()}}]}))
             }))).await.unwrap();
         });
-        let mut settings = openatc_settings::Settings::default();
-        settings.ai_url = origin;
-        settings.ai_model = "test".into();
+        let settings = openatc_settings::Settings {
+            ai_url: origin,
+            ai_model: "test".into(),
+            ..Default::default()
+        };
         assert_eq!(
             pace_crew_reply(
                 &reqwest::Client::new(),

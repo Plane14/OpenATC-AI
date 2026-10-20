@@ -92,6 +92,7 @@ struct Reminder {
     key: String,
     since: Option<Instant>,
     last_call: Option<Instant>,
+    calls: u8,
 }
 
 impl Reminder {
@@ -100,6 +101,7 @@ impl Reminder {
             self.key = key;
             self.since = Some(now);
             self.last_call = None;
+            self.calls = 0;
         }
     }
 
@@ -111,6 +113,18 @@ impl Reminder {
             && self
                 .last_call
                 .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(60))
+    }
+
+    /// A bounded reminder: one repeat interval between calls, and a fixed number of calls.
+    fn ready_repeating(&self, now: Instant, delay: u64, repeat: u64, limit: u8) -> bool {
+        !self.key.is_empty()
+            && self.calls < limit
+            && self
+                .since
+                .is_some_and(|since| now.duration_since(since) >= Duration::from_secs(delay))
+            && self
+                .last_call
+                .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(repeat))
     }
 }
 
@@ -365,8 +379,9 @@ fn tick_at(state: &mut EngineState, radio_available: bool, now: Instant) -> bool
             monitor.landing_unapproved = false;
             message = Some(("monitor_landing_without_clearance", vec![]));
         } else if !waiting_for_reply(state) {
-            if monitor.transponder.ready(now, 30) {
+            if monitor.transponder.ready_repeating(now, 30, 120, 2) {
                 monitor.transponder.last_call = Some(now);
+                monitor.transponder.calls = monitor.transponder.calls.saturating_add(1);
                 message = Some(
                     if let Some(code) = monitor.transponder.key.strip_prefix("squawk:") {
                         ("monitor_squawk", vec![("squawk", code.to_owned())])
@@ -695,6 +710,35 @@ mod tests {
         assert!(!tick_at(&mut s, true, now + Duration::from_secs(60)));
         s.session.telemetry.transponder_code = Some(2105);
         assert!(!tick_at(&mut s, true, now + Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn transponder_reminders_are_bounded_and_spaced() {
+        let mut s = state();
+        s.settings.monitor_transponder = true;
+        s.session.telemetry.transponder_code = Some(1200);
+        let now = Instant::now();
+        assert!(!tick_at(&mut s, true, now));
+        assert!(tick_at(&mut s, true, now + Duration::from_secs(31)));
+        assert!(!tick_at(&mut s, true, now + Duration::from_secs(100)));
+        assert!(tick_at(&mut s, true, now + Duration::from_secs(151)));
+        for second in [300, 400, 500] {
+            assert!(!tick_at(&mut s, true, now + Duration::from_secs(second)));
+        }
+        assert_eq!(
+            s.session
+                .transcript
+                .iter()
+                .filter(|entry| entry.text.contains("2105"))
+                .count(),
+            2
+        );
+        // Correcting the code ends the reminder; a new mismatch starts a fresh bounded count.
+        s.session.telemetry.transponder_code = Some(2105);
+        assert!(!tick_at(&mut s, true, now + Duration::from_secs(600)));
+        s.session.telemetry.transponder_code = Some(1200);
+        assert!(!tick_at(&mut s, true, now + Duration::from_secs(700)));
+        assert!(tick_at(&mut s, true, now + Duration::from_secs(731)));
     }
 
     #[test]

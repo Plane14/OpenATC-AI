@@ -367,11 +367,12 @@ pub async fn atis(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
         ));
     }
     if !runways.is_empty() {
-        if s.atis_runways.len() >= 32 && !s.atis_runways.contains_key(&station.airport) {
-            if let Some(key) = s.atis_runways.keys().next().cloned() {
-                s.atis_runways.remove(&key);
-                s.atis_last_runway.remove(&key);
-            }
+        if s.atis_runways.len() >= 32
+            && !s.atis_runways.contains_key(&station.airport)
+            && let Some(key) = s.atis_runways.keys().next().cloned()
+        {
+            s.atis_runways.remove(&key);
+            s.atis_last_runway.remove(&key);
         }
         s.atis_runways
             .insert(station.airport.clone(), runways.clone());
@@ -389,14 +390,13 @@ pub async fn atis(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
         ""
     };
     let runway = atis_runway(&runways, runway, number("windDegrees"), number("windKnots"));
-    if !runway.is_empty() {
-        if s.atis_last_runway
+    if !runway.is_empty()
+        && s.atis_last_runway
             .insert(station.airport.clone(), runway.clone())
             .is_some_and(|previous| previous != runway)
-            && let Some(information) = s.atis_information.get_mut(&station.airport)
-        {
-            information.1 = (information.1 + 1) % 26;
-        }
+        && let Some(information) = s.atis_information.get_mut(&station.airport)
+    {
+        information.1 = (information.1 + 1) % 26;
     }
     let letter = s.atis_information.get(&station.airport).map_or(0, |v| v.1);
     let code = openatc_core::dialogue::say(&format!("atis_information_{letter:02}"), &[]);

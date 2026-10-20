@@ -901,8 +901,10 @@ pub fn read_acf_identity(path: &std::path::Path) -> Result<(String, String), Str
 mod tests {
     #[test]
     fn flight_plan_feedback_distinguishes_empty_incomplete_and_valid_drafts() {
-        let mut plan = FlightPlan::default();
-        plan.callsign = "C-GTLT".into();
+        let mut plan = FlightPlan {
+            callsign: "C-GTLT".into(),
+            ..Default::default()
+        };
         let missing = super::flight_plan_clearance_feedback(&plan).unwrap();
         assert!(missing.starts_with("C-GTLT,"));
         assert!(missing.contains("not filed a flight plan"));

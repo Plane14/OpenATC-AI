@@ -292,6 +292,11 @@ pub(super) fn from_final(
 
 /// Prepare each final boundary at its actual entry height, using one explicit missed level.
 /// These remain opaque drafts until both protection and the approach clearance are complete.
+pub(super) type Variants = (
+    std::collections::BTreeMap<usize, std::sync::Arc<Draft>>,
+    Option<super::flight::MissedInstruction>,
+);
+
 pub(super) fn final_variants(
     planner: &super::airborne::Planner<'_>,
     terminal: &super::routing::Terminal,
@@ -300,13 +305,7 @@ pub(super) fn final_variants(
     nominal: &super::airborne::Draft,
     published: &Draft,
     late: Waypoint,
-) -> Result<
-    (
-        std::collections::BTreeMap<usize, std::sync::Arc<Draft>>,
-        Option<super::flight::MissedInstruction>,
-    ),
-    String,
-> {
+) -> Result<Variants, String> {
     let mut levels = nominal.approach_levels();
     if levels.is_empty() {
         return Err("Final recovery has no approach limits".into());
@@ -1018,6 +1017,8 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
         let legs = catalogue.0.values().next().unwrap();
         let terminal = super::super::routing::Terminal {
+            arrival_manual: None,
+            direct: false,
             enroute_from: [0.0, 0.0],
             enroute_to: [0.0, 0.0],
             enroute_minimum_feet: 1000,
@@ -1076,6 +1077,7 @@ mod tests {
             occupied_stand_cells: &BTreeSet::new(),
             parking_exclusions: &BTreeSet::new(),
             preference: &openatc_core::parking::TrafficPreference::default(),
+            allow_direct: false,
         };
         let speed = trajectory::Airspeed {
             indicated_knots: planner.aircraft.approach_knots,

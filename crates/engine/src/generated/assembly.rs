@@ -100,10 +100,10 @@ impl Draft {
             }
         };
         let checked = self
-            .protect(&protected)
+            .protect(protected)
             .map_err(|error| reason.borrow().clone().unwrap_or(error))?;
         let result = checked
-            .finish_all_production(&protected)
+            .finish_all_production(protected)
             .map_err(|error| reason.borrow().clone().unwrap_or(error))?;
         if terrain.borrow().has_unresolved_obstacles() {
             return Err("Low-level scenery corridor contains unresolved object, polygon or network obstacles".into());
@@ -111,6 +111,8 @@ impl Draft {
         Ok(result)
     }
 
+    // The draft joins separately planned surface, airborne, arrival and controller products.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         departure: &departure::Surface,
         decoded: &airborne::Decoded,
@@ -380,7 +382,7 @@ impl Checked {
         protected: impl Fn(Waypoint, Waypoint) -> bool,
     ) -> Result<flight::Prepared, String> {
         let contracts = self.controller_contracts(context)?;
-        self.finish(
+        let mut plan = self.finish(
             |index, _| {
                 contracts
                     .get(&index)
@@ -389,7 +391,9 @@ impl Checked {
             },
             recovery,
             protected,
-        )
+        )?;
+        plan.amendment = context.amendment.cloned();
+        Ok(plan)
     }
 
     pub fn final_recoveries(
@@ -489,6 +493,7 @@ impl Checked {
             clearances,
             recovery: recoveries,
             vacated_reports: self.reports,
+            amendment: None,
         };
         if let Some(expected) = self
             .controller
@@ -533,7 +538,7 @@ impl Checked {
             if !probe.recovery(0, 1, index, recovery.clone()) {
                 return Err(format!("Invalid generated recovery at movement {index}"));
             }
-            if self.controller.is_some() {
+            if let Some(controller) = self.controller.as_ref() {
                 let clearance = plan
                     .clearances
                     .get_mut(&index)
@@ -551,7 +556,7 @@ impl Checked {
                     clearance.coordinated_recovery = super::controller::recovery_coordination(
                         clearance.limit_station(),
                         recovery,
-                        &self.controller.as_ref().unwrap().stations,
+                        &controller.stations,
                     )
                     .map_err(|error| {
                         format!(
@@ -624,8 +629,8 @@ mod tests {
                     100.0
                 },
                 resources: match index {
-                    0 | 1 => vec!["RUNWAY/TEST/09/27".into()],
-                    6 | 7 | 8 => vec!["RUNWAY/DEST/09/27".into()],
+                    0..=1 => vec!["RUNWAY/TEST/09/27".into()],
+                    6..=8 => vec!["RUNWAY/DEST/09/27".into()],
                     10 => vec!["STAND/DEST/1".into()],
                     _ => vec![],
                 },
@@ -701,7 +706,7 @@ mod tests {
         };
         let departure_weather = weather(&origin);
         let arrival_weather = weather(&destination);
-        let requirements = (2..=5)
+        let requirements: Vec<openatc_core::traffic::trajectory::Fix> = (2..=5)
             .map(|index| {
                 let end = *route.segment(index).unwrap().points.last().unwrap();
                 let atmosphere = departure_weather.atmosphere;
@@ -724,7 +729,8 @@ mod tests {
                 }
             })
             .collect();
-        let checked = Checked {
+        let build_checked = || -> Checked {
+            Checked {
             airspeeds: BTreeMap::new(),
             controller: None,
             route: route.clone(),
@@ -738,12 +744,12 @@ mod tests {
             acceleration: 3.0,
             braking: 3.0,
             holding: None,
-            missed,
+            missed: missed.clone(),
             missed_variants: BTreeMap::new(),
             map_index: 5,
             climb_fpm: 1500.0,
             descent_fpm: 1500.0,
-            requirements,
+            requirements: requirements.clone(),
             surface_start: 9,
             arrival_orders: vec![(
                 0,
@@ -755,7 +761,9 @@ mod tests {
                     ..Default::default()
                 },
             )],
+            }
         };
+        let checked = build_checked();
         let final_recoveries = checked.final_recoveries(|_, _| true);
         assert!(final_recoveries.values().all(Result::is_ok));
         let stations = [
@@ -785,6 +793,8 @@ mod tests {
         })
         .collect::<Vec<_>>();
         let terminal = routing::Terminal {
+            arrival_manual: None,
+            direct: false,
             enroute_from: [0.0, 0.0],
             enroute_to: [0.0, 0.1],
             enroute_minimum_feet: 1000,
@@ -801,6 +811,7 @@ mod tests {
         };
         let regions = BTreeMap::new();
         let context = super::super::controller::Context {
+            amendment: None,
             origin: &origin,
             destination: &destination,
             departure_runway: "09",
@@ -859,6 +870,113 @@ mod tests {
                 })
                 .is_err()
         );
+        let mut amended_route_terminal = terminal.clone();
+        let mut manual_fields = vec![""; 38];
+        manual_fields[0] = "010";
+        manual_fields[1] = "S";
+        manual_fields[2] = "TEST2A";
+        manual_fields[4] = "COPEN";
+        manual_fields[11] = "FM";
+        let manual_leg = openatc_core::traffic::procedures::Catalogue::parse(&format!(
+            "STAR:{};",
+            manual_fields.join(",")
+        ))
+        .unwrap()
+        .0
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+        amended_route_terminal.arrival_manual = Some(
+            openatc_core::traffic::resolved::ManualTermination {
+                terminator: "FM".into(),
+                identifier: "COPEN".into(),
+            },
+        );
+        amended_route_terminal.arrival = manual_leg;
+        let mut entry_fields = vec![""; 38];
+        entry_fields[0] = "010";
+        entry_fields[1] = "A";
+        entry_fields[2] = "I09";
+        entry_fields[4] = "KELLA";
+        entry_fields[11] = "IF";
+        amended_route_terminal.approach = openatc_core::traffic::procedures::Catalogue::parse(
+            &format!("APPCH:{};", entry_fields.join(",")),
+        )
+        .unwrap()
+        .0
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+        let amendment = flight::RouteAmendment {
+            procedure: "TEST2A".into(),
+            transition: String::new(),
+            terminator: "FM".into(),
+            manual_fix: "COPEN".into(),
+            target: "KELLA".into(),
+            approach: "I09".into(),
+            target_coordinate: [coordinates[5].latitude, coordinates[5].longitude],
+        };
+        let route_context = super::super::controller::Context {
+            terminal: &amended_route_terminal,
+            amendment: Some(&amendment),
+            ..context
+        };
+        let unamended = super::super::controller::Context {
+            terminal: &terminal,
+            ..route_context
+        };
+        let amended_checked = build_checked();
+        assert!(amended_checked.controller_contracts(&unamended).is_err());
+        let route_plan = amended_checked
+            .finish_controlled(
+                &route_context,
+                |index, segment| {
+                    if let Some(result) = final_recoveries.get(&index) {
+                        return result.clone();
+                    }
+                    Ok(Arc::new(Route::compile(
+                        vec![hold(*segment.points.last().unwrap())],
+                        1500.0,
+                        1500.0,
+                    )?))
+                },
+                |_, _| true,
+            )
+            .unwrap();
+        let amended = route_plan.clearances[&5].amended_route.as_ref().unwrap();
+        assert_eq!(amended, &amendment);
+        // The lateral change is announced in the instruction and confirmed in the read-back.
+        assert!(route_plan.clearances[&5].instruction.contains("KELLA"));
+        assert!(route_plan.clearances[&5].readback.contains("KELLA"));
+        for invalid in 0..5 {
+            let mut broken = route_plan.clone();
+            match invalid {
+                0 => broken
+                    .clearances
+                    .get_mut(&5)
+                    .unwrap()
+                    .amended_route
+                    .as_mut()
+                    .unwrap()
+                    .target_coordinate = [1.0, 1.0],
+                4 => broken.clearances.get_mut(&5).unwrap().amended_route = None,
+                1 => broken.clearances.get_mut(&5).unwrap().instruction = "Descend as filed.".into(),
+                2 => broken.clearances.get_mut(&5).unwrap().readback = "Roger, I09.".into(),
+                _ => broken
+                    .clearances
+                    .get_mut(&5)
+                    .unwrap()
+                    .amended_route
+                    .as_mut()
+                    .unwrap()
+                    .terminator = "ZZ".into(),
+            }
+            assert!(broken.validate().is_err(), "case {invalid} accepted");
+        }
+        // A procedure with no published manual termination cannot be amended at all.
+        assert!(route_plan.validate().is_ok(), "the issued amendment must validate");
         let plan = checked
             .finish_controlled(
                 &amended_context,
@@ -1092,6 +1210,7 @@ mod tests {
                             .map(|(index, route)| (index - 5, route.clone()))
                             .collect(),
                         vacated_reports: BTreeMap::from([(4, plan.vacated_reports[&9].clone())]),
+                        amendment: None,
                     };
                     onward.validate_onward().unwrap();
                     let error =

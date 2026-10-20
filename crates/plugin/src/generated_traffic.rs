@@ -362,17 +362,14 @@ impl Renderer {
             {
                 self.retire(frame.target.id);
             }
-            if !self.aircraft.contains_key(&frame.target.id) {
-                self.aircraft.insert(
-                    frame.target.id,
-                    Drawn {
-                        model: frame.model.id.clone(),
-                        objects: frame.model.objects.clone(),
-                        instances: Vec::new(),
-                        terrain: None,
-                    },
-                );
-            }
+            self.aircraft
+                .entry(frame.target.id)
+                .or_insert_with(|| Drawn {
+                    model: frame.model.id.clone(),
+                    objects: frame.model.objects.clone(),
+                    instances: Vec::new(),
+                    terrain: None,
+                });
             let (mut x, mut y, mut z) = (0.0, 0.0, 0.0);
             unsafe {
                 xp::XPLMWorldToLocal(

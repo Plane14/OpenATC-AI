@@ -346,6 +346,9 @@ pub struct FlightPlan {
     /// Assigned approach.
     #[serde(default)]
     pub approach: String,
+    /// Procedure transition fallback reported to the Planning page.
+    #[serde(default)]
+    pub procedure_notice: String,
     /// Departure stand.
     #[serde(default)]
     pub departure_stand: String,
@@ -424,6 +427,7 @@ impl Default for FlightPlan {
             star: String::new(),
             star_transition: String::new(),
             approach: String::new(),
+            procedure_notice: String::new(),
             departure_stand: String::new(),
             arrival_stand: String::new(),
             airac: String::new(),

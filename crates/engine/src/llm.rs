@@ -39,6 +39,8 @@ pub async fn structured_format<T: DeserializeOwned>(
 }
 
 /// Conversation history keeps user and crew speakers distinct at the provider boundary.
+// The provider boundary takes each schema field separately; a struct would duplicate it.
+#[allow(clippy::too_many_arguments)]
 pub async fn structured_history<T: DeserializeOwned>(
     client: &reqwest::Client,
     url: &str,
@@ -206,6 +208,8 @@ fn messages(system: &str, user: &str, history: &[serde_json::Value]) -> Vec<serd
     messages
 }
 
+// The request body is assembled from these independent fields without a shared object.
+#[allow(clippy::too_many_arguments)]
 async fn complete_request(
     client: &reqwest::Client,
     url: &str,
@@ -279,6 +283,23 @@ pub fn clean_reply(mut text: String) -> String {
         text = text.chars().take(500).collect();
     }
     text
+}
+
+/// Give every actor the same explicit distinction between examples and current facts.
+pub fn prompt(
+    instructions: &str,
+    example_guidance: &str,
+    examples: &[String],
+    context: &str,
+) -> String {
+    format!(
+        "{instructions}\n{example_guidance}\n{}\n{context}",
+        examples
+            .iter()
+            .map(|line| format!("- {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }
 
 #[cfg(test)]
@@ -517,21 +538,4 @@ mod tests {
         assert_eq!(exchanges[0]["user"].as_str().unwrap().chars().count(), 512);
         assert_eq!(exchanges[0]["reply"].as_str().unwrap().chars().count(), 600);
     }
-}
-
-/// Give every actor the same explicit distinction between examples and current facts.
-pub fn prompt(
-    instructions: &str,
-    example_guidance: &str,
-    examples: &[String],
-    context: &str,
-) -> String {
-    format!(
-        "{instructions}\n{example_guidance}\n{}\n{context}",
-        examples
-            .iter()
-            .map(|line| format!("- {line}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    )
 }

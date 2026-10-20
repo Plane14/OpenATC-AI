@@ -3051,6 +3051,9 @@ fn procedures_tab(ui: &imgui::Ui, interface: &mut Interface) {
         load_airport(interface, &interface.draft.destination.clone());
     }
     ui.text_wrapped(&interface.airport_notice);
+    if !interface.draft.procedure_notice.is_empty() {
+        ui.text_wrapped(&interface.draft.procedure_notice);
+    }
     ui.text_disabled(format!(
         "Click a procedure from {} to use its name and transition.",
         interface.airport.icao
@@ -3363,10 +3366,15 @@ mod tests {
     fn parked_requests_include_radio_and_local_information_before_filing() {
         use openatc_core::state::{FlightPlan, PhaseCode};
         use openatc_core::stations::Station;
-        let mut state = State::default();
-        state.plan = FlightPlan::default();
-        state.phase = PhaseCode::Parked;
-        state.telemetry.on_ground = true;
+        let mut state = State {
+            plan: FlightPlan::default(),
+            phase: PhaseCode::Parked,
+            telemetry: openatc_core::state::Telemetry {
+                on_ground: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let buttons = openatc_core::catalog::buttons();
         for service in ["Clearance", "Ground", "Tower"] {
             let station = Station {

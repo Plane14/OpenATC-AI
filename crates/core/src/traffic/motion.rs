@@ -311,6 +311,11 @@ impl Route {
     pub fn segment(&self, index: usize) -> Option<&Segment> {
         self.segments.get(index)
     }
+    /// Number of compiled movements, used by planners that inspect the route in order.
+    #[must_use]
+    pub fn segment_count(&self) -> usize {
+        self.segments.len()
+    }
     /// Nominal duration of an explicit controller scope, before acceleration adjustments.
     pub fn nominal_seconds(&self, first: usize, last: usize) -> Option<f64> {
         if first > last || last >= self.legs.len() {
@@ -339,6 +344,29 @@ impl Route {
     #[must_use]
     pub fn end_position(&self) -> Waypoint {
         *self.segments.last().unwrap().points.last().unwrap()
+    }
+    /// Exact compiled start point, used when planning a continuous next phase.
+    #[must_use]
+    pub fn start_position(&self) -> Waypoint {
+        *self.segments.first().unwrap().points.first().unwrap()
+    }
+    /// Hold an unstarted aircraft at its stand for longer, spreading start-up requests apart.
+    pub fn delay_initial_dwell(&mut self, extra_seconds: f64) -> bool {
+        let Some(segment) = self.segments.first_mut() else {
+            return false;
+        };
+        if !matches!(segment.stage, Stage::Parked | Stage::Turnaround)
+            || !extra_seconds.is_finite()
+            || extra_seconds < 0.0
+        {
+            return false;
+        }
+        let total = segment.dwell_seconds + extra_seconds;
+        if !(0.0..=86400.0).contains(&total) {
+            return false;
+        }
+        segment.dwell_seconds = total;
+        true
     }
 }
 
@@ -616,6 +644,8 @@ pub struct World {
     generation: u64,
     aircraft: BTreeMap<u32, Aircraft>,
     owners: BTreeMap<String, u32>,
+    /// Aircraft flying a published advisory procedure, which is their own authority.
+    advisory: BTreeSet<u32>,
     clock: Option<f64>,
 }
 
@@ -675,6 +705,7 @@ impl World {
         }
         self.aircraft.extend(other.aircraft);
         self.owners.extend(other.owners);
+        self.advisory.extend(other.advisory);
         true
     }
 
@@ -769,6 +800,18 @@ impl World {
         let aircraft = self.aircraft.get(&id)?;
         aircraft.route.segments.get(aircraft.segment)
     }
+    /// Resources one aircraft currently holds, including those retained while standing.
+    pub fn owned_resources(&self, id: u32) -> BTreeSet<String> {
+        self.owners
+            .iter()
+            .filter(|(_, owner)| **owner == id)
+            .map(|(resource, _)| resource.clone())
+            .collect()
+    }
+    /// Current owner of one protected resource.
+    pub fn resource_owner(&self, resource: &str) -> Option<u32> {
+        self.owners.get(resource).copied()
+    }
     /// Flight generation attached to work sent to a CPU worker.
     #[must_use]
     pub fn generation(&self) -> u64 {
@@ -828,6 +871,320 @@ impl World {
                 surface_reservation: None,
             },
         );
+        true
+    }
+    /// Admit an aircraft that is already established on an airborne segment of its route.
+    ///
+    /// The seeded aircraft owns no surface resources and starts with authority only for its
+    /// current segment, exactly as if the preceding segment had just been completed. Later
+    /// boundaries still need their own clearance.
+    pub fn seed_airborne(
+        &mut self,
+        generation: u64,
+        id: u32,
+        route: std::sync::Arc<Route>,
+        segment: usize,
+    ) -> bool {
+        self.admit_airborne(generation, id, route, segment, true)
+    }
+
+    /// Admit an aircraft on an airborne segment, with or without movement permission.
+    fn admit_airborne(
+        &mut self,
+        generation: u64,
+        id: u32,
+        route: std::sync::Arc<Route>,
+        segment: usize,
+        authorised: bool,
+    ) -> bool {
+        if generation != self.generation
+            || id == 0
+            || (self.aircraft.len() >= 63 && !self.aircraft.contains_key(&id))
+        {
+            return false;
+        }
+        if let Some(existing) = self.aircraft.get(&id)
+            && !(existing.segment == 0
+                && existing.elapsed == 0.0
+                && !existing.authorised
+                && !existing.complete
+                && !existing.next_authorised
+                && existing.airborne_authority.is_none()
+                && existing.hold_exit.is_none()
+                && existing.surface_reservation.is_none()
+                && existing.recovery_from.is_none())
+        {
+            return false;
+        }
+        let Some(initial) = route.segments.get(segment) else {
+            return false;
+        };
+        if initial.stage.on_ground() || initial.points.len() < 2 {
+            return false;
+        }
+        if initial
+            .resources
+            .iter()
+            .any(|resource| self.owners.contains_key(resource))
+        {
+            return false;
+        }
+        let speed = initial.knots;
+        // The aircraft is no longer standing on its planned stand; release whatever the
+        // unstarted surface route held so another flight can use it.
+        self.owners.retain(|_, owner| *owner != id);
+        self.aircraft.insert(
+            id,
+            Aircraft {
+                assigned_route: route.clone(),
+                route,
+                segment,
+                elapsed: 0.0,
+                authorised,
+                complete: false,
+                next_authorised: false,
+                airborne_authority: None,
+                hold_exit: None,
+                rates: None,
+                speed,
+                holding: false,
+                recoveries: BTreeMap::new(),
+                recovery_from: None,
+                surface_reservation: None,
+            },
+        );
+        true
+    }
+
+    /// Admit an aircraft that flies a published advisory procedure with no controller behind it.
+    ///
+    /// The procedure is the authority for this traffic, so the aircraft is admitted without
+    /// movement permission and owns no surface resource. Only the segments of the admitted
+    /// route can ever be authorised, and the published runway is held for the landing roll
+    /// alone.
+    pub fn insert_advisory(
+        &mut self,
+        generation: u64,
+        id: u32,
+        route: std::sync::Arc<Route>,
+        segment: usize,
+    ) -> bool {
+        if self.aircraft.contains_key(&id) && !self.advisory.contains(&id) {
+            return false;
+        }
+        if !self.admit_airborne(generation, id, route, segment, false) {
+            return false;
+        }
+        self.advisory.insert(id);
+        true
+    }
+
+    /// Whether an aircraft flies a published advisory procedure.
+    #[must_use]
+    pub fn is_advisory(&self, id: u32) -> bool {
+        self.advisory.contains(&id)
+    }
+
+    /// Grant the next segment of a published advisory procedure.
+    ///
+    /// The procedure is the authority, so the grant follows the admitted route. A taxi, a
+    /// runway entry and a segment beyond the route are refused: an advisory procedure never
+    /// authorises controlled movement.
+    pub fn authorise_advisory(
+        &mut self,
+        generation: u64,
+        id: u32,
+        segment: usize,
+        blocked: &BTreeSet<String>,
+    ) -> bool {
+        if generation != self.generation || !self.advisory.contains(&id) {
+            return false;
+        }
+        let Some(aircraft) = self.aircraft.get(&id) else {
+            return false;
+        };
+        if aircraft.segment != segment {
+            return false;
+        }
+        let Some(current) = aircraft.route.segments.get(segment) else {
+            return false;
+        };
+        if !matches!(
+            current.stage,
+            Stage::Climb | Stage::Cruise | Stage::Descent | Stage::Approach | Stage::Rollout
+        ) {
+            return false;
+        }
+        if !self.reserve(generation, id, segment, blocked) {
+            return false;
+        }
+        let aircraft = self.aircraft.get_mut(&id).unwrap();
+        aircraft.authorised = true;
+        aircraft.holding = false;
+        true
+    }
+
+    /// Install the next advisory circuit at a completed boundary, without granting movement.
+    ///
+    /// The procedure continues from the exact point the previous circuit ended, so the
+    /// aircraft is never repositioned.
+    pub fn continue_advisory(
+        &mut self,
+        generation: u64,
+        id: u32,
+        route: std::sync::Arc<Route>,
+    ) -> bool {
+        let Some(aircraft) = self.aircraft.get(&id) else {
+            return false;
+        };
+        let current = aircraft.pose(id);
+        if !aircraft.complete || current.knots > 0.0 {
+            return false;
+        }
+        self.redirect_advisory(generation, id, route)
+    }
+
+    /// Redirect an advisory aircraft onto a new circuit from its present position.
+    ///
+    /// The procedure continues from the exact point the aircraft reached, so it is never
+    /// repositioned, and its movement permission follows it onto the new circuit.
+    pub fn redirect_advisory(
+        &mut self,
+        generation: u64,
+        id: u32,
+        route: std::sync::Arc<Route>,
+    ) -> bool {
+        if generation != self.generation || !self.advisory.contains(&id) {
+            return false;
+        }
+        let Some(aircraft) = self.aircraft.get(&id) else {
+            return false;
+        };
+        let current = aircraft.pose(id);
+        let Some(first) = route.segments.first() else {
+            return false;
+        };
+        if first.stage.on_ground()
+            || distance_nm(current.position.coordinate(), first.points[0].coordinate()) > 0.001
+            || (current.position.altitude_feet - first.points[0].altitude_feet).abs() > 1.0
+        {
+            return false;
+        }
+        let authorised = aircraft.authorised;
+        let aircraft = self.aircraft.get_mut(&id).unwrap();
+        aircraft.assigned_route = route.clone();
+        aircraft.route = route;
+        aircraft.segment = 0;
+        aircraft.elapsed = 0.0;
+        aircraft.authorised = authorised;
+        aircraft.next_authorised = false;
+        aircraft.airborne_authority = None;
+        aircraft.hold_exit = None;
+        aircraft.complete = false;
+        aircraft.holding = false;
+        aircraft.surface_reservation = None;
+        aircraft.recoveries.clear();
+        aircraft.recovery_from = None;
+        true
+    }
+    /// Admit an aircraft already rolling on a surface segment of its route.
+    ///
+    /// The current segment is the only movement granted. Its protected cells are taken so no
+    /// other aircraft can be admitted into them, and the next boundary still requires a
+    /// controller clearance. A started aircraft is never reseeded or teleported.
+    pub fn seed_ground(
+        &mut self,
+        generation: u64,
+        id: u32,
+        route: std::sync::Arc<Route>,
+        segment: usize,
+    ) -> bool {
+        if generation != self.generation
+            || id == 0
+            || (self.aircraft.len() >= 63 && !self.aircraft.contains_key(&id))
+        {
+            return false;
+        }
+        if let Some(existing) = self.aircraft.get(&id)
+            && !(existing.segment == 0
+                && existing.elapsed == 0.0
+                && !existing.authorised
+                && !existing.complete
+                && !existing.next_authorised
+                && existing.airborne_authority.is_none()
+                && existing.hold_exit.is_none()
+                && existing.surface_reservation.is_none()
+                && existing.recovery_from.is_none())
+        {
+            return false;
+        }
+        let Some(initial) = route.segments.get(segment) else {
+            return false;
+        };
+        if !initial.stage.on_ground()
+            || !matches!(
+                initial.stage,
+                Stage::Pushback | Stage::TaxiOut | Stage::TaxiIn | Stage::Crossing
+            )
+            || initial.points.len() < 2
+        {
+            return false;
+        }
+        if initial
+            .resources
+            .iter()
+            .any(|resource| self.owners.contains_key(resource))
+        {
+            return false;
+        }
+        let speed = initial.knots;
+        self.owners.retain(|_, owner| *owner != id);
+        for resource in &initial.resources {
+            self.owners.insert(resource.clone(), id);
+        }
+        self.aircraft.insert(
+            id,
+            Aircraft {
+                assigned_route: route.clone(),
+                route,
+                segment,
+                elapsed: 0.0,
+                authorised: true,
+                complete: false,
+                next_authorised: false,
+                airborne_authority: None,
+                hold_exit: None,
+                rates: None,
+                speed,
+                holding: false,
+                recoveries: BTreeMap::new(),
+                recovery_from: None,
+                surface_reservation: None,
+            },
+        );
+        true
+    }
+    /// Spread the first start-up call of an unstarted aircraft without moving it.
+    pub fn stagger_initial_dwell(&mut self, generation: u64, id: u32, extra_seconds: f64) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        let Some(aircraft) = self.aircraft.get_mut(&id) else {
+            return false;
+        };
+        if aircraft.segment != 0
+            || aircraft.elapsed != 0.0
+            || aircraft.authorised
+            || aircraft.complete
+        {
+            return false;
+        }
+        let mut route = (*aircraft.route).clone();
+        if !route.delay_initial_dwell(extra_seconds) {
+            return false;
+        }
+        aircraft.route = std::sync::Arc::new(route.clone());
+        aircraft.assigned_route = std::sync::Arc::new(route);
         true
     }
     /// Returns false for stale, conflicting or already completed instructions.
@@ -1544,8 +1901,9 @@ impl World {
         true
     }
     /// Brake surface traffic when a new observed obstruction enters its reserved path.
-    /// Unknown observations suspend movement; they never imply an empty airport.
-    pub fn recheck_surface(&mut self, blocked: &BTreeSet<String>, observations_known: bool) {
+    /// Only known blocking cells suspend movement. A missing observation feed says nothing about
+    /// the airport, so it cannot stop an aircraft that holds its own clearance.
+    pub fn recheck_surface(&mut self, blocked: &BTreeSet<String>) {
         for (id, aircraft) in &mut self.aircraft {
             let current = &aircraft.route.segments[aircraft.segment];
             if !matches!(
@@ -1554,11 +1912,10 @@ impl World {
             ) {
                 continue;
             }
-            aircraft.holding = !observations_known
-                || current
-                    .resources
-                    .iter()
-                    .any(|resource| blocked.contains(resource));
+            aircraft.holding = current
+                .resources
+                .iter()
+                .any(|resource| blocked.contains(resource));
             if aircraft.holding
                 || aircraft
                     .route
@@ -3034,7 +3391,7 @@ mod tests {
         }
         let before = world.snapshot()[0].clone();
         assert_eq!(before.knots, 10.0);
-        world.recheck_surface(&BTreeSet::from(["A".into()]), true);
+        world.recheck_surface(&BTreeSet::from(["A".into()]));
         world.advance(6.0, false);
         let braking = world.snapshot()[0].clone();
         assert_eq!(braking.knots, 8.0);
@@ -3046,7 +3403,7 @@ mod tests {
         let stopped = world.snapshot()[0].position;
         world.advance(13.0, false);
         assert_eq!(world.snapshot()[0].position, stopped);
-        world.recheck_surface(&BTreeSet::new(), true);
+        world.recheck_surface(&BTreeSet::new());
         assert!(world.authorise(0, 1, 0, &BTreeSet::new()));
         assert!(world.reserve_next_taxi(0, 1, &BTreeSet::new()));
         let mut continued_at_speed = false;
@@ -3177,6 +3534,122 @@ mod tests {
         assert_ne!(world.snapshot()[0].position, clock_changed);
     }
     #[test]
+    fn airborne_seeding_starts_established_without_surface_resources() {
+        let airborne = std::sync::Arc::new(
+            Route::compile(
+                vec![
+                    Segment {
+                        stage: Stage::Cruise,
+                        points: vec![point(0.0, 5000.0), point(10_000.0, 5000.0)],
+                        knots: 200.0,
+                        resources: vec![],
+                        dwell_seconds: 0.0,
+                    },
+                    Segment {
+                        stage: Stage::Descent,
+                        points: vec![point(10_000.0, 5000.0), point(20_000.0, 4000.0)],
+                        knots: 180.0,
+                        resources: vec![],
+                        dwell_seconds: 0.0,
+                    },
+                    Segment {
+                        stage: Stage::Rollout,
+                        points: vec![point(20_000.0, 4000.0), point(21_000.0, 4000.0)],
+                        knots: 100.0,
+                        resources: vec!["RW".into()],
+                        dwell_seconds: 0.0,
+                    },
+                ],
+                1000.0,
+                3000.0,
+            )
+            .unwrap(),
+        );
+        // A ground segment is not an airborne seed.
+        let mut world = World::default();
+        assert!(!world.seed_airborne(0, 1, crossing(), 0));
+        assert!(world.snapshot().is_empty());
+        // An airborne segment starts moving with authority for that segment only.
+        let seeded_route = airborne.clone();
+        assert!(world.seed_airborne(0, 2, airborne, 0));
+        let seeded = world.snapshot();
+        assert_eq!(seeded.len(), 1);
+        assert_eq!(seeded[0].id, 2);
+        assert_eq!(seeded[0].stage, Stage::Cruise);
+        assert!(!seeded[0].complete && !seeded[0].awaiting_clearance);
+        assert!(world.owned_resources(2).is_empty());
+        world.advance(0.0, false);
+        world.advance(5.0, false);
+        let moved = world.snapshot()[0].clone();
+        assert_ne!(moved.position, seeded[0].position);
+        assert_eq!(moved.segment, 0);
+        // The next segment still needs its own grant; bounded clock steps keep movement valid.
+        for step in 1..=9 {
+            world.advance(5.0 + f64::from(step) * 25.0, false);
+        }
+        let limit = world.snapshot()[0].clone();
+        assert_eq!(limit.segment, 1);
+        assert!(limit.awaiting_clearance);
+        // A started aircraft is never reseeded or teleported.
+        assert!(!world.seed_airborne(0, 2, seeded_route, 0));
+    }
+    #[test]
+    fn ground_seeding_starts_taxiing_owns_its_cells_and_refuses_occupancy() {
+        let route = || {
+            std::sync::Arc::new(
+                Route::compile(
+                    vec![
+                        Segment {
+                            stage: Stage::Parked,
+                            points: vec![point(0.0, 0.0)],
+                            knots: 0.0,
+                            resources: vec!["STAND".into()],
+                            dwell_seconds: 30.0,
+                        },
+                        Segment {
+                            stage: Stage::TaxiOut,
+                            points: vec![point(0.0, 0.0), point(100.0, 0.0)],
+                            knots: 10.0,
+                            resources: vec!["A".into()],
+                            dwell_seconds: 0.0,
+                        },
+                        Segment {
+                            stage: Stage::TaxiOut,
+                            points: vec![point(100.0, 0.0), point(200.0, 0.0)],
+                            knots: 10.0,
+                            resources: vec!["B".into()],
+                            dwell_seconds: 0.0,
+                        },
+                    ],
+                    1000.0,
+                    1000.0,
+                )
+                .unwrap(),
+            )
+        };
+        let mut world = World::default();
+        let first = route();
+        assert!(world.insert(0, 1, first.clone()));
+        assert_eq!(world.owned_resources(1), BTreeSet::from(["STAND".into()]));
+        assert!(world.seed_ground(0, 1, first.clone(), 1));
+        assert_eq!(world.owned_resources(1), BTreeSet::from(["A".into()]));
+        let pose = &world.snapshot()[0];
+        assert_eq!(pose.stage, Stage::TaxiOut);
+        assert!(!pose.awaiting_clearance && pose.knots == 10.0);
+        // A started aircraft keeps its own position and cannot be seeded again.
+        assert!(!world.seed_ground(0, 1, first, 2));
+        // The seeded cells are occupied, so another aircraft cannot be injected into them.
+        let second = route();
+        assert!(world.insert(0, 2, second.clone()));
+        assert!(!world.seed_ground(0, 2, second, 1));
+        // A stand dwell can be delayed without moving the aircraft.
+        assert_eq!(world.aircraft[&2].duration(), 30.0);
+        assert!(world.stagger_initial_dwell(0, 2, 45.0));
+        assert_eq!(world.aircraft[&2].duration(), 75.0);
+        assert!(!world.stagger_initial_dwell(0, 1, 10.0));
+        assert!(!world.stagger_initial_dwell(0, 2, -1.0));
+    }
+    #[test]
     fn impossible_climb_and_route_gaps_are_rejected() {
         let route = Segment {
             stage: Stage::Climb,
@@ -3197,5 +3670,149 @@ mod tests {
                 .unwrap_err()
                 .contains("discontinuity")
         );
+    }
+    fn advisory() -> std::sync::Arc<Route> {
+        std::sync::Arc::new(
+            Route::compile(
+                vec![
+                    Segment {
+                        stage: Stage::Descent,
+                        points: vec![point(0.0, 1000.0), point(2000.0, 1000.0)],
+                        knots: 90.0,
+                        resources: vec![],
+                        dwell_seconds: 0.0,
+                    },
+                    Segment {
+                        stage: Stage::Approach,
+                        points: vec![point(2000.0, 1000.0), point(7000.0, 0.0)],
+                        knots: 85.0,
+                        resources: vec![],
+                        dwell_seconds: 0.0,
+                    },
+                    Segment {
+                        stage: Stage::Rollout,
+                        points: vec![point(7000.0, 0.0), point(7900.0, 0.0)],
+                        knots: 70.0,
+                        resources: vec!["RUNWAY/TEST/09/27".into()],
+                        dwell_seconds: 0.0,
+                    },
+                ],
+                1000.0,
+                1000.0,
+            )
+            .unwrap(),
+        )
+    }
+    #[test]
+    fn an_advisory_procedure_moves_only_along_its_own_route() {
+        let mut world = World::default();
+        assert!(world.insert_advisory(0, 1, advisory(), 0));
+        assert!(world.is_advisory(1));
+        // A controlled aircraft can never be adopted as advisory traffic.
+        assert!(world.insert(0, 2, crossing()));
+        assert!(!world.insert_advisory(0, 2, advisory(), 0));
+        // The procedure is the authority, so the first segment moves without a controller.
+        assert!(world.authorise_advisory(0, 1, 0, &BTreeSet::new()));
+        world.advance(0.0, false);
+        world.advance(30.0, false);
+        let pose = world.snapshot().into_iter().find(|pose| pose.id == 1).unwrap();
+        assert_eq!(pose.stage, Stage::Descent);
+        assert!(pose.knots > 0.0);
+        // Controlled traffic is never granted by an advisory procedure.
+        assert!(!world.authorise_advisory(0, 2, 0, &BTreeSet::new()));
+    }
+    #[test]
+    fn an_advisory_procedure_stops_at_a_boundary_until_the_next_segment_is_granted() {
+        let mut world = World::default();
+        assert!(world.insert_advisory(0, 1, advisory(), 0));
+        assert!(world.authorise_advisory(0, 1, 0, &BTreeSet::new()));
+        world.advance(0.0, false);
+        world.advance(20.0, false);
+        world.advance(40.0, false);
+        world.advance(60.0, false);
+        let pose = world.snapshot().into_iter().find(|pose| pose.id == 1).unwrap();
+        assert_eq!(pose.segment, 1);
+        assert!(pose.awaiting_clearance);
+        assert_eq!(pose.knots, 0.0);
+        // The next segment is granted by the procedure, not by a controller clearance.
+        assert!(world.authorise_advisory(0, 1, 1, &BTreeSet::new()));
+        world.advance(61.0, false);
+        world.advance(90.0, false);
+        let moved = world.snapshot().into_iter().find(|pose| pose.id == 1).unwrap();
+        assert_eq!(moved.segment, 1);
+        assert!(moved.knots > 0.0);
+    }
+    #[test]
+    fn an_advisory_circuit_continues_from_the_point_the_last_one_ended() {
+        let mut world = World::default();
+        let route = advisory();
+        assert!(world.insert_advisory(0, 1, route.clone(), 0));
+        let mut clock = 0.0;
+        // Fly the whole circuit, granting each leg as the procedure reaches it.
+        for _ in 0..600 {
+            let pose = world.snapshot().into_iter().find(|pose| pose.id == 1).unwrap();
+            if pose.complete {
+                break;
+            }
+            if pose.awaiting_clearance {
+                assert!(world.authorise_advisory(0, 1, pose.segment, &BTreeSet::new()));
+            }
+            clock += 1.0;
+            world.advance(clock, false);
+        }
+        let pose = world.snapshot().into_iter().find(|pose| pose.id == 1).unwrap();
+        assert!(pose.complete);
+        // The continuation starts where the landing roll ended and climbs away from it.
+        let next = std::sync::Arc::new(
+            Route::compile(
+                vec![
+                    Segment {
+                        stage: Stage::Climb,
+                        points: vec![point(7900.0, 0.0), point(12900.0, 1000.0)],
+                        knots: 70.0,
+                        resources: vec![],
+                        dwell_seconds: 0.0,
+                    },
+                    Segment {
+                        stage: Stage::Descent,
+                        points: vec![point(12900.0, 1000.0), point(20000.0, 1000.0)],
+                        knots: 90.0,
+                        resources: vec![],
+                        dwell_seconds: 0.0,
+                    },
+                    Segment {
+                        stage: Stage::Approach,
+                        points: vec![point(20000.0, 1000.0), point(25000.0, 0.0)],
+                        knots: 85.0,
+                        resources: vec![],
+                        dwell_seconds: 0.0,
+                    },
+                    Segment {
+                        stage: Stage::Rollout,
+                        points: vec![point(25000.0, 0.0), point(25900.0, 0.0)],
+                        knots: 70.0,
+                        resources: vec!["RUNWAY/TEST/09/27".into()],
+                        dwell_seconds: 0.0,
+                    },
+                ],
+                1000.0,
+                1000.0,
+            )
+            .unwrap(),
+        );
+        assert!(world.continue_advisory(0, 1, next.clone()));
+        let resumed = world.snapshot().into_iter().find(|pose| pose.id == 1).unwrap();
+        assert!(!resumed.complete);
+        assert_eq!(resumed.segment, 0);
+        assert!(resumed.awaiting_clearance);
+        assert!((resumed.position.longitude - next.start_position().longitude).abs() < 1e-9);
+        assert!(world.authorise_advisory(0, 1, 0, &BTreeSet::new()));
+        clock += 1.0;
+        world.advance(clock, false);
+        clock += 20.0;
+        world.advance(clock, false);
+        let climbing = world.snapshot().into_iter().find(|pose| pose.id == 1).unwrap();
+        assert_eq!(climbing.stage, Stage::Climb);
+        assert!(climbing.position.altitude_feet > 0.0);
     }
 }

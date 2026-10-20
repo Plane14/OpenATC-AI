@@ -90,7 +90,8 @@ pub async fn post_telemetry(
             let worker_state = shared.clone();
             tokio::spawn(async move {
                 super::generated::prepare(worker_state.clone()).await;
-                super::generated::simulate(worker_state).await;
+                super::generated::simulate(worker_state.clone()).await;
+                super::generated::prepare_turnaround(worker_state).await;
             });
         }
         super::crew::update_ground_connection(&mut state);

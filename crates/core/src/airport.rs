@@ -644,12 +644,13 @@ fn taxi_path(
     let mut via = String::new();
     let mut last = String::new();
     for name in names {
-        if !name.is_empty() && name != last {
+        let name = name.trim();
+        if !name.is_empty() && name != "-" && name != last.as_str() {
             if !via.is_empty() {
                 via += ", ";
             }
-            via += &name;
-            last = name;
+            via += name;
+            last = name.to_owned();
         }
     }
     (points, via)
@@ -853,6 +854,8 @@ pub fn calculate_taxi_route(
             "taxi_to_parking",
             &[("destination", destination.to_owned())],
         )
+    } else if via.is_empty() {
+        return Err(crate::dialogue::say("taxi_route_without_named_taxiways", &[]));
     } else if needs_backtrack {
         crate::dialogue::say(
             "taxi_hold_for_backtrack",
@@ -2592,8 +2595,10 @@ mod ramp_metadata_tests {
 
     #[test]
     fn operator_codes_are_normalized_without_turning_preferences_into_restrictions() {
-        let mut builder = AirportBuilder::default();
-        builder.airport = demo_airport();
+        let mut builder = AirportBuilder {
+            airport: demo_airport(),
+            ..Default::default()
+        };
         builder.size_parking(&["1301", "C", "none", "sia", "SIA", "qfa", "BAD1"]);
         let stand = builder.airport.parking.last().unwrap();
         assert_eq!(stand.airlines, vec!["QFA", "SIA"]);
@@ -2601,5 +2606,32 @@ mod ramp_metadata_tests {
         let legacy: Parking =
             serde_json::from_value(serde_json::json!({"name":"Legacy", "size":"C"})).unwrap();
         assert!(legacy.airlines.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod taxi_name_tests {
+    use super::*;
+
+    #[test]
+    fn an_unnamed_taxiway_never_becomes_a_spoken_placeholder() {
+        let mut airport = demo_airport();
+        for edge in &mut airport.edges {
+            edge.name = "-".into();
+        }
+        let observed = Telemetry {
+            on_ground: true,
+            position_valid: true,
+            latitude: 200.0 / 111_320.0,
+            longitude: -1000.0 / 111_320.0,
+            traffic: Some(Vec::new()),
+            ..Default::default()
+        };
+        let route = calculate_taxi_route(&airport, &observed, "Gate 1", true, 'C')
+            .expect("unnamed taxiways still form a usable route");
+        assert!(route.via.is_empty(), "{:?}", route.via);
+        assert!(!route.instructions.contains("via -"), "{}", route.instructions);
+        assert!(!route.instructions.contains("via ."), "{}", route.instructions);
+        assert!(route.instructions.contains("Gate 1"), "{}", route.instructions);
     }
 }

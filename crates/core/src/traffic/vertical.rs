@@ -81,8 +81,16 @@ pub fn levels_selected(
             .minimum_feet
             .max(previous.0 - descent_fpm * minutes);
         let upper = crossing.maximum_feet.min(previous.1 + climb_fpm * minutes);
-        let (lower, upper) = intersection(lower, upper, crossing)
-            .ok_or_else(|| format!("Unreachable crossing restriction at {index}"))?;
+        let (lower, upper) = intersection(lower, upper, crossing).ok_or_else(|| {
+            format!(
+                "Unreachable crossing restriction at {index}: need {:.0}..{:.0} ft, reachable {:.0}..{:.0} ft in {:.1} s",
+                crossing.minimum_feet,
+                crossing.maximum_feet,
+                previous.0 - descent_fpm * minutes,
+                previous.1 + climb_fpm * minutes,
+                crossing.seconds
+            )
+        })?;
         bounds.push((lower, upper));
         previous = (lower, upper);
     }

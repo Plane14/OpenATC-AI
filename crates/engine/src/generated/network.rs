@@ -63,6 +63,7 @@ fn published_pair(
                 points: &points,
                 mora,
                 budget,
+                direct: false,
             })
             .map(|_| ())
         },
@@ -130,6 +131,151 @@ fn runway(airport: &Airport, preferred: &str) -> Option<String> {
         .any(|runway| runway.first_name == preferred || runway.second_name == preferred)
         .then(|| preferred.to_owned())
         .or_else(|| longest_runway(airport))
+}
+
+/// Pick the bounded set of same-flow runway ends in the order the airport prefers them.
+fn runway_ends(airport: &Airport, preferred: &str) -> Vec<String> {
+    let heading = |name: &str| {
+        airport
+            .runways
+            .iter()
+            .find(|runway| runway.first_name == name || runway.second_name == name)
+            .map(|runway| {
+                let (first, second) = if runway.first_name == name {
+                    (runway.first, runway.second)
+                } else {
+                    (runway.second, runway.first)
+                };
+                (second.east - first.east)
+                    .atan2(second.north - first.north)
+                    .to_degrees()
+                    .rem_euclid(360.0)
+            })
+    };
+    let Some(course) = heading(preferred) else {
+        return vec![preferred.to_owned()];
+    };
+    let length = |runway: &openatc_core::airport::Runway| {
+        (runway.second.east - runway.first.east).hypot(runway.second.north - runway.first.north)
+    };
+    let mut runways = airport.runways.iter().collect::<Vec<_>>();
+    runways.sort_by(|left, right| length(right).total_cmp(&length(left)));
+    let mut ends = vec![preferred.to_owned()];
+    for runway in runways {
+        for name in [&runway.first_name, &runway.second_name] {
+            if name != preferred
+                && !ends.contains(name)
+                && heading(name).is_some_and(|other| {
+                    openatc_core::navigation::turn(course, other).abs() <= 15.0
+                })
+            {
+                ends.push(name.clone());
+            }
+        }
+    }
+    ends
+}
+
+/// Prefer a runway end that a representative of each eligible category can leave
+/// after braking, falling back to the airport's preferred end when none can.
+fn vacatable_runway(
+    input: &Preparation,
+    origin: &Airport,
+    destination: &Airport,
+    preferred: &str,
+    eligible: [bool; 4],
+) -> String {
+    if input.simulator_root.is_empty() {
+        return preferred.to_owned();
+    }
+    let distance = distance(origin, destination);
+    let (Some(origin_port), Some(destination_port)) = (port(origin), port(destination)) else {
+        return preferred.to_owned();
+    };
+    let representatives = [
+        Category::Airline,
+        Category::Regional,
+        Category::Cargo,
+        Category::GeneralAviation,
+    ]
+    .into_iter()
+    .enumerate()
+    .filter(|(index, _)| eligible[*index] && input.counts[*index] > 0)
+    .filter_map(|(_, category)| {
+        input
+            .profiles
+            .select_where(
+                &origin_port,
+                &destination_port,
+                distance,
+                category,
+                &input.models,
+                input.epoch,
+                |_, aircraft| {
+                    [origin, destination].iter().all(|airport| {
+                        airport
+                            .parking
+                            .iter()
+                            .any(|stand| openatc_core::parking::moving_supports(stand, aircraft))
+                    })
+                },
+            )
+            .and_then(|choice| input.profiles.aircraft_for(&choice.aircraft))
+    })
+    .collect::<Vec<_>>();
+    if representatives.is_empty() {
+        return preferred.to_owned();
+    }
+    let Ok(data) =
+        openatc_core::arrival::ArrivalAirport::load(&input.simulator_root, destination.clone())
+    else {
+        return preferred.to_owned();
+    };
+    let Ok((_, policy, _)) = policy::load(&input.config) else {
+        return preferred.to_owned();
+    };
+    let Some(handling) = animation::builtin().ok() else {
+        return preferred.to_owned();
+    };
+    let ends = runway_ends(destination, preferred);
+    let candidates = ends
+        .into_iter()
+        .filter_map(|name| {
+            runway::Surface::new(
+                destination,
+                &name,
+                &data.thresholds,
+                policy.runway_slope_limit_percent,
+            )
+            .ok()
+            .map(|surface| (name, surface))
+        })
+        .collect::<Vec<_>>();
+    let mut best = (0usize, preferred.to_owned());
+    for (name, _) in &candidates {
+        let accepted = representatives
+            .iter()
+            .filter(|aircraft| {
+                aircraft.handling.is_some_and(|kind| {
+                    handling.get(&kind).is_some_and(|handling| {
+                        landing::vacatable_runway(
+                            destination,
+                            &candidates,
+                            aircraft,
+                            handling,
+                            &policy,
+                            aircraft.approach_knots,
+                        )
+                        .is_ok_and(|chosen| chosen == *name)
+                    })
+                })
+            })
+            .count();
+        if accepted > best.0 {
+            best = (accepted, name.clone());
+        }
+    }
+    best.1
 }
 
 /// Traffic discovery can start before the player has filed a route.
@@ -289,9 +435,10 @@ pub(super) fn survey(input: &Preparation, key: String) -> Result<Plan, String> {
         }) {
             continue;
         }
-        let Some(runway) = longest_runway(&airport) else {
+        let Some(preferred) = longest_runway(&airport) else {
             continue;
         };
+        let airport_runway = vacatable_runway(input, &anchor, &airport, &preferred, available[0]);
         let airport = Arc::new(airport);
         let anchor_runway = if anchor.icao == input.origin.icao {
             input.runway.clone()
@@ -303,7 +450,7 @@ pub(super) fn survey(input: &Preparation, key: String) -> Result<Plan, String> {
             &anchor,
             &airport,
             &anchor_runway,
-            &runway,
+            &airport_runway,
             &mora,
             policy.terminal_candidate_limit,
         )
@@ -334,7 +481,7 @@ pub(super) fn survey(input: &Preparation, key: String) -> Result<Plan, String> {
             origin: anchor.clone(),
             destination: airport.clone(),
             departure_runway: anchor_runway,
-            arrival_runway: runway,
+            arrival_runway: airport_runway,
             compatible: available,
         };
         // Keep two-way coverage ahead of one-way alternatives within the same airport budget.
@@ -364,7 +511,7 @@ pub(super) fn survey(input: &Preparation, key: String) -> Result<Plan, String> {
 fn allocate(pairs: &[Pair], counts: [u8; 4]) -> (Vec<[u8; 4]>, Vec<String>) {
     let mut warnings = Vec::new();
     let mut allocations = vec![[0u8; 4]; pairs.len()];
-    let mut remaining = 63u8;
+    let mut remaining = MAXIMUM_AIRCRAFT as u8;
     for category in 0..4 {
         let two_way = pairs
             .iter()
@@ -513,6 +660,8 @@ pub(super) fn prepare(mut input: Preparation, plan: &Plan) -> Result<Scene, Stri
         .ok_or_else(|| format!("No complete traffic airport pair: {}", warnings.join("; ")))?;
     scene.warnings.extend(plan.warnings.iter().cloned());
     scene.warnings.extend(warnings);
+    scene.seed_airborne();
+    super::ctaf::prepare(&mut scene, &input);
     Ok(scene)
 }
 

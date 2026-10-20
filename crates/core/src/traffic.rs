@@ -4,6 +4,7 @@ pub mod air;
 pub mod animation;
 pub mod coordinates;
 pub mod csl;
+pub mod ctaf;
 pub mod curves;
 pub mod holding;
 pub mod motion;

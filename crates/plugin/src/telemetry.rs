@@ -225,92 +225,6 @@ fn optional_number(reader: &Option<Box<dyn Fn() -> f64>>, nonnegative: bool) -> 
         .filter(|value| value.is_finite() && (!nonnegative || *value >= 0.0))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn callout_sampling_leaves_unrelated_readers_untouched() {
-        let refs = Refs {
-            ground: Some(Box::new(|| 0)),
-            agl: Some(Box::new(|| 3.0)),
-            vertical_speed: Some(Box::new(|| 500.0)),
-            indicated_speed: Some(Box::new(|| 150.0)),
-            traffic: Some(Box::new(|| panic!("traffic must not be read by callouts"))),
-            ..Default::default()
-        };
-        let t = gather_callouts(&refs);
-        assert!(!t.on_ground);
-        assert!(t.height_agl_feet > 9.8 && t.height_agl_feet < 9.9);
-        assert_eq!(t.vertical_speed_fpm, 500.0);
-        assert_eq!(t.indicated_speed_knots, Some(150.0));
-        let missing = gather_callouts(&Refs::default());
-        assert!(missing.on_ground);
-        assert_eq!(missing.vertical_speed_fpm, 0.0);
-        assert!(missing.indicated_speed_knots.is_none());
-    }
-
-    #[test]
-    fn barometric_altitudes_stay_separate_from_geometric_position() {
-        let refs = Refs {
-            altitude: Some(Box::new(|| 18311.7 / 3.280_839_895)),
-            indicated_altitude: Some(Box::new(|| 18000.0)),
-            pressure_altitude: Some(Box::new(|| 18000.0)),
-            ..Default::default()
-        };
-        let telemetry = gather(&refs);
-        assert!((telemetry.altitude_feet - 18311.7).abs() < 0.01);
-        assert_eq!(telemetry.reported_altitude_feet(), 18000.0);
-        assert_eq!(telemetry.clearance_altitude_feet(18000, 10000), 18000.0);
-        let invalid = Refs {
-            indicated_altitude: Some(Box::new(|| f64::NAN)),
-            pressure_altitude: Some(Box::new(|| f64::INFINITY)),
-            ..Default::default()
-        };
-        let telemetry = gather(&invalid);
-        assert_eq!(telemetry.indicated_altitude_feet, None);
-        assert_eq!(telemetry.pressure_altitude_feet, None);
-    }
-
-    #[test]
-    fn unavailable_instruments_do_not_hide_the_airport_position() {
-        let mut refs = Refs {
-            latitude: Some(Box::new(|| 33.938318)),
-            longitude: Some(Box::new(|| -118.383084)),
-            ground: Some(Box::new(|| 1)),
-            com1: Some(Box::new(|| 121705)),
-            com2: Some(Box::new(|| 118700)),
-            indicated_speed: Some(Box::new(|| -0.1)),
-            simulation_seconds: Some(Box::new(|| -1.0)),
-            track: Some(Box::new(|| f64::NAN)),
-            magnetic_heading: Some(Box::new(|| f64::INFINITY)),
-            agl: Some(Box::new(|| -0.12)),
-            ..Default::default()
-        };
-        let sample = gather(&refs);
-        assert!(sample.position_valid);
-        assert_eq!(sample.com1_khz, 121705);
-        assert_eq!(sample.com2_khz, Some(118700));
-        assert_eq!(sample.indicated_speed_knots, None);
-        assert_eq!(sample.simulation_seconds, None);
-        assert_eq!(sample.ground_track_degrees, None);
-        assert_eq!(sample.magnetic_heading_degrees, None);
-        let mut state = openatc_core::state::State::default();
-        openatc_core::ops::update_flight_phase(&mut state, &sample).unwrap();
-        assert_eq!(state.telemetry.latitude, 33.938318);
-        assert!(state.telemetry.height_agl_feet < 0.0);
-        refs.indicated_speed = Some(Box::new(|| 140.0));
-        assert_eq!(gather(&refs).indicated_speed_knots, Some(140.0));
-        refs.latitude = Some(Box::new(|| 95.0));
-        let invalid = gather(&refs);
-        assert!(!invalid.position_valid);
-        let error = openatc_core::ops::update_flight_phase(&mut state, &invalid).unwrap_err();
-        assert!(error.contains("latitude = 95"));
-        assert_eq!(state.telemetry.latitude, sample.latitude);
-        refs.com2 = None;
-        assert_eq!(gather(&refs).com2_khz, None);
-    }
-}
-
 fn traffic_reader(
     data: &mut xplane::data::DataApi,
 ) -> Option<Box<dyn Fn() -> Vec<openatc_core::state::TrafficTarget>>> {
@@ -398,4 +312,90 @@ fn traffic_reader(
             })
             .collect()
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn callout_sampling_leaves_unrelated_readers_untouched() {
+        let refs = Refs {
+            ground: Some(Box::new(|| 0)),
+            agl: Some(Box::new(|| 3.0)),
+            vertical_speed: Some(Box::new(|| 500.0)),
+            indicated_speed: Some(Box::new(|| 150.0)),
+            traffic: Some(Box::new(|| panic!("traffic must not be read by callouts"))),
+            ..Default::default()
+        };
+        let t = gather_callouts(&refs);
+        assert!(!t.on_ground);
+        assert!(t.height_agl_feet > 9.8 && t.height_agl_feet < 9.9);
+        assert_eq!(t.vertical_speed_fpm, 500.0);
+        assert_eq!(t.indicated_speed_knots, Some(150.0));
+        let missing = gather_callouts(&Refs::default());
+        assert!(missing.on_ground);
+        assert_eq!(missing.vertical_speed_fpm, 0.0);
+        assert!(missing.indicated_speed_knots.is_none());
+    }
+
+    #[test]
+    fn barometric_altitudes_stay_separate_from_geometric_position() {
+        let refs = Refs {
+            altitude: Some(Box::new(|| 18311.7 / 3.280_839_895)),
+            indicated_altitude: Some(Box::new(|| 18000.0)),
+            pressure_altitude: Some(Box::new(|| 18000.0)),
+            ..Default::default()
+        };
+        let telemetry = gather(&refs);
+        assert!((telemetry.altitude_feet - 18311.7).abs() < 0.01);
+        assert_eq!(telemetry.reported_altitude_feet(), 18000.0);
+        assert_eq!(telemetry.clearance_altitude_feet(18000, 10000), 18000.0);
+        let invalid = Refs {
+            indicated_altitude: Some(Box::new(|| f64::NAN)),
+            pressure_altitude: Some(Box::new(|| f64::INFINITY)),
+            ..Default::default()
+        };
+        let telemetry = gather(&invalid);
+        assert_eq!(telemetry.indicated_altitude_feet, None);
+        assert_eq!(telemetry.pressure_altitude_feet, None);
+    }
+
+    #[test]
+    fn unavailable_instruments_do_not_hide_the_airport_position() {
+        let mut refs = Refs {
+            latitude: Some(Box::new(|| 33.938318)),
+            longitude: Some(Box::new(|| -118.383084)),
+            ground: Some(Box::new(|| 1)),
+            com1: Some(Box::new(|| 121705)),
+            com2: Some(Box::new(|| 118700)),
+            indicated_speed: Some(Box::new(|| -0.1)),
+            simulation_seconds: Some(Box::new(|| -1.0)),
+            track: Some(Box::new(|| f64::NAN)),
+            magnetic_heading: Some(Box::new(|| f64::INFINITY)),
+            agl: Some(Box::new(|| -0.12)),
+            ..Default::default()
+        };
+        let sample = gather(&refs);
+        assert!(sample.position_valid);
+        assert_eq!(sample.com1_khz, 121705);
+        assert_eq!(sample.com2_khz, Some(118700));
+        assert_eq!(sample.indicated_speed_knots, None);
+        assert_eq!(sample.simulation_seconds, None);
+        assert_eq!(sample.ground_track_degrees, None);
+        assert_eq!(sample.magnetic_heading_degrees, None);
+        let mut state = openatc_core::state::State::default();
+        openatc_core::ops::update_flight_phase(&mut state, &sample).unwrap();
+        assert_eq!(state.telemetry.latitude, 33.938318);
+        assert!(state.telemetry.height_agl_feet < 0.0);
+        refs.indicated_speed = Some(Box::new(|| 140.0));
+        assert_eq!(gather(&refs).indicated_speed_knots, Some(140.0));
+        refs.latitude = Some(Box::new(|| 95.0));
+        let invalid = gather(&refs);
+        assert!(!invalid.position_valid);
+        let error = openatc_core::ops::update_flight_phase(&mut state, &invalid).unwrap_err();
+        assert!(error.contains("latitude = 95"));
+        assert_eq!(state.telemetry.latitude, sample.latitude);
+        refs.com2 = None;
+        assert_eq!(gather(&refs).com2_khz, None);
+    }
 }

@@ -217,6 +217,8 @@ mod tests {
             intercept: None,
         };
         let terminal = Terminal {
+            arrival_manual: None,
+            direct: false,
             enroute_from: [0.2, 0.2],
             enroute_to: [0.2, 1.8],
             enroute_minimum_feet: 8000,

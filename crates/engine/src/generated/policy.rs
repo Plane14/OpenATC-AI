@@ -2,16 +2,13 @@
 use super::{Operations, animation, parse_operations};
 use std::{collections::BTreeMap, io::Read, path::Path};
 
-pub(super) fn load(
-    config: &Path,
-) -> Result<
-    (
-        BTreeMap<animation::Kind, animation::Handling>,
-        Operations,
-        BTreeMap<String, animation::Channel>,
-    ),
-    String,
-> {
+pub(super) type Loaded = (
+    BTreeMap<animation::Kind, animation::Handling>,
+    Operations,
+    BTreeMap<String, animation::Channel>,
+);
+
+pub(super) fn load(config: &Path) -> Result<Loaded, String> {
     let mut handling = animation::builtin()?;
     let mut operations = parse_operations(include_str!("../../../../traffic/operations.toml"))?;
     let mut channels =

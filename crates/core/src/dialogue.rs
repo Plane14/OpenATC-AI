@@ -62,30 +62,27 @@ fn select_response(
         )
     };
     let text = words(text);
-    let selected = {
-        templates
-            .iter()
-            .filter(|(key, template)| {
-                key.starts_with(prefix)
-                    && (!template.humour || humour)
-                    && template.when.iter().all(|(fact, condition)| {
-                        facts
-                            .get(fact)
-                            .is_some_and(|value| condition_matches(condition, value))
-                    })
-            })
-            .filter(|(_, template)| {
-                template.fallback
-                    || (template.match_any.is_empty() && !template.when.is_empty())
-                    || template
-                        .match_any
-                        .iter()
-                        .any(|phrase| !phrase.trim().is_empty() && text.contains(&words(phrase)))
-            })
-            .max_by_key(|(_, template)| (!template.fallback, template.match_priority))
-            .map(|(key, _)| key.clone())
-    };
-    selected
+    templates
+        .iter()
+        .filter(|(key, template)| {
+            key.starts_with(prefix)
+                && (!template.humour || humour)
+                && template.when.iter().all(|(fact, condition)| {
+                    facts
+                        .get(fact)
+                        .is_some_and(|value| condition_matches(condition, value))
+                })
+        })
+        .filter(|(_, template)| {
+            template.fallback
+                || (template.match_any.is_empty() && !template.when.is_empty())
+                || template
+                    .match_any
+                    .iter()
+                    .any(|phrase| !phrase.trim().is_empty() && text.contains(&words(phrase)))
+        })
+        .max_by_key(|(_, template)| (!template.fallback, template.match_priority))
+        .map(|(key, _)| key.clone())
 }
 
 fn condition_matches(condition: &serde_json::Value, value: &serde_json::Value) -> bool {
@@ -243,6 +240,107 @@ pub fn phrases(id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Normalised, space-delimited words used for deterministic clause classification.
+fn clause_words(text: &str) -> String {
+    format!(
+        " {} ",
+        text.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+const CONTROL_CLAUSES: &[&str] = &[
+    "taxi",
+    "backtrack",
+    "start",
+    "start up",
+    "pushback",
+    "engine",
+    "clearance",
+    "cleared",
+    "runway",
+    "takeoff",
+    "take off",
+    "departure",
+    "approach",
+    "land",
+    "landing",
+    "altitude",
+    "climb",
+    "descend",
+    "descent",
+    "heading",
+    "turn",
+    "direct",
+    "frequency",
+    "squawk",
+    "hold short",
+    "cross",
+    "crossing",
+    "stand",
+    "gate",
+    "parking",
+    "readback",
+    "read back",
+    "ready",
+    "line up",
+    "go around",
+    "missed",
+    "emergency",
+    "mayday",
+    "pan pan",
+    "ifr",
+    "vfr",
+];
+
+const SOCIAL_CLAUSES: &[&str] = &[
+    "hello",
+    "hi",
+    "hey",
+    "thanks",
+    "thank you",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "good day",
+    "goodbye",
+    "bye",
+    "cheers",
+    "please",
+    "welcome",
+    "how are you",
+    "joke",
+    "chat",
+    "lovely",
+    "nice",
+    "great",
+    "sorry",
+    "see you",
+];
+
+fn contains_clause(words: &str, clauses: &[&str]) -> bool {
+    clauses
+        .iter()
+        .any(|clause| words.contains(&format!(" {clause} ")))
+}
+
+/// True when the transmission contains a clause that asks for or grants aircraft movement.
+#[must_use]
+pub fn has_control_clause(text: &str) -> bool {
+    contains_clause(&clause_words(text), CONTROL_CLAUSES)
+}
+
+/// True when the transmission is purely social: it has a greeting or pleasantry and no control
+/// clause. Pure banter must never be interpreted as a request for movement.
+#[must_use]
+pub fn social_only(text: &str) -> bool {
+    let words = clause_words(text);
+    contains_clause(&words, SOCIAL_CLAUSES) && !contains_clause(&words, CONTROL_CLAUSES)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +377,15 @@ mod tests {
         assert!(
             parse("[chat]\nslots=[]\nsay=['Hello']\nwhen={phase={execute='anything'}}").is_err()
         );
+        // Social pleasantries are recognised, but any movement clause keeps a transmission
+        // out of the social-only class.
+        assert!(social_only("Thanks, have a good day"));
+        assert!(social_only("Hello there, how are you?"));
+        assert!(!social_only("Thanks, request taxi via A"));
+        assert!(!social_only("Good morning, cleared to land runway 27"));
+        assert!(has_control_clause("Thanks, request taxi via A"));
+        assert!(has_control_clause("ready for departure"));
+        assert!(!has_control_clause("Thanks, have a good day"));
     }
     #[test]
     fn unrelated_responses_do_not_change_phrase_rotation() {

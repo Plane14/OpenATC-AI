@@ -1251,6 +1251,48 @@ pub fn apply_request(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutc
             ctx.pilot_tag,
         );
     }
+    // A social clause never authorises movement, and a control clause is never handled as small
+    // talk. These guards are deliberately narrow: they only reject a transmission whose text
+    // has no control clause at all for an authorising intent, or that carries an explicit
+    // movement clause under the conversation intent.
+    let spoken = ctx.request.text.trim();
+    if !spoken.is_empty() {
+        let intent = ctx.request.intent.as_str();
+        let authorising = matches!(
+            intent,
+            "taxi"
+                | "backtrack"
+                | "start"
+                | "pushback"
+                | "start_pushback"
+                | "clearance"
+                | "ready"
+                | "takeoff"
+                | "landing"
+                | "approach"
+                | "altitude"
+                | "direct"
+                | "descent"
+                | "frequency"
+                | "resume_course"
+                | "cancel_ifr"
+                | "go_around"
+                | "emergency"
+                | "arrival_runway"
+                | "departure_runway"
+                | "change_approach"
+        );
+        if (authorising && crate::dialogue::social_only(spoken))
+            || (intent == "conversation" && crate::dialogue::has_control_clause(spoken))
+        {
+            return reply(
+                state,
+                ctx,
+                false,
+                crate::dialogue::say("say_again_with_a_standard_request_for", &[]),
+            );
+        }
+    }
     // Open requests skip the gates below.
     let gated = !open_intent(&ctx.request.intent);
     if gated
@@ -1522,6 +1564,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn social_clauses_never_authorise_movement_and_control_clauses_are_not_small_talk() {
+        let tag = SpeechTag::default();
+        let region = Region::default();
+        let realism = Realism {
+            require_frequency: false,
+            require_callsign: false,
+            strict_phraseology: false,
+            teaching_corrections: false,
+            ..Default::default()
+        };
+        let run = |intent: &str, text: &str| {
+            let mut state = State::default();
+            state.plan.callsign = "C-GTLT".into();
+            state.telemetry.on_ground = true;
+            let request = Request {
+                intent: intent.into(),
+                text: text.into(),
+                ..Default::default()
+            };
+            let outcome = apply_request(
+                &mut state,
+                &RequestContext {
+                    squawk: "1234",
+                    request: &request,
+                    runway_taxi_authorized: true,
+                    airport: None,
+                    atc_tag: &tag,
+                    pilot_tag: &tag,
+                    realism: &realism,
+                    units: UnitSystem::Imperial,
+                    region: &region,
+                },
+            );
+            (state, outcome)
+        };
+        // A pleasantry classified as a taxi request grants nothing.
+        let (state, outcome) = run("taxi", "Thanks, have a good day");
+        assert!(!outcome.accepted, "{}", outcome.message);
+        assert!(state.taxi_clearance.instructions.is_empty());
+        assert_eq!(state.taxi_clearance.sequence, 0);
+        // A movement clause classified as conversation is answered as a request, not small talk.
+        let (_, outcome) = run("conversation", "Thanks, cleared to taxi via A");
+        assert!(!outcome.accepted);
+        assert!(outcome.message.contains("standard request"));
+    }
     fn fixtures() -> serde_json::Value {
         let path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/apply.json");

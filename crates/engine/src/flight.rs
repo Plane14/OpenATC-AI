@@ -39,6 +39,32 @@ pub fn station_key(station: &Station) -> String {
     )
 }
 
+/// One controller may be published more than once for adjacent airports or
+/// duplicated frequencies. A handoff only transfers when the facility and
+/// frequency actually change.
+pub fn same_controller(a: &Station, b: &Station) -> bool {
+    a.khz == b.khz && a.name.trim().eq_ignore_ascii_case(b.name.trim())
+}
+
+/// A runway-vacate report belongs to the surface controller, not to a
+/// departure or en-route position that happens to share the tuned frequency.
+fn surface_owner(state: &EngineState, stations: &[Station], current: &Station) -> Station {
+    ["Tower", "Ground"]
+        .iter()
+        .find_map(|service| {
+            stations
+                .iter()
+                .filter(|station| {
+                    station.receivable
+                        && station.service == *service
+                        && station.airport == state.session.plan.destination
+                })
+                .min_by(|a, b| a.distance_nm.total_cmp(&b.distance_nm))
+                .cloned()
+        })
+        .unwrap_or_else(|| current.clone())
+}
+
 pub(crate) fn tag(state: &mut EngineState, station: &Station) -> SpeechTag {
     let settings = state.settings.clone();
     let mut tag = crate::routes::assign_airspace_controller(
@@ -141,8 +167,18 @@ fn next_station(state: &EngineState, stations: &[Station], current: &Station) ->
                 .cloned()
         })
     };
-    let preferred = regional(&ahead).or_else(|| regional(t));
-    if ["Approach", "Departure"].contains(&current.service.as_str())
+    let preferred = if arrival {
+        // An approach sector becomes the next controller only when it already
+        // owns the aircraft's current altitude. Selecting it from a position
+        // further along the descent makes Center and Approach hand the flight
+        // back and forth at the sector ceiling.
+        regional(&ahead)
+            .filter(|station| owns(station, t))
+            .or_else(|| regional(t))
+    } else {
+        regional(&ahead).or_else(|| regional(t))
+    };
+    if ["Approach", "Departure", "Center"].contains(&current.service.as_str())
         && state.session.clearance.as_ref().is_some_and(|c| {
             c.acknowledged && (t.altitude_feet - f64::from(c.altitude_feet)).abs() < 300.0
         })
@@ -222,6 +258,53 @@ pub fn urgent(state: &mut EngineState) -> bool {
     protect_final(state, &current)
 }
 
+/// The arrival runway under the aircraft, named in the direction it is travelling.
+///
+/// A vacate report only makes sense at the destination and on the pavement (or just past its
+/// ends). `state.airport` can already have been replaced by the planned arrival airport, so the
+/// runway geometry is what proves the aircraft is actually there.
+fn landed_runway(state: &EngineState) -> Option<String> {
+    let telemetry = &state.session.telemetry;
+    if !telemetry.on_ground {
+        return None;
+    }
+    let airport = state
+        .arrival_airport
+        .as_ref()
+        .or(state.airport.as_ref())
+        .filter(|airport| airport.icao == state.session.plan.destination)?;
+    let planned = state.session.plan.arrival_runway.trim();
+    if planned.is_empty() {
+        return None;
+    }
+    let runway = airport
+        .runways
+        .iter()
+        .find(|runway| runway.first_name == planned || runway.second_name == planned)?;
+    let (along, across, length, course) = openatc_core::traffic::runway_position(
+        airport,
+        planned,
+        telemetry.latitude,
+        telemetry.longitude,
+    )?;
+    if !(-60.0..=length + 60.0).contains(&along) || across.abs() > runway.width / 2.0 + 35.0 {
+        return None;
+    }
+    let track = telemetry
+        .ground_track_degrees
+        .unwrap_or(telemetry.heading_degrees);
+    let reciprocal = if runway.first_name == planned {
+        runway.second_name.clone()
+    } else {
+        runway.first_name.clone()
+    };
+    Some(if openatc_core::navigation::turn(course, track).abs() <= 90.0 {
+        planned.to_owned()
+    } else {
+        reciprocal
+    })
+}
+
 pub fn tick(state: &mut EngineState) {
     if matches!(state.session.phase, PhaseCode::Landed | PhaseCode::TaxiIn)
         && let Some(airport) = &state.arrival_airport
@@ -231,6 +314,9 @@ pub fn tick(state: &mut EngineState) {
             .is_none_or(|a| a.icao != airport.icao)
     {
         state.airport = Some(airport.clone());
+    }
+    if !state.session.telemetry.on_ground {
+        state.flow.vacate_reported = false;
     }
     let t = &state.session.telemetry;
     if state.session.demo
@@ -287,16 +373,18 @@ pub fn tick(state: &mut EngineState) {
     if state.session.phase == PhaseCode::Landed
         && state.session.telemetry.ground_speed_knots < 40.0
         && !state.flow.vacate_reported
+        && let Some(runway) = landed_runway(state)
     {
         state.flow.vacate_reported = true;
         let text = say(
             "arrival_vacate",
             &[
                 ("callsign", state.session.plan.callsign.clone()),
-                ("runway", state.session.plan.arrival_runway.clone()),
+                ("runway", runway),
             ],
         );
-        let voice = tag(state, &current);
+        let owner = surface_owner(state, &stations, &current);
+        let voice = tag(state, &owner);
         add_transmission(&mut state.session, "ATC", &text, &voice);
         return;
     }
@@ -305,7 +393,7 @@ pub fn tick(state: &mut EngineState) {
         return;
     };
     let key = station_key(&next);
-    if key == station_key(&current) || key == state.flow.pending_station {
+    if same_controller(&next, &current) || key == station_key(&current) || key == state.flow.pending_station {
         state.flow.evidence = 0;
         if state.flow.pending_station.is_empty() {
             crate::instructions::tick(state, &current);
@@ -384,7 +472,7 @@ pub fn request(
         let stations = nearby(&state.stations, &state.session.telemetry);
         let next = next_station(state, &stations, station);
         let (accepted, text) =
-            if let Some(next) = next.filter(|s| station_key(s) != station_key(station)) {
+            if let Some(next) = next.filter(|s| !same_controller(s, station)) {
                 state.session.recommended_frequency_khz = next.khz;
                 state.session.frequency_sequence = state.session.next_sequence;
                 state.flow.pending_station = station_key(&next);
@@ -707,13 +795,69 @@ fn weather(state: &EngineState, station: &Station) -> String {
     )
 }
 
+
+
+/// Speak a sequencing instruction and record the pilot readback that matches it, so the copilot
+/// never acknowledges a take-off clearance that was not given.
+fn return_with_reply(
+    state: &mut EngineState,
+    result: &mut openatc_core::apply::RequestOutcome,
+    instruction: &str,
+    readback: &str,
+) {
+    let slots = [
+        ("callsign", state.session.plan.callsign.clone()),
+        ("runway", state.session.plan.runway.clone()),
+    ];
+    result.message = say(instruction, &slots);
+    if let Some(entry) = state
+        .session
+        .transcript
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.speaker == "ATC")
+    {
+        entry.text.clone_from(&result.message);
+        entry.pilot_reply = say(readback, &slots);
+    }
+}
+
 pub fn takeoff_wording(
     state: &mut EngineState,
     station: &Station,
     result: &mut openatc_core::apply::RequestOutcome,
 ) {
-    state.flow.takeoff_cleared = true;
     let plan = &state.session.plan;
+    // Sequencing: the same decisions ATC makes for generated traffic apply to the player. A landing
+    // aircraft keeps the runway, so the player holds short; a departure already on the runway means
+    // lining up and waiting rather than a take-off clearance.
+    if let Some(airport) = state.airport.clone() {
+        let use_of_runway = airport
+            .runways
+            .iter()
+            .find(|r| r.first_name == plan.runway || r.second_name == plan.runway)
+            .map(|r| {
+                state
+                    .generated
+                    .runway_use(&format!("RUNWAY/{}/{}/{}", airport.icao, r.first_name, r.second_name))
+            })
+            .unwrap_or(crate::generated::RunwayUse::Clear);
+        match use_of_runway {
+            crate::generated::RunwayUse::Landing => {
+                state.flow.takeoff_cleared = false;
+                return_with_reply(state, result, "flight_hold_short_landing", "pilot_hold_short_readback");
+                return;
+            }
+            crate::generated::RunwayUse::Departing => {
+                state.flow.takeoff_cleared = false;
+                return_with_reply(state, result, "flight_line_up_and_wait", "pilot_line_up_and_wait_readback");
+                return;
+            }
+            crate::generated::RunwayUse::Clear => state.flow.takeoff_cleared = true,
+        }
+    } else {
+        state.flow.takeoff_cleared = true;
+    }
     let sid = state.airport.as_ref().is_some_and(|a| {
         a.procedures
             .iter()
@@ -827,7 +971,9 @@ fn compliance(state: &mut EngineState, station: &Station) {
             .and_then(|target| target.glide_degrees)
             .unwrap_or(3.0);
         let path = airport.elevation_feet + openatc_core::arrival::gradient(glide) * distance;
-        if (state.session.telemetry.altitude_feet - path).abs() <= 500.0 {
+        let below_cleared =
+            state.session.telemetry.altitude_feet < f64::from(clearance.altitude_feet) - 300.0;
+        if below_cleared || (state.session.telemetry.altitude_feet - path).abs() <= 500.0 {
             state.flow.warning.resolved();
             state.flow.last_correction = None;
             return;
@@ -961,6 +1107,7 @@ fn amend_airport(
         }
         state.session.plan.approach = canonical.clone();
         state.flow.announce_approach = false;
+        state.flow.vacate_reported = false;
         openatc_core::navigation::enrich(&mut state.session.plan, &state.settings.simulator_root);
         state.flow.arrival_requested = true;
         state.flow.approach_cleared = false;
@@ -1002,6 +1149,7 @@ fn amend_airport(
     }
     if departure {
         state.flow.takeoff_cleared = false;
+        state.flow.vacate_reported = false;
         let sid_entries: Vec<_> = airport
             .procedures
             .iter()
@@ -1038,6 +1186,7 @@ fn amend_airport(
         state.session.plan.arrival_runway = value.clone();
         state.session.plan.approach.clear();
         state.flow.announce_approach = false;
+        state.flow.vacate_reported = false;
         if state.vertical_policy.select_runway_ils
             && let Some(approach) = state
                 .arrival_profile
@@ -1248,13 +1397,25 @@ fn arrival_tick(state: &mut EngineState, current: &Station) -> bool {
             return false;
         }
         // Issue the published entry-level amendment before clearing the approach.
-        if let Some(entry) = state
-            .arrival_profile
-            .as_ref()
-            .and_then(|profile| {
-                openatc_core::arrival::target(profile, &state.session.plan.arrival_runway, approach)
-            })
-            .and_then(|target| target.intercept_feet)
+        // An aircraft already below its last cleared level cannot be corrected
+        // upward into the old level: the approach clearance is the resolution.
+        let below_cleared = state.session.clearance.as_ref().is_some_and(|clearance| {
+            state.session.telemetry.indicated_altitude_feet
+                .unwrap_or(state.session.telemetry.altitude_feet)
+                < f64::from(clearance.altitude_feet) - 300.0
+        });
+        if !below_cleared
+            && let Some(entry) = state
+                .arrival_profile
+                .as_ref()
+                .and_then(|profile| {
+                    openatc_core::arrival::target(
+                        profile,
+                        &state.session.plan.arrival_runway,
+                        approach,
+                    )
+                })
+                .and_then(|target| target.intercept_feet)
             && state
                 .session
                 .clearance
@@ -1270,7 +1431,8 @@ fn arrival_tick(state: &mut EngineState, current: &Station) -> bool {
             return false;
         }
         let agl = state.session.telemetry.altitude_feet - airport.elevation_feet;
-        if agl < 200.0 || agl > openatc_core::arrival::gradient(3.0) * distance + 500.0 {
+        if agl < 200.0 || (!below_cleared && agl > openatc_core::arrival::gradient(3.0) * distance + 2000.0)
+        {
             return false;
         }
         let slots = [
@@ -1830,6 +1992,271 @@ mod ownership_tests {
         }
     }
     #[test]
+    #[test]
+    fn a_duplicate_station_record_does_not_hand_off_to_the_same_controller() {
+        let mut state = crate::test_state();
+        state.session.demo = false;
+        state.session.has_departed = true;
+        state.session.phase = PhaseCode::Arrival;
+        state.session.plan.destination = "KMCO".into();
+        state.session.plan.arrival_runway = "36R".into();
+        state.session.plan.approach = "I36R".into();
+        state.session.telemetry = openatc_core::state::Telemetry {
+            on_ground: false,
+            position_valid: true,
+            radio_power: true,
+            com1_khz: 124800,
+            latitude: 28.43,
+            longitude: -81.31,
+            altitude_feet: 10000.0,
+            height_agl_feet: 10000.0,
+            ground_speed_knots: 240.0,
+            heading_degrees: 360.0,
+            ground_track_degrees: Some(360.0),
+            traffic: Some(vec![]),
+            ..Default::default()
+        };
+        let facility = |airport: &str, ceiling: f64| Station {
+            airport: airport.into(),
+            name: "Orlando Approach".into(),
+            service: "Approach".into(),
+            khz: 124800,
+            latitude: 28.43,
+            longitude: -81.31,
+            coverage: vec![Coverage {
+                floor: 0.0,
+                ceiling,
+                points: vec![[27.0, -83.0], [29.0, -83.0], [29.0, -80.0], [27.0, -80.0]],
+            }],
+            ..Default::default()
+        };
+        // The tuned record does not own this altitude; the adjacent airport
+        // record with the same name and frequency does. That is one controller,
+        // so no transfer may be issued.
+        state.stations = vec![facility("KMCO", 5000.0), facility("KSFB", 20000.0)];
+        for _ in 0..8 {
+            tick(&mut state);
+        }
+        assert!(
+            state.session.transcript.iter().all(|entry| {
+                !entry.text.contains("Contact")
+                    && !entry.text.contains("contact")
+                    && !entry.text.contains("124.800")
+            }),
+            "{:?}",
+            state
+                .session
+                .transcript
+                .iter()
+                .map(|entry| &entry.text)
+                .collect::<Vec<_>>()
+        );
+        assert!(state.flow.pending_station.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires installed X-Plane navigation data"]
+    fn installed_center_coverage_remains_available_at_cruise_levels() {
+        let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").expect("simulator root");
+        let stations = openatc_core::stations::load_index(&root).expect("station index");
+        for (label, latitude, longitude) in [
+            ("KMCO", 28.43, -81.31),
+            ("KRDU", 35.88, -78.79),
+            ("central US", 39.0, -98.0),
+        ] {
+            let telemetry = openatc_core::state::Telemetry {
+                position_valid: true,
+                radio_power: true,
+                on_ground: false,
+                latitude,
+                longitude,
+                altitude_feet: 35000.0,
+                height_agl_feet: 35000.0,
+                indicated_altitude_feet: Some(35000.0),
+                ground_speed_knots: 450.0,
+                heading_degrees: 90.0,
+                ground_track_degrees: Some(90.0),
+                ..Default::default()
+            };
+            let nearby = openatc_core::stations::nearby(&stations, &telemetry);
+            let center = nearby.iter().find(|station| {
+                station.service == "Center"
+                    && station.coverage.iter().any(|volume| volume.contains(&telemetry))
+            });
+            assert!(
+                center.is_some(),
+                "No published Center owns FL350 at {label}; ceilings came from {}",
+                root
+            );
+            let mut state = crate::test_state();
+            state.session.phase = PhaseCode::Cruise;
+            state.session.has_departed = true;
+            state.session.plan.cruise_feet = 35000;
+            state.session.telemetry = telemetry;
+            state.stations.clone_from(&nearby);
+            let current = center.unwrap().clone();
+            let next = next_station(&state, &nearby, &current).unwrap_or_else(|| {
+                panic!("No controller is reachable at FL350 over {label}")
+            });
+            assert!(
+                next.coverage.iter().any(|volume| volume.contains(&state.session.telemetry))
+                    || next.service == "Center",
+                "FL350 over {label} selected {} ({})",
+                next.name,
+                next.service
+            );
+        }
+    }
+
+    #[test]
+    fn a_climb_is_not_capped_by_the_current_low_sector_ceiling() {
+        let mut state = crate::test_state();
+        state.session.phase = PhaseCode::Cruise;
+        state.session.has_departed = true;
+        state.session.plan.cruise_feet = 35000;
+        state.session.telemetry = openatc_core::state::Telemetry {
+            position_valid: true,
+            on_ground: false,
+            latitude: 40.0,
+            longitude: -90.0,
+            altitude_feet: 24000.0,
+            height_agl_feet: 24000.0,
+            ground_speed_knots: 300.0,
+            heading_degrees: 90.0,
+            ground_track_degrees: Some(90.0),
+            ..Default::default()
+        };
+        state.session.clearance = Some(openatc_core::state::Clearance {
+            altitude_feet: 24000,
+            acknowledged: true,
+            ..Default::default()
+        });
+        let volume = |floor: f64, ceiling: f64| Coverage {
+            floor,
+            ceiling,
+            points: vec![[38.0, -92.0], [42.0, -92.0], [42.0, -88.0], [38.0, -88.0]],
+        };
+        let low = Station {
+            name: "Kansas City Center".into(),
+            service: "Center".into(),
+            khz: 118700,
+            latitude: 40.0,
+            longitude: -90.0,
+            coverage: vec![volume(0.0, 24000.0)],
+            receivable: true,
+            ..Default::default()
+        };
+        let high = Station {
+            name: "Kansas City Center".into(),
+            service: "Center".into(),
+            khz: 125200,
+            latitude: 40.0,
+            longitude: -90.0,
+            coverage: vec![volume(24000.0, 60000.0)],
+            receivable: true,
+            ..Default::default()
+        };
+        let next = next_station(&state, &[low.clone(), high.clone()], &low)
+            .expect("upper sector must be reachable");
+        assert_eq!(next.khz, high.khz);
+        assert!(next.coverage.iter().any(|v| v.ceiling > 24000.0));
+    }
+
+    #[test]
+    fn arrival_handoff_does_not_flap_at_the_approach_ceiling() {
+        let mut state = crate::test_state();
+        state.session.phase = PhaseCode::Arrival;
+        state.session.plan.destination = "TEST".into();
+        state.session.telemetry = openatc_core::state::Telemetry {
+            position_valid: true,
+            on_ground: false,
+            latitude: 0.0,
+            longitude: 0.0,
+            altitude_feet: 5500.0,
+            height_agl_feet: 5500.0,
+            ground_speed_knots: 220.0,
+            heading_degrees: 90.0,
+            ground_track_degrees: Some(90.0),
+            ..Default::default()
+        };
+        let volume = |ceiling: f64| Coverage {
+            floor: 0.0,
+            ceiling,
+            points: vec![[-1.0, -1.0], [-1.0, 1.0], [1.0, 1.0], [1.0, -1.0]],
+        };
+        let center = Station {
+            name: "Washington Center".into(),
+            service: "Center".into(),
+            khz: 118700,
+            receivable: true,
+            coverage: vec![volume(20000.0)],
+            ..Default::default()
+        };
+        let approach = Station {
+            airport: "TEST".into(),
+            name: "Raleigh Approach".into(),
+            service: "Approach".into(),
+            khz: 124800,
+            receivable: true,
+            coverage: vec![volume(5000.0)],
+            ..Default::default()
+        };
+        let next = next_station(
+            &state,
+            &[center.clone(), approach.clone()],
+            &center,
+        )
+        .expect("Center must retain the descent above the approach ceiling");
+        assert_eq!(next.khz, center.khz);
+        state.session.telemetry.altitude_feet = 4500.0;
+        state.session.telemetry.height_agl_feet = 4500.0;
+        let next = next_station(&state, &[center.clone(), approach.clone()], &center)
+            .expect("Approach takes the flight inside its ceiling");
+        assert_eq!(next.khz, approach.khz);
+    }
+
+    #[test]
+    fn a_flight_below_its_last_level_gets_an_approach_clearance_not_a_climb() {
+        let (mut state, approach, _) = arrival_state();
+        state.settings.enforce_clearance_constraints = true;
+        state.session.telemetry.latitude = -0.1;
+        state.session.telemetry.altitude_feet = 4200.0;
+        state.session.telemetry.height_agl_feet = 4200.0;
+        state.session.telemetry.indicated_altitude_feet = Some(4200.0);
+        state.session.telemetry.ground_speed_knots = 160.0;
+        state.session.telemetry.heading_degrees = 0.0;
+        state.session.telemetry.ground_track_degrees = Some(0.0);
+        state.session.clearance = Some(openatc_core::state::Clearance {
+            altitude_feet: 5000,
+            acknowledged: true,
+            sequence: 1,
+            ..Default::default()
+        });
+        assert!(
+            arrival_tick(&mut state, &approach),
+            "An approach clearance must resolve a flight below its last level"
+        );
+        assert!(state.flow.approach_cleared);
+        assert!(
+            state
+                .session
+                .transcript
+                .iter()
+                .any(|entry| entry.text.to_ascii_lowercase().contains("approach"))
+        );
+        state.flow.clearance_sequence = 1;
+        state.flow.last_correction =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+        let before = state.session.transcript.len();
+        compliance(&mut state, &approach);
+        assert_eq!(
+            state.session.transcript.len(),
+            before,
+            "The superseded level must not be demanded after the approach clearance"
+        );
+    }
+
+    #[test]
     fn published_owner_wins_over_a_nearer_unrelated_airport() {
         let mut state = crate::test_state();
         state.session.phase = PhaseCode::Departure;
@@ -2285,6 +2712,45 @@ mod ownership_tests {
     }
 
     #[test]
+    fn a_runway_vacate_report_is_not_attributed_to_departure() {
+        let (mut state, _, mut tower) = arrival_state();
+        tower.airport = "TEST".into();
+        let departure = Station {
+            airport: "TEST".into(),
+            name: "Test Departure".into(),
+            service: "Departure".into(),
+            khz: 122000,
+            ..Default::default()
+        };
+        state.stations = vec![tower.clone(), departure.clone()];
+        state.session.demo = false;
+        state.session.has_departed = true;
+        state.session.phase = PhaseCode::Approach;
+        let telemetry = openatc_core::state::Telemetry {
+            on_ground: true,
+            position_valid: true,
+            radio_power: true,
+            com1_khz: departure.khz,
+            latitude: 0.005,
+            traffic: Some(vec![]),
+            ..Default::default()
+        };
+        state.session.telemetry = telemetry.clone();
+        for _ in 0..4 {
+            openatc_core::ops::update_flight_phase(&mut state.session, &telemetry).unwrap();
+        }
+        tick(&mut state);
+        let vacate = state
+            .session
+            .transcript
+            .iter()
+            .find(|entry| entry.text.to_lowercase().contains("vacate"))
+            .expect("vacate instruction");
+        assert_eq!(vacate.position, tower.name);
+        assert!(!vacate.position.contains("Departure"));
+    }
+
+    #[test]
     fn touchdown_exit_and_ground_handoff_are_separate_steps() {
         use openatc_core::{
             airport::{Airport, Runway},
@@ -2383,6 +2849,145 @@ mod ownership_tests {
                     "Combined Tower retains the arrival"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn arrival_vacate_requires_the_destination_runway_and_resets_after_takeoff() {
+        use openatc_core::{
+            airport::{Airport, Runway},
+            state::{Point, Telemetry},
+        };
+        let destination = Airport {
+            icao: "DEST".into(),
+            reference_latitude: 0.0,
+            reference_longitude: 0.0,
+            runways: vec![Runway {
+                first_name: "36".into(),
+                second_name: "18".into(),
+                first: Point::default(),
+                second: Point {
+                    north: 2000.0,
+                    ..Default::default()
+                },
+                width: 45.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut state = crate::test_state();
+        state.session.demo = false;
+        state.session.has_departed = true;
+        state.session.phase = PhaseCode::Landed;
+        state.session.plan.destination = "DEST".into();
+        state.session.plan.arrival_runway = "36".into();
+        state.arrival_airport = Some(destination);
+        state.stations = vec![Station {
+            airport: "DEST".into(),
+            name: "Arrival Tower".into(),
+            service: "Tower".into(),
+            khz: 118100,
+            ..Default::default()
+        }];
+        state.session.telemetry = Telemetry {
+            on_ground: true,
+            position_valid: true,
+            radio_power: true,
+            com1_khz: 118100,
+            latitude: 10.0,
+            longitude: 10.0,
+            ground_speed_knots: 10.0,
+            traffic: Some(vec![]),
+            ..Default::default()
+        };
+        // Slow movement far from the destination must not name its runway.
+        assert_eq!(landed_runway(&state), None);
+        for _ in 0..4 {
+            tick(&mut state);
+        }
+        assert!(
+            state
+                .session
+                .transcript
+                .iter()
+                .all(|entry| !entry.text.to_lowercase().contains("vacate"))
+        );
+        // On the planned runway the report is issued once, in the direction of travel.
+        state.session.telemetry.latitude = 0.005;
+        state.session.telemetry.longitude = 0.0;
+        assert_eq!(landed_runway(&state).as_deref(), Some("36"));
+        tick(&mut state);
+        assert!(
+            state
+                .session
+                .transcript
+                .last()
+                .unwrap()
+                .text
+                .to_lowercase()
+                .contains("vacate runway 36")
+        );
+        state.session.telemetry.heading_degrees = 180.0;
+        assert_eq!(landed_runway(&state).as_deref(), Some("18"));
+        // Becoming airborne clears the report so a later landing reports on its own runway.
+        state.session.telemetry.on_ground = false;
+        state.session.telemetry.heading_degrees = 0.0;
+        tick(&mut state);
+        assert!(!state.flow.vacate_reported);
+        state.session.telemetry.on_ground = true;
+        state.session.telemetry.latitude = 0.005;
+        state.session.phase = PhaseCode::Landed;
+        tick(&mut state);
+        assert!(state.flow.vacate_reported);
+    }
+}
+
+#[cfg(test)]
+mod sequencing_tests {
+    use super::*;
+
+    #[test]
+    fn a_sequencing_instruction_never_reads_back_as_a_takeoff_clearance() {
+        let mut state = crate::test_state();
+        state.session.plan.callsign = "TEST123".into();
+        state.session.plan.runway = "09".into();
+        state
+            .session
+            .transcript
+            .push(openatc_core::state::Transmission {
+                radio: None,
+                information_only: false,
+                pilot_reply: String::new(),
+                background: false,
+                speaker: "ATC".into(),
+                text: String::new(),
+                sequence: 0,
+                position: String::new(),
+                voice: String::new(),
+                delivery: String::new(),
+                speed: 1.0,
+                urgent: false,
+            });
+        let mut result = openatc_core::apply::RequestOutcome {
+            accepted: true,
+            message: String::new(),
+        };
+        for (instruction, readback, expected) in [
+            (
+                "flight_line_up_and_wait",
+                "pilot_line_up_and_wait_readback",
+                "line up and wait",
+            ),
+            ("flight_hold_short_landing", "pilot_hold_short_readback", "short"),
+        ] {
+            return_with_reply(&mut state, &mut result, instruction, readback);
+            let spoken = result.message.to_lowercase();
+            assert!(spoken.contains(expected), "{spoken}");
+            assert!(!spoken.contains("cleared for takeoff"), "{spoken}");
+            let entry = state.session.transcript.last().expect("transcript entry");
+            let reply = entry.pilot_reply.to_lowercase();
+            assert!(reply.contains("short") || reply.contains("line up and wait"), "{reply}");
+            assert!(!reply.contains("cleared for takeoff"), "{reply}");
         }
     }
 }

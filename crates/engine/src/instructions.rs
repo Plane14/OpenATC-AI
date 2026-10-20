@@ -236,12 +236,13 @@ pub fn request(
         _ => {
             state.flow.monitor.deviation = None;
             state.flow.monitor.heading = None;
-            let Some(fix) = state
-                .session
-                .plan
-                .fixes
-                .get(state.flow.monitor.next_fix.max(1))
-            else {
+            let next = navigation::route_ahead(
+                &state.session.plan.fixes,
+                state.flow.monitor.next_fix.max(1),
+                &state.session.telemetry,
+            );
+            state.flow.monitor.next_fix = next;
+            let Some(fix) = state.session.plan.fixes.get(next) else {
                 return Some(reply(
                     state,
                     request,
@@ -370,7 +371,7 @@ pub fn tick(state: &mut EngineState, station: &Station) {
         state.flow.monitor.checked_fix = established - 1;
         next = established;
     }
-    let leg = navigation::leg(&fixes, next, &t);
+    let mut leg = navigation::leg(&fixes, next, &t);
     let call = state.session.plan.callsign.clone();
     let ready = state
         .flow
@@ -382,9 +383,11 @@ pub fn tick(state: &mut EngineState, station: &Station) {
     });
     if captured
         || navigation::fix_passed_on_outbound(&fixes, next, &t)
-        || leg
-            .as_ref()
-            .is_some_and(|leg| leg.along >= 1.0 && leg.cross_track_nm < 1.5)
+        || leg.as_ref().is_some_and(|leg| {
+            leg.along >= 1.0
+                && (leg.cross_track_nm < 1.5
+                    || fixes.get(next).is_some_and(|fix| !fix.fly_over))
+        })
     {
         if next != state.flow.monitor.checked_fix {
             state.flow.monitor.checked_fix = next;
@@ -475,6 +478,12 @@ pub fn tick(state: &mut EngineState, station: &Station) {
         state.flow.monitor.next_fix = next + 1;
         state.flow.monitor.direct_origin = None;
         state.flow.monitor.heading = None;
+    }
+    let ahead = navigation::route_ahead(&fixes, state.flow.monitor.next_fix.max(1), &t);
+    if ahead != next {
+        state.flow.monitor.next_fix = ahead;
+        next = ahead;
+        leg = navigation::leg(&fixes, next, &t);
     }
     if !ready {
         return;
@@ -621,12 +630,9 @@ fn published_speed_notice(state: &EngineState) -> Option<(usize, f64, bool)> {
         return None;
     }
     let t = &state.session.telemetry;
-    let Some(ias) = t
+    let ias = t
         .indicated_speed_knots
-        .filter(|v| v.is_finite() && *v > 0.0)
-    else {
-        return None;
-    };
+        .filter(|v| v.is_finite() && *v > 0.0)?;
     let next = state.flow.monitor.next_fix.max(1);
     let fixes = &state.session.plan.fixes;
     // An initial fix can carry a STAR speed before its first TF leg. A reminder
@@ -802,8 +808,35 @@ fn climb(state: &mut EngineState, station: &Station) {
     );
 }
 
-fn transmit_descent(state: &mut EngineState, station: &Station, mut text: String, target: i32) {
-    state.session.phase = PhaseCode::Arrival;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Vertical {
+    Climb,
+    Descend,
+    Maintain,
+}
+
+/// The instruction word follows the actual altitude, never the source of the target.
+fn vertical_for(target: i32, actual: f64) -> Vertical {
+    const TOLERANCE_FEET: f64 = 200.0;
+    if actual < f64::from(target) - TOLERANCE_FEET {
+        Vertical::Climb
+    } else if actual > f64::from(target) + TOLERANCE_FEET {
+        Vertical::Descend
+    } else {
+        Vertical::Maintain
+    }
+}
+
+fn transmit_descent(
+    state: &mut EngineState,
+    station: &Station,
+    mut text: String,
+    target: i32,
+    direction: Vertical,
+) {
+    if direction == Vertical::Descend {
+        state.session.phase = PhaseCode::Arrival;
+    }
     let notice = published_speed_notice(state);
     let speed = notice.map(|(index, limit, exact)| {
         let fix = state.session.plan.fixes[index].identifier.clone();
@@ -831,7 +864,30 @@ fn transmit_descent(state: &mut EngineState, station: &Station, mut text: String
     clearance.readback_scope = "altitude".into();
     clearance.readback_speed = speed;
     clearance.acknowledged = false;
-    let pilot = openatc_core::readback::descent_reply(clearance, &state.session.plan.callsign);
+    let altitude = openatc_core::altitude_text(
+        f64::from(target),
+        openatc_core::UnitSystem::Imperial,
+        true,
+    );
+    let pilot = match direction {
+        Vertical::Descend => {
+            openatc_core::readback::descent_reply(clearance, &state.session.plan.callsign)
+        }
+        Vertical::Climb => say(
+            "pilot_continue_climb",
+            &[
+                ("callsign", state.session.plan.callsign.clone()),
+                ("altitude", altitude),
+            ],
+        ),
+        Vertical::Maintain => say(
+            "pilot_maintain_altitude",
+            &[
+                ("callsign", state.session.plan.callsign.clone()),
+                ("altitude", altitude),
+            ],
+        ),
+    };
     transmit(state, station, text, Some(pilot));
 }
 
@@ -846,7 +902,11 @@ fn descend(state: &mut EngineState, station: &Station) -> bool {
     }
     let t = &state.session.telemetry;
     let c = state.session.clearance.as_ref().unwrap();
-    let next = state.flow.monitor.next_fix.max(1);
+    let next = navigation::route_ahead(
+        &state.session.plan.fixes,
+        state.flow.monitor.next_fix.max(1),
+        t,
+    );
     let mut point = [t.latitude, t.longitude];
     let mut distance = 0.0;
     let mut preceding_floor = i32::MIN;
@@ -861,6 +921,15 @@ fn descend(state: &mut EngineState, station: &Station) -> bool {
             && distance.is_finite()
             && distance <= state.vertical_policy.distance(c.altitude_feet, upper)
         {
+            let target = upper.max(fix.minimum_altitude_feet.unwrap_or(upper));
+            // An at-or-below restriction already met at the aircraft's actual
+            // altitude no longer limits the flight; keep looking ahead.
+            if fix.minimum_altitude_feet != Some(upper)
+                && t.altitude_feet <= f64::from(target) + 200.0
+            {
+                preceding_floor = preceding_floor.max(fix.minimum_altitude_feet.unwrap_or(i32::MIN));
+                continue;
+            }
             selected = Some((fix, upper));
             break;
         }
@@ -881,10 +950,13 @@ fn descend(state: &mut EngineState, station: &Station) -> bool {
             ),
         ),
     ];
-    let phrase = if t.vertical_speed_fpm < -200.0 {
-        "automatic_continue_descent"
-    } else {
-        "automatic_descent"
+    let direction = vertical_for(target, t.altitude_feet);
+    let phrase = match direction {
+        Vertical::Climb if t.vertical_speed_fpm > 200.0 => "automatic_continue_climb",
+        Vertical::Climb => "automatic_climb",
+        Vertical::Descend if t.vertical_speed_fpm < -200.0 => "automatic_continue_descent",
+        Vertical::Descend => "automatic_descent",
+        Vertical::Maintain => "automatic_maintain",
     };
     let mut text = say(phrase, &slots);
     let crossing = say(
@@ -901,7 +973,7 @@ fn descend(state: &mut EngineState, station: &Station) -> bool {
     );
     text.push(' ');
     text.push_str(&crossing);
-    transmit_descent(state, station, text, target);
+    transmit_descent(state, station, text, target, direction);
     true
 }
 
@@ -1016,7 +1088,7 @@ fn destination_descent(state: &mut EngineState, station: &Station) -> bool {
         text.push(' ');
         text.push_str(&say(phrase, &[("pressure", value)]));
     }
-    transmit_descent(state, station, text, target);
+    transmit_descent(state, station, text, target, Vertical::Descend);
     true
 }
 
@@ -1111,6 +1183,291 @@ mod tests {
                 .contains("or less")
         );
     }
+    #[test]
+    fn altitude_instruction_direction_follows_the_actual_altitude() {
+        let fixture = |actual: f64, assigned: i32, maximum: Option<i32>, minimum: Option<i32>| {
+            let mut state = crate::test_state();
+            state.session.phase = PhaseCode::Cruise;
+            state.session.telemetry = openatc_core::state::Telemetry {
+                position_valid: true,
+                on_ground: false,
+                longitude: 0.0,
+                altitude_feet: actual,
+                indicated_altitude_feet: Some(actual),
+                ground_speed_knots: 300.0,
+                heading_degrees: 90.0,
+                ..Default::default()
+            };
+            state.session.plan.cruise_feet = 17000;
+            state.session.plan.fixes = vec![
+                openatc_core::state::RouteFix {
+                    longitude: 0.0,
+                    ..Default::default()
+                },
+                openatc_core::state::RouteFix {
+                    identifier: "LIMIT".into(),
+                    longitude: 0.2,
+                    maximum_altitude_feet: maximum,
+                    minimum_altitude_feet: minimum,
+                    path_terminator: "TF".into(),
+                    ..Default::default()
+                },
+                openatc_core::state::RouteFix {
+                    identifier: "FAR".into(),
+                    longitude: 5.0,
+                    path_terminator: "TF".into(),
+                    ..Default::default()
+                },
+            ];
+            state.session.clearance = Some(openatc_core::state::Clearance {
+                altitude_feet: assigned,
+                acknowledged: true,
+                ..Default::default()
+            });
+            (state, Station {
+                service: "Center".into(),
+                ..Default::default()
+            })
+        };
+
+        let (mut state, station) = fixture(4800.0, 5000, None, None);
+        climb(&mut state, &station);
+        let text = &state.session.transcript.last().expect("climb instruction").text;
+        assert!(text.contains("climb") && !text.contains("descend"), "{text}");
+
+        let (mut state, station) = fixture(10000.0, 12000, Some(7000), None);
+        assert!(descend(&mut state, &station));
+        let text = &state.session.transcript.last().expect("descent instruction").text;
+        assert!(text.contains("descend") && !text.contains("climb"), "{text}");
+
+        let (mut state, station) = fixture(7000.0, 9000, Some(7000), Some(7000));
+        assert!(descend(&mut state, &station));
+        let entry = state.session.transcript.last().expect("level instruction");
+        assert!(
+            entry.text.contains("maintain") && !entry.text.contains("descend"),
+            "{}",
+            entry.text
+        );
+        assert!(entry.pilot_reply.contains("Maintain"), "{}", entry.pilot_reply);
+
+        let (mut state, station) = fixture(5000.0, 12000, Some(7000), None);
+        assert!(
+            !descend(&mut state, &station),
+            "An at-or-below restriction already met must not command a descent"
+        );
+        assert!(state.session.transcript.is_empty());
+    }
+
+    #[test]
+    fn resume_route_uses_the_active_arrival_leg_not_a_departure_fix() {
+        let mut state = crate::test_state();
+        state.session.phase = PhaseCode::Arrival;
+        state.session.telemetry = openatc_core::state::Telemetry {
+            position_valid: true,
+            on_ground: false,
+            latitude: 0.0,
+            longitude: 0.0,
+            altitude_feet: 10000.0,
+            heading_degrees: 90.0,
+            ground_track_degrees: Some(90.0),
+            ..Default::default()
+        };
+        state.session.plan.fixes = vec![
+            openatc_core::state::RouteFix {
+                identifier: "KMCO".into(),
+                longitude: -1.0,
+                ..Default::default()
+            },
+            openatc_core::state::RouteFix {
+                identifier: "JWOLF".into(),
+                longitude: -0.5,
+                path_terminator: "TF".into(),
+                ..Default::default()
+            },
+            openatc_core::state::RouteFix {
+                identifier: "ARRIVAL".into(),
+                longitude: 1.0,
+                path_terminator: "TF".into(),
+                ..Default::default()
+            },
+        ];
+        state.flow.monitor.next_fix = 1;
+        state.session.clearance = Some(openatc_core::state::Clearance {
+            altitude_feet: 10000,
+            acknowledged: true,
+            ..Default::default()
+        });
+        let resume = Request {
+            intent: "resume_course".into(),
+            text: "Resume planned route".into(),
+            ..Default::default()
+        };
+        let station = Station {
+            service: "Center".into(),
+            ..Default::default()
+        };
+        let result = request(
+            &mut state,
+            &station,
+            &resume,
+            &openatc_core::state::SpeechTag::default(),
+        )
+        .expect("resume request");
+        let message = result["message"].as_str().unwrap_or_default();
+        assert!(message.contains("ARRIVAL"), "{message}");
+        assert!(!message.contains("JWOLF"), "{message}");
+    }
+
+    #[test]
+    fn a_passed_crossing_restriction_stops_limiting_the_level() {
+        let mut state = crate::test_state();
+        state.settings.enforce_clearance_constraints = false;
+        state.session.phase = PhaseCode::Cruise;
+        state.session.telemetry = openatc_core::state::Telemetry {
+            position_valid: true,
+            on_ground: false,
+            latitude: 0.0,
+            longitude: 0.4,
+            altitude_feet: 35000.0,
+            indicated_altitude_feet: Some(35000.0),
+            ground_speed_knots: 300.0,
+            heading_degrees: 90.0,
+            ground_track_degrees: Some(90.0),
+            ..Default::default()
+        };
+        state.session.plan.cruise_feet = 39000;
+        state.session.plan.fixes = vec![
+            openatc_core::state::RouteFix {
+                longitude: 0.0,
+                ..Default::default()
+            },
+            openatc_core::state::RouteFix {
+                identifier: "GOTHA".into(),
+                longitude: 0.2,
+                maximum_altitude_feet: Some(7000),
+                path_terminator: "TF".into(),
+                ..Default::default()
+            },
+            openatc_core::state::RouteFix {
+                identifier: "AFTER".into(),
+                longitude: 1.0,
+                path_terminator: "TF".into(),
+                ..Default::default()
+            },
+        ];
+        state.session.clearance = Some(openatc_core::state::Clearance {
+            altitude_feet: 39000,
+            acknowledged: true,
+            route: "ROUTE".into(),
+            ..Default::default()
+        });
+        state.flow.monitor.route = "ROUTE".into();
+        state.flow.monitor.next_fix = 1;
+        let station = Station {
+            service: "Center".into(),
+            ..Default::default()
+        };
+        let _ = descend(&mut state, &station);
+        assert!(
+            state
+                .session
+                .transcript
+                .iter()
+                .all(|entry| !entry.text.contains("GOTHA")),
+            "A passed restriction was still applied"
+        );
+        let before = state.session.transcript.len();
+        tick(&mut state, &station);
+        assert!(state.flow.monitor.next_fix > 1);
+        assert!(!descend(&mut state, &station));
+        assert_eq!(
+            state.session.transcript.len(),
+            before,
+            "The granted 39000 level was contradicted after GOTHA"
+        );
+        assert!(
+            state
+                .session
+                .transcript
+                .iter()
+                .all(|entry| !entry.text.contains("GOTHA") && !entry.text.contains("descend")),
+            "{:?}",
+            state
+                .session
+                .transcript
+                .iter()
+                .map(|entry| &entry.text)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn off_course_vector_targets_the_leg_ahead_not_the_passed_fix() {
+        let mut state = crate::test_state();
+        state.settings.enforce_clearance_constraints = true;
+        state.session.phase = PhaseCode::Cruise;
+        state.session.telemetry = openatc_core::state::Telemetry {
+            position_valid: true,
+            on_ground: false,
+            latitude: 0.05,
+            longitude: 0.4,
+            altitude_feet: 20000.0,
+            height_agl_feet: 20000.0,
+            indicated_altitude_feet: Some(20000.0),
+            ground_speed_knots: 300.0,
+            heading_degrees: 60.0,
+            magnetic_heading_degrees: Some(60.0),
+            ground_track_degrees: Some(60.0),
+            ..Default::default()
+        };
+        state.session.plan.cruise_feet = 20000;
+        state.session.plan.fixes = vec![
+            openatc_core::state::RouteFix {
+                longitude: 0.0,
+                ..Default::default()
+            },
+            openatc_core::state::RouteFix {
+                identifier: "GM439".into(),
+                longitude: 0.2,
+                path_terminator: "TF".into(),
+                ..Default::default()
+            },
+            openatc_core::state::RouteFix {
+                identifier: "GM614".into(),
+                longitude: 0.6,
+                path_terminator: "TF".into(),
+                ..Default::default()
+            },
+        ];
+        state.session.clearance = Some(openatc_core::state::Clearance {
+            altitude_feet: 20000,
+            acknowledged: true,
+            route: "ROUTE".into(),
+            ..Default::default()
+        });
+        state.flow.monitor.route = "ROUTE".into();
+        state.flow.monitor.next_fix = 1;
+        for latitude in -1..=1 {
+            for longitude in 0..=2 {
+                state.mora.0.insert((latitude, longitude), 1000);
+            }
+        }
+        let station = Station {
+            service: "Center".into(),
+            ..Default::default()
+        };
+        tick(&mut state, &station);
+        let text = state
+            .session
+            .transcript
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(text.contains("GM614"), "{text}");
+        assert!(!text.contains("GM439"), "{text}");
+    }
+
     #[test]
     fn descent_combines_due_speed_with_one_complete_readback() {
         for exact in [false, true] {

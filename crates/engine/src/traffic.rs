@@ -617,7 +617,7 @@ fn spacing(state: &mut EngineState, station: &Station) -> bool {
             }
         }
     }
-    let candidate = reduction.or_else(|| if ahead { None } else { increase_candidate });
+    let candidate = reduction.or(if ahead { None } else { increase_candidate });
     let Some((speed, increase)) = candidate else {
         return false;
     };

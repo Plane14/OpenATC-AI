@@ -412,9 +412,11 @@ mod tests {
     }
     #[test]
     fn issued_taxi_aids_do_not_wait_for_readback() {
-        let mut route = openatc_core::state::TaxiClearance::default();
-        route.sequence = 1;
-        route.points = vec![p(0., 0.), p(0., 100.)];
+        let mut route = openatc_core::state::TaxiClearance {
+            sequence: 1,
+            points: vec![p(0., 0.), p(0., 100.)],
+            ..Default::default()
+        };
         assert!(!route.approved);
         assert!(issued_route(&route));
         route.approved = true;

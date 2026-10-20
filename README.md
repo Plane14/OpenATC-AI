@@ -643,6 +643,15 @@ Generated flight clearances now accept published Departure controllers for climb
 - These are data/selection foundations; the generated moving fleet remains unfinished.
 - See [profile editing and sources](traffic/README.md).
 
+- **Advisory traffic at untowered fields** flies a right-hand visual circuit at any field that publishes a CTAF or UNICOM frequency and no Tower service.
+- The aircraft announces its own position on the published frequency: downwind, base, final and landing. No call contains a clearance, and none of them can grant one.
+- The procedure is the authority for that traffic, so it never enters the controlled-clearance path and never occupies a taxiway or a runway outside its published pattern.
+- The pattern repeats: the aircraft climbs from the end of the landing roll, rejoins the downwind and flies the circuit again.
+- A runway held by the player or another aircraft at the final call produces a go-around instead of a landing.
+- These calls are heard only while that frequency is tuned, and are recorded as background information rather than as an instruction.
+- Fields are selected from the published station index near the player, and at most two advisory aircraft are published.
+- This is source and installed-data behaviour; it has not been seen in the simulator.
+
 ## Maps, stations and simulator guidance
 
 | Page | What it shows |
@@ -1089,5 +1098,39 @@ FACF altitude code J now preserves its published minimum independently of its gl
 For a missed approach beginning with a course/heading-to-altitude leg, a late runway recovery now gets a separate complete draft from its actual position and height. It preserves the published termination altitude and hold, retains the original MAP identity and still requires independent protection. Fixed legs retain their existing forward-join guard. The seven-flight source fixture continues to pass; the broader mixed test now retains two nominal flights but still fails origin/category coverage and production scenery release.
 
 Same-flow runway selection now considers coverage of the requested traffic categories before complete nominal count, while retaining its existing bounded search and all weather/geometry checks. It no longer stops with only airline/regional drafts when cargo or GA was also requested. Unknown or ambiguous operator categories do not count toward coverage. The mixed installed-data test still fails reverse/third-origin and category acceptance.
+
+### Published manual-termination arrivals — 18 October 2026
+
+A STAR whose published route ends at a manual termination is now usable instead of being discarded. The computable published legs are kept with all their restrictions, and the transition itself is retained as typed provenance: procedure, transition, terminator and manual fix. A terminator that is not last is still refused, because computable legs after it would otherwise be dropped without notice.
+
+Continuing past that point requires an explicit controller amendment. The planner directs the flight to the published approach entry, solves that bridge with actual wind, and protects it with the same terrain, MORA and separation checks as any other leg. The approach clearance announces the amendment, names the amended target in both the instruction and the readback, and carries the directive with it. The flown path must reach the target it was cleared to, and a flight planned with an amendment cannot be installed without that directive present. Every published crossing restriction stays in force across the bridge, because the amendment changes the lateral path only.
+
+Fully published arrivals are preferred; an amended candidate is only used where no published route reaches the approach entry. That matters in practice: Memphis publishes 25 STAR variants ending in a manual transition, and reverse arrivals into KMEM runway 36L now produce candidates where they previously produced none. Runways without a supported approach or published recovery are still refused, so the amendment does not mask those gaps. A pre-existing Nice–Milan installed-data check fails independently of this change.
+
+A short route whose departure ends exactly where the arrival begins is no longer refused just because the two airports report different weather. The join now compares the intended indicated speed, and still refuses a real speed change that would need an upstream deceleration plan. Previously two airports could effectively never share a pressure setting, so these routes could not connect at all.
+
+Traffic that has finished its flights is now topped back up. A scene is only rebuilt once every aircraft has finished, parked or turned around: anything still flying, taxiing or awaiting a clearance blocks the rebuild, because publishing a scene replaces the whole traffic runtime and would otherwise remove aircraft mid-flight. The airport survey is reused, so only the aircraft themselves are prepared again. Following the player to new airports, and seeding traffic that is already airborne, remain open.
+
+A supplied role-prompt catalogue is now checked for completeness. If a `prompts.toml` is present but leaves out a role, the engine names the missing roles and stops rather than starting with a partial set and quietly falling back. The bundled catalogue and the guidance keys the engine actually reads are kept in step by a test, so a prompt that exists but is never used, or one that is read but missing, is caught instead of drifting.
+
+Traffic reported from a real flight is now acted on. Movement no longer depends on the simulator's nearby-traffic feed, so aircraft across the whole airport keep moving instead of only those close to the player; a generated follower queued behind the hold-short line is no longer counted as runway occupancy for the aircraft ahead, which had been deadlocking the first departure; scenes seed some aircraft already on approach, some taxiing and the rest at the gate with staggered dwells instead of everyone starting up together; and a vacate instruction now requires the aircraft to be on the planned destination runway and names the end matching its direction of travel. Transponder reminders are bounded to two calls per mismatch.
+
+Generated traffic now passes the production obstacle gate for the first time. Flights are released by the real gate rather than only by test fixtures: the mixed cargo/GA scene releases a departure and the Nice/Milan seven-flight scene releases a departure, each having passed terrain, obstacle, corridor-protection, controller and readback checks. Nothing was cleared to achieve this; every remaining refusal comes from a checked intersection or an unresolved scenery class.
+
+Reaching that needed four corrections. Object-bearing tiles were being treated as unresolved as a blanket rule even when every placement loaded, which no airport could ever satisfy; that was replaced by the precise rule that a tile resolves when its placements resolve and stays unresolved when any placement fails. Road and rail chains were being checked against an overlay's empty terrain mesh instead of the base mesh beneath it. Building and forest heights, which are published above ground, were being added to the terrain a second time. And forests were tested as bounding boxes, so a corridor passing through a concave gap or a hole was refused along with one crossing the trees; forests are now tested against their real polygon, with holes clear and uncertain geometry still refusing.
+
+Forest protection now reads the definitions ships actually use. X-Plane 12 forests are usually built from 3-D tree geometry rather than the older tree-height commands, the definition files are larger than the simple quad format, and their fields are tab-separated. Heights therefore come from the vertical span of each tree's own geometry, and the read limit is 64 MB. This took unresolved forest placements in the Memphis cargo fixture from 18,738 to zero.
+
+Object loading no longer refuses a building merely because it declares a material finish. Shading, specular, transparency and export-name directives cannot move geometry, so they are ignored, while anything that can change position is still refused. The per-tile cap on distinct object resources also rose from 256 to 4096, which had been rejecting hundreds of placements per airport tile; memory remains bounded by the existing 32 MB geometry budget. Together these resolved about nine thousand placements.
+
+Buildings and forests are now checked as real obstacles instead of making a whole scenery tile unusable. A facade is recognised from its definition file, its footprint rings are kept, and its published parameter is used as the building height. A forest's heights come from the tallest tree its definition publishes, since the polygon parameter is a density rather than a height. Both become obstacle boxes that flight paths are checked against, and shapes that cannot be resolved stay unresolved rather than being assumed clear. Forest definitions are read once per tile because they are referenced many times over.
+
+Road, rail and water networks remain unresolved on purpose. Their points carry elevations, so a section above the terrain is a bridge and must be reported; resolving that needs the junction offset, the 32-bit pool rules and a terrain comparison, none of which are handled yet. Leaving them unresolved refuses release rather than clearing a bridge.
+
+A facade or wall can share its header with an apron, and pavement detection previously inspected only that header, so vertical scenery was being treated as flat ground an aircraft could fly over. Ground-level detection now also checks that a polygon carries no vertical geometry, so walls refuse as obstacles instead of being assumed to be ground. Extracting the actual wall footprint and height is still outstanding.
+
+Untwowered fields now carry advisory traffic. A field qualifies only when it publishes a CTAF or UNICOM frequency and no Tower service, so an advisory aircraft can never appear where a controlled clearance is required. Its circuit is a right-hand pattern: downwind on the right of the runway flown against the landing direction, base across to the extended centreline, final on the runway heading and a landing roll on the published runway. Each leg carries one self-announced call, and no wording contains a clearance.
+
+The advisory procedure is the authority for that traffic rather than a controller. The movement world grants the segments of the admitted route and refuses a taxi, a runway entry or any other surface movement outside the published pattern, so the controlled-clearance path is not reachable from an advisory route. The pattern repeats from the exact point the previous circuit ended, and a runway held by the player or another aircraft at the final call produces a go-around instead of a landing.
 
 </details>

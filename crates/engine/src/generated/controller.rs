@@ -24,6 +24,7 @@ pub(super) struct Flight {
     pub departure_weather: environment::Environment,
     pub arrival_weather: environment::Environment,
     pub missed: Option<super::flight::MissedInstruction>,
+    pub amendment: Option<super::flight::RouteAmendment>,
     pub scope_seconds: f64,
 }
 impl Flight {
@@ -40,6 +41,7 @@ impl Flight {
             departure_weather: &self.departure_weather,
             arrival_weather: &self.arrival_weather,
             missed: self.missed.as_ref(),
+            amendment: self.amendment.as_ref(),
             scope_seconds: self.scope_seconds,
         }
     }
@@ -58,6 +60,7 @@ pub(super) struct Context<'a> {
     pub departure_weather: &'a environment::Environment,
     pub arrival_weather: &'a environment::Environment,
     pub missed: Option<&'a super::flight::MissedInstruction>,
+    pub amendment: Option<&'a super::flight::RouteAmendment>,
     pub scope_seconds: f64,
 }
 
@@ -477,14 +480,23 @@ fn coordinated_centers(
         .ok_or("Empty enroute controller path")?
         .1
         .clone();
-    let transfers = selected
-        .into_iter()
-        .skip(1)
-        .map(|(seconds, station)| super::flight::SectorTransfer {
-            remaining_seconds: (elapsed - seconds).max(0.0),
-            station,
-        })
-        .collect();
+    let transfers = {
+        let mut transfers = Vec::new();
+        let mut previous = initial.clone();
+        for (seconds, station) in selected.into_iter().skip(1) {
+            if station.khz == previous.khz
+                && station.name.trim().eq_ignore_ascii_case(previous.name.trim())
+            {
+                continue;
+            }
+            previous = station.clone();
+            transfers.push(super::flight::SectorTransfer {
+                remaining_seconds: (elapsed - seconds).max(0.0),
+                station,
+            });
+        }
+        transfers
+    };
     Ok((initial, transfers))
 }
 
@@ -521,10 +533,9 @@ fn station(
             } else {
                 openatc_core::stations::reception_distance(candidate, &observed).is_some()
             }
-        }) {
-            if !center || coordinated_centers(std::slice::from_ref(candidate), segment).is_ok() {
-                return Ok(candidate.clone());
-            }
+        }) && (!center || coordinated_centers(std::slice::from_ref(candidate), segment).is_ok())
+        {
+            return Ok(candidate.clone());
         }
     }
     let closest = context
@@ -637,6 +648,7 @@ fn contract(station: Station, instruction: String, readback: String) -> Clearanc
         airborne_through: None,
         landing_rollout: None,
         missed: None,
+        amended_route: None,
         holding: None,
     }
 }
@@ -651,11 +663,11 @@ pub(super) fn holding_contracts(
 ) -> Result<(), String> {
     let mut scope: BTreeMap<usize, usize> = holds.keys().map(|index| (*index, *index)).collect();
     for (&start, clearance) in contracts.iter() {
-        if let Some(end) = clearance.airborne_through {
-            if holds.contains_key(&end) {
-                for index in start..=end {
-                    scope.insert(index, end);
-                }
+        if let Some(end) = clearance.airborne_through
+            && holds.contains_key(&end)
+        {
+            for index in start..=end {
+                scope.insert(index, end);
             }
         }
     }
@@ -828,6 +840,45 @@ pub(super) fn contracts(
     } else {
         None
     };
+    // The amendment may only replace a genuine published manual termination, and only with
+    // the approach entry the controller is about to clear. Nothing else authorises the path.
+    if let Some(amendment) = context.amendment {
+        let published = context.terminal.arrival_manual.as_ref().ok_or(
+            "Route amendment is not supported by a published manual termination",
+        )?;
+        let arrival_leg = context
+            .terminal
+            .arrival
+            .last()
+            .ok_or("Route amendment has no published arrival")?;
+        let approach_leg = context
+            .terminal
+            .approach
+            .first()
+            .ok_or("Route amendment has no published approach entry")?;
+        if amendment.procedure != context.terminal.arrival_name
+            || amendment.transition != context.terminal.arrival_transition
+            || amendment.terminator != published.terminator
+            || published.terminator != arrival_leg.terminator
+            || amendment.manual_fix != published.identifier
+            || amendment.manual_fix != arrival_leg.identifier
+            || amendment.approach != context.terminal.approach_name
+            || amendment.target.is_empty()
+            || amendment.target != approach_leg.identifier
+            || !context
+                .terminal
+                .arrival
+                .iter()
+                .rev()
+                .skip(1)
+                .all(|leg| routing::supported(std::slice::from_ref(leg), false))
+        {
+            return Err(
+                "Route amendment does not match the published manual termination and approach entry"
+                    .into(),
+            );
+        }
+    }
     let runway_key = |airport: &Airport, name: &str| {
         airport
             .runways
@@ -1065,15 +1116,44 @@ pub(super) fn contracts(
                 ];
                 let (instruction, readback) = approach_wording
                     .get_or_insert_with(|| {
-                        let instruction = say("arrival_approach_clearance", &slots);
+                        let mut instruction = vec![say("arrival_approach_clearance", &slots)];
+                        let mut readback = Vec::new();
+                        // A published manual termination has no flyable geometry, so the
+                        // lateral change is issued and read back here or not at all.
+                        if let Some(amendment) = context.amendment {
+                            let transition = if amendment.transition.is_empty() {
+                                "transition".to_owned()
+                            } else {
+                                format!("{} transition", amendment.transition)
+                            };
+                            instruction.push(say(
+                                "generated_manual_route_amendment",
+                                &[
+                                    ("procedure", amendment.procedure.clone()),
+                                    ("transition", transition.clone()),
+                                    ("manual_fix", amendment.manual_fix.clone()),
+                                    ("target", amendment.target.clone()),
+                                ],
+                            ));
+                            readback.push(say(
+                                "generated_manual_route_readback",
+                                &[
+                                    ("callsign", context.callsign.into()),
+                                    ("procedure", amendment.procedure.clone()),
+                                    ("transition", transition),
+                                    ("manual_fix", amendment.manual_fix.clone()),
+                                    ("target", amendment.target.clone()),
+                                ],
+                            ));
+                        }
                         if let (Some(missed), Some(altitude)) =
                             (context.missed, missed_altitude.as_ref())
                         {
-                            let amendment = say(
+                            instruction.push(say(
                                 "generated_missed_level_amendment",
                                 &[("altitude", altitude.clone()), ("fix", missed.fix.clone())],
-                            );
-                            let reply = say(
+                            ));
+                            readback.push(say(
                                 "generated_approach_amended_readback",
                                 &[
                                     ("callsign", context.callsign.into()),
@@ -1081,15 +1161,21 @@ pub(super) fn contracts(
                                     ("altitude", altitude.clone()),
                                     ("fix", missed.fix.clone()),
                                 ],
-                            );
-                            (format!("{instruction} {amendment}"), reply)
-                        } else {
-                            (instruction, say("pilot_approach_clearance", &slots))
+                            ));
                         }
+                        (
+                            instruction.join(" "),
+                            if readback.is_empty() {
+                                say("pilot_approach_clearance", &slots)
+                            } else {
+                                readback.join(" ")
+                            },
+                        )
                     })
                     .clone();
                 let mut clearance = contract(control, instruction, readback);
                 clearance.missed = context.missed.cloned();
+                clearance.amended_route = context.amendment.cloned();
                 clearance
             } else {
                 let first = segment.points[0];

@@ -34,7 +34,9 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn atoms(bytes: &[u8]) -> Result<Vec<([u8; 4], &[u8])>, String> {
+type Atom<'a> = ([u8; 4], &'a [u8]);
+
+fn atoms(bytes: &[u8]) -> Result<Vec<Atom<'_>>, String> {
     let mut reader = Reader::new(bytes);
     let mut result = Vec::new();
     while reader.at < bytes.len() {
@@ -87,9 +89,70 @@ fn draped(names: &[&str], definition: usize) -> bool {
         .and_then(|name| std::path::Path::new(name).extension())
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("pol") || extension.eq_ignore_ascii_case("lin")
+            extension.eq_ignore_ascii_case("pol")
+                || extension.eq_ignore_ascii_case("lin")
+                || extension.eq_ignore_ascii_case("bch")
         })
 }
+fn extension_is(names: &[&str], definition: usize, wanted: &str) -> bool {
+    names
+        .get(definition)
+        .and_then(|name| std::path::Path::new(name).extension())
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(wanted))
+}
+
+/// A polygon definition is a facade when its file is a `.fac`. The DSF polygon parameter is
+/// then the building height in metres rather than a texture or density value.
+fn facade(names: &[&str], definition: usize) -> bool {
+    extension_is(names, definition, "fac")
+}
+
+/// A forest polygon fills its area with trees. Unlike a facade its parameter is a density, so
+/// the height comes from the tree definitions in the `.for` file instead.
+fn forest(names: &[&str], definition: usize) -> bool {
+    extension_is(names, definition, "for")
+}
+
+/// A polygon that rises above the ground instead of draping over it: a building or a forest.
+pub(super) struct Facade {
+    pub resource: std::sync::Arc<str>,
+    /// Geographic footprint, outer ring first, latitude and longitude.
+    pub rings: Vec<Vec<[f64; 2]>>,
+    /// Published building height in metres, taken from the polygon parameter. A forest has no
+    /// height here: its trees are defined in the referenced `.for` file.
+    pub height_meters: f64,
+    /// Trees rather than a building; the height is resolved from the forest definition.
+    pub forest: bool,
+}
+
+/// A polygon definition that repeats objects along its rings: an object string (`.str`) or an
+/// autogen string (`.ags`). Its height comes from the catalogue it references.
+pub(super) struct StringPolygon {
+    pub resource: std::sync::Arc<str>,
+    /// Geographic footprint, latitude and longitude.
+    pub rings: Vec<Vec<[f64; 2]>>,
+    /// Autogen strings also place vegetation; object strings place only objects.
+    pub autogen: bool,
+    /// Height of the tallest placed object, set when the catalogue is resolved.
+    pub height_meters: f64,
+    /// Horizontal reach of a placed object, used to widen each string segment.
+    pub reach_meters: f64,
+}
+
+fn string_definition(names: &[&str], definition: usize) -> Option<bool> {
+    let extension = std::path::Path::new(names.get(definition)?)
+        .extension()?
+        .to_str()?;
+    if extension.eq_ignore_ascii_case("str") {
+        Some(false)
+    } else if extension.eq_ignore_ascii_case("ags") || extension.eq_ignore_ascii_case("agb") {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 fn filter_comment(
     comment: &[u8],
     filters: &[std::sync::Arc<str>],
@@ -163,16 +226,23 @@ fn polygon_indices(reader: &mut Reader<'_>, command: u8) -> Result<(u16, Vec<Vec
     Ok((parameter, rings))
 }
 
-fn pool(bytes: &[u8], scale: &[u8]) -> Result<Pool, String> {
+/// Decode one coordinate pool. Geometry pools hold 16-bit fixed point; vector networks hold
+/// 32-bit fixed point and are large enough to need no junction indirection. `width` is the
+/// element size in bytes and fixes both the value range and the differencing modulus.
+fn pool(bytes: &[u8], scale: &[u8], width: usize) -> Result<Pool, String> {
     let mut reader = Reader::new(bytes);
     let count = reader.u32()? as usize;
     let depth = usize::from(reader.u8()?);
-    if count > 65536 || !(1..=32).contains(&depth) || scale.len() != depth * 8 {
+    // An empty pool carries no planes, so its depth is meaningless; the default scenery writes
+    // such a pool. Any pool with points must still declare a plausible depth.
+    let limit = if width == 2 { 65536 } else { 4 * 1024 * 1024 };
+    if count > limit || depth > 32 || (depth == 0 && count != 0) || scale.len() != depth * 8 {
         return Err("DSF point pool exceeds its shape or count budget".into());
     }
     let mut points = vec![[0.0; 4]; count];
     let mut scaling = Reader::new(scale);
-    for plane in 0..depth {
+    let mut plane = 0;
+    while plane < depth {
         let factor = scaling.f32()?;
         let offset = scaling.f32()?;
         if !factor.is_finite() || !offset.is_finite() {
@@ -185,7 +255,7 @@ fn pool(bytes: &[u8], scale: &[u8]) -> Result<Pool, String> {
         let mut values = Vec::with_capacity(count);
         while values.len() < count {
             if encoding & 2 == 0 {
-                values.push(reader.u16()?);
+                values.push(read_value(&mut reader, width)?);
             } else {
                 let run = reader.u8()?;
                 let length = usize::from(run & 127);
@@ -193,19 +263,24 @@ fn pool(bytes: &[u8], scale: &[u8]) -> Result<Pool, String> {
                     return Err("Invalid DSF point run".into());
                 }
                 if run & 128 != 0 {
-                    let value = reader.u16()?;
+                    let value = read_value(&mut reader, width)?;
                     values.resize(values.len() + length, value);
                 } else {
                     for _ in 0..length {
-                        values.push(reader.u16()?);
+                        values.push(read_value(&mut reader, width)?);
                     }
                 }
             }
         }
-        let mut last = 0u16;
+        let divisor = if width == 2 { 65535.0 } else { 4294967295.0 };
+        let mut last = 0u32;
         for (index, value) in values.into_iter().enumerate() {
             let value = if encoding & 1 != 0 {
-                last.wrapping_add(value)
+                if width == 2 {
+                    (last + value) & 0xFFFF
+                } else {
+                    last.wrapping_add(value)
+                }
             } else {
                 value
             };
@@ -214,15 +289,24 @@ fn pool(bytes: &[u8], scale: &[u8]) -> Result<Pool, String> {
                 points[index][plane] = if factor == 0.0 {
                     f64::from(value)
                 } else {
-                    f64::from(value) / 65535.0 * factor + offset
+                    f64::from(value) / divisor * factor + offset
                 };
             }
         }
+        plane += 1;
     }
     if reader.at != bytes.len() {
         return Err("Unexpected trailing DSF point data".into());
     }
     Ok(Pool { depth, points })
+}
+
+fn read_value(reader: &mut Reader<'_>, width: usize) -> Result<u32, String> {
+    Ok(if width == 2 {
+        u32::from(reader.u16()?)
+    } else {
+        reader.u32()?
+    })
 }
 
 struct Raster {
@@ -318,7 +402,9 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
         return Err("Invalid DSF property pairs".into());
     }
     let polygon_exclusions = properties
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter(|pair| pair[0] == "sim/exclude_pol")
         .map(|pair| {
             let bounds = pair[1]
@@ -343,13 +429,17 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     let airport_filters = properties
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter(|pair| pair[0] == "sim/filter/aptid")
         .map(|pair| std::sync::Arc::<str>::from(pair[1]))
         .collect::<Vec<_>>();
     let property = |name: &str| {
         properties
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .find(|pair| pair[0] == name)
             .map(|pair| pair[1])
     };
@@ -446,12 +536,36 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
     let mut pools = Vec::new();
     let mut points = 0usize;
     for (raw, scaling) in raw_pools.into_iter().zip(scales) {
-        let decoded = pool(raw, scaling)?;
+        let decoded = pool(raw, scaling, 2)?;
         points += decoded.points.len();
         if points > 4 * 1024 * 1024 {
             return Err("DSF coordinate count exceeds the mesh budget".into());
         }
         pools.push(decoded);
+    }
+    // Vector networks use their own 32-bit pools, selected by the same pool index but resolved
+    // against this list.
+    let network_raw = geodata
+        .iter()
+        .filter(|(key, _)| key == b"23OP")
+        .map(|(_, bytes)| *bytes)
+        .collect::<Vec<_>>();
+    let network_scales = geodata
+        .iter()
+        .filter(|(key, _)| key == b"23CS")
+        .map(|(_, bytes)| *bytes)
+        .collect::<Vec<_>>();
+    if network_raw.len() != network_scales.len() || network_raw.len() > 8192 {
+        return Err("DSF vector coordinate pools have missing scales or exceed their budget".into());
+    }
+    let mut network_pools = Vec::new();
+    for (raw, scaling) in network_raw.into_iter().zip(network_scales) {
+        let decoded = pool(raw, scaling, 4)?;
+        points += decoded.points.len();
+        if points > 4 * 1024 * 1024 {
+            return Err("DSF coordinate count exceeds the mesh budget".into());
+        }
+        network_pools.push(decoded);
     }
     let mut reader = Reader::new(only(&top, b"SDMC")?);
     let mut current = None;
@@ -462,9 +576,14 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
     let mut objects = Vec::new();
     let mut draped_resources = std::collections::BTreeSet::new();
     let mut polygons = Vec::new();
+    let mut facades = Vec::new();
+    let mut strings: Vec<StringPolygon> = Vec::new();
     let mut polygon_resources = std::collections::BTreeMap::new();
     let mut polygon_points = 0usize;
     let mut airport_filter = None;
+    let mut junction_offset = 0u32;
+    let mut networks: Vec<Vec<[f64; 3]>> = Vec::new();
+    let mut network_points = 0usize;
     while reader.at < reader.bytes.len() {
         let command = reader.u8()?;
         match command {
@@ -472,7 +591,8 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
                 current = Some(usize::from(reader.u16()?));
             }
             2 => {
-                reader.take(4)?;
+                // Retained: vector commands below 11 add this to their indices.
+                junction_offset = reader.u32()?;
             }
             3 => definition = usize::from(reader.u8()?),
             4 => definition = usize::from(reader.u16()?),
@@ -521,17 +641,154 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
                     });
                 }
             }
-            10 => {
-                unresolved_obstacles = true;
-                reader.take(4)?;
-            }
-            9 | 11 => {
-                unresolved_obstacles = true;
-                let n = usize::from(reader.u8()?);
-                reader.take(n * if command == 9 { 2 } else { 4 })?;
+            9..=11 => {
+                // A network chain is a road, rail or water centreline. Its third plane is a
+                // height above the draped terrain rather than an absolute elevation, despite the
+                // specification describing DSF vertical values as metres above mean sea level;
+                // the installed global scenery publishes 0 to 2 m over terrain above 4,000 m, so
+                // the absolute reading is impossible. The chain is retained here and resolved
+                // against the mesh once the tile is indexed; command 11 carries explicit 32-bit
+                // indices and takes no junction offset.
+                let mut indices: Vec<u32> = Vec::new();
+                if command == 10 {
+                    let start = u32::from(reader.u16()?);
+                    let end = u32::from(reader.u16()?);
+                    if end < start {
+                        return Err("Invalid DSF network range".into());
+                    }
+                    indices.extend(start..end);
+                } else {
+                    let count = usize::from(reader.u8()?);
+                    for _ in 0..count {
+                        indices.push(if command == 9 {
+                            u32::from(reader.u16()?)
+                        } else {
+                            reader.u32()?
+                        });
+                    }
+                }
+                if command != 11 {
+                    for index in &mut indices {
+                        *index = index
+                            .checked_add(junction_offset)
+                            .ok_or("DSF network junction index overflow")?;
+                    }
+                }
+                let pool = network_pools
+                    .get(current.ok_or("DSF network has no coordinate pool")?)
+                    .filter(|pool| pool.depth >= 3)
+                    .ok_or("DSF network has an invalid coordinate pool")?;
+                let mut chain = Vec::with_capacity(indices.len());
+                for index in indices {
+                    let point = *pool
+                        .points
+                        .get(index as usize)
+                        .ok_or("DSF network point is missing")?;
+                    if point[..3].iter().any(|value| !value.is_finite()) {
+                        return Err("DSF network coordinate is invalid".into());
+                    }
+                    // Store as latitude, longitude, elevation, matching the rest of the planner.
+                    chain.push([point[1], point[0], point[2]]);
+                }
+                network_points += chain.len();
+                if network_points > 4 * 1024 * 1024 {
+                    return Err("DSF network points exceed their budget".into());
+                }
+                networks.push(chain);
             }
             12..=15 => {
                 let (parameter, indices) = polygon_indices(&mut reader, command)?;
+                if facade(&polygon_names, definition) || forest(&polygon_names, definition) {
+                    // A facade is a building: its parameter is the height in metres and its
+                    // rings are the footprint. Retaining it here is what lets the scenery
+                    // loader treat it as an obstacle instead of an unknown obstruction.
+                    if facades.len() >= 100_000 {
+                        return Err("DSF facade count exceeds its budget".into());
+                    }
+                    let pool = pools
+                        .get(current.ok_or("DSF facade has no pool")?)
+                        .filter(|pool| pool.depth >= 2)
+                        .ok_or("DSF facade has an invalid coordinate pool")?;
+                    let mut rings = Vec::new();
+                    for indices in indices {
+                        polygon_points += indices.len();
+                        if polygon_points > 1024 * 1024 {
+                            return Err("DSF facade points exceed their budget".into());
+                        }
+                        let mut ring = Vec::new();
+                        for index in indices {
+                            let point = *pool
+                                .points
+                                .get(usize::from(index))
+                                .ok_or("DSF facade point is missing")?;
+                            // A facade may draw its footprint from a shared point pool that
+                            // spans more than this tile, so the tile bounds shown by the draped
+                            // path are not a valid test here. Only reject coordinates that
+                            // cannot be a location. Plane 0 is longitude and plane 1 latitude,
+                            // matching the draped path.
+                            if point.iter().any(|value| !value.is_finite())
+                                || point[0].abs() > 180.0
+                                || point[1].abs() >= 85.0
+                            {
+                                return Err("DSF facade coordinate is invalid".into());
+                            }
+                            // Store as latitude then longitude, matching the rest of the planner.
+                            ring.push([point[1], point[0]]);
+                        }
+                        rings.push(ring);
+                    }
+                    let forest = forest(&polygon_names, definition);
+                    facades.push(Facade {
+                        resource: std::sync::Arc::<str>::from(polygon_names[definition]),
+                        rings,
+                        height_meters: if forest { 0.0 } else { f64::from(parameter) },
+                        forest,
+                    });
+                    continue;
+                }
+                if let Some(autogen) = string_definition(&polygon_names, definition) {
+                    // A string is a line or area of repeated objects. Its extent is the polygon
+                    // footprint and its height comes from the catalogue, so the rings are
+                    // retained now and resolved once the tile is indexed.
+                    if strings.len() >= 100_000 {
+                        return Err("DSF string count exceeds its budget".into());
+                    }
+                    let pool = pools
+                        .get(current.ok_or("DSF string has no pool")?)
+                        .filter(|pool| pool.depth >= 2)
+                        .ok_or("DSF string has an invalid coordinate pool")?;
+                    let mut rings = Vec::new();
+                    for indices in indices {
+                        polygon_points += indices.len();
+                        if polygon_points > 1024 * 1024 {
+                            return Err("DSF string points exceed their budget".into());
+                        }
+                        let mut ring = Vec::new();
+                        for index in indices {
+                            let point = *pool
+                                .points
+                                .get(usize::from(index))
+                                .ok_or("DSF string point is missing")?;
+                            if point.iter().any(|value| !value.is_finite())
+                                || point[0].abs() > 180.0
+                                || point[1].abs() >= 85.0
+                            {
+                                return Err("DSF string coordinate is invalid".into());
+                            }
+                            // Store as latitude then longitude, matching the rest of the planner.
+                            ring.push([point[1], point[0]]);
+                        }
+                        rings.push(ring);
+                    }
+                    strings.push(StringPolygon {
+                        resource: std::sync::Arc::<str>::from(polygon_names[definition]),
+                        rings,
+                        autogen,
+                        height_meters: 0.0,
+                        reach_meters: 0.0,
+                    });
+                    continue;
+                }
                 unresolved_obstacles |= !draped(&polygon_names, definition);
                 if draped(&polygon_names, definition) {
                     if polygons.len() >= 100_000 {
@@ -667,7 +924,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
                 };
                 match kind {
                     0 => {
-                        for tri in indices.chunks_exact(3) {
+                        for tri in indices.as_chunks::<3>().0 {
                             add([tri[0], tri[1], tri[2]])?;
                         }
                     }
@@ -709,12 +966,18 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
     let mut tile = Tile {
         bounds,
         overlay: property("sim/overlay") == Some("1"),
-        // Local object meshes alone do not resolve library variants or neighboring-tile extents.
-        unresolved_obstacles: unresolved_obstacles || !objects.is_empty(),
+        // Object placements are not resolved here because their resources live outside the tile.
+        // The loader resolves every retained placement and sets this flag when one cannot be
+        // loaded, so a tile whose placements all resolve is understood and a tile with any
+        // unloadable placement still refuses release.
+        unresolved_obstacles,
         objects,
         obstacles: Vec::new(),
         draped_resources,
         polygons,
+        facades,
+        strings,
+        networks,
         polygon_exclusions,
         triangles,
         bins: Vec::new(),
@@ -726,6 +989,33 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn facades_and_ground_polygons_are_told_apart_by_their_definition() {
+        // X-Plane decides whether a polygon is a building or ground from the definition file
+        // extension, so the loader must use the same rule.
+        let names = ["buildings.fac", "apron.pol", "road.lin", "trees.for", "coast.bch"];
+        assert!(facade(&names, 0));
+        assert!(!facade(&names, 1));
+        assert!(!facade(&names, 2));
+        assert!(!facade(&names, 3));
+        // Case is not significant in a scenery package reference.
+        assert!(facade(&["BUILDINGS.FAC"], 0));
+        assert!(draped(&names, 1));
+        assert!(draped(&names, 2));
+        assert!(!draped(&names, 0));
+        assert!(!draped(&names, 3));
+        // A beach is a flat shoreline surface, not a vertical obstacle.
+        assert!(draped(&names, 4));
+        assert!(!facade(&names, 4));
+        assert_eq!(string_definition(&["lights.str"], 0), Some(false));
+        assert_eq!(string_definition(&["block.agb"], 0), Some(true));
+        assert_eq!(string_definition(&["block.ags"], 0), Some(true));
+        // An unknown extension is neither, and must stay unresolved rather than assumed.
+        assert!(!facade(&["thing.xyz"], 0));
+        assert!(!draped(&["thing.xyz"], 0));
+    }
+
     #[test]
     fn airport_filter_comments_select_clear_and_reject_missing_ids() {
         let filters = [
@@ -796,26 +1086,53 @@ mod tests {
             for value in values {
                 bytes.extend(value.to_le_bytes());
             }
-            let decoded = pool(&bytes, &scale).unwrap();
+            let decoded = pool(&bytes, &scale, 2).unwrap();
             for (index, expected) in expected.iter().enumerate() {
                 assert!((decoded.points[index][0] - f64::from(*expected) / 65535.0).abs() < 1e-12);
             }
-            assert!(pool(&bytes[..bytes.len() - 1], &scale).is_err());
+            assert!(pool(&bytes[..bytes.len() - 1], &scale, 2).is_err());
         }
         for run in [0, 4, 128, 132] {
             let mut bytes = 3u32.to_le_bytes().to_vec();
             bytes.extend([1, 2, run, 0, 0]);
-            assert!(pool(&bytes, &scale).is_err());
+            assert!(pool(&bytes, &scale, 2).is_err());
         }
         let mut repeat = 3u32.to_le_bytes().to_vec();
         repeat.extend([1, 2, 131, 7, 0]);
         assert!(
-            pool(&repeat, &scale)
+            pool(&repeat, &scale, 2)
                 .unwrap()
                 .points
                 .iter()
                 .all(|point| (point[0] - 7.0 / 65535.0).abs() < 1e-12)
         );
+    }
+
+    #[test]
+    fn vector_pools_decode_32_bit_points_and_tolerate_an_empty_pool() {
+        // A 32-bit pool normalises over 2^32 - 1 so the same scale convention as the 16-bit
+        // pools still maps onto the published range.
+        let mut bytes = 2u32.to_le_bytes().to_vec();
+        bytes.extend([1, 0]); // one plane, raw encoding
+        bytes.extend(u32::MAX.to_le_bytes());
+        bytes.extend(0u32.to_le_bytes());
+        let scale = [1.0f32.to_le_bytes(), 7.0f32.to_le_bytes()].concat();
+        let decoded = pool(&bytes, &scale, 4).unwrap();
+        assert!((decoded.points[0][0] - 8.0).abs() < 1e-12);
+        assert!((decoded.points[1][0] - 7.0).abs() < 1e-12);
+        // Differencing accumulates over the full 32-bit range, unlike the 16-bit pools.
+        let mut wrapped = 2u32.to_le_bytes().to_vec();
+        wrapped.extend([1, 1]);
+        wrapped.extend(70000u32.to_le_bytes());
+        wrapped.extend(1u32.to_le_bytes());
+        let decoded = pool(&wrapped, &scale, 4).unwrap();
+        assert!((decoded.points[0][0] - (7.0 + 70000.0 / 4294967295.0)).abs() < 1e-12);
+        assert!((decoded.points[1][0] - (7.0 + 70001.0 / 4294967295.0)).abs() < 1e-12);
+        // The default scenery appends an empty 32-bit pool; it must not fail the whole tile.
+        let empty = [0u8; 4].into_iter().chain([0u8]).collect::<Vec<_>>();
+        assert!(pool(&empty, &[], 4).unwrap().points.is_empty());
+        // A pool with points must still declare a usable depth and matching scale.
+        assert!(pool(&[1, 0, 0, 0, 0], &[], 4).is_err());
     }
 
     #[test]

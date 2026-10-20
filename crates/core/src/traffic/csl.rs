@@ -288,4 +288,25 @@ mod tests {
         assert_eq!(c.warnings.len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    #[ignore = "requires installed Bluebell CSL models"]
+    fn installed_catalogue_scan_time_and_model_count_are_bounded() {
+        let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
+        let path = std::path::Path::new(&root).join("Resources/plugins/OpenATC/Resources/CSL");
+        let started = std::time::Instant::now();
+        let catalogue = Catalogue::scan(&path).unwrap();
+        let elapsed = started.elapsed();
+        eprintln!(
+            "CSL catalogue: {} models, {} warnings, scanned in {:.3}s",
+            catalogue.models.len(),
+            catalogue.warnings.len(),
+            elapsed.as_secs_f64()
+        );
+        assert!(!catalogue.models.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_secs(60),
+            "CSL scan exceeded its budget: {elapsed:?}"
+        );
+    }
 }

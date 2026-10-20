@@ -114,6 +114,19 @@ fn intercept(
     Ok(destination(from, heading, along))
 }
 
+/// ARINC path terminators that publish a manual transition point instead of flyable geometry.
+pub const MANUAL_TERMINATORS: [&str; 2] = ["FM", "VM"];
+
+/// A published manual termination: the procedure ends its computable path here.
+/// The remaining lateral geometry is not published, so any onward path is an amendment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ManualTermination {
+    /// Path terminator that ends the computable published geometry.
+    pub terminator: String,
+    /// Published identifier of the manual transition point, when the record carries one.
+    pub identifier: String,
+}
+
 /// Resolve fixes, published courses and heading intercepts without granting a clearance.
 /// Corridor protection and reachable vertical scheduling remain separate checks.
 pub fn crossings(start: Waypoint, legs: &[Leg], c: &Context<'_>) -> Result<Vec<Fix>, String> {
@@ -130,12 +143,40 @@ pub fn boundary_crossings(
     decode(start, legs, c, true)
 }
 
+/// Decode a procedure that ends at a published manual termination.
+///
+/// Returns the computable published crossings together with the manual transition that
+/// follows them. Callers may only continue past that point by issuing and read-backing an
+/// explicit route amendment; this decode never authorises lateral movement on its own.
+pub fn amended_crossings(
+    start: Waypoint,
+    legs: &[Leg],
+    c: &Context<'_>,
+) -> Result<(Vec<Fix>, Option<ManualTermination>), String> {
+    decode_amended(start, legs, c, true)
+}
+
 fn decode(
     start: Waypoint,
     legs: &[Leg],
     c: &Context<'_>,
     retain_boundary: bool,
 ) -> Result<Vec<Fix>, String> {
+    decode_amended(start, legs, c, retain_boundary).and_then(|(fixes, manual)| match manual {
+        None => Ok(fixes),
+        Some(manual) => Err(format!(
+            "{} uses unsupported {} geometry",
+            manual.identifier, manual.terminator
+        )),
+    })
+}
+
+fn decode_amended(
+    start: Waypoint,
+    legs: &[Leg],
+    c: &Context<'_>,
+    retain_boundary: bool,
+) -> Result<(Vec<Fix>, Option<ManualTermination>), String> {
     if legs.is_empty()
         || legs.len() > 128
         || !c.variation.is_finite()
@@ -151,15 +192,34 @@ fn decode(
     let mut result: Vec<Fix> = Vec::with_capacity(legs.len());
     let mut indicated_speeds = Vec::with_capacity(legs.len());
     let mut incoming_track = None;
+    let mut manual = None;
     for (index, leg) in legs.iter().enumerate() {
         if !matches!(
             leg.terminator.as_str(),
             "IF" | "TF" | "DF" | "CF" | "CA" | "FA" | "VA" | "VI" | "CI"
         ) {
-            return Err(format!(
-                "{} uses unsupported {} geometry",
-                leg.identifier, leg.terminator
-            ));
+            if !MANUAL_TERMINATORS.contains(&leg.terminator.as_str()) {
+                return Err(format!(
+                    "{} uses unsupported {} geometry",
+                    leg.identifier, leg.terminator
+                ));
+            }
+            // A manual transition publishes no flyable geometry. Keeping the computable
+            // crossings and reporting the transition lets a caller continue only through
+            // an explicit amendment; computable legs after it would be dropped silently.
+            if index + 1 != legs.len() {
+                return Err(format!(
+                    "{} terminates {} before {} published legs complete",
+                    leg.identifier,
+                    leg.terminator,
+                    legs.len() - index - 1
+                ));
+            }
+            manual = Some(ManualTermination {
+                terminator: leg.terminator.clone(),
+                identifier: leg.identifier.clone(),
+            });
+            break;
         }
         let (minimum_feet, mut maximum_feet) = altitude_bounds(leg, c)?;
         if matches!(leg.terminator.as_str(), "CA" | "FA" | "VA") {
@@ -384,7 +444,7 @@ fn decode(
     if result.is_empty() {
         return Err("Terminal route has no moving leg".into());
     }
-    Ok(result)
+    Ok((result, manual))
 }
 
 #[cfg(test)]
@@ -407,6 +467,110 @@ mod tests {
             .next()
             .unwrap()
             .remove(0)
+    }
+    #[test]
+    fn manual_termination_keeps_published_geometry_and_names_the_amendment_point() {
+        let airport = Airport {
+            reference_latitude: 43.0,
+            reference_longitude: 7.0,
+            runways: vec![crate::airport::Runway {
+                first_name: "04".into(),
+                second_name: "22".into(),
+                first: crate::state::Point {
+                    east: 9260.0,
+                    north: 9260.0,
+                    height: 0.0,
+                },
+                second: crate::state::Point {
+                    east: 9360.0,
+                    north: 9260.0,
+                    height: 0.0,
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let points = Points::default();
+        let atmosphere = Atmosphere::surface(1013.25, 15.0, 0.0).unwrap();
+        let context = Context {
+            airport: &airport,
+            points: &points,
+            atmosphere,
+            variation: 0.0,
+            wind_from: 90.0,
+            wind_knots: 30.0,
+            indicated_knots: 150.0,
+            maximum_intercept_nm: 20.0,
+            climb_fpm: 1000.0,
+            minimum_feet: 0.0,
+            maximum_feet: 20000.0,
+            preferred_feet: 10000.0,
+        };
+        let start = Waypoint {
+            latitude: 43.2,
+            longitude: 7.2,
+            altitude_feet: 0.0,
+        };
+        let mut published = leg("DF", "", "01000");
+        published.identifier = "RW04".into();
+        published.section = "P".into();
+        published.subsection = "G".into();
+        for terminator in MANUAL_TERMINATORS {
+            let mut manual = leg(terminator, "", "");
+            manual.identifier = "MOSBE".into();
+            let legs = [published.clone(), manual.clone()];
+            // The strict decoder still refuses: nothing authorises the manual transition.
+            let refused = boundary_crossings(start, &legs, &context)
+                .map(|_| ())
+                .unwrap_err();
+            assert!(
+                refused.contains(&format!("MOSBE uses unsupported {terminator} geometry")),
+                "{refused}"
+            );
+            let (fixes, termination) =
+                amended_crossings(start, &legs, &context).unwrap();
+            assert_eq!(fixes.len(), 1);
+            assert!(
+                (fixes[0].minimum_feet - atmosphere.geometric(1000.0, false).unwrap()).abs()
+                    < 1e-6
+            );
+            assert_eq!(
+                termination,
+                Some(ManualTermination {
+                    terminator: terminator.into(),
+                    identifier: "MOSBE".into(),
+                })
+            );
+            // Computable legs after a manual transition would be dropped silently.
+            let mut trailing = leg("DF", "", "01000");
+            trailing.identifier = "RW04".into();
+            trailing.section = "P".into();
+            trailing.subsection = "G".into();
+            assert!(amended_crossings(
+                start,
+                &[published.clone(), manual.clone(), trailing],
+                &context
+            )
+            .map(|_| ())
+            .unwrap_err()
+            .contains("before 1 published legs complete"));
+            // A manual first leg leaves no published geometry to precede the amendment.
+            assert!(
+                amended_crossings(start, &[manual.clone()], &context)
+                    .map(|_| ())
+                    .unwrap_err()
+                    .contains("no moving leg")
+            );
+            // Other unsupported terminators are still refused as unsupported geometry.
+            let mut unknown = manual.clone();
+            unknown.terminator = "ZZ".into();
+            assert!(
+                amended_crossings(start, &[published.clone(), unknown], &context)
+                    .map(|_| ())
+                    .unwrap_err()
+                    .contains("unsupported ZZ geometry")
+            );
+        }
     }
     #[test]
     fn heading_to_altitude_keeps_wind_drift_and_the_published_altitude() {
