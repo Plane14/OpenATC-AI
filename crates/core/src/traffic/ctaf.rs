@@ -147,6 +147,28 @@ const LEGS: [(&str, &str, usize); 4] = [
     ("landing", "ctaf_landing", 3),
 ];
 
+/// Legs of a cross-country flight and the segment each advisory is made on.
+const CROSS_COUNTRY_LEGS: [(&str, &str, usize, bool); 5] = [
+    ("departing", "ctaf_departing", 0, true),
+    ("leaving", "ctaf_leaving", 1, true),
+    ("five_miles", "ctaf_five_miles", 3, false),
+    ("final", "ctaf_final", 4, false),
+    ("landing", "ctaf_landing", 5, false),
+];
+
+/// Legs of a departure and the segment each advisory is made on.
+const DEPARTURE_LEGS: [(&str, &str, usize); 2] = [
+    ("departing", "ctaf_departing", 0),
+    ("leaving", "ctaf_leaving", 1),
+];
+
+/// Legs of a straight-in arrival and the segment each advisory is made on.
+const STRAIGHT_IN_LEGS: [(&str, &str, usize); 3] = [
+    ("five_miles", "ctaf_five_miles", 0),
+    ("final", "ctaf_final", 1),
+    ("landing", "ctaf_landing", 2),
+];
+
 /// Climb and descent performance used to check the pattern geometry.
 const CLIMB_FPM: f64 = 1_000.0;
 const DESCENT_FPM: f64 = 1_000.0;
@@ -155,6 +177,11 @@ const DESCENT_FPM: f64 = 1_000.0;
 const OFFSET_METERS: f64 = 1_500.0;
 /// Distance from the threshold to the final approach fix.
 const FINAL_METERS: f64 = 3_000.0;
+/// Distance from the threshold to the start of a straight-in arrival.
+const STRAIGHT_IN_METERS: f64 = 9_000.0;
+/// Distance from the threshold to the short final fix.
+const SHORT_FINAL_METERS: f64 = 3_000.0;
+
 /// Length of the straight climb ahead of the runway after a landing.
 const UPWIND_METERS: f64 = 3_200.0;
 /// Lead of the crosswind leg beyond the end of the climb.
@@ -233,7 +260,11 @@ impl Geometry {
     /// Start of the downwind leg.
     fn downwind_start(&self, from: &Waypoint) -> Waypoint {
         let (along, _) = self.local(self.upwind_end(from));
-        self.at(along + CROSSWIND_METERS, OFFSET_METERS, self.pattern_altitude)
+        self.at(
+            along + CROSSWIND_METERS,
+            OFFSET_METERS,
+            self.pattern_altitude,
+        )
     }
     /// End of the downwind leg, past the threshold on the right of the runway.
     fn downwind_end(&self) -> Waypoint {
@@ -282,6 +313,232 @@ impl Geometry {
     }
 }
 
+/// One advisory of a cross-country flight, with the field that hears it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CrossCountryLeg {
+    /// Segment on which the call is made.
+    pub segment: usize,
+    /// Spoken advisory.
+    pub advisory: Advisory,
+    /// Field whose frequency carries the call.
+    pub field: Field,
+}
+
+/// A VFR flight from one untowered field to another.
+///
+/// The route starts on the departure runway, climbs and cruises, then joins the destination
+/// five-mile final and lands. Calls are split between the two CTAF frequencies: the departure
+/// and leaving calls belong to the origin, the approach and landing calls to the destination.
+pub struct CrossCountry {
+    callsign: String,
+    origin: Field,
+    destination: Field,
+    origin_runway: String,
+    destination_runway: String,
+    route: Arc<Route>,
+    legs: Vec<CrossCountryLeg>,
+    destination_pattern: Arc<Pattern>,
+}
+
+impl CrossCountry {
+    /// Build a cross-country route between two untowered fields.
+    pub fn new(
+        origin_airport: &Airport,
+        origin_runway: &str,
+        destination_airport: &Airport,
+        destination_runway: &str,
+        callsign: &str,
+        origin: Field,
+        destination: Field,
+    ) -> Result<Self, String> {
+        if origin.airport != origin_airport.icao || destination.airport != destination_airport.icao
+        {
+            return Err("CTAF field belongs to another airport".into());
+        }
+        if origin_airport.icao == destination_airport.icao {
+            return Err("a cross-country flight needs two different fields".into());
+        }
+        if callsign.trim().is_empty() {
+            return Err("CTAF traffic needs a callsign".into());
+        }
+        let from = Pattern::geometry(origin_airport, origin_runway)?;
+        let to = Pattern::geometry(destination_airport, destination_runway)?;
+        let cruise = from.elevation.max(to.elevation) + 3_500.0;
+        let upwind = from.at(from.length + 1_500.0, 0.0, from.pattern_altitude);
+        let midpoint = Waypoint {
+            latitude: f64::midpoint(
+                origin_airport.reference_latitude,
+                destination_airport.reference_latitude,
+            ),
+            longitude: f64::midpoint(
+                origin_airport.reference_longitude,
+                destination_airport.reference_longitude,
+            ),
+            altitude_feet: cruise,
+        };
+        let five_miles = to.at(-9_000.0, 0.0, to.pattern_altitude);
+        let short_final = to.at(-3_000.0, 0.0, to.pattern_altitude - 300.0);
+        let threshold = to.threshold();
+        let rollout = to.rollout_end();
+        let destination_pattern = Arc::new(Pattern::new(
+            destination_airport,
+            destination_runway,
+            callsign,
+            destination.clone(),
+        )?);
+        let route = Route::compile(
+            vec![
+                Segment {
+                    stage: Stage::Climb,
+                    points: vec![from.threshold(), upwind],
+                    knots: 75.0,
+                    resources: vec![from.runway_resource.clone()],
+                    dwell_seconds: 0.0,
+                },
+                Segment {
+                    stage: Stage::Climb,
+                    points: vec![upwind, midpoint],
+                    knots: 95.0,
+                    resources: vec![],
+                    dwell_seconds: 0.0,
+                },
+                Segment {
+                    stage: Stage::Descent,
+                    points: vec![midpoint, five_miles],
+                    knots: 95.0,
+                    resources: vec![],
+                    dwell_seconds: 0.0,
+                },
+                Segment {
+                    stage: Stage::Approach,
+                    points: vec![five_miles, short_final],
+                    knots: 85.0,
+                    resources: vec![],
+                    dwell_seconds: 0.0,
+                },
+                Segment {
+                    stage: Stage::Approach,
+                    points: vec![short_final, threshold],
+                    knots: 80.0,
+                    resources: vec![],
+                    dwell_seconds: 0.0,
+                },
+                Segment {
+                    stage: Stage::Rollout,
+                    points: vec![threshold, rollout],
+                    knots: 70.0,
+                    resources: vec![to.runway_resource.clone()],
+                    dwell_seconds: 0.0,
+                },
+            ],
+            CLIMB_FPM,
+            DESCENT_FPM,
+        )
+        .map_err(|error| format!("cross-country geometry: {error}"))?;
+        let callsign = callsign.trim();
+        let legs = CROSS_COUNTRY_LEGS
+            .iter()
+            .map(|(leg, key, segment, at_origin)| {
+                let (field, airport, runway) = if *at_origin {
+                    (&origin, origin_airport.icao.as_str(), origin_runway)
+                } else {
+                    (
+                        &destination,
+                        destination_airport.icao.as_str(),
+                        destination_runway,
+                    )
+                };
+                CrossCountryLeg {
+                    segment: *segment,
+                    advisory: Advisory {
+                        leg,
+                        text: crate::dialogue::say(
+                            key,
+                            &[
+                                ("airport", airport.to_owned()),
+                                ("callsign", callsign.to_owned()),
+                                ("runway", runway.to_owned()),
+                            ],
+                        ),
+                    },
+                    field: field.clone(),
+                }
+            })
+            .collect();
+        Ok(Self {
+            callsign: callsign.to_owned(),
+            origin,
+            destination,
+            origin_runway: origin_runway.to_owned(),
+            destination_runway: destination_runway.to_owned(),
+            route: Arc::new(route),
+            legs,
+            destination_pattern,
+        })
+    }
+
+    /// Callsign making the advisories.
+    #[must_use]
+    pub fn callsign(&self) -> &str {
+        &self.callsign
+    }
+    /// Origin field.
+    #[must_use]
+    pub fn origin_field(&self) -> &Field {
+        &self.origin
+    }
+    /// Destination field.
+    #[must_use]
+    pub fn destination_field(&self) -> &Field {
+        &self.destination
+    }
+    /// Origin runway.
+    #[must_use]
+    pub fn origin_runway(&self) -> &str {
+        &self.origin_runway
+    }
+    /// Destination runway.
+    #[must_use]
+    pub fn destination_runway(&self) -> &str {
+        &self.destination_runway
+    }
+    /// Flight geometry. It ends on the destination landing roll.
+    #[must_use]
+    pub fn route(&self) -> Arc<Route> {
+        self.route.clone()
+    }
+    /// Advisories and the field each one is made on.
+    #[must_use]
+    pub fn legs(&self) -> &[CrossCountryLeg] {
+        &self.legs
+    }
+    /// Runway resource held during the destination landing roll.
+    #[must_use]
+    pub fn landing_runway_resource(&self) -> &str {
+        self.destination_pattern.runway_resource()
+    }
+
+    /// Circuit flown when the destination runway is occupied at the final.
+    pub fn go_around_circuit(&self, from: Waypoint) -> Result<Circuit, String> {
+        self.destination_pattern.go_around_circuit(from)
+    }
+
+    /// Destination pattern, used when the arrival must continue locally.
+    #[must_use]
+    pub fn destination_pattern(&self) -> Arc<Pattern> {
+        self.destination_pattern.clone()
+    }
+
+    /// The advisory made on a segment, with the field that hears it.
+    #[must_use]
+    pub fn advisory(&self, segment: usize) -> Option<(&Advisory, &Field)> {
+        self.legs
+            .iter()
+            .find(|leg| leg.segment == segment)
+            .map(|leg| (&leg.advisory, &leg.field))
+    }
+}
+
 /// A right-hand visual circuit for one aircraft at an untowered field.
 pub struct Pattern {
     field: Field,
@@ -290,25 +547,13 @@ pub struct Pattern {
     geometry: Geometry,
     circuit: Circuit,
     advisories: Vec<Advisory>,
+    straight_in: bool,
+    departure: bool,
 }
 
 impl Pattern {
-    /// Build a right-hand circuit ending in a landing rollout on the named runway.
-    ///
-    /// The route is advisory traffic geometry only. It grants no movement and carries no
-    /// controlled-clearance contract.
-    pub fn new(
-        airport: &Airport,
-        runway_name: &str,
-        callsign: &str,
-        field: Field,
-    ) -> Result<Self, String> {
-        if field.airport != airport.icao {
-            return Err("CTAF field belongs to another airport".into());
-        }
-        if callsign.trim().is_empty() {
-            return Err("CTAF traffic needs a callsign".into());
-        }
+    /// Runway geometry shared by the circuit and the straight-in arrival.
+    fn geometry(airport: &Airport, runway_name: &str) -> Result<Geometry, String> {
         let runway = airport
             .runways
             .iter()
@@ -327,7 +572,7 @@ impl Pattern {
         let (along_east, along_north) = (east / length, north / length);
         // Right normal in the local east/north plane.
         let (right_east, right_north) = (along_north, -along_east);
-        let geometry = Geometry {
+        Ok(Geometry {
             reference_latitude: airport.reference_latitude,
             reference_longitude: airport.reference_longitude,
             origin: start,
@@ -340,15 +585,36 @@ impl Pattern {
                 "RUNWAY/{}/{}/{}",
                 airport.icao, runway.first_name, runway.second_name
             ),
-        };
+        })
+    }
+
+    /// Build a right-hand circuit ending in a landing rollout on the named runway.
+    ///
+    /// The route is advisory traffic geometry only. It grants no movement and carries no
+    /// controlled-clearance contract.
+    pub fn new(
+        airport: &Airport,
+        runway_name: &str,
+        callsign: &str,
+        field: Field,
+    ) -> Result<Self, String> {
+        if field.airport != airport.icao {
+            return Err("CTAF field belongs to another airport".into());
+        }
+        if callsign.trim().is_empty() {
+            return Err("CTAF traffic needs a callsign".into());
+        }
+        let geometry = Self::geometry(airport, runway_name)?;
         // The first circuit starts on the downwind, abeam the far end of the runway.
-        let entry = geometry.at(length, OFFSET_METERS, geometry.pattern_altitude);
+        let entry = geometry.at(geometry.length, OFFSET_METERS, geometry.pattern_altitude);
         let circuit = Self::compile(
             geometry.segments(entry),
             0,
             callsign.trim(),
             &field,
             runway_name,
+            &LEGS,
+            false,
         )?;
         let advisories = circuit
             .legs()
@@ -362,6 +628,141 @@ impl Pattern {
             geometry,
             circuit,
             advisories,
+            straight_in: false,
+            departure: false,
+        })
+    }
+
+    /// Build a straight-in arrival from about five miles final to the landing roll.
+    ///
+    /// The arrival carries the same advisory authority as the circuit, uses the runway only
+    /// for its landing roll and never repeats.
+    pub fn straight_in(
+        airport: &Airport,
+        runway_name: &str,
+        callsign: &str,
+        field: Field,
+    ) -> Result<Self, String> {
+        if field.airport != airport.icao {
+            return Err("CTAF field belongs to another airport".into());
+        }
+        if callsign.trim().is_empty() {
+            return Err("CTAF traffic needs a callsign".into());
+        }
+        let geometry = Self::geometry(airport, runway_name)?;
+        let fix = geometry.at(-STRAIGHT_IN_METERS, 0.0, geometry.pattern_altitude);
+        let short_final = geometry.at(-SHORT_FINAL_METERS, 0.0, geometry.pattern_altitude - 300.0);
+        let segments = vec![
+            Segment {
+                stage: Stage::Approach,
+                points: vec![fix, short_final],
+                knots: 85.0,
+                resources: vec![],
+                dwell_seconds: 0.0,
+            },
+            Segment {
+                stage: Stage::Approach,
+                points: vec![short_final, geometry.threshold()],
+                knots: 80.0,
+                resources: vec![],
+                dwell_seconds: 0.0,
+            },
+            Segment {
+                stage: Stage::Rollout,
+                points: vec![geometry.threshold(), geometry.rollout_end()],
+                knots: 70.0,
+                resources: vec![geometry.runway_resource.clone()],
+                dwell_seconds: 0.0,
+            },
+        ];
+        let circuit = Self::compile(
+            segments,
+            0,
+            callsign.trim(),
+            &field,
+            runway_name,
+            &STRAIGHT_IN_LEGS,
+            false,
+        )?;
+        let advisories = circuit
+            .legs()
+            .iter()
+            .map(|leg| leg.advisory.clone())
+            .collect();
+        Ok(Self {
+            field,
+            callsign: callsign.trim().to_owned(),
+            runway: runway_name.to_owned(),
+            geometry,
+            circuit,
+            advisories,
+            straight_in: true,
+            departure: false,
+        })
+    }
+
+    /// Build a departure from the runway threshold and out of the pattern.
+    ///
+    /// The first segment holds the runway resource while the aircraft climbs along it; the
+    /// resource is released when the aircraft turns out. The departure ends after one pass.
+    pub fn departure(
+        airport: &Airport,
+        runway_name: &str,
+        callsign: &str,
+        field: Field,
+    ) -> Result<Self, String> {
+        if field.airport != airport.icao {
+            return Err("CTAF field belongs to another airport".into());
+        }
+        if callsign.trim().is_empty() {
+            return Err("CTAF traffic needs a callsign".into());
+        }
+        let geometry = Self::geometry(airport, runway_name)?;
+        let upwind = geometry.at(geometry.length + 1_500.0, 0.0, geometry.pattern_altitude);
+        let turnout = geometry.at(
+            geometry.length + 6_000.0,
+            2_000.0,
+            geometry.pattern_altitude + 500.0,
+        );
+        let segments = vec![
+            Segment {
+                stage: Stage::Climb,
+                points: vec![geometry.threshold(), upwind],
+                knots: 75.0,
+                resources: vec![geometry.runway_resource.clone()],
+                dwell_seconds: 0.0,
+            },
+            Segment {
+                stage: Stage::Climb,
+                points: vec![upwind, turnout],
+                knots: 85.0,
+                resources: vec![],
+                dwell_seconds: 0.0,
+            },
+        ];
+        let circuit = Self::compile(
+            segments,
+            0,
+            callsign.trim(),
+            &field,
+            runway_name,
+            &DEPARTURE_LEGS,
+            true,
+        )?;
+        let advisories = circuit
+            .legs()
+            .iter()
+            .map(|leg| leg.advisory.clone())
+            .collect();
+        Ok(Self {
+            field,
+            callsign: callsign.trim().to_owned(),
+            runway: runway_name.to_owned(),
+            geometry,
+            circuit,
+            advisories,
+            straight_in: false,
+            departure: true,
         })
     }
 
@@ -372,10 +773,16 @@ impl Pattern {
         callsign: &str,
         field: &Field,
         runway_name: &str,
+        legs: &[(&'static str, &'static str, usize)],
+        departure: bool,
     ) -> Result<Circuit, String> {
-        let route = Route::compile(segments, CLIMB_FPM, DESCENT_FPM)
-            .map_err(|error| format!("CTAF pattern geometry: {error}"))?;
-        let legs = LEGS
+        let route = if departure {
+            Route::compile_departure(segments, CLIMB_FPM, DESCENT_FPM)
+        } else {
+            Route::compile(segments, CLIMB_FPM, DESCENT_FPM)
+        }
+        .map_err(|error| format!("CTAF pattern geometry: {error}"))?;
+        let legs = legs
             .iter()
             .map(|(leg, key, segment)| Leg {
                 segment: segment + offset,
@@ -416,6 +823,24 @@ impl Pattern {
         &self.geometry.runway_resource
     }
 
+    /// Whether this arrival is a straight-in rather than a repeating circuit.
+    #[must_use]
+    pub fn is_straight_in(&self) -> bool {
+        self.straight_in
+    }
+
+    /// Whether this procedure is a departure rather than an arrival.
+    #[must_use]
+    pub fn is_departure(&self) -> bool {
+        self.departure
+    }
+
+    /// Whether the procedure ends after one pass and must not repeat.
+    #[must_use]
+    pub fn ends_after_one_pass(&self) -> bool {
+        self.straight_in || self.departure
+    }
+
     /// Callsign making the advisories.
     #[must_use]
     pub fn callsign(&self) -> &str {
@@ -446,6 +871,9 @@ impl Pattern {
     /// flies the same circuit again. The continuation is the same geometry every time, so a
     /// pattern can be repeated without a controller.
     pub fn next_circuit(&self) -> Result<Circuit, String> {
+        if self.ends_after_one_pass() {
+            return Err("a one-pass procedure does not repeat".into());
+        }
         self.circuit_from(self.geometry.rollout_end())
     }
 
@@ -485,6 +913,8 @@ impl Pattern {
             self.callsign.trim(),
             &self.field,
             self.runway.as_str(),
+            &LEGS,
+            false,
         )
     }
 
@@ -583,6 +1013,54 @@ mod tests {
     }
 
     #[test]
+    fn a_cross_country_splits_calls_between_the_two_frequencies() {
+        let origin = field_airport();
+        let mut destination = field_airport();
+        destination.icao = "KDST".into();
+        destination.reference_latitude += 0.25;
+        destination.frequencies = vec![crate::airport::Frequency {
+            service: "CTAF".into(),
+            name: "CTAF".into(),
+            khz: 123_000,
+        }];
+        let origin_field = field(&origin, &[]).unwrap();
+        let destination_field = field(&destination, &[]).unwrap();
+        let origin_runway = origin.runways[0].first_name.clone();
+        let destination_runway = destination.runways[0].first_name.clone();
+        let cross = CrossCountry::new(
+            &origin,
+            &origin_runway,
+            &destination,
+            &destination_runway,
+            "N12345",
+            origin_field,
+            destination_field,
+        )
+        .unwrap();
+        assert_eq!(cross.route().segment_count(), 6);
+        assert_eq!(cross.legs().len(), 5);
+        assert_eq!(cross.legs()[0].field.frequency_khz, 122_900);
+        assert!(cross.legs()[0].advisory.text.contains("KCTF"));
+        assert_eq!(cross.legs()[2].field.frequency_khz, 123_000);
+        assert_eq!(cross.legs()[2].field.airport, "KDST");
+        assert!(cross.legs()[2].advisory.text.contains("KDST"));
+        assert!(cross.legs()[2].advisory.text.contains("five miles final"));
+        assert!(cross.legs()[4].advisory.text.contains("vacated"));
+        assert!(cross.landing_runway_resource().contains("KDST"));
+        let from = Waypoint {
+            latitude: destination.reference_latitude,
+            longitude: destination.reference_longitude,
+            altitude_feet: destination.elevation_feet,
+        };
+        assert!(cross.go_around_circuit(from).is_ok());
+        for leg in cross.legs() {
+            let lower = leg.advisory.text.to_lowercase();
+            assert!(!lower.contains("cleared"));
+            assert!(!lower.contains("clearance"));
+        }
+    }
+
+    #[test]
     fn a_pattern_announces_every_leg_and_never_grants_a_clearance() {
         let airport = field_airport();
         let field = field(&airport, &[]).unwrap();
@@ -601,9 +1079,72 @@ mod tests {
         }
         assert_eq!(pattern.advisories()[0].leg, "downwind");
         assert_eq!(pattern.advisories()[3].leg, "landing");
+        let expected = [
+            format!("KCTF traffic, N12345, entering downwind runway {runway}, KCTF"),
+            format!("KCTF traffic, N12345, turning base runway {runway}, KCTF"),
+            format!("KCTF traffic, N12345, final runway {runway}, KCTF"),
+            format!("KCTF traffic, N12345, runway {runway} vacated, KCTF"),
+        ];
+        for (advisory, expected) in pattern.advisories().iter().zip(expected) {
+            assert_eq!(advisory.text, expected);
+        }
         let go_around = pattern.go_around();
-        assert!(go_around.text.contains("going around"));
+        assert_eq!(
+            go_around.text,
+            format!("KCTF traffic, N12345, going around runway {runway}, KCTF")
+        );
         assert!(!go_around.text.to_lowercase().contains("cleared"));
+    }
+
+    #[test]
+    fn a_departure_announces_the_runway_and_leaving_the_pattern() {
+        let airport = field_airport();
+        let field = field(&airport, &[]).unwrap();
+        let runway = airport.runways[0].first_name.clone();
+        let pattern = Pattern::departure(&airport, &runway, "N12345", field).unwrap();
+        assert_eq!(pattern.route().segment_count(), 2);
+        assert_eq!(pattern.advisories().len(), 2);
+        assert_eq!(
+            pattern.advisories()[0].text,
+            format!("KCTF traffic, N12345, departing runway {runway}, KCTF")
+        );
+        assert_eq!(
+            pattern.advisories()[1].text,
+            "KCTF traffic, N12345, leaving the pattern, KCTF"
+        );
+        assert!(pattern.is_departure());
+        assert!(pattern.ends_after_one_pass());
+        assert!(pattern.next_circuit().is_err());
+        for advisory in pattern.advisories() {
+            let lower = advisory.text.to_lowercase();
+            assert!(!lower.contains("cleared"));
+            assert!(!lower.contains("clearance"));
+        }
+    }
+
+    #[test]
+    fn a_straight_in_announces_five_miles_final_and_vacated() {
+        let airport = field_airport();
+        let field = field(&airport, &[]).unwrap();
+        let runway = airport.runways[0].first_name.clone();
+        let pattern = Pattern::straight_in(&airport, &runway, "N12345", field).unwrap();
+        assert_eq!(pattern.route().segment_count(), 3);
+        assert_eq!(pattern.advisories().len(), 3);
+        assert_eq!(
+            pattern.advisories()[0].text,
+            format!("KCTF traffic, N12345, five miles final runway {runway}, KCTF")
+        );
+        assert_eq!(
+            pattern.advisories()[2].text,
+            format!("KCTF traffic, N12345, runway {runway} vacated, KCTF")
+        );
+        assert!(pattern.is_straight_in());
+        assert!(pattern.next_circuit().is_err());
+        for advisory in pattern.advisories() {
+            let lower = advisory.text.to_lowercase();
+            assert!(!lower.contains("cleared"));
+            assert!(!lower.contains("clearance"));
+        }
     }
 
     #[test]
@@ -636,8 +1177,14 @@ mod tests {
         // The downwind ends past the threshold, on the right of the runway.
         let downwind_end = downwind.points[1];
         let landing_heading = crate::arrival::bearing(
-            [final_approach.points[0].latitude, final_approach.points[0].longitude],
-            [final_approach.points[1].latitude, final_approach.points[1].longitude],
+            [
+                final_approach.points[0].latitude,
+                final_approach.points[0].longitude,
+            ],
+            [
+                final_approach.points[1].latitude,
+                final_approach.points[1].longitude,
+            ],
         );
         let downwind_heading = crate::arrival::bearing(
             [downwind.points[0].latitude, downwind.points[0].longitude],

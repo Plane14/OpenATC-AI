@@ -1,4 +1,11 @@
 //! Airborne instructions, route progress and compliance monitoring.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use crate::EngineState;
 use openatc_core::{
     apply::add_transmission,
@@ -29,9 +36,9 @@ pub struct Monitor {
     pub pending_sequence: u32,
     pub pending_since: Option<Instant>,
 }
-fn transmit(state: &mut EngineState, station: &Station, text: String, reply: Option<String>) {
+fn transmit(state: &mut EngineState, station: &Station, text: &str, reply: Option<String>) {
     let tag = crate::flight::tag(state, station);
-    add_transmission(&mut state.session, "ATC", &text, &tag);
+    add_transmission(&mut state.session, "ATC", text, &tag);
     if let Some(reply) = reply
         && let Some(last) = state.session.transcript.last_mut()
     {
@@ -44,7 +51,7 @@ fn reply(
     request: &Request,
     tag: &SpeechTag,
     accepted: bool,
-    text: String,
+    text: &str,
     pilot: Option<String>,
 ) -> Value {
     if !request.controller_initiated {
@@ -56,7 +63,7 @@ fn reply(
             &SpeechTag::default(),
         );
     }
-    add_transmission(&mut state.session, "ATC", &text, tag);
+    add_transmission(&mut state.session, "ATC", text, tag);
     if let Some(pilot) = pilot
         && let Some(last) = state.session.transcript.last_mut()
     {
@@ -133,7 +140,7 @@ pub fn request(
             request,
             tag,
             false,
-            say("amendment_unavailable", &[]),
+            &say("amendment_unavailable", &[]),
             None,
         ));
     }
@@ -151,7 +158,7 @@ pub fn request(
                     request,
                     tag,
                     false,
-                    say("speed_request_invalid", &[]),
+                    &say("speed_request_invalid", &[]),
                     None,
                 ));
             };
@@ -161,7 +168,7 @@ pub fn request(
                     request,
                     tag,
                     false,
-                    say("speed_indication_unavailable", &[]),
+                    &say("speed_indication_unavailable", &[]),
                     None,
                 ));
             }
@@ -182,7 +189,7 @@ pub fn request(
                     request,
                     tag,
                     false,
-                    say("speed_restriction_unable", &[]),
+                    &say("speed_restriction_unable", &[]),
                     None,
                 ));
             }
@@ -205,7 +212,7 @@ pub fn request(
                     request,
                     tag,
                     false,
-                    say("deviation_request_invalid", &[]),
+                    &say("deviation_request_invalid", &[]),
                     None,
                 ));
             };
@@ -216,7 +223,7 @@ pub fn request(
                     request,
                     tag,
                     false,
-                    say("deviation_request_invalid", &[]),
+                    &say("deviation_request_invalid", &[]),
                     None,
                 ));
             }
@@ -248,7 +255,7 @@ pub fn request(
                     request,
                     tag,
                     false,
-                    say("route_geometry_unavailable", &[]),
+                    &say("route_geometry_unavailable", &[]),
                     None,
                 ));
             };
@@ -260,7 +267,7 @@ pub fn request(
         }
     };
     state.flow.monitor.last_call = Some(Instant::now());
-    Some(reply(state, request, tag, true, text, Some(pilot)))
+    Some(reply(state, request, tag, true, &text, Some(pilot)))
 }
 /// One transmission per tick, after handoffs and pending readbacks have cleared.
 /// Keep handoffs and new instructions behind the current readback.
@@ -309,10 +316,11 @@ pub fn awaiting_reply(state: &mut EngineState, station: &Station) -> bool {
             .rev()
             .find(|e| e.is_controller_instruction())
             .and_then(|e| (!e.pilot_reply.is_empty()).then(|| e.pilot_reply.clone()));
-        transmit(state, station, text, reply);
+        transmit(state, station, &text, reply);
         state.flow.monitor.pending_since = Some(Instant::now());
         state.flow.monitor.pending_sequence =
             state.session.transcript.last().map_or(0, |e| e.sequence);
+        crate::traffic::holding::reminder(state, sequence, state.flow.monitor.pending_sequence);
     }
     true
 }
@@ -340,7 +348,7 @@ pub fn tick(state: &mut EngineState, station: &Station) {
     let c = state.session.clearance.as_ref().unwrap().clone();
     let own = [t.latitude, t.longitude];
     if state.flow.monitor.route != c.route {
-        state.flow.monitor.route = c.route.clone();
+        state.flow.monitor.route.clone_from(&c.route);
         state.flow.monitor.speed_reminder = None;
         state.flow.monitor.heading = None;
         state.flow.monitor.next_fix = state
@@ -385,8 +393,7 @@ pub fn tick(state: &mut EngineState, station: &Station) {
         || navigation::fix_passed_on_outbound(&fixes, next, &t)
         || leg.as_ref().is_some_and(|leg| {
             leg.along >= 1.0
-                && (leg.cross_track_nm < 1.5
-                    || fixes.get(next).is_some_and(|fix| !fix.fly_over))
+                && (leg.cross_track_nm < 1.5 || fixes.get(next).is_some_and(|fix| !fix.fly_over))
         })
     {
         if next != state.flow.monitor.checked_fix {
@@ -458,7 +465,7 @@ pub fn tick(state: &mut EngineState, station: &Station) {
                     correct(
                         state,
                         station,
-                        text,
+                        &text,
                         Some(say(
                             match (altitude_missed, speed_missed) {
                                 (true, true) => "pilot_checking_restriction",
@@ -510,7 +517,7 @@ pub fn tick(state: &mut EngineState, station: &Station) {
             correct(
                 state,
                 station,
-                say("course_correction_relative", &slots),
+                &say("course_correction_relative", &slots),
                 Some(say("pilot_turn_relative", &slots)),
             );
             return;
@@ -525,7 +532,7 @@ pub fn tick(state: &mut EngineState, station: &Station) {
         correct(
             state,
             station,
-            say("speed_correction", &slots),
+            &say("speed_correction", &slots),
             Some(say("pilot_speed_readback", &slots)),
         );
         return;
@@ -541,10 +548,9 @@ pub fn tick(state: &mut EngineState, station: &Station) {
         let course = fixes
             .get(next - 1)
             .zip(fixes.get(next))
-            .map(|(a, b)| {
+            .map_or(leg.bearing, |(a, b)| {
                 openatc_core::arrival::bearing([a.latitude, a.longitude], [b.latitude, b.longitude])
-            })
-            .unwrap_or(leg.bearing);
+            });
         let deviation = navigation::turn(course, track);
         if state
             .flow
@@ -568,7 +574,7 @@ pub fn tick(state: &mut EngineState, station: &Station) {
                 transmit(
                     state,
                     station,
-                    say(
+                    &say(
                         "off_course_vector_unavailable",
                         &[("callsign", call.clone())],
                     ),
@@ -595,14 +601,14 @@ pub fn tick(state: &mut EngineState, station: &Station) {
                 correct(
                     state,
                     station,
-                    say("course_correction_heading", &slots),
+                    &say("course_correction_heading", &slots),
                     Some(say("pilot_heading_readback", &slots)),
                 );
             } else {
                 correct(
                     state,
                     station,
-                    say("course_correction_relative", &slots),
+                    &say("course_correction_relative", &slots),
                     Some(say("pilot_turn_relative", &slots)),
                 );
             }
@@ -703,11 +709,11 @@ fn published_speed_reminder(state: &mut EngineState, station: &Station) -> bool 
         &slots,
     );
     state.flow.monitor.speed_reminder = Some((index, limit));
-    transmit(state, station, text, Some(pilot));
+    transmit(state, station, &text, Some(pilot));
     true
 }
 
-fn correct(state: &mut EngineState, station: &Station, text: String, pilot: Option<String>) {
+fn correct(state: &mut EngineState, station: &Station, text: &str, pilot: Option<String>) {
     if !state.settings.enforce_clearance_constraints {
         state.flow.monitor.warning.resolved();
     }
@@ -717,7 +723,7 @@ fn correct(state: &mut EngineState, station: &Station, text: String, pilot: Opti
         && !state.session.emergency_declared;
     if repeated {
         let assistance = say("compliance_assistance", &[]);
-        transmit(state, station, format!("{text} {assistance}"), pilot);
+        transmit(state, station, &format!("{text} {assistance}"), pilot);
     } else {
         transmit(state, station, text, pilot);
     }
@@ -803,7 +809,7 @@ fn climb(state: &mut EngineState, station: &Station) {
     transmit(
         state,
         station,
-        text,
+        &text,
         Some(say("pilot_continue_climb", &slots)),
     );
 }
@@ -864,11 +870,8 @@ fn transmit_descent(
     clearance.readback_scope = "altitude".into();
     clearance.readback_speed = speed;
     clearance.acknowledged = false;
-    let altitude = openatc_core::altitude_text(
-        f64::from(target),
-        openatc_core::UnitSystem::Imperial,
-        true,
-    );
+    let altitude =
+        openatc_core::altitude_text(f64::from(target), openatc_core::UnitSystem::Imperial, true);
     let pilot = match direction {
         Vertical::Descend => {
             openatc_core::readback::descent_reply(clearance, &state.session.plan.callsign)
@@ -888,7 +891,7 @@ fn transmit_descent(
             ],
         ),
     };
-    transmit(state, station, text, Some(pilot));
+    transmit(state, station, &text, Some(pilot));
 }
 
 fn descend(state: &mut EngineState, station: &Station) -> bool {
@@ -927,7 +930,8 @@ fn descend(state: &mut EngineState, station: &Station) -> bool {
             if fix.minimum_altitude_feet != Some(upper)
                 && t.altitude_feet <= f64::from(target) + 200.0
             {
-                preceding_floor = preceding_floor.max(fix.minimum_altitude_feet.unwrap_or(i32::MIN));
+                preceding_floor =
+                    preceding_floor.max(fix.minimum_altitude_feet.unwrap_or(i32::MIN));
                 continue;
             }
             selected = Some((fix, upper));
@@ -1224,21 +1228,40 @@ mod tests {
                 acknowledged: true,
                 ..Default::default()
             });
-            (state, Station {
-                service: "Center".into(),
-                ..Default::default()
-            })
+            (
+                state,
+                Station {
+                    service: "Center".into(),
+                    ..Default::default()
+                },
+            )
         };
 
         let (mut state, station) = fixture(4800.0, 5000, None, None);
         climb(&mut state, &station);
-        let text = &state.session.transcript.last().expect("climb instruction").text;
-        assert!(text.contains("climb") && !text.contains("descend"), "{text}");
+        let text = &state
+            .session
+            .transcript
+            .last()
+            .expect("climb instruction")
+            .text;
+        assert!(
+            text.contains("climb") && !text.contains("descend"),
+            "{text}"
+        );
 
         let (mut state, station) = fixture(10000.0, 12000, Some(7000), None);
         assert!(descend(&mut state, &station));
-        let text = &state.session.transcript.last().expect("descent instruction").text;
-        assert!(text.contains("descend") && !text.contains("climb"), "{text}");
+        let text = &state
+            .session
+            .transcript
+            .last()
+            .expect("descent instruction")
+            .text;
+        assert!(
+            text.contains("descend") && !text.contains("climb"),
+            "{text}"
+        );
 
         let (mut state, station) = fixture(7000.0, 9000, Some(7000), Some(7000));
         assert!(descend(&mut state, &station));
@@ -1248,7 +1271,11 @@ mod tests {
             "{}",
             entry.text
         );
-        assert!(entry.pilot_reply.contains("Maintain"), "{}", entry.pilot_reply);
+        assert!(
+            entry.pilot_reply.contains("Maintain"),
+            "{}",
+            entry.pilot_reply
+        );
 
         let (mut state, station) = fixture(5000.0, 12000, Some(7000), None);
         assert!(
@@ -1814,14 +1841,14 @@ mod tests {
             fixes: vec![
                 openatc_core::state::RouteFix {
                     identifier: "ANAKI".into(),
-                    latitude: 44.201111111,
-                    longitude: 8.725555556,
+                    latitude: 44.201_111_111,
+                    longitude: 8.725_555_556,
                     ..Default::default()
                 },
                 openatc_core::state::RouteFix {
                     identifier: "DEVOX".into(),
-                    latitude: 44.696111111,
-                    longitude: 8.746944444,
+                    latitude: 44.696_111_111,
+                    longitude: 8.746_944_444,
                     ..Default::default()
                 },
                 openatc_core::state::RouteFix {
@@ -1930,14 +1957,14 @@ mod tests {
             fixes: vec![
                 openatc_core::state::RouteFix {
                     identifier: "ANAKI".into(),
-                    latitude: 44.201111111,
-                    longitude: 8.725555556,
+                    latitude: 44.201_111_111,
+                    longitude: 8.725_555_556,
                     ..Default::default()
                 },
                 openatc_core::state::RouteFix {
                     identifier: "DEVOX".into(),
-                    latitude: 44.696111111,
-                    longitude: 8.746944444,
+                    latitude: 44.696_111_111,
+                    longitude: 8.746_944_444,
                     ..Default::default()
                 },
                 openatc_core::state::RouteFix {
@@ -2076,7 +2103,7 @@ mod tests {
             correct(
                 &mut state,
                 &station,
-                "Turn left heading 270.".into(),
+                "Turn left heading 270.",
                 Some("Left heading 270, TEST.".into()),
             );
             assert!(!state.session.clearance_cancelled);
@@ -2109,14 +2136,15 @@ mod tests {
         transmit(
             &mut state,
             &station,
-            "Climb to 8000 feet".into(),
+            "Climb to 8000 feet",
             Some("8000 feet, TEST".into()),
         );
         assert!(awaiting_reply(&mut state, &station));
         let count = state.session.transcript.len();
         assert!(awaiting_reply(&mut state, &station));
         assert_eq!(state.session.transcript.len(), count);
-        state.flow.monitor.pending_since = Some(Instant::now() - Duration::from_secs(46));
+        state.flow.monitor.pending_since =
+            Some(Instant::now().checked_sub(Duration::from_secs(46)).unwrap());
         assert!(awaiting_reply(&mut state, &station));
         assert_eq!(
             state.session.transcript.last().unwrap().pilot_reply,

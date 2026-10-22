@@ -319,7 +319,7 @@ pub fn tick(state: &mut EngineState) {
         state.session.mission.choices = event.choices.clone();
         if event.severity != "normal" {
             state.session.mission.severity = event.severity.clone();
-            state.session.mission.incident = text.clone();
+            state.session.mission.incident.clone_from(&text);
         }
         state
             .session

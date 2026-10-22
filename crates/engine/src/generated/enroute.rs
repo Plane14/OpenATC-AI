@@ -1,4 +1,11 @@
 //! Join published terminal boundaries without treating a nominal connection as a clearance.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use super::{environment::Environment, routing::Terminal};
 use openatc_core::{
     arrival::{bearing, destination, distance_nm},
@@ -21,6 +28,7 @@ pub(super) struct Request<'a> {
     pub budget: usize,
 }
 
+#[allow(clippy::needless_pass_by_value)] // The request carries mutable departure borrows.
 pub(super) fn crossings(input: Request<'_>) -> Result<Vec<Fix>, String> {
     if !input.departure_weather.fresh() || !input.arrival_weather.fresh() {
         return Err("Enroute planning needs fresh endpoint weather".into());
@@ -174,6 +182,7 @@ pub(super) fn crossings(input: Request<'_>) -> Result<Vec<Fix>, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     use openatc_core::airport::Airport;
@@ -223,7 +232,6 @@ mod tests {
             enroute_to: [0.2, 1.8],
             enroute_minimum_feet: 8000,
             departure_name: String::new(),
-            departure_transition: String::new(),
             departure: vec![],
             arrival_name: String::new(),
             arrival_transition: String::new(),

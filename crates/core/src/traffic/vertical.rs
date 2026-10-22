@@ -23,7 +23,7 @@ fn intersection(lower: f64, upper: f64, crossing: &Crossing) -> Option<(f64, f64
     if lower - upper > roundoff {
         return None;
     }
-    let level = ((lower + upper) * 0.5).clamp(crossing.minimum_feet, crossing.maximum_feet);
+    let level = f64::midpoint(lower, upper).clamp(crossing.minimum_feet, crossing.maximum_feet);
     Some((level, level))
 }
 
@@ -117,7 +117,7 @@ pub fn levels_selected(
         }
     };
     let mut converged = false;
-    for _ in 0..crossings.len() * 2 + 1 {
+    for _ in 0..=(crossings.len() * 2) {
         let mut changed = false;
         let mut previous = (initial_feet, initial_feet);
         for index in 0..crossings.len() {

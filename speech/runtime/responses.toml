@@ -1,5 +1,49 @@
 # Operational speech. Every phrase must keep all declared placeholders.
 
+[generated_arrival_speed]
+slots = ["callsign", "speed"]
+say = ["{callsign}, reduce speed to {speed} knots until commencing final approach, then resume published speed."]
+
+[pilot_generated_arrival_speed]
+slots = ["callsign", "speed"]
+say = ["Reducing to {speed} knots until final approach, then published speed, {callsign}."]
+
+[generated_arrival_speed_cancelled]
+slots = ["callsign"]
+say = ["{callsign}, cancel speed adjustment, maintain the cleared route and published speeds."]
+
+[arrival_traffic_hold]
+slots = ["callsign", "fix", "direction", "course", "altitude", "speed", "delay"]
+say = ["{callsign}, cleared to {fix}, hold {direction} on the {course} inbound course, right turns, one minute legs. Maintain {altitude} feet, maximum holding speed {speed} knots. Arrival traffic, expect further clearance at {delay} Zulu."]
+
+[pilot_arrival_traffic_hold]
+slots = ["callsign", "fix", "direction", "course", "altitude", "speed", "delay"]
+say = ["Cleared to {fix}, hold {direction}, inbound course {course}, right turns, one minute legs, {altitude} feet, maximum {speed} knots, expect further clearance at {delay} Zulu, {callsign}."]
+
+[arrival_hold_onward]
+slots = ["callsign", "fix"]
+say = ["{callsign}, leave the hold at {fix}, resume the last cleared route, maintain assigned altitude. Expect approach clearance."]
+
+[pilot_arrival_hold_onward]
+slots = ["callsign", "fix"]
+say = ["Leaving the hold at {fix}, resuming last cleared route, maintaining assigned altitude, {callsign}."]
+
+[arrival_hold_extended]
+slots = ["callsign", "fix", "delay"]
+say = ["{callsign}, continue holding at {fix}, arrival traffic. Expect further clearance at {delay} Zulu."]
+
+[pilot_arrival_hold_extended]
+slots = ["callsign", "fix", "delay"]
+say = ["Continuing hold at {fix}, expect further clearance at {delay} Zulu, {callsign}."]
+
+[arrival_hold_unable]
+slots = ["callsign"]
+say = ["{callsign}, roger unable holding. Maintain the last cleared route and altitude, standby for resequencing."]
+
+[arrival_hold_amendment_required]
+slots = ["callsign", "fix"]
+say = ["{callsign}, holding clearance at {fix} remains in effect. Standby for an onward clearance."]
+
 [crew_social_ground_farewell]
 slots = []
 match_any = ["have a good day", "have a nice day", "have a good night", "goodbye", "see you", "take care"]
@@ -1414,14 +1458,14 @@ slots = []
 say = ["Good to hear from you. I'm keeping it brief while we share the frequency.", "Hello there. Happy to chat briefly; we'll leave room for the operational calls."]
 
 [traffic_chat_initiate_airborne]
-when = { on_ground = false, phase = ["cruise"] }
+when = { on_ground = false, phase = ["cruise"], weather_concern = true }
 slots = ["callsign", "traffic"]
-say = ["{callsign}, {traffic}, when you have a moment, how's the ride at your level?", "{callsign}, {traffic}, do you have a recent weather report along your route?", "{callsign}, {traffic}, a quick hello. Hope your flight is going well."]
+say = ["{callsign}, {traffic}, when you have a moment, how's the ride at your level?", "{callsign}, {traffic}, do you have a recent weather report along your route?"]
 
 [traffic_chat_initiate_ground]
-when = { on_ground = true, phase = ["parked", "taxi_in"] }
+when = { on_ground = true, phase = ["parked", "taxi_in"], weather_concern = true }
 slots = ["callsign", "traffic"]
-say = ["{callsign}, {traffic}, when you're free, how were the conditions on arrival?", "{callsign}, {traffic}, hello from the apron. Hope you've had a good flight."]
+say = ["{callsign}, {traffic}, when you're free, how were the conditions on arrival?"]
 
 [flight_altimeter]
 slots = ["pressure"]
@@ -1499,6 +1543,14 @@ say = ["{callsign}, report final runway {runway}."]
 slots = ["callsign", "runway", "weather"]
 say = ["{callsign}, {weather} Runway {runway}, cleared to land.", "{callsign}, runway {runway}, cleared to land. {weather}", "{callsign}, {weather} Cleared to land runway {runway}."]
 
+[arrival_landing_clearance_stand]
+slots = ["callsign", "runway", "weather", "stand"]
+say = ["{callsign}, {weather} Runway {runway}, cleared to land, taxi to stand {stand}.", "{callsign}, runway {runway}, cleared to land, taxi to stand {stand}. {weather}", "{callsign}, {weather} Cleared to land runway {runway}, taxi to stand {stand} on contact with Ground."]
+
+[pilot_landing_readback_stand]
+slots = ["callsign", "runway", "stand"]
+say = ["Runway {runway}, stand {stand}, {callsign}", "Cleared to land runway {runway}, stand {stand}, {callsign}"]
+
 [crossing_route_unavailable]
 slots = []
 say = ["Hold position. Unable to approve crossing at this location.", "Remain holding short. Stand by for further taxi instructions.", "Unable crossing at this location. Hold position.", "Hold position; crossing is not authorized.", "Hold short. Unable to confirm the crossing route.", "Remain short of the runway. Say intentions."]
@@ -1528,8 +1580,16 @@ slots = ["callsign"]
 say = ["{callsign}, clearance cancelled due to continued noncompliance. Say intentions and request an amended clearance.", "{callsign}, repeated deviation from your clearance. Clearance cancelled. Say intentions.", "{callsign}, clearance cancelled. Request revised instructions before continuing under that clearance."]
 
 [arrival_vacate]
+slots = ["callsign", "runway", "side"]
+say = ["{callsign}, vacate runway {runway} {side}. Report runway vacated.", "{callsign}, vacate runway {runway} {side} when able and report clear.", "{callsign}, report clear of runway {runway} {side}."]
+
+[arrival_vacate_any]
 slots = ["callsign", "runway"]
 say = ["{callsign}, vacate runway {runway}. Report runway vacated.", "{callsign}, vacate runway {runway} when able and report clear.", "{callsign}, report clear of runway {runway}."]
+
+[arrival_vacate_taxiway]
+slots = ["callsign", "runway", "side", "taxiway"]
+say = ["{callsign}, vacate runway {runway} {side} via taxiway {taxiway}. Report runway vacated.", "{callsign}, vacate {side} via taxiway {taxiway} when able. Report clear of runway {runway}.", "{callsign}, exit the runway {runway} {side} at taxiway {taxiway}. Report runway vacated."]
 
 [arrival_ils_clearance]
 slots = ["callsign", "runway"]
@@ -17796,20 +17856,80 @@ say = ["Continuing as previously cleared, will hold at the cleared limit if not 
 
 [ctaf_downwind]
 slots = ["airport", "callsign", "runway"]
-say = ["Traffic, {callsign}, {airport}, downwind, runway {runway}"]
+say = ["{airport} traffic, {callsign}, entering downwind runway {runway}, {airport}"]
 
 [ctaf_base]
 slots = ["airport", "callsign", "runway"]
-say = ["Traffic, {callsign}, {airport}, base, runway {runway}"]
+say = ["{airport} traffic, {callsign}, turning base runway {runway}, {airport}"]
 
 [ctaf_final]
 slots = ["airport", "callsign", "runway"]
-say = ["Traffic, {callsign}, {airport}, final, runway {runway}"]
+say = ["{airport} traffic, {callsign}, final runway {runway}, {airport}"]
+
+[ctaf_departing]
+slots = ["airport", "callsign", "runway"]
+say = ["{airport} traffic, {callsign}, departing runway {runway}, {airport}"]
+
+[ctaf_leaving]
+slots = ["airport", "callsign"]
+say = ["{airport} traffic, {callsign}, leaving the pattern, {airport}"]
+
+[ctaf_five_miles]
+slots = ["airport", "callsign", "runway"]
+say = ["{airport} traffic, {callsign}, five miles final runway {runway}, {airport}"]
 
 [ctaf_landing]
 slots = ["airport", "callsign", "runway"]
-say = ["Traffic, {callsign}, {airport}, landing, runway {runway}"]
+say = ["{airport} traffic, {callsign}, runway {runway} vacated, {airport}"]
 
 [ctaf_go_around]
 slots = ["airport", "callsign", "runway"]
-say = ["Traffic, {callsign}, {airport}, going around, runway {runway} occupied"]
+say = ["{airport} traffic, {callsign}, going around runway {runway}, {airport}"]
+
+[tower_five_miles]
+slots = ["callsign", "runway"]
+say = ["Tower, {callsign}, five miles final runway {runway}"]
+
+[tower_final]
+slots = ["callsign", "runway"]
+say = ["Tower, {callsign}, final runway {runway}"]
+
+[tower_landing]
+slots = ["callsign", "runway"]
+say = ["Tower, {callsign}, runway {runway} vacated"]
+
+[tower_departing]
+slots = ["callsign", "runway"]
+say = ["Tower, {callsign}, departing runway {runway}"]
+
+[tower_leaving]
+slots = ["callsign"]
+say = ["Tower, {callsign}, leaving the pattern"]
+
+[tower_downwind]
+slots = ["callsign", "runway"]
+say = ["Tower, {callsign}, downwind runway {runway}"]
+
+[tower_base]
+slots = ["callsign", "runway"]
+say = ["Tower, {callsign}, base runway {runway}"]
+
+[tower_go_around]
+slots = ["callsign", "runway"]
+say = ["Tower, {callsign}, going around runway {runway}"]
+
+[tower_clear_land]
+slots = ["callsign", "runway"]
+say = ["{callsign}, Tower, cleared to land runway {runway}"]
+
+[tower_clear_takeoff]
+slots = ["callsign", "runway"]
+say = ["{callsign}, Tower, cleared for takeoff runway {runway}"]
+
+[tower_readback_land]
+slots = ["callsign", "runway"]
+say = ["Cleared to land runway {runway}, {callsign}"]
+
+[tower_readback_takeoff]
+slots = ["callsign", "runway"]
+say = ["Cleared for takeoff runway {runway}, {callsign}"]

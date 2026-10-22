@@ -2,6 +2,9 @@
 version = 1
 # Includes filed endpoints when available; other pairs need compatible fleets and fresh simulator weather.
 network_airport_limit = 4
+# Concurrent controller-managed flights. Keep this at one until multi-flight
+# rejoin scheduling is complete.
+sequenced_flight_limit = 1
 network_candidate_limit = 16
 network_radius_nm = 750.0
 flight_clearance_lead_seconds = 120.0

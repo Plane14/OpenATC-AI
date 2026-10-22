@@ -1,10 +1,83 @@
 //! Traffic actually reported by the simulator, including runway-blocking diagnostics.
+
+// Layout limits bound the numeric casts below.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use crate::widgets;
 use openatc_core::state::State;
 
+/// How often the generated traffic is drawn, in frames or in hertz.
+fn traffic_rate(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
+    use openatc_settings::TrafficRate;
+    let preview = match interface.settings.traffic_rate {
+        TrafficRate::EveryFrame => "Every frame".to_owned(),
+        TrafficRate::EveryFrames(frames) => format!("Every {frames} frames"),
+        TrafficRate::Hertz(hertz) => format!("{hertz} frames per second"),
+    };
+    ui.text_disabled("Traffic update rate");
+    ui.set_next_item_width(-1.0);
+    if let Some(_combo) = ui.begin_combo("##traffic-rate", preview) {
+        for option in ["Every frame", "Every N frames", "Frames per second"] {
+            if ui.selectable(option) {
+                interface.settings.traffic_rate = match option {
+                    "Every frame" => TrafficRate::EveryFrame,
+                    "Every N frames" => TrafficRate::EveryFrames(2),
+                    _ => TrafficRate::Hertz(20),
+                };
+            }
+        }
+    }
+    match interface.settings.traffic_rate {
+        TrafficRate::EveryFrame => {
+            ui.text_wrapped("The traffic is drawn on every simulator frame. This is the smoothest and the most expensive; the cost grows with the frame rate and the number of aircraft.");
+        }
+        TrafficRate::EveryFrames(frames) => {
+            let mut frames = i32::from(frames);
+            ui.text_disabled("Frames between draws");
+            ui.set_next_item_width(-1.0);
+            if ui.slider("##traffic-frames", 1, 10, &mut frames) {
+                interface.settings.traffic_rate =
+                    TrafficRate::EveryFrames(frames.clamp(1, 10) as u8);
+            }
+            ui.text_wrapped("The traffic is drawn on every n-th simulator frame.");
+        }
+        TrafficRate::Hertz(hertz) => {
+            let mut hertz = i32::from(hertz);
+            ui.text_disabled("Frames per second");
+            ui.set_next_item_width(-1.0);
+            if ui.slider("##traffic-hertz", 10, 60, &mut hertz) {
+                interface.settings.traffic_rate = TrafficRate::Hertz(hertz.clamp(10, 60) as u8);
+            }
+            ui.text_wrapped("The traffic is drawn at a fixed rate. The engine publishes the traffic twice a second, so a higher rate only interpolates between those snapshots.");
+        }
+    }
+}
+
 pub fn settings(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
+    scenery_setup(ui, interface);
+    widgets::section_title(ui, "TRAFFIC MOTION");
+    traffic_rate(ui, interface);
+    ui.checkbox(
+        "Add local pattern traffic",
+        &mut interface.settings.local_pattern_traffic,
+    );
+    ui.text_wrapped("Adds a local circuit arrival and two departures at your airport when the network released fewer than two flights. The pattern flies on the tower frequency with a clearance and a readback.");
+    ui.checkbox(
+        "Start the first flight on approach",
+        &mut interface.settings.start_first_flight_on_approach,
+    );
+    ui.text_wrapped("Starts the first released flight on final instead of at its stand, so arrival traffic is visible straight away. That flight then lands instead of departing.");
     widgets::section_title(ui, "TRAFFIC SOURCE");
     ui.text_wrapped("OpenATC generated traffic is still in development. Native X-Plane AI is optional; installing Bluebell models alone does not create flights.");
+    ui.checkbox(
+        "Fast traffic preview",
+        &mut interface.settings.preview_traffic,
+    );
+    ui.text_wrapped("Publishes a small protected scene while the full airport traffic is prepared; the full scene replaces it. The same obstacle and weather checks apply.");
     if let Some(reply) = interface.engine.take_reply("/traffic/models/index") {
         interface.traffic_notice = if reply.success {
             format!(
@@ -35,6 +108,11 @@ pub fn settings(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
             &mut interface.settings.suppress_native_traffic,
         );
         ui.text_wrapped("Keeps native AI out of OpenATC's traffic flow. Other traffic plugins retain ownership. X-Plane's Draw Parked Aircraft option is separate.");
+        ui.checkbox(
+            "Mute X-Plane radio audio while connected",
+            &mut interface.settings.mute_native_radio,
+        );
+        ui.text_wrapped("Turn this off when another plugin, such as a pushback helper, speaks through the radio channel. OpenATC speech has its own output and is unaffected.");
         let _native_disabled = ui.begin_disabled(interface.settings.suppress_native_traffic);
         ui.checkbox(
             "Set X-Plane AI traffic amount",
@@ -401,4 +479,88 @@ fn model_installer(ui: &imgui::Ui, interface: &mut crate::interface::Interface) 
     }
     ui.text_wrapped("Downloads the publisher's DDS model packs and installs them in OpenATC's CSL folder. Allow several GB of disk space. Completed downloads are kept for retry if interrupted. Models retain their original licences.");
     ui.spacing();
+}
+
+/// Worker progress is polled only while this page is visible. No files or database on the UI thread.
+fn scenery_setup(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
+    widgets::section_title(ui, "TRAFFIC SETUP");
+    if let Some(reply) = interface.engine.take_reply("/traffic/scenery/status") {
+        interface.scenery_pending = false;
+        if reply.success {
+            interface.scenery_status = reply.data;
+        } else {
+            interface.scenery_status["error"] = reply.error.into();
+        }
+    }
+    if let Some(reply) = interface.engine.take_reply("/traffic/scenery/clear") {
+        interface.traffic_notice = if reply.success {
+            "Scenery index cleared. It rebuilds as new traffic is prepared; active flights are retained.".into()
+        } else {
+            reply.error
+        };
+        interface.scenery_checked = -1.0;
+    }
+    let now = ui.time();
+    if interface.engine.connected()
+        && (!interface.scenery_pending || now - interface.scenery_checked > 10.0)
+        && (interface.scenery_checked < 0.0 || now - interface.scenery_checked >= 1.0)
+    {
+        interface.scenery_pending = true;
+        interface.scenery_checked = now;
+        interface
+            .engine
+            .post("/traffic/scenery/status", serde_json::json!({}));
+    }
+    if !interface.engine.connected() {
+        ui.text_wrapped("Waiting for the companion engine. Traffic preparation starts after the simulator and airport data are available.");
+        return;
+    }
+    let status = &interface.scenery_status;
+    ui.text_wrapped(
+        status["traffic"]
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .unwrap_or("Waiting for simulator position and airport data"),
+    );
+    let cache = &status["cache"];
+    ui.text_wrapped(cache["phase"].as_str().filter(|text| !text.is_empty()).unwrap_or("Scenery is indexed on demand. The first visit takes longer; later visits reuse unchanged scenery."));
+    if let Some(tile) = cache["currentTile"]
+        .as_str()
+        .filter(|tile| !tile.is_empty())
+    {
+        ui.text(format!("Scenery tile: {tile}"));
+    }
+    ui.text(format!(
+        "Cached tiles used: {} | Prepared: {} | Saved: {}",
+        cache["hits"].as_u64().unwrap_or(0),
+        cache["misses"].as_u64().unwrap_or(0),
+        cache["writes"].as_u64().unwrap_or(0)
+    ));
+    if let Some(error) = cache["error"].as_str().filter(|text| !text.is_empty()) {
+        ui.text_wrapped(error);
+    }
+    if let Some(error) = status["error"].as_str() {
+        ui.text_wrapped(error);
+    }
+    if status["enabled"].as_bool() == Some(false) {
+        ui.text_wrapped("Generated traffic is switched off. Enable it below to prepare flights.");
+    }
+    if ui.collapsing_header("Scenery cache details", imgui::TreeNodeFlags::empty()) {
+        ui.text_wrapped(
+            cache["path"]
+                .as_str()
+                .unwrap_or("The cache has not opened yet"),
+        );
+        ui.text(format!(
+            "Retained scenery: {:.1} MiB / 512 MiB per planner",
+            cache["retainedBytes"].as_u64().unwrap_or(0) as f64 / 1_048_576.0
+        ));
+        ui.text_wrapped("Changed scenery is rebuilt automatically. Clearing the index keeps your settings and flight plans. Cache readiness does not mean all routes have passed the traffic checks.");
+        let _disabled = ui.begin_disabled(status["preparing"].as_bool().unwrap_or(false));
+        if ui.button("Clear scenery index") {
+            interface
+                .engine
+                .post("/traffic/scenery/clear", serde_json::json!({}));
+        }
+    }
 }

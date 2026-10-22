@@ -1,5 +1,7 @@
 //! Engine support: config paths, atomic saves, prompt loading, upstream HTTP.
 
+#![allow(clippy::default_trait_access)]
+
 use std::path::{Path, PathBuf};
 
 /// Role prompts with file-loaded overrides and shipped fallbacks.
@@ -59,7 +61,8 @@ fn default_crew_response() -> String {
 /// Name every role a supplied catalogue leaves undefined. A present but partial
 /// file is an operator error, not a reason to silently drop its roles.
 fn missing_role_prompts(text: &str) -> Result<(), String> {
-    let table: toml::Table = toml::from_str(text).map_err(|error| error.to_string())?;
+    let table: toml::Table =
+        openatc_core::configuration::from_str(text).map_err(|error| error.to_string())?;
     let missing: Vec<&str> = REQUIRED_ROLE_PROMPTS
         .iter()
         .copied()
@@ -157,10 +160,12 @@ pub fn fill_prompt(text: &str, callsign: &str) -> String {
 /// A present but incomplete `prompts.toml` is refused with the missing roles
 /// rather than quietly discarding the operator's catalogue.
 pub fn load_prompts(config_dir: &Path, exe_dir: &Path) -> Result<Prompts, String> {
-    let mut prompts = toml::from_str::<PromptFile>(include_str!("../../../prompts/prompts.toml"))
-        .expect("bundled role prompts")
-        .into_prompts("built-in".into())
-        .expect("valid bundled prompts");
+    let mut prompts = openatc_core::configuration::from_str::<PromptFile>(include_str!(
+        "../../../prompts/prompts.toml"
+    ))
+    .expect("bundled role prompts")
+    .into_prompts("built-in".into())
+    .expect("valid bundled prompts");
     let mut candidates = Vec::new();
     if let Some(dir) = std::env::var_os("OPENATC_PROMPTS_DIR") {
         candidates.push(PathBuf::from(dir));
@@ -172,7 +177,8 @@ pub fn load_prompts(config_dir: &Path, exe_dir: &Path) -> Result<Prompts, String
         if let Ok(text) = std::fs::read_to_string(&path) {
             let mut loaded = missing_role_prompts(&text)
                 .and_then(|()| {
-                    toml::from_str::<PromptFile>(&text).map_err(|error| error.to_string())
+                    openatc_core::configuration::from_str::<PromptFile>(&text)
+                        .map_err(|error| error.to_string())
                 })
                 .and_then(|file| file.into_prompts(candidate.to_string_lossy().into_owned()))
                 .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -537,8 +543,10 @@ pub struct Guidance(std::collections::BTreeMap<String, String>);
 impl Default for Guidance {
     fn default() -> Self {
         Self(
-            toml::from_str(include_str!("../../../prompts/interaction.toml"))
-                .expect("bundled interaction instructions"),
+            openatc_core::configuration::from_str(include_str!(
+                "../../../prompts/interaction.toml"
+            ))
+            .expect("bundled interaction instructions"),
         )
     }
 }
@@ -552,7 +560,10 @@ impl Guidance {
             eprintln!("Shared prompt instructions too large: {}", path.display());
             return result;
         }
-        let overrides = match toml::from_str::<std::collections::BTreeMap<String, String>>(&text) {
+        let overrides = match openatc_core::configuration::from_str::<
+            std::collections::BTreeMap<String, String>,
+        >(&text)
+        {
             Ok(values) => values,
             Err(error) => {
                 eprintln!(

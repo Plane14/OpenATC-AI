@@ -9,6 +9,7 @@ pub mod maps;
 mod missions;
 pub mod pages;
 mod sectors;
+mod setup;
 mod theme;
 mod traffic;
 pub mod widgets;

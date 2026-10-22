@@ -175,6 +175,7 @@ impl Drop for WarmContext {
 /// Prepared utterance samples by phrase, absent until that phrase has been synthesised.
 type PreparedSamples = Arc<Mutex<std::collections::BTreeMap<String, Option<Arc<Vec<f32>>>>>>;
 
+/// Synthesised speech playback and capture state for the interface.
 pub struct Speech {
     context: *mut MaContext,
     capture: Arc<Mutex<Capture>>,
@@ -283,6 +284,11 @@ impl Speech {
     #[must_use]
     pub fn live(&self) -> bool {
         !self.context.is_null()
+    }
+
+    /// Playback gain for one utterance: the role volume scaled by the master level.
+    fn effective_gain(&self, volume: f32) -> f32 {
+        (volume.clamp(0.0, 1.0) * self.master_volume.clamp(0.0, 1.0)).clamp(0.0, 1.0)
     }
 
     /// Apply device and level settings.
@@ -559,7 +565,7 @@ impl Speech {
             self.set_status(error);
             return;
         }
-        self.pending_volume = request.volume.clamp(0.0, 1.0);
+        self.pending_volume = self.effective_gain(request.volume);
         self.set_status("Generating speech...");
         let speaker = match request.role {
             4 => "ground",
@@ -734,13 +740,14 @@ impl Speech {
         let busy = self.busy_job.clone();
         let playing = self.playing.clone();
         let status = self.status.clone();
+        let gain = self.effective_gain(volume);
         self.track_job(std::thread::spawn(move || {
             playing.store(true, Ordering::SeqCst);
             let result = play_frames(
                 context as *mut MaContext,
                 &output,
                 &frames,
-                volume.clamp(0.0, 1.0),
+                gain,
                 &cancelled,
             );
             if let Err(error) = result
@@ -1153,6 +1160,16 @@ mod tests {
             speech.output_devices().len(),
             speech.status()
         );
+    }
+
+    #[test]
+    fn the_master_level_scales_every_utterance() {
+        let mut speech = Speech::new();
+        speech.configure("", "", 1.0, 0.5);
+        assert!((speech.effective_gain(1.0) - 0.5).abs() < 1e-6);
+        assert!((speech.effective_gain(0.4) - 0.2).abs() < 1e-6);
+        speech.configure("", "", 1.0, 0.0);
+        assert!(speech.effective_gain(1.0) < 1e-6);
     }
 
     #[test]

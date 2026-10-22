@@ -428,7 +428,13 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
         .interface
         .as_ref()
         .is_some_and(|interface| interface.engine.connected());
-    locked.native_radio.update(connected);
+    // Another plugin may speak through the radio channel, for example a pushback helper, so the
+    // native radio is only muted when the user asked for it.
+    let mute_native_radio = locked
+        .interface
+        .as_ref()
+        .is_none_or(|interface| interface.settings.mute_native_radio);
+    locked.native_radio.update(connected && mute_native_radio);
     if let Some(code) = locked
         .interface
         .as_mut()
@@ -693,8 +699,6 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     }
     let ground_enabled = interface.settings.show_ground_taxi_arrows;
     let holding_enabled = interface.settings.show_holding_point;
-    let generated_model_root = std::path::Path::new(&interface.settings.simulator_root)
-        .join("Resources/plugins/OpenATC/Resources/CSL");
     let follow_me_enabled = interface.settings.show_follow_me;
     let native_enabled = interface.settings.manage_native_traffic;
     let suppress_native =
@@ -734,12 +738,6 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
         }
     }
     locked.ground_arrows.update(ground_enabled, &state);
-    locked.generated_traffic.receive(
-        &state.generated_traffic,
-        &generated_model_root,
-        &state.generated_animation_channels,
-        state.telemetry.paused,
-    );
     locked.holding_marker.update(holding_enabled, &state);
     locked.follow_me.update(follow_me_enabled, &state);
     if state.generated_traffic.is_empty() {
@@ -966,7 +964,27 @@ impl Plugin for OpenAtc {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 shared.follow_me.step();
-                shared.generated_traffic.step();
+                // The traffic rate is a user choice: a higher rate moves the traffic more
+                // smoothly and spends more of the simulator's frame time.
+                let traffic_rate = shared
+                    .interface
+                    .as_ref()
+                    .map(|interface| interface.settings.traffic_rate)
+                    .unwrap_or_default();
+                // Consume immutable HTTP snapshots independently of the slower telemetry tick.
+                if let Some(interface) = shared.interface.as_ref() {
+                    let state = interface.engine.state();
+                    let root = std::path::Path::new(&interface.settings.simulator_root)
+                        .join("Resources/plugins/OpenATC/Resources/CSL");
+                    shared.generated_traffic.receive(
+                        &state.generated_traffic,
+                        &root,
+                        &state.generated_animation_channels,
+                        state.telemetry.paused,
+                        state.generated_traffic_clock,
+                    );
+                }
+                shared.generated_traffic.step(traffic_rate);
                 let Shared {
                     generated_traffic,
                     tcas,
@@ -979,16 +997,15 @@ impl Plugin for OpenAtc {
                 if shared.tcas.active() {
                     return LoopResult::NextLoop;
                 }
-                LoopResult::Seconds(
-                    if shared.follow_me.active()
-                        || shared.generated_traffic.active()
-                        || shared.callouts.active
-                    {
-                        0.05
-                    } else {
-                        0.5
-                    },
-                )
+                if shared.follow_me.active()
+                    || shared.generated_traffic.active()
+                    || shared.callouts.active
+                {
+                    // Rendering gates its own cadence; TCAS and other frame services keep
+                    // running independently of the selected traffic draw rate.
+                    return LoopResult::NextLoop;
+                }
+                LoopResult::Seconds(0.5)
             },
             LoopMarker,
         );
@@ -1352,7 +1369,7 @@ xplane_plugin!(OpenAtc);
 
 #[cfg(test)]
 mod binding_tests {
-    use super::{action_for, COMMANDS};
+    use super::{COMMANDS, action_for};
 
     #[test]
     fn every_registered_binding_has_a_handler() {
@@ -1365,7 +1382,11 @@ mod binding_tests {
             );
             assert!(!name.is_empty() && !description.is_empty());
         }
-        assert_eq!(COMMANDS.len(), 7, "bindings changed; update the documentation");
+        assert_eq!(
+            COMMANDS.len(),
+            7,
+            "bindings changed; update the documentation"
+        );
         assert!(action_for("openatc/not_a_binding").is_none());
     }
 

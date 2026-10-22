@@ -464,7 +464,7 @@ mod tests {
             on_ground: false,
             altitude_feet: 5000.0,
             ground_speed_knots: 150.0,
-            com1_khz: 125000,
+            com1_khz: 125_000,
             traffic: Some(vec![TrafficTarget {
                 id: 24,
                 callsign: "VH-BIL".into(),
@@ -480,7 +480,7 @@ mod tests {
         let station = Station {
             service: "Approach".into(),
             name: "Approach".into(),
-            khz: 125000,
+            khz: 125_000,
             ..Default::default()
         };
         (s, station)
@@ -510,7 +510,7 @@ mod tests {
         s.session.telemetry.traffic.as_mut().unwrap()[0].altitude_feet = 10000.0;
         assert!(!tick(&mut s, &station));
         s.traffic.advisories.get_mut(&24).unwrap().clear_since =
-            Some(Instant::now() - Duration::from_secs(6));
+            Some(Instant::now().checked_sub(Duration::from_secs(6)).unwrap());
         assert!(tick(&mut s, &station));
         assert!(
             s.session
@@ -527,7 +527,7 @@ mod tests {
         let (mut s, station) = setup();
         assert!(tick(&mut s, &station));
         let mut other = station.clone();
-        other.khz = 126000;
+        other.khz = 126_000;
         let r = Request {
             intent: "traffic_sighted".into(),
             ..Default::default()
@@ -537,7 +537,7 @@ mod tests {
         s.session.telemetry.traffic = None;
         assert!(!tick(&mut s, &station));
         s.traffic.advisories.get_mut(&24).unwrap().clear_since =
-            Some(Instant::now() - Duration::from_secs(9));
+            Some(Instant::now().checked_sub(Duration::from_secs(9)).unwrap());
         assert!(tick(&mut s, &station));
         assert!(
             s.session

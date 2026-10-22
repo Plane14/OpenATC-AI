@@ -1,3 +1,44 @@
+# Roadmap
+
+## Traffic and setup — 22 October 2026
+
+Implemented:
+
+- SQLite caches for parsed TOML and compiled scenery, with invalidation, bounded
+  retention and Developer Re-setup. Editable files remain authoritative.
+- Buffered traffic rendering and draw-rate controls; native smoothness and frame
+  times still need testing.
+- Category-aware airport discovery, shared scenery planning across network
+  directions and removal of rejected actors' live stand/resource ownership.
+- Predictive approach speed control, readback before generated speed changes,
+  restricted direct-entry player holds with an on/off setting, and Australian
+  wake rules alongside the existing FAA rules.
+- Separate percentage settings for eligible weather calls and shortcut offers,
+  with reason checks, cooldown and no repeated roll for the same opportunity.
+
+The installed-scenery replay completes one production-protected flight from
+initial taxi through parking. Five of six nominal routes still fail conservative
+scenery checks. This does not complete mixed traffic; generated traffic remains
+disabled by default. Current test results are in [validation](VALIDATION.md).
+
+Remaining priorities:
+
+- Resolve scenery/path refusals and conservative planning reservations without
+  bypassing physical clearance checks.
+- Complete mixed cargo, airline, regional and GA flights across multiple airports,
+  continuous replenishment and the earlier multi-flight arrival stall.
+- Finish integrated VFR/CTAF, wake warning/wait/release, protected resequencing and
+  full player/generated parity.
+- Extend player holding beyond direct entries, including accepted-hold inability,
+  diversion and emergency amendments.
+- Verify native visibility, taxi/takeoff/landing, audio, frame times and setup UI
+  through Steam; retain separate Windows/macOS acceptance.
+
+## Earlier implementation notes
+
+These dated records describe previous stages of the work. The current traffic
+status above takes precedence; the wider remaining scope is retained below.
+
 ## Installed scenery and airborne permission checks — 17 October 2026
 
 The production worker now calls the complete flight factory with installed grid MORA and enabled physical scenery meshes. The DSF reader supports plain and 7z-compressed tiles, scaled coordinate pools, physical triangle primitives and elevation rasters. It retains scenery-stack priority and checks the full line through intersecting triangles, including ridges between endpoints; missing mesh coverage remains unknown. Codec, tile, point, triangle, cache and worker limits are bounded. The decoder uses one thread inside the planning worker, with no simulator SDK calls. Its tests cover malformed records, pooled coordinate encodings, overlay/base priority, disabled packs, negative tile coordinates, tile boundaries, ridges and unknown gaps. The installed Nice base mesh and enabled custom scenery stack decode successfully.
@@ -57,7 +98,7 @@ Final recovery construction retains the remaining lateral final path through the
 
 A complete assembly/controller regression now drives a checked route and its recoveries through actual controller exchanges, readbacks, movement permissions and parking. This is source integration evidence, not a complete production factory or simulator acceptance. Distinct route networks, continuous nearby coverage, GA VFR, complete operational coordination and native performance remain open. Generated traffic remains disabled by default.
 
-# Roadmap
+## Delivery plan
 
 ## Current delivery order
 
@@ -181,7 +222,11 @@ Unfiled player plans now have a tested nearby-airport discovery path, and genera
 
 Fields without a Tower service now carry advisory traffic when they publish a CTAF or UNICOM frequency. The aircraft flies a right-hand visual circuit and announces each leg; no call grants a clearance, and the advisory procedure is the authority for its movement. The pattern repeats from the point the previous circuit ended, and an occupied runway at the final call produces a go-around instead of a landing.
 
-This closes the CTAF item of the GA and VFR group. The remaining items in that group are unchanged: general-aviation VFR traffic, untowered airport operations without a pattern, and general-aviation stand compatibility for the controlled traffic that still needs verified apron routes. Cargo and general-aviation arrivals at the controlled airports remain blocked by the ground connectivity and the runway geometry recorded below, and generated traffic stays disabled by default. Advisory traffic has not been seen in the simulator, so no native acceptance is claimed.
+Straight-in arrivals and departures cover aircraft that are not in a circuit. A straight-in announces five miles final, final and runway vacated and is removed after its landing roll. A departure announces the runway and leaving the pattern, holds the runway resource during the climb-out and is removed after turning out. Neither repeats, and the runway-occupied go-around still applies to arrivals.
+
+Cross-country VFR flights are also published when two untowered fields are 10-40 nm apart. The route starts on the origin runway, climbs, cruises and lands at the destination; departure calls use the origin frequency and approach and landing calls the destination frequency. An occupied destination runway produces a go-around on the destination pattern instead of a landing.
+
+This closes the CTAF, untowered-operations and general-aviation VFR items of the GA and VFR group. The remaining item in that group is general-aviation stand compatibility for the controlled traffic that still needs verified apron routes. Cargo and general-aviation arrivals at the controlled airports remain blocked by the ground connectivity and the runway geometry recorded below, and generated traffic stays disabled by default. Advisory traffic has not been seen in the simulator, so no native acceptance is claimed.
 
 ### Cargo and GA integration limits — 18 October 2026
 
@@ -204,3 +249,11 @@ For a missed approach beginning with a course/heading-to-altitude leg, a late ru
 Same-flow runway selection now considers coverage of the requested traffic categories before complete nominal count, while retaining its existing bounded search and all weather/geometry checks. It no longer stops with only airline/regional drafts when cargo or GA was also requested. Unknown or ambiguous operator categories do not count toward coverage. The mixed installed-data test still fails reverse/third-origin and category acceptance.
 
 A STAR ending at a published manual termination is now planned as an explicit amendment instead of being discarded. The computable legs keep their restrictions, the transition is retained as typed provenance, and the bridge to the published approach entry is solved, protected and cleared by name in both instruction and readback. A flight planned with an amendment cannot be installed without that directive. Published arrivals are preferred, so amendments only fill directions with no published route; Memphis reverse arrivals into 36L now produce candidates they previously did not. Runways without a supported approach or recovery remain refused, and a pre-existing Nice–Milan installed-data check still fails independently.
+
+### Exit-to-parking selection — 22 October 2026
+
+Generated arrival planning checks a bounded set of verified forward exits together with their onward taxi and free-stand routes. It no longer rejects a whole arrival merely because the earliest usable exit leads to a dead end. Braking, pavement, full-aircraft runway clearance, stand occupancy and route compilation remain required. A synthetic two-exit arrival regression passes and still rejects reserved parking; mixed-category production and native performance acceptance remain separate.
+
+### Repeated-fix holding restrictions — 22 October 2026
+
+Missed-approach planning can retain an explicit exact/minimum altitude from the immediately preceding record when an otherwise blank HM record repeats the same fix and navigation reference. The original records stay unchanged. This removes one unsupported-input refusal while preserving the complete route, pressure, hold-entry, protection and clearance checks. It does not complete mixed traffic or native acceptance.

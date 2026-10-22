@@ -41,6 +41,9 @@ pub struct Context<'a> {
 }
 
 /// Convert a published crossing band to geometric heights; this grants no path or clearance.
+/// # Panics
+///
+/// Panics if a crossing leg has no resolved altitude values.
 pub fn altitude_bounds(leg: &Leg, c: &Context<'_>) -> Result<(f64, f64), String> {
     let convert = |altitude: Option<i32>, standard: Option<bool>| -> Result<Option<f64>, String> {
         altitude
@@ -293,9 +296,9 @@ fn decode_amended(
                 }
             }
             if leg.terminator == "VA"
-                && result
-                    .last()
-                    .is_some_and(|crossing| crossing.minimum_feet != crossing.maximum_feet)
+                && result.last().is_some_and(|crossing| {
+                    (crossing.minimum_feet - crossing.maximum_feet).abs() > f64::EPSILON
+                })
             {
                 return Err("Heading-to-altitude leg needs a fixed incoming altitude".into());
             }
@@ -448,6 +451,7 @@ fn decode_amended(
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     fn leg(terminator: &str, description: &str, altitude: &str) -> Leg {
@@ -527,12 +531,10 @@ mod tests {
                 refused.contains(&format!("MOSBE uses unsupported {terminator} geometry")),
                 "{refused}"
             );
-            let (fixes, termination) =
-                amended_crossings(start, &legs, &context).unwrap();
+            let (fixes, termination) = amended_crossings(start, &legs, &context).unwrap();
             assert_eq!(fixes.len(), 1);
             assert!(
-                (fixes[0].minimum_feet - atmosphere.geometric(1000.0, false).unwrap()).abs()
-                    < 1e-6
+                (fixes[0].minimum_feet - atmosphere.geometric(1000.0, false).unwrap()).abs() < 1e-6
             );
             assert_eq!(
                 termination,
@@ -546,14 +548,16 @@ mod tests {
             trailing.identifier = "RW04".into();
             trailing.section = "P".into();
             trailing.subsection = "G".into();
-            assert!(amended_crossings(
-                start,
-                &[published.clone(), manual.clone(), trailing],
-                &context
-            )
-            .map(|_| ())
-            .unwrap_err()
-            .contains("before 1 published legs complete"));
+            assert!(
+                amended_crossings(
+                    start,
+                    &[published.clone(), manual.clone(), trailing],
+                    &context
+                )
+                .map(|_| ())
+                .unwrap_err()
+                .contains("before 1 published legs complete")
+            );
             // A manual first leg leaves no published geometry to precede the amendment.
             assert!(
                 amended_crossings(start, &[manual.clone()], &context)
@@ -966,6 +970,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod intercept_tests {
     #[test]
     fn intercept_joins_the_course_before_the_fix() {
@@ -989,6 +994,7 @@ mod intercept_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod installed_tests {
     use super::*;
     #[test]
@@ -1024,9 +1030,9 @@ mod installed_tests {
             runway.second
         };
         let start = Waypoint {
-            latitude: airport.reference_latitude + point.north / 111320.0,
+            latitude: airport.reference_latitude + point.north / 111_320.0,
             longitude: airport.reference_longitude
-                + point.east / (111320.0 * airport.reference_latitude.to_radians().cos()),
+                + point.east / (111_320.0 * airport.reference_latitude.to_radians().cos()),
             altitude_feet: airport.elevation_feet + 35.0,
         };
         let context = Context {

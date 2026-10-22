@@ -1,4 +1,12 @@
 //! Published-station handoffs and explicit arrival permissions.
+
+#![allow(clippy::default_trait_access)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use crate::EngineState;
 use openatc_core::{
     apply::add_transmission,
@@ -10,6 +18,7 @@ use openatc_core::{
 use serde_json::{Value, json};
 
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct FlightFlow {
     pub discipline: crate::discipline::Monitor,
     pub monitor: crate::instructions::Monitor,
@@ -258,6 +267,98 @@ pub fn urgent(state: &mut EngineState) -> bool {
     protect_final(state, &current)
 }
 
+/// First usable runway exit, named taxiway and side relative to the landing direction.
+fn runway_exit(state: &EngineState, runway_name: &str) -> Option<(&'static str, String)> {
+    let airport = state
+        .arrival_airport
+        .as_ref()
+        .or(state.airport.as_ref())
+        .filter(|airport| airport.icao == state.session.plan.destination)?;
+    let runway = airport
+        .runways
+        .iter()
+        .find(|runway| runway.first_name == runway_name || runway.second_name == runway_name)?;
+    let (start, end) = if runway.first_name == runway_name {
+        (runway.first, runway.second)
+    } else {
+        (runway.second, runway.first)
+    };
+    let (east, north) = (end.east - start.east, end.north - start.north);
+    let length = east.hypot(north);
+    if length < 1.0 {
+        return None;
+    }
+    let (along_east, along_north) = (east / length, north / length);
+    // The left-hand side of the landing direction in the local east and north plane.
+    let (left_east, left_north) = (-along_north, along_east);
+    let node = |id: i64| airport.nodes.iter().find(|node| node.id == id);
+    let place = |node: &openatc_core::airport::TaxiNode| {
+        let offset_east = node.point.east - start.east;
+        let offset_north = node.point.north - start.north;
+        (
+            offset_east * along_east + offset_north * along_north,
+            offset_east * left_east + offset_north * left_north,
+        )
+    };
+    let mut best: Option<(f64, f64, String)> = None;
+    for edge in &airport.edges {
+        if edge.runway || edge.name.trim().is_empty() {
+            continue;
+        }
+        let (Some(first), Some(second)) = (node(edge.first), node(edge.second)) else {
+            continue;
+        };
+        let (first_along, first_across) = place(first);
+        let (second_along, second_across) = place(second);
+        let on_runway = |along: f64, across: f64| {
+            along >= -20.0 && along <= length + 20.0 && across.abs() < 30.0
+        };
+        let off_runway = |along: f64, across: f64| {
+            along >= -20.0 && along <= length + 40.0 && across.abs() >= 30.0
+        };
+        let (along, across) = if on_runway(first_along, first_across)
+            && off_runway(second_along, second_across)
+        {
+            (second_along, second_across)
+        } else if on_runway(second_along, second_across) && off_runway(first_along, first_across) {
+            (first_along, first_across)
+        } else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(current, _, _)| along < *current) {
+            best = Some((along, across, edge.name.clone()));
+        }
+    }
+    let (_, across, taxiway) = best?;
+    Some((if across > 0.0 { "left" } else { "right" }, taxiway))
+}
+
+/// Reserve an unoccupied published stand for the arrival and retain it for taxi-in.
+fn reserve_arrival_stand(state: &mut EngineState) -> Option<String> {
+    let airport = state
+        .arrival_airport
+        .as_ref()
+        .or(state.airport.as_ref())
+        .filter(|airport| airport.icao == state.session.plan.destination)?
+        .clone();
+    let size = openatc_core::parking::aircraft_size(&state.session)?;
+    let current = state.session.plan.arrival_stand.clone();
+    if !current.is_empty()
+        && let Some(parking) = airport.parking.iter().find(|stand| stand.name == current)
+        && openatc_core::parking::fits(parking, size)
+        && openatc_core::parking::occupied(&airport, parking, &state.session.telemetry, size)
+            == Some(false)
+    {
+        return Some(current);
+    }
+    let stand = openatc_core::parking::candidates(&airport, &state.session, size)
+        .into_iter()
+        .find(|stand| !stand.kind.eq_ignore_ascii_case("hangar"))
+        .map(|stand| stand.name.clone())?;
+    state.session.plan.arrival_stand.clone_from(&stand);
+    Some(stand)
+}
+
 /// The arrival runway under the aircraft, named in the direction it is travelling.
 ///
 /// A vacate report only makes sense at the destination and on the pavement (or just past its
@@ -298,11 +399,13 @@ fn landed_runway(state: &EngineState) -> Option<String> {
     } else {
         runway.first_name.clone()
     };
-    Some(if openatc_core::navigation::turn(course, track).abs() <= 90.0 {
-        planned.to_owned()
-    } else {
-        reciprocal
-    })
+    Some(
+        if openatc_core::navigation::turn(course, track).abs() <= 90.0 {
+            planned.to_owned()
+        } else {
+            reciprocal
+        },
+    )
 }
 
 pub fn tick(state: &mut EngineState) {
@@ -359,6 +462,9 @@ pub fn tick(state: &mut EngineState) {
     if crate::instructions::awaiting_reply(state, &current) {
         return;
     }
+    if crate::traffic::holding::tick(state, &current) || crate::traffic::spacing(state, &current) {
+        return;
+    }
     if arrival_tick(state, &current) {
         return;
     }
@@ -376,13 +482,25 @@ pub fn tick(state: &mut EngineState) {
         && let Some(runway) = landed_runway(state)
     {
         state.flow.vacate_reported = true;
-        let text = say(
-            "arrival_vacate",
-            &[
-                ("callsign", state.session.plan.callsign.clone()),
-                ("runway", runway),
-            ],
-        );
+        let exit = runway_exit(state, &runway);
+        let text = match &exit {
+            Some((side, taxiway)) => say(
+                "arrival_vacate_taxiway",
+                &[
+                    ("callsign", state.session.plan.callsign.clone()),
+                    ("runway", runway.clone()),
+                    ("side", (*side).to_owned()),
+                    ("taxiway", taxiway.clone()),
+                ],
+            ),
+            None => say(
+                "arrival_vacate_any",
+                &[
+                    ("callsign", state.session.plan.callsign.clone()),
+                    ("runway", runway),
+                ],
+            ),
+        };
         let owner = surface_owner(state, &stations, &current);
         let voice = tag(state, &owner);
         add_transmission(&mut state.session, "ATC", &text, &voice);
@@ -393,7 +511,10 @@ pub fn tick(state: &mut EngineState) {
         return;
     };
     let key = station_key(&next);
-    if same_controller(&next, &current) || key == station_key(&current) || key == state.flow.pending_station {
+    if same_controller(&next, &current)
+        || key == station_key(&current)
+        || key == state.flow.pending_station
+    {
         state.flow.evidence = 0;
         if state.flow.pending_station.is_empty() {
             crate::instructions::tick(state, &current);
@@ -438,7 +559,7 @@ fn respond(
     request: &Request,
     tag: &SpeechTag,
     accepted: bool,
-    text: String,
+    text: &str,
 ) -> Value {
     let callsign = state.session.plan.callsign.clone();
     if !request.controller_initiated {
@@ -449,7 +570,7 @@ fn respond(
             &SpeechTag::default(),
         );
     }
-    add_transmission(&mut state.session, "ATC", &text, tag);
+    add_transmission(&mut state.session, "ATC", text, tag);
     json!({"accepted":accepted,"message":text})
 }
 
@@ -471,34 +592,36 @@ pub fn request(
     if request.intent == "frequency" {
         let stations = nearby(&state.stations, &state.session.telemetry);
         let next = next_station(state, &stations, station);
-        let (accepted, text) =
-            if let Some(next) = next.filter(|s| !same_controller(s, station)) {
-                state.session.recommended_frequency_khz = next.khz;
-                state.session.frequency_sequence = state.session.next_sequence;
-                state.flow.pending_station = station_key(&next);
-                (
-                    true,
-                    say(
-                        "flight_handoff",
-                        &[
-                            ("callsign", callsign),
-                            ("station", next.name),
-                            ("frequency", format!("{:.3}", f64::from(next.khz) / 1000.0)),
-                        ],
-                    ),
-                )
-            } else {
-                (
-                    true,
-                    say(
-                        "flight_remain_frequency",
-                        &[("callsign", callsign), ("station", station.name.clone())],
-                    ),
-                )
-            };
-        return Some(respond(state, request, tag, accepted, text));
+        let (accepted, text) = if let Some(next) = next.filter(|s| !same_controller(s, station)) {
+            state.session.recommended_frequency_khz = next.khz;
+            state.session.frequency_sequence = state.session.next_sequence;
+            state.flow.pending_station = station_key(&next);
+            (
+                true,
+                say(
+                    "flight_handoff",
+                    &[
+                        ("callsign", callsign),
+                        ("station", next.name),
+                        ("frequency", format!("{:.3}", f64::from(next.khz) / 1000.0)),
+                    ],
+                ),
+            )
+        } else {
+            (
+                true,
+                say(
+                    "flight_remain_frequency",
+                    &[("callsign", callsign), ("station", station.name.clone())],
+                ),
+            )
+        };
+        return Some(respond(state, request, tag, accepted, &text));
     }
     if request.intent == "checkin" {
+        if !state.session.telemetry.on_ground {
+            crate::initiative::roll_for_flight(state);
+        }
         state.session.control_radio = request.radio;
         state.flow.checked_in_station = station_key(station);
         state.flow.pending_station.clear();
@@ -612,7 +735,7 @@ pub fn request(
             )),
             _ => None,
         };
-        let result = respond(state, &checkin, tag, true, text);
+        let result = respond(state, &checkin, tag, true, &text);
         if pending_readback {
             // Contact acknowledgement must not hide an instruction still awaiting readback.
             if let Some(last) = state.session.transcript.last_mut() {
@@ -639,7 +762,7 @@ pub fn request(
             request,
             tag,
             false,
-            say("arrival_airport_unavailable", &[]),
+            &say("arrival_airport_unavailable", &[]),
         ));
     };
     let runway = state.session.plan.arrival_runway.clone();
@@ -654,7 +777,7 @@ pub fn request(
             request,
             tag,
             false,
-            say("arrival_runway_required", &[]),
+            &say("arrival_runway_required", &[]),
         ));
     }
     if state.session.telemetry.on_ground {
@@ -663,7 +786,7 @@ pub fn request(
             request,
             tag,
             false,
-            say("arrival_airborne_required", &[]),
+            &say("arrival_airborne_required", &[]),
         ));
     }
     if request.intent == "approach" {
@@ -676,7 +799,7 @@ pub fn request(
                 request,
                 tag,
                 false,
-                say("arrival_contact_approach", &[]),
+                &say("arrival_contact_approach", &[]),
             ));
         }
         state.flow.arrival_requested = true;
@@ -694,7 +817,7 @@ pub fn request(
                 ("airport", airport.name),
             ],
         );
-        return Some(respond(state, request, tag, true, text));
+        return Some(respond(state, request, tag, true, &text));
     }
     if station.service != "Tower" {
         return Some(respond(
@@ -702,7 +825,7 @@ pub fn request(
             request,
             tag,
             false,
-            say("arrival_contact_tower", &[]),
+            &say("arrival_contact_tower", &[]),
         ));
     }
     if !state.flow.approach_cleared || final_position(state).is_none_or(|d| d > 12.0) {
@@ -711,7 +834,7 @@ pub fn request(
             request,
             tag,
             false,
-            say(
+            &say(
                 "arrival_report_final",
                 &[("callsign", callsign), ("runway", runway)],
             ),
@@ -723,26 +846,49 @@ pub fn request(
             request,
             tag,
             false,
-            say(blocked, &[("runway", runway)]),
+            &say(blocked, &[("runway", runway)]),
         ));
     }
     state.flow.landing_cleared = true;
-    let text = say(
-        "arrival_landing_clearance",
-        &[
-            ("callsign", callsign),
-            ("runway", runway),
-            ("weather", weather(state, station)),
-        ],
-    );
-    let result = respond(state, request, tag, true, text);
-    let reply = say(
-        "pilot_landing_readback",
-        &[
-            ("callsign", state.session.plan.callsign.clone()),
-            ("runway", state.session.plan.arrival_runway.clone()),
-        ],
-    );
+    let stand = reserve_arrival_stand(state);
+    let weather = weather(state, station);
+    let text = match &stand {
+        Some(stand) => say(
+            "arrival_landing_clearance_stand",
+            &[
+                ("callsign", callsign.clone()),
+                ("runway", runway.clone()),
+                ("weather", weather),
+                ("stand", stand.clone()),
+            ],
+        ),
+        None => say(
+            "arrival_landing_clearance",
+            &[
+                ("callsign", callsign.clone()),
+                ("runway", runway.clone()),
+                ("weather", weather),
+            ],
+        ),
+    };
+    let result = respond(state, request, tag, true, &text);
+    let reply = match &stand {
+        Some(stand) => say(
+            "pilot_landing_readback_stand",
+            &[
+                ("callsign", state.session.plan.callsign.clone()),
+                ("runway", state.session.plan.arrival_runway.clone()),
+                ("stand", stand.clone()),
+            ],
+        ),
+        None => say(
+            "pilot_landing_readback",
+            &[
+                ("callsign", state.session.plan.callsign.clone()),
+                ("runway", state.session.plan.arrival_runway.clone()),
+            ],
+        ),
+    };
     if let Some(last) = state.session.transcript.last_mut() {
         last.pilot_reply = reply;
     }
@@ -795,8 +941,6 @@ fn weather(state: &EngineState, station: &Station) -> String {
     )
 }
 
-
-
 /// Speak a sequencing instruction and record the pilot readback that matches it, so the copilot
 /// never acknowledges a take-off clearance that was not given.
 fn return_with_reply(
@@ -836,21 +980,31 @@ pub fn takeoff_wording(
             .runways
             .iter()
             .find(|r| r.first_name == plan.runway || r.second_name == plan.runway)
-            .map(|r| {
-                state
-                    .generated
-                    .runway_use(&format!("RUNWAY/{}/{}/{}", airport.icao, r.first_name, r.second_name))
-            })
-            .unwrap_or(crate::generated::RunwayUse::Clear);
+            .map_or(crate::generated::RunwayUse::Clear, |r| {
+                state.generated.runway_use(&format!(
+                    "RUNWAY/{}/{}/{}",
+                    airport.icao, r.first_name, r.second_name
+                ))
+            });
         match use_of_runway {
             crate::generated::RunwayUse::Landing => {
                 state.flow.takeoff_cleared = false;
-                return_with_reply(state, result, "flight_hold_short_landing", "pilot_hold_short_readback");
+                return_with_reply(
+                    state,
+                    result,
+                    "flight_hold_short_landing",
+                    "pilot_hold_short_readback",
+                );
                 return;
             }
             crate::generated::RunwayUse::Departing => {
                 state.flow.takeoff_cleared = false;
-                return_with_reply(state, result, "flight_line_up_and_wait", "pilot_line_up_and_wait_readback");
+                return_with_reply(
+                    state,
+                    result,
+                    "flight_line_up_and_wait",
+                    "pilot_line_up_and_wait_readback",
+                );
                 return;
             }
             crate::generated::RunwayUse::Clear => state.flow.takeoff_cleared = true,
@@ -1038,7 +1192,7 @@ fn amend_airport(
             request,
             tag,
             false,
-            say("amendment_unavailable", &[]),
+            &say("amendment_unavailable", &[]),
         );
     }
     let departure = request.intent == "departure_runway";
@@ -1058,7 +1212,7 @@ fn amend_airport(
             request,
             tag,
             false,
-            say("arrival_airport_unavailable", &[]),
+            &say("arrival_airport_unavailable", &[]),
         );
     };
     if departure && station.airport != *id {
@@ -1067,7 +1221,7 @@ fn amend_airport(
             request,
             tag,
             false,
-            say("amendment_wrong_airport", &[]),
+            &say("amendment_wrong_airport", &[]),
         );
     }
     let value = request.waypoint.trim().to_uppercase();
@@ -1086,7 +1240,7 @@ fn amend_airport(
                 request,
                 tag,
                 false,
-                say("amendment_approach_unavailable", &[]),
+                &say("amendment_approach_unavailable", &[]),
             );
         }
         if let Some(runway) = approach_runway(&canonical) {
@@ -1100,12 +1254,12 @@ fn amend_airport(
                     request,
                     tag,
                     false,
-                    say("amendment_runway_unavailable", &[]),
+                    &say("amendment_runway_unavailable", &[]),
                 );
             }
             state.session.plan.arrival_runway = runway.into();
         }
-        state.session.plan.approach = canonical.clone();
+        state.session.plan.approach.clone_from(&canonical);
         state.flow.announce_approach = false;
         state.flow.vacate_reported = false;
         openatc_core::navigation::enrich(&mut state.session.plan, &state.settings.simulator_root);
@@ -1122,7 +1276,7 @@ fn amend_airport(
                 ("approach", approach_label(&canonical)),
             ],
         );
-        let result = respond(state, request, tag, true, text);
+        let result = respond(state, request, tag, true, &text);
         if let Some(last) = state.session.transcript.last_mut() {
             last.pilot_reply = say(
                 "pilot_approach_amendment",
@@ -1144,7 +1298,7 @@ fn amend_airport(
             request,
             tag,
             false,
-            say("amendment_runway_unavailable", &[]),
+            &say("amendment_runway_unavailable", &[]),
         );
     }
     if departure {
@@ -1170,20 +1324,20 @@ fn amend_airport(
                 request,
                 tag,
                 false,
-                say("amendment_departure_incompatible", &[]),
+                &say("amendment_departure_incompatible", &[]),
             );
         }
-        state.session.plan.runway = value.clone();
+        state.session.plan.runway.clone_from(&value);
         state.session.taxi_clearance = Default::default();
         state.session.phase = PhaseCode::Clearance;
         if let Some(c) = state.session.clearance.as_mut() {
-            c.runway = value.clone();
+            c.runway.clone_from(&value);
             c.sequence = state.session.next_sequence;
             c.readback_scope = "runway".into();
             c.acknowledged = false;
         }
     } else {
-        state.session.plan.arrival_runway = value.clone();
+        state.session.plan.arrival_runway.clone_from(&value);
         state.session.plan.approach.clear();
         state.flow.announce_approach = false;
         state.flow.vacate_reported = false;
@@ -1207,7 +1361,7 @@ fn amend_airport(
         "amendment_runway",
         &[("callsign", callsign.clone()), ("runway", value.clone())],
     );
-    let result = respond(state, request, tag, true, text);
+    let result = respond(state, request, tag, true, &text);
     if !departure && let Some(last) = state.session.transcript.last_mut() {
         last.pilot_reply = say(
             "pilot_runway_amendment",
@@ -1255,6 +1409,7 @@ fn final_position(state: &EngineState) -> Option<f64> {
     Some(-along / 1852.0)
 }
 pub(crate) fn go_around(state: &mut EngineState) {
+    crate::traffic::holding::clear(state);
     state.flow.approach_cleared = false;
     state.flow.landing_cleared = false;
     state.flow.arrival_requested = false;
@@ -1400,7 +1555,10 @@ fn arrival_tick(state: &mut EngineState, current: &Station) -> bool {
         // An aircraft already below its last cleared level cannot be corrected
         // upward into the old level: the approach clearance is the resolution.
         let below_cleared = state.session.clearance.as_ref().is_some_and(|clearance| {
-            state.session.telemetry.indicated_altitude_feet
+            state
+                .session
+                .telemetry
+                .indicated_altitude_feet
                 .unwrap_or(state.session.telemetry.altitude_feet)
                 < f64::from(clearance.altitude_feet) - 300.0
         });
@@ -1431,7 +1589,8 @@ fn arrival_tick(state: &mut EngineState, current: &Station) -> bool {
             return false;
         }
         let agl = state.session.telemetry.altitude_feet - airport.elevation_feet;
-        if agl < 200.0 || (!below_cleared && agl > openatc_core::arrival::gradient(3.0) * distance + 2000.0)
+        if agl < 200.0
+            || (!below_cleared && agl > openatc_core::arrival::gradient(3.0) * distance + 2000.0)
         {
             return false;
         }
@@ -1508,20 +1667,39 @@ fn arrival_tick(state: &mut EngineState, current: &Station) -> bool {
     }
     state.flow.landing_cleared = true;
     state.flow.landing_hold = false;
+    // Reserve before landing so generated traffic cannot take the assigned stand.
+    let stand = reserve_arrival_stand(state);
     let slots = [
         ("callsign", state.session.plan.callsign.clone()),
         ("runway", state.session.plan.arrival_runway.clone()),
         ("weather", weather(state, current)),
     ];
     let voice = tag(state, current);
-    add_transmission(
-        &mut state.session,
-        "ATC",
-        &say("arrival_landing_clearance", &slots),
-        &voice,
-    );
+    let clearance = match &stand {
+        Some(stand) => say(
+            "arrival_landing_clearance_stand",
+            &[
+                ("callsign", slots[0].1.clone()),
+                ("runway", slots[1].1.clone()),
+                ("weather", slots[2].1.clone()),
+                ("stand", stand.clone()),
+            ],
+        ),
+        None => say("arrival_landing_clearance", &slots),
+    };
+    add_transmission(&mut state.session, "ATC", &clearance, &voice);
     if let Some(last) = state.session.transcript.last_mut() {
-        last.pilot_reply = say("pilot_landing_readback", &slots);
+        last.pilot_reply = match &stand {
+            Some(stand) => say(
+                "pilot_landing_readback_stand",
+                &[
+                    ("callsign", slots[0].1.clone()),
+                    ("runway", slots[1].1.clone()),
+                    ("stand", stand.clone()),
+                ],
+            ),
+            None => say("pilot_landing_readback", &slots),
+        };
     }
     true
 }
@@ -1655,7 +1833,7 @@ mod ownership_tests {
         let center = Station {
             name: "MILAN Center".into(),
             service: "Center".into(),
-            khz: 118675,
+            khz: 118_675,
             latitude: airport.reference_latitude,
             longitude: airport.reference_longitude,
             ..Default::default()
@@ -1771,8 +1949,11 @@ mod ownership_tests {
                 state.session.telemetry.indicated_altitude_feet = Some(altitude);
                 state.session.telemetry.pressure_altitude_feet = Some(altitude);
                 state.session.telemetry.height_agl_feet = altitude - airport.elevation_feet;
-                state.flow.monitor.last_call =
-                    Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+                state.flow.monitor.last_call = Some(
+                    std::time::Instant::now()
+                        .checked_sub(std::time::Duration::from_secs(31))
+                        .unwrap(),
+                );
                 tick(&mut state);
                 if entry_distance.is_none()
                     && state.session.clearance.as_ref().unwrap().altitude_feet == 4000
@@ -1861,7 +2042,7 @@ mod ownership_tests {
         state.session.telemetry.latitude = -0.1;
         let center = Station {
             service: "Center".into(),
-            khz: 123000,
+            khz: 123_000,
             ..approach
         };
         tower.receivable = true;
@@ -1917,8 +2098,11 @@ mod ownership_tests {
         };
         for altitude in [18000.0, 17950.0, 18070.0, 18299.0, 18000.0] {
             state.session.telemetry.pressure_altitude_feet = Some(altitude);
-            state.flow.last_correction =
-                Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+            state.flow.last_correction = Some(
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(31))
+                    .unwrap(),
+            );
             compliance(&mut state, &station);
             assert!(state.session.transcript.is_empty());
         }
@@ -1928,13 +2112,19 @@ mod ownership_tests {
             state.session.transcript.is_empty(),
             "A sustained deviation needs grace"
         );
-        state.flow.last_correction =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+        state.flow.last_correction = Some(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(31))
+                .unwrap(),
+        );
         compliance(&mut state, &station);
         assert_eq!(state.session.transcript.len(), 1);
         state.session.telemetry.vertical_speed_fpm = -500.0;
-        state.flow.last_correction =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+        state.flow.last_correction = Some(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(31))
+                .unwrap(),
+        );
         compliance(&mut state, &station);
         assert_eq!(
             state.session.transcript.len(),
@@ -1962,8 +2152,11 @@ mod ownership_tests {
             };
             compliance(&mut state, &station);
             for count in 1..=5 {
-                state.flow.last_correction =
-                    Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+                state.flow.last_correction = Some(
+                    std::time::Instant::now()
+                        .checked_sub(std::time::Duration::from_secs(31))
+                        .unwrap(),
+                );
                 compliance(&mut state, &station);
                 assert_eq!(state.session.transcript.len(), count);
                 assert!(!state.session.clearance_cancelled);
@@ -1992,7 +2185,6 @@ mod ownership_tests {
         }
     }
     #[test]
-    #[test]
     fn a_duplicate_station_record_does_not_hand_off_to_the_same_controller() {
         let mut state = crate::test_state();
         state.session.demo = false;
@@ -2005,7 +2197,7 @@ mod ownership_tests {
             on_ground: false,
             position_valid: true,
             radio_power: true,
-            com1_khz: 124800,
+            com1_khz: 124_800,
             latitude: 28.43,
             longitude: -81.31,
             altitude_feet: 10000.0,
@@ -2020,7 +2212,7 @@ mod ownership_tests {
             airport: airport.into(),
             name: "Orlando Approach".into(),
             service: "Approach".into(),
-            khz: 124800,
+            khz: 124_800,
             latitude: 28.43,
             longitude: -81.31,
             coverage: vec![Coverage {
@@ -2081,12 +2273,14 @@ mod ownership_tests {
             let nearby = openatc_core::stations::nearby(&stations, &telemetry);
             let center = nearby.iter().find(|station| {
                 station.service == "Center"
-                    && station.coverage.iter().any(|volume| volume.contains(&telemetry))
+                    && station
+                        .coverage
+                        .iter()
+                        .any(|volume| volume.contains(&telemetry))
             });
             assert!(
                 center.is_some(),
-                "No published Center owns FL350 at {label}; ceilings came from {}",
-                root
+                "No published Center owns FL350 at {label}; ceilings came from {root}"
             );
             let mut state = crate::test_state();
             state.session.phase = PhaseCode::Cruise;
@@ -2095,11 +2289,12 @@ mod ownership_tests {
             state.session.telemetry = telemetry;
             state.stations.clone_from(&nearby);
             let current = center.unwrap().clone();
-            let next = next_station(&state, &nearby, &current).unwrap_or_else(|| {
-                panic!("No controller is reachable at FL350 over {label}")
-            });
+            let next = next_station(&state, &nearby, &current)
+                .unwrap_or_else(|| panic!("No controller is reachable at FL350 over {label}"));
             assert!(
-                next.coverage.iter().any(|volume| volume.contains(&state.session.telemetry))
+                next.coverage
+                    .iter()
+                    .any(|volume| volume.contains(&state.session.telemetry))
                     || next.service == "Center",
                 "FL350 over {label} selected {} ({})",
                 next.name,
@@ -2139,7 +2334,7 @@ mod ownership_tests {
         let low = Station {
             name: "Kansas City Center".into(),
             service: "Center".into(),
-            khz: 118700,
+            khz: 118_700,
             latitude: 40.0,
             longitude: -90.0,
             coverage: vec![volume(0.0, 24000.0)],
@@ -2149,7 +2344,7 @@ mod ownership_tests {
         let high = Station {
             name: "Kansas City Center".into(),
             service: "Center".into(),
-            khz: 125200,
+            khz: 125_200,
             latitude: 40.0,
             longitude: -90.0,
             coverage: vec![volume(24000.0, 60000.0)],
@@ -2187,7 +2382,7 @@ mod ownership_tests {
         let center = Station {
             name: "Washington Center".into(),
             service: "Center".into(),
-            khz: 118700,
+            khz: 118_700,
             receivable: true,
             coverage: vec![volume(20000.0)],
             ..Default::default()
@@ -2196,17 +2391,13 @@ mod ownership_tests {
             airport: "TEST".into(),
             name: "Raleigh Approach".into(),
             service: "Approach".into(),
-            khz: 124800,
+            khz: 124_800,
             receivable: true,
             coverage: vec![volume(5000.0)],
             ..Default::default()
         };
-        let next = next_station(
-            &state,
-            &[center.clone(), approach.clone()],
-            &center,
-        )
-        .expect("Center must retain the descent above the approach ceiling");
+        let next = next_station(&state, &[center.clone(), approach.clone()], &center)
+            .expect("Center must retain the descent above the approach ceiling");
         assert_eq!(next.khz, center.khz);
         state.session.telemetry.altitude_feet = 4500.0;
         state.session.telemetry.height_agl_feet = 4500.0;
@@ -2245,8 +2436,11 @@ mod ownership_tests {
                 .any(|entry| entry.text.to_ascii_lowercase().contains("approach"))
         );
         state.flow.clearance_sequence = 1;
-        state.flow.last_correction =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+        state.flow.last_correction = Some(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(31))
+                .unwrap(),
+        );
         let before = state.session.transcript.len();
         compliance(&mut state, &approach);
         assert_eq!(
@@ -2357,7 +2551,7 @@ mod ownership_tests {
         let tower = Station {
             name: "Test Tower".into(),
             service: "Tower".into(),
-            khz: 118100,
+            khz: 118_100,
             ..Default::default()
         };
         (state, approach, tower)
@@ -2376,14 +2570,20 @@ mod ownership_tests {
         });
         assert!(arrival_tick(&mut state, &approach));
         state.flow.clearance_sequence = 1;
-        state.flow.last_correction =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+        state.flow.last_correction = Some(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(31))
+                .unwrap(),
+        );
         let before = state.session.transcript.len();
         compliance(&mut state, &approach);
         assert_eq!(state.session.transcript.len(), before);
         state.session.telemetry.longitude = 0.02;
-        state.flow.last_correction =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(31));
+        state.flow.last_correction = Some(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(31))
+                .unwrap(),
+        );
         compliance(&mut state, &approach);
         assert_eq!(
             state.session.transcript.len(),
@@ -2530,6 +2730,66 @@ mod ownership_tests {
         assert_eq!(state.session.transcript.len(), 2);
         assert!(!state.flow.landing_cleared);
     }
+    #[test]
+    fn the_landing_clearance_reserves_a_stand_before_the_aircraft_lands() {
+        use openatc_core::{airport::Parking, state::Point};
+        let (mut state, _, tower) = arrival_state();
+        if let Some(airport) = state.arrival_airport.as_mut() {
+            airport.parking = vec![
+                Parking {
+                    name: "A1".into(),
+                    kind: "gate".into(),
+                    size: "C".into(),
+                    point: Point {
+                        east: 120.0,
+                        north: 60.0,
+                        height: 0.0,
+                    },
+                    ..Default::default()
+                },
+                Parking {
+                    name: "B2".into(),
+                    kind: "gate".into(),
+                    size: "C".into(),
+                    point: Point {
+                        east: 180.0,
+                        north: 60.0,
+                        height: 0.0,
+                    },
+                    ..Default::default()
+                },
+            ];
+        }
+        state.session.telemetry.wingspan_meters = Some(30.0);
+        state.flow.approach_cleared = true;
+        request(
+            &mut state,
+            &tower,
+            &Request {
+                intent: "checkin".into(),
+                text: "Test Tower, TEST".into(),
+                ..Default::default()
+            },
+            &SpeechTag::default(),
+        )
+        .unwrap();
+        assert!(state.flow.landing_cleared);
+        assert_eq!(state.session.plan.arrival_stand, "A1");
+        let clearance = state.session.transcript.last().unwrap().text.clone();
+        assert!(clearance.contains("cleared to land"), "{clearance}");
+        assert!(clearance.contains("A1"), "{clearance}");
+        assert!(
+            state
+                .session
+                .transcript
+                .last()
+                .unwrap()
+                .pilot_reply
+                .contains("A1"),
+            "the pilot reads the stand back"
+        );
+    }
+
     #[test]
     fn tower_checkin_cannot_hide_a_pending_instruction_or_grant_landing() {
         let (mut state, _, tower) = arrival_state();
@@ -2719,7 +2979,7 @@ mod ownership_tests {
             airport: "TEST".into(),
             name: "Test Departure".into(),
             service: "Departure".into(),
-            khz: 122000,
+            khz: 122_000,
             ..Default::default()
         };
         state.stations = vec![tower.clone(), departure.clone()];
@@ -2783,7 +3043,7 @@ mod ownership_tests {
                 airport: "DEST".into(),
                 name: "Arrival Tower".into(),
                 service: "Tower".into(),
-                khz: 118100,
+                khz: 118_100,
                 ..Default::default()
             };
             state.stations = vec![tower.clone()];
@@ -2792,7 +3052,7 @@ mod ownership_tests {
                     airport: "DEST".into(),
                     name: "Arrival Ground".into(),
                     service: "Ground".into(),
-                    khz: 121900,
+                    khz: 121_900,
                     ..Default::default()
                 });
             }
@@ -2800,7 +3060,7 @@ mod ownership_tests {
                 on_ground: true,
                 position_valid: true,
                 radio_power: true,
-                com1_khz: 118100,
+                com1_khz: 118_100,
                 latitude: 0.005,
                 traffic: Some(vec![]),
                 ..Default::default()
@@ -2832,7 +3092,7 @@ mod ownership_tests {
                 tick(&mut state);
             }
             if separate_ground {
-                assert_eq!(state.session.recommended_frequency_khz, 121900);
+                assert_eq!(state.session.recommended_frequency_khz, 121_900);
                 assert!(
                     state
                         .session
@@ -2850,6 +3110,84 @@ mod ownership_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_first_runway_exit_names_the_side_the_pilot_should_vacate() {
+        use openatc_core::airport::{Runway, TaxiEdge, TaxiNode};
+        use openatc_core::state::Point;
+
+        let mut state = crate::test_state();
+        let mut airport = openatc_core::airport::demo_airport();
+        airport.icao = "LFRX".into();
+        airport.runways = vec![Runway {
+            first_name: "09".into(),
+            second_name: "27".into(),
+            first: Point {
+                east: -1200.0,
+                north: 0.0,
+                height: 0.0,
+            },
+            second: Point {
+                east: 1200.0,
+                north: 0.0,
+                height: 0.0,
+            },
+            first_displaced_meters: 0.0,
+            second_displaced_meters: 0.0,
+            width: 45.0,
+        }];
+        airport.nodes = vec![
+            TaxiNode {
+                id: 1,
+                point: Point {
+                    east: -1200.0,
+                    north: 0.0,
+                    height: 0.0,
+                },
+            },
+            TaxiNode {
+                id: 2,
+                point: Point {
+                    east: 300.0,
+                    north: 0.0,
+                    height: 0.0,
+                },
+            },
+            TaxiNode {
+                id: 3,
+                point: Point {
+                    east: 300.0,
+                    north: 45.0,
+                    height: 0.0,
+                },
+            },
+        ];
+        airport.edges = vec![
+            TaxiEdge {
+                first: 1,
+                second: 2,
+                name: "09".into(),
+                runway: true,
+                one_way: false,
+                active_runways: String::new(),
+                size: 'B',
+            },
+            TaxiEdge {
+                first: 2,
+                second: 3,
+                name: "N1".into(),
+                runway: false,
+                one_way: false,
+                active_runways: String::new(),
+                size: 'B',
+            },
+        ];
+        state.arrival_airport = Some(airport);
+        state.session.plan.destination = "LFRX".into();
+        let (side, taxiway) = runway_exit(&state, "09").expect("the first exit");
+        assert_eq!(side, "left");
+        assert_eq!(taxiway, "N1");
     }
 
     #[test]
@@ -2886,14 +3224,14 @@ mod ownership_tests {
             airport: "DEST".into(),
             name: "Arrival Tower".into(),
             service: "Tower".into(),
-            khz: 118100,
+            khz: 118_100,
             ..Default::default()
         }];
         state.session.telemetry = Telemetry {
             on_ground: true,
             position_valid: true,
             radio_power: true,
-            com1_khz: 118100,
+            com1_khz: 118_100,
             latitude: 10.0,
             longitude: 10.0,
             ground_speed_knots: 10.0,
@@ -2978,7 +3316,11 @@ mod sequencing_tests {
                 "pilot_line_up_and_wait_readback",
                 "line up and wait",
             ),
-            ("flight_hold_short_landing", "pilot_hold_short_readback", "short"),
+            (
+                "flight_hold_short_landing",
+                "pilot_hold_short_readback",
+                "short",
+            ),
         ] {
             return_with_reply(&mut state, &mut result, instruction, readback);
             let spoken = result.message.to_lowercase();
@@ -2986,7 +3328,10 @@ mod sequencing_tests {
             assert!(!spoken.contains("cleared for takeoff"), "{spoken}");
             let entry = state.session.transcript.last().expect("transcript entry");
             let reply = entry.pilot_reply.to_lowercase();
-            assert!(reply.contains("short") || reply.contains("line up and wait"), "{reply}");
+            assert!(
+                reply.contains("short") || reply.contains("line up and wait"),
+                "{reply}"
+            );
             assert!(!reply.contains("cleared for takeoff"), "{reply}");
         }
     }

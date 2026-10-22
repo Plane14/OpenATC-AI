@@ -1,4 +1,12 @@
 //! Mission selection and a form editor with an editable TOML view.
+
+// Layout limits bound the numeric casts below.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use crate::{client::EngineClient, widgets};
 use openatc_core::{
     missions::{Media, Mission},

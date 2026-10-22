@@ -30,6 +30,10 @@ pub fn conversation_response(prefix: &str, text: &str, humour: bool) -> Option<S
 }
 
 /// Find a response whose editable conditions match observed facts.
+///
+/// # Panics
+///
+/// Panics if the built-in dialogue template set cannot be parsed.
 #[must_use]
 pub fn matched_response(
     prefix: &str,
@@ -111,7 +115,7 @@ static PLACEHOLDERS: OnceLock<regex::Regex> = OnceLock::new();
 static TEMPLATES: OnceLock<RwLock<Templates>> = OnceLock::new();
 
 fn parse(text: &str) -> Result<Templates, String> {
-    let templates: Templates = toml::from_str(text).map_err(|e| e.to_string())?;
+    let templates: Templates = crate::configuration::from_str(text).map_err(|e| e.to_string())?;
     let placeholders = regex::Regex::new(r"\{([a-z_0-9]+)\}").map_err(|e| e.to_string())?;
     for (id, entry) in &templates {
         if entry.when.len() > 16
@@ -230,6 +234,10 @@ pub fn say(id: &str, slots: &[(&str, String)]) -> String {
 }
 
 /// All editable phrases for request matching or prompt examples.
+///
+/// # Panics
+///
+/// Panics if the built-in dialogue template set cannot be parsed.
 #[must_use]
 pub fn phrases(id: &str) -> Vec<String> {
     let lock =
@@ -423,6 +431,10 @@ mod tests {
 }
 
 /// Remove decorative emoji before sending a line to speech synthesis.
+///
+/// # Panics
+///
+/// Panics if the built-in emoji pattern cannot be compiled.
 pub fn speech_text(text: &str) -> String {
     static EMOJI: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let emoji = EMOJI.get_or_init(|| {

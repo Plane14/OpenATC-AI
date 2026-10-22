@@ -1,5 +1,7 @@
 //! Join production departure, airborne and arrival plans before installing controller authority.
+#[allow(unused_imports, clippy::wildcard_imports)]
 use super::*;
+use super::{Arc, BTreeMap, Operations, airborne, animation, departure, flight, landing};
 use openatc_core::traffic::motion::{Route, Segment, Stage, Waypoint};
 
 #[derive(Clone)]
@@ -39,6 +41,10 @@ pub(super) struct Checked {
 }
 
 impl Draft {
+    #[cfg(test)]
+    pub fn origin(&self) -> &Airport {
+        &self.controller.origin
+    }
     pub fn weather_fresh(&self) -> bool {
         self.controller.departure_weather.fresh() && self.controller.arrival_weather.fresh()
     }
@@ -53,6 +59,18 @@ impl Draft {
         let destination = self.controller.arrival_weather.clone();
         let obstacle_radius = self.obstacle_radius_meters;
         let reason = std::cell::RefCell::new(None);
+        let unresolved_detail = |terrain: &super::scenery::Terrain| {
+            let classes = terrain.unresolved_classes();
+            if classes.is_empty() {
+                "object, polygon or network".to_owned()
+            } else {
+                classes
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        };
         let protected = |a: Waypoint, b: Waypoint| {
             if !origin.fresh() || !destination.fresh() {
                 *reason.borrow_mut() =
@@ -74,22 +92,64 @@ impl Draft {
                 }
             }
             let terrain_result = terrain.borrow_mut().terrain_clear(a, b, 0.0);
-            if terrain.borrow().has_unresolved_obstacles() {
-                *reason.borrow_mut() = Some("Low-level scenery corridor contains unresolved object, polygon or network obstacles".into());
+            let unresolved = {
+                let terrain = terrain.borrow();
+                terrain
+                    .has_unresolved_obstacles()
+                    .then(|| unresolved_detail(&terrain))
+            };
+            if let Some(detail) = unresolved {
+                *reason.borrow_mut() = Some(format!(
+                    "Low-level scenery corridor contains unresolved {detail} obstacles"
+                ));
                 return false;
             }
             match terrain_result {
-                Ok(true) => match terrain.borrow_mut().obstacles_clear(a, b, obstacle_radius) {
-                    Ok(clear) => clear,
-                    Err(error) => {
-                        *reason.borrow_mut() = Some(error);
-                        false
+                Ok(true) => {
+                    let obstacles = terrain.borrow_mut().obstacles_clear(a, b, obstacle_radius);
+                    match obstacles {
+                        Ok(clear) => {
+                            if !clear {
+                                let unresolved = {
+                                    let terrain = terrain.borrow();
+                                    terrain
+                                        .has_unresolved_obstacles()
+                                        .then(|| unresolved_detail(&terrain))
+                                };
+                                if let Some(detail) = unresolved {
+                                    *reason.borrow_mut() = Some(format!(
+                                        "Low-level scenery corridor contains unresolved {detail} obstacles"
+                                    ));
+                                } else {
+                                    *reason.borrow_mut() = Some(format!(
+                                        "Physical obstacle intersects the route from {:.5}/{:.5} at {:.0} ft to {:.5}/{:.5} at {:.0} ft (aircraft radius {:.1} m)",
+                                        a.latitude,
+                                        a.longitude,
+                                        a.altitude_feet,
+                                        b.latitude,
+                                        b.longitude,
+                                        b.altitude_feet,
+                                        obstacle_radius
+                                    ));
+                                }
+                            }
+                            clear
+                        }
+                        Err(error) => {
+                            *reason.borrow_mut() = Some(error);
+                            false
+                        }
                     }
-                },
+                }
                 Ok(false) => {
                     *reason.borrow_mut() = Some(format!(
-                        "Physical scenery intersects the route near {:.5}/{:.5}",
-                        a.latitude, a.longitude
+                        "Physical scenery intersects the route from {:.5}/{:.5} at {:.0} ft to {:.5}/{:.5} at {:.0} ft",
+                        a.latitude,
+                        a.longitude,
+                        a.altitude_feet,
+                        b.latitude,
+                        b.longitude,
+                        b.altitude_feet
                     ));
                     false
                 }
@@ -105,8 +165,16 @@ impl Draft {
         let result = checked
             .finish_all_production(protected)
             .map_err(|error| reason.borrow().clone().unwrap_or(error))?;
-        if terrain.borrow().has_unresolved_obstacles() {
-            return Err("Low-level scenery corridor contains unresolved object, polygon or network obstacles".into());
+        let unresolved = {
+            let terrain = terrain.borrow();
+            terrain
+                .has_unresolved_obstacles()
+                .then(|| unresolved_detail(&terrain))
+        };
+        if let Some(detail) = unresolved {
+            return Err(format!(
+                "Low-level scenery corridor contains unresolved {detail} obstacles"
+            ));
         }
         Ok(result)
     }
@@ -264,6 +332,7 @@ impl Draft {
 }
 
 impl Checked {
+    #[allow(dead_code)]
     pub fn production_contracts(&self) -> Result<BTreeMap<usize, flight::Clearance>, String> {
         let controller = self
             .controller
@@ -488,6 +557,15 @@ impl Checked {
             }
         }
         let mut plan = flight::Prepared {
+            spacing_floor: self.controller.as_ref().map(|c| {
+                c.terminal
+                    .arrival
+                    .iter()
+                    .chain(&c.terminal.approach)
+                    .filter(|leg| leg.speed_description == "+")
+                    .filter_map(|leg| leg.speed_knots)
+                    .fold(0.0, f64::max)
+            }),
             airspeeds: self.airspeeds,
             route: self.route,
             clearances,
@@ -582,7 +660,7 @@ mod tests {
     fn assembled_protected_route_and_recoveries_drive_the_controller_to_parking() {
         let point = |metres, altitude| Waypoint {
             latitude: 0.0,
-            longitude: metres / 111320.0,
+            longitude: metres / 111_320.0,
             altitude_feet: altitude,
         };
         let coordinates = [
@@ -731,48 +809,48 @@ mod tests {
             .collect();
         let build_checked = || -> Checked {
             Checked {
-            airspeeds: BTreeMap::new(),
-            controller: None,
-            route: route.clone(),
-            reports: BTreeMap::from([(
-                9,
-                flight::RunwayReport {
-                    airport: "DEST".into(),
-                    runway: "09".into(),
-                },
-            )]),
-            acceleration: 3.0,
-            braking: 3.0,
-            holding: None,
-            missed: missed.clone(),
-            missed_variants: BTreeMap::new(),
-            map_index: 5,
-            climb_fpm: 1500.0,
-            descent_fpm: 1500.0,
-            requirements: requirements.clone(),
-            surface_start: 9,
-            arrival_orders: vec![(
-                0,
-                openatc_core::state::TaxiClearance {
-                    airport: "DEST".into(),
-                    instructions: "Taxi to stand 1 via A.".into(),
-                    via: "A".into(),
-                    destination: "1".into(),
-                    ..Default::default()
-                },
-            )],
+                airspeeds: BTreeMap::new(),
+                controller: None,
+                route: route.clone(),
+                reports: BTreeMap::from([(
+                    9,
+                    flight::RunwayReport {
+                        airport: "DEST".into(),
+                        runway: "09".into(),
+                    },
+                )]),
+                acceleration: 3.0,
+                braking: 3.0,
+                holding: None,
+                missed: missed.clone(),
+                missed_variants: BTreeMap::new(),
+                map_index: 5,
+                climb_fpm: 1500.0,
+                descent_fpm: 1500.0,
+                requirements: requirements.clone(),
+                surface_start: 9,
+                arrival_orders: vec![(
+                    0,
+                    openatc_core::state::TaxiClearance {
+                        airport: "DEST".into(),
+                        instructions: "Taxi to stand 1 via A.".into(),
+                        via: "A".into(),
+                        destination: "1".into(),
+                        ..Default::default()
+                    },
+                )],
             }
         };
         let checked = build_checked();
         let final_recoveries = checked.final_recoveries(|_, _| true);
         assert!(final_recoveries.values().all(Result::is_ok));
         let stations = [
-            ("TEST", "Tower", 120950),
-            ("TEST", "Departure", 124500),
-            ("TEST", "Center", 118675),
-            ("DEST", "Approach", 125500),
-            ("DEST", "Tower", 120900),
-            ("DEST", "Ground", 121705),
+            ("TEST", "Tower", 120_950),
+            ("TEST", "Departure", 124_500),
+            ("TEST", "Center", 118_675),
+            ("DEST", "Approach", 125_500),
+            ("DEST", "Tower", 120_900),
+            ("DEST", "Ground", 121_705),
         ]
         .into_iter()
         .map(|(airport, service, khz)| Station {
@@ -799,7 +877,6 @@ mod tests {
             enroute_to: [0.0, 0.1],
             enroute_minimum_feet: 1000,
             departure_name: "TEST1A".into(),
-            departure_transition: String::new(),
             departure: vec![],
             arrival_name: "TEST2A".into(),
             arrival_transition: String::new(),
@@ -887,12 +964,11 @@ mod tests {
         .next()
         .unwrap()
         .clone();
-        amended_route_terminal.arrival_manual = Some(
-            openatc_core::traffic::resolved::ManualTermination {
+        amended_route_terminal.arrival_manual =
+            Some(openatc_core::traffic::resolved::ManualTermination {
                 terminator: "FM".into(),
                 identifier: "COPEN".into(),
-            },
-        );
+            });
         amended_route_terminal.arrival = manual_leg;
         let mut entry_fields = vec![""; 38];
         entry_fields[0] = "010";
@@ -953,30 +1029,41 @@ mod tests {
         for invalid in 0..5 {
             let mut broken = route_plan.clone();
             match invalid {
-                0 => broken
-                    .clearances
-                    .get_mut(&5)
-                    .unwrap()
-                    .amended_route
-                    .as_mut()
-                    .unwrap()
-                    .target_coordinate = [1.0, 1.0],
+                0 => {
+                    broken
+                        .clearances
+                        .get_mut(&5)
+                        .unwrap()
+                        .amended_route
+                        .as_mut()
+                        .unwrap()
+                        .target_coordinate = [1.0, 1.0];
+                }
                 4 => broken.clearances.get_mut(&5).unwrap().amended_route = None,
-                1 => broken.clearances.get_mut(&5).unwrap().instruction = "Descend as filed.".into(),
-                2 => broken.clearances.get_mut(&5).unwrap().readback = "Roger, I09.".into(),
-                _ => broken
-                    .clearances
-                    .get_mut(&5)
-                    .unwrap()
-                    .amended_route
-                    .as_mut()
-                    .unwrap()
-                    .terminator = "ZZ".into(),
+                1 => {
+                    broken.clearances.get_mut(&5).unwrap().instruction = "Descend as filed.".into();
+                }
+                2 => {
+                    broken.clearances.get_mut(&5).unwrap().readback = "Roger, I09.".into();
+                }
+                _ => {
+                    broken
+                        .clearances
+                        .get_mut(&5)
+                        .unwrap()
+                        .amended_route
+                        .as_mut()
+                        .unwrap()
+                        .terminator = "ZZ".into();
+                }
             }
             assert!(broken.validate().is_err(), "case {invalid} accepted");
         }
         // A procedure with no published manual termination cannot be amended at all.
-        assert!(route_plan.validate().is_ok(), "the issued amendment must validate");
+        assert!(
+            route_plan.validate().is_ok(),
+            "the issued amendment must validate"
+        );
         let plan = checked
             .finish_controlled(
                 &amended_context,
@@ -1000,7 +1087,7 @@ mod tests {
             let mut broken = plan.clone();
             match invalid {
                 0 => broken.clearances.get_mut(&6).unwrap().landing_rollout = Some(9),
-                1 => broken.clearances.get_mut(&7).unwrap().station.khz = 121705,
+                1 => broken.clearances.get_mut(&7).unwrap().station.khz = 121_705,
                 2 => broken.clearances.get_mut(&8).unwrap().readback = "Different clearance".into(),
                 3 => broken.clearances.get_mut(&5).unwrap().airborne_through = Some(6),
                 4 => {
@@ -1011,7 +1098,7 @@ mod tests {
                         .missed
                         .as_mut()
                         .unwrap()
-                        .geometric_feet = 2000.0
+                        .geometric_feet = 2000.0;
                 }
                 _ => broken
                     .clearances
@@ -1058,7 +1145,7 @@ mod tests {
             target: TrafficTarget {
                 id: 1,
                 callsign: "TEST123".into(),
-                com1_khz: Some(120950),
+                com1_khz: Some(120_950),
                 ..Default::default()
             },
             model: Arc::new(openatc_core::traffic::csl::Model {
@@ -1096,7 +1183,7 @@ mod tests {
                     blocked.session.telemetry.traffic = Some(vec![TrafficTarget {
                         id: 88,
                         latitude: if airborne { 0.03 } else { 0.0 },
-                        longitude: if airborne { 11000.0 } else { 13500.0 } / 111320.0,
+                        longitude: if airborne { 11000.0 } else { 13500.0 } / 111_320.0,
                         altitude_feet: if airborne { 500.0 } else { 0.0 },
                         ground_speed_knots: Some(if airborne { 180.0 } else { 0.0 }),
                         on_ground: !airborne,
@@ -1188,6 +1275,7 @@ mod tests {
                         onward_clearances.insert(old - 5, clearance);
                     }
                     let onward = flight::Prepared {
+                        spacing_floor: None,
                         airspeeds: plan
                             .airspeeds
                             .range(5..)

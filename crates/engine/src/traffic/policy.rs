@@ -11,7 +11,12 @@ pub(super) struct Chat {
     pub range_nm: f64,
     pub observation_age_seconds: u64,
     pub initiation_interval_seconds: u64,
+    // Accepted for old user TOMLs; the settings percentage is the only dice roll.
     pub initiation_probability: f64,
+    #[serde(default = "weather_wind")]
+    pub weather_wind_knots: f64,
+    #[serde(default = "weather_visibility")]
+    pub weather_visibility_meters: f64,
     pub operational_quiet_seconds: u64,
     pub maximum_reply_characters: usize,
     pub maximum_message_bytes: usize,
@@ -27,6 +32,12 @@ pub(super) struct Chat {
 #[serde(deny_unknown_fields)]
 struct File {
     pilot_chat: Chat,
+}
+fn weather_wind() -> f64 {
+    20.0
+}
+fn weather_visibility() -> f64 {
+    5000.0
 }
 impl Chat {
     pub fn load(config: &Path) -> Self {
@@ -64,7 +75,7 @@ impl Chat {
         if text.len() > 128 * 1024 {
             return Err("Conversation policy exceeds 128 KiB".into());
         }
-        let policy = toml::from_str::<File>(text)
+        let policy = openatc_core::configuration::from_str::<File>(text)
             .map_err(|error| error.to_string())?
             .pilot_chat;
         if !policy.range_nm.is_finite()
@@ -84,11 +95,13 @@ impl Chat {
             || !(3.0..=30.0).contains(&policy.critical_airport_radius_nm)
             || !policy.critical_height_feet.is_finite()
             || !(1000.0..=5000.0).contains(&policy.critical_height_feet)
+            || !(10.0..=60.0).contains(&policy.weather_wind_knots)
+            || !(500.0..=10000.0).contains(&policy.weather_visibility_meters)
             || policy.allowed_phases.is_empty()
             || policy
                 .allowed_phases
                 .iter()
-                .any(|phase| !["parked", "cruise", "taxi_in"].contains(&phase.as_str()))
+                .any(|phase| !["cruise", "taxi_in"].contains(&phase.as_str()))
             || policy.personality.trim().is_empty()
         {
             return Err("Conversation policy exceeds its supported limits or includes a critical flight phase".into());

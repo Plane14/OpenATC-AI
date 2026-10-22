@@ -130,9 +130,9 @@ pub async fn status(AxumState(shared): AxumState<crate::Shared>, Json(_): Json<V
         (s.model_installer.clone(), s.settings.simulator_root.clone())
     };
     if !installer.running.load(Ordering::Acquire) && installer.snapshot().stage == "installed" {
-        let installed = installer.snapshot();
-        if !Path::new(&installed.path).join(RECEIPT).is_file()
-            || location(&root).is_ok_and(|base| base.join("Bluebell") != Path::new(&installed.path))
+        let snapshot = installer.snapshot();
+        if !Path::new(&snapshot.path).join(RECEIPT).is_file()
+            || location(&root).is_ok_and(|base| base.join("Bluebell") != Path::new(&snapshot.path))
         {
             installer.update(|p| *p = Progress::default());
         }

@@ -311,8 +311,7 @@ mod tests {
                             .lines()
                             .filter_map(|line| line.split_once(':'))
                             .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                            .map(|(_, length)| length.trim().parse::<usize>().unwrap())
-                            .unwrap_or(0);
+                            .map_or(0, |(_, length)| length.trim().parse::<usize>().unwrap());
                         break (end + 4, length);
                     }
                     assert!(request.len() < 65536, "test request headers too large");

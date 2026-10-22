@@ -1182,8 +1182,8 @@ fn apply_service(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome 
     }
     if intent == "emergency" {
         if !ctx.realism.practice_emergencies
-            && !(state.mission.running
-                && ["urgent", "emergency"].contains(&state.mission.severity.as_str()))
+            && (!state.mission.running
+                || !["urgent", "emergency"].contains(&state.mission.severity.as_str()))
         {
             return reply(
                 state,
@@ -1744,6 +1744,7 @@ mod tests {
             ..Default::default()
         };
         // Historical fixture defaults are test data, not a live flight plan.
+        state.plan.callsign = "VH-BIL".into();
         state.plan.departure = "YMLT".into();
         state.plan.destination = "YMML".into();
         state.plan.runway = "32".into();

@@ -20,7 +20,7 @@ pub struct Store(
 );
 
 struct Loaded {
-    disk_loaded: bool,
+    from_disk: bool,
     profile: Arc<Profiles>,
     sources: Vec<String>,
     errors: Vec<String>,
@@ -34,7 +34,7 @@ impl Default for Store {
             .clone();
         Self(
             Arc::new(tokio::sync::Mutex::new(Some(Loaded {
-                disk_loaded: false,
+                from_disk: false,
                 profile: profile.clone(),
                 sources: vec!["Bundled profiles".into()],
                 errors: vec![],
@@ -61,6 +61,7 @@ fn load(dirs: &[PathBuf]) -> Result<Loaded, String> {
         include_str!("../../../traffic/airlines.toml").to_owned(),
         include_str!("../../../traffic/hubs.toml").to_owned(),
     ];
+    let mut routes = include_str!("../../../traffic/routes.toml").to_owned();
     let mut sources = vec!["Bundled profiles".to_owned()];
     for dir in dirs {
         for (i, name) in ["aircraft.toml", "airlines.toml", "hubs.toml"]
@@ -83,10 +84,31 @@ fn load(dirs: &[PathBuf]) -> Result<Loaded, String> {
             texts[i] = text;
             sources.push(path.display().to_string());
         }
+        let path = dir.join("routes.toml");
+        match std::fs::File::open(&path) {
+            Ok(file) => {
+                let mut text = String::new();
+                file.take(32 * 1024 * 1024 + 1)
+                    .read_to_string(&mut text)
+                    .map_err(|error| error.to_string())?;
+                if text.len() > 32 * 1024 * 1024 {
+                    return Err(format!("{} exceeds 32 MiB", path.display()));
+                }
+                routes = text;
+                sources.push(path.display().to_string());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        }
     }
     Ok(Loaded {
-        disk_loaded: true,
-        profile: Arc::new(Profiles::parse(&texts[0], &texts[1], &texts[2])?),
+        from_disk: true,
+        profile: Arc::new(Profiles::parse_all(
+            &texts[0],
+            &texts[1],
+            &texts[2],
+            Some(&routes),
+        )?),
         sources,
         errors: vec![],
     })
@@ -107,8 +129,8 @@ impl Store {
         refresh: bool,
     ) -> Result<Arc<Profiles>, String> {
         let mut cached = self.0.lock().await;
-        if refresh || cached.as_ref().is_none_or(|loaded| !loaded.disk_loaded) {
-            if cached.as_ref().is_none_or(|loaded| !loaded.disk_loaded) {
+        if refresh || cached.as_ref().is_none_or(|loaded| !loaded.from_disk) {
+            if cached.as_ref().is_none_or(|loaded| !loaded.from_disk) {
                 *self
                     .1
                     .write()
@@ -167,6 +189,7 @@ pub async fn inspect(AxumState(shared): AxumState<Shared>, Json(body): Json<Valu
 mod tests {
     use super::*;
     #[tokio::test]
+    #[allow(clippy::float_cmp)]
     async fn edited_profiles_load_and_invalid_reload_keeps_previous_set() {
         let dir =
             std::env::temp_dir().join(format!("openatc-traffic-profiles-{}", std::process::id()));

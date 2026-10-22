@@ -1,5 +1,15 @@
 //! UI state, asynchronous replies and frame updates.
 
+// Layout tests compare exact fixture coordinates.
+#![allow(clippy::float_cmp)]
+// Layout limits bound the numeric casts below.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+
 use crate::client::EngineClient;
 use crate::widgets;
 use openatc_audio::Speech;
@@ -87,7 +97,15 @@ pub struct Interface {
     pub native_traffic_status: String,
     pub(crate) traffic_selected: u32,
     pub(crate) traffic_notice: String,
+    pub(crate) scenery_status: serde_json::Value,
+    pub(crate) scenery_checked: f64,
+    pub(crate) scenery_pending: bool,
+    pub(crate) setup_status: serde_json::Value,
+    pub(crate) setup_checked: f64,
+    pub(crate) setup_pending: bool,
     pub(crate) traffic_message: String,
+    /// Quick request just sent; blocks a double-click until the state catches up.
+    pub(crate) pending_request: Option<(String, std::time::Instant)>,
     pub(crate) model_install_status: serde_json::Value,
     pub(crate) model_install_checked: f64,
     pub(crate) model_install_pending: bool,
@@ -125,6 +143,7 @@ pub struct Interface {
     pub taxi_traffic_visible: bool,
     /// Show observed traffic on the developer sector map.
     pub map_traffic_visible: bool,
+    /// Show the filed plan on the developer sector map.
     pub map_plan_visible: bool,
     /// Include heliports among the airport markers.
     pub map_heliports: bool,
@@ -382,7 +401,14 @@ impl Interface {
             native_traffic_status: String::new(),
             traffic_selected: 0,
             traffic_notice: String::new(),
+            scenery_status: serde_json::Value::Null,
+            scenery_checked: -1.0,
+            scenery_pending: false,
+            setup_status: serde_json::Value::Null,
+            setup_checked: -1.0,
+            setup_pending: false,
             traffic_message: String::new(),
+            pending_request: None,
             model_install_status: serde_json::Value::Null,
             model_install_checked: 0.0,
             model_install_pending: false,
@@ -978,10 +1004,12 @@ impl Interface {
                 std::mem::swap(&mut fresh.engine, &mut self.engine);
                 fresh.settings = self.settings.clone();
                 fresh.settings_loaded = self.settings_loaded;
-                fresh.last_settings_json = self.last_settings_json.clone();
+                fresh
+                    .last_settings_json
+                    .clone_from(&self.last_settings_json);
                 fresh.simulator_host = self.simulator_host;
                 fresh.preserve_window_layout(self);
-                fresh.current_airport = self.current_airport.clone();
+                fresh.current_airport.clone_from(&self.current_airport);
                 fresh.flight_reset_generation = self.flight_reset_generation;
                 fresh.clipboard = self.clipboard.take();
                 fresh.plan_notice = "New flight ready.".into();
@@ -1230,8 +1258,13 @@ impl Interface {
         } else {
             &mut self.speech
         };
+        let spoken = openatc_core::radiotelephony::spoken_flight_number(
+            &entry.text,
+            &entry.speaker,
+            self.settings.callsign_numbers == openatc_settings::CallsignNumbers::Group,
+        );
         output.speak(&openatc_audio::SpeakRequest {
-            text: &entry.text,
+            text: &spoken,
             engine_endpoint: &endpoint,
             role,
             received_radio: entry.background,
@@ -1434,7 +1467,7 @@ impl Interface {
         let (radio, station) = if self.settings.show_com2
             && secondary.is_some_and(|station| station.service == "ATIS")
             && (self.active_radio == openatc_core::state::Radio::Com2
-                || !primary.is_some_and(|station| station.service == "ATIS"))
+                || primary.is_none_or(|station| station.service != "ATIS"))
         {
             (openatc_core::state::Radio::Com2, secondary)
         } else {
@@ -1782,6 +1815,10 @@ impl Interface {
     }
 
     /// Draw the panel, returning one-frame window requests for the host.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the engine state cannot be read.
     pub fn draw(&mut self, ui: &imgui::Ui) -> WindowActions {
         self.window_actions.restore_bounds = self.pending_window_bounds.take();
         let _theme = crate::theme::apply(ui, self.settings.light_theme);
@@ -2137,7 +2174,7 @@ impl Interface {
             self.save_settings();
         }
         ui.same_line();
-        let _disabled = ui.begin_disabled(!matches!(self.page, 0 | 10));
+        let disabled = ui.begin_disabled(!matches!(self.page, 0 | 10));
         if icon_button(
             ui,
             if self.compact {
@@ -2163,7 +2200,7 @@ impl Interface {
             let (a, b) = (ui.item_rect_min(), ui.item_rect_max());
             self.collapse_bounds = [a[0], a[1], b[0], b[1]];
         }
-        drop(_disabled);
+        drop(disabled);
         if self.can_pop_out {
             ui.same_line();
             if icon_button(

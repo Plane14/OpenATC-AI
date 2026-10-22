@@ -1,4 +1,11 @@
 //! Time-based aircraft animation. Sampling does not call the simulator SDK.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use super::motion::Stage;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -87,9 +94,11 @@ pub fn parse(text: &str) -> Result<BTreeMap<Kind, Handling>, String> {
     if text.len() > 65536 {
         return Err("Handling catalogue exceeds 64 KiB".into());
     }
-    let mut value: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
-    let defaults: toml::Value = toml::from_str(include_str!("../../../../traffic/handling.toml"))
-        .map_err(|error| error.to_string())?;
+    let mut value: toml::Value =
+        crate::configuration::from_str(text).map_err(|error| error.to_string())?;
+    let defaults: toml::Value =
+        crate::configuration::from_str(include_str!("../../../../traffic/handling.toml"))
+            .map_err(|error| error.to_string())?;
     if let Some(handling) = value
         .get_mut("handling")
         .and_then(toml::Value::as_table_mut)
@@ -177,6 +186,7 @@ pub struct Input {
 /// Per-aircraft animation state, retained across snapshots.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Animation {
     /// Degrees nose up.
     pub pitch: f64,
@@ -255,7 +265,7 @@ impl Animation {
         let bank = if ground {
             0.0
         } else {
-            (input.knots.max(0.0) * 0.514444 * input.turn_degrees_sec.to_radians() / 9.80665)
+            (input.knots.max(0.0) * 0.514_444 * input.turn_degrees_sec.to_radians() / 9.80665)
                 .atan()
                 .to_degrees()
                 .clamp(-h.maximum_bank_degrees, h.maximum_bank_degrees)
@@ -267,7 +277,7 @@ impl Animation {
             0.0
         } else {
             let flight_path = (input.vertical_fpm * 0.00508)
-                .atan2(input.knots.max(1.0) * 0.514444)
+                .atan2(input.knots.max(1.0) * 0.514_444)
                 .to_degrees();
             let bias = match input.stage {
                 Stage::Approach => h.approach_pitch_bias_degrees,
@@ -297,7 +307,7 @@ impl Animation {
         } else {
             1.0
         };
-        let signed_speed = input.knots.max(0.0) * 0.514444 * direction;
+        let signed_speed = input.knots.max(0.0) * 0.514_444 * direction;
         let steering = if ground && input.knots > 0.5 {
             (h.wheelbase_meters * input.turn_degrees_sec.to_radians() / signed_speed)
                 .atan()
@@ -338,6 +348,7 @@ impl Animation {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     #[test]
@@ -552,7 +563,8 @@ pub fn channels(text: &str) -> Result<BTreeMap<String, Channel>, String> {
     if text.len() > 65536 {
         return Err("Animation channels exceed 64 KiB".into());
     }
-    let file: ChannelFile = toml::from_str(text).map_err(|error| error.to_string())?;
+    let file: ChannelFile =
+        crate::configuration::from_str(text).map_err(|error| error.to_string())?;
     if file.version != 1
         || file.channels.is_empty()
         || file.channels.len() > 64
@@ -568,6 +580,7 @@ pub fn channels(text: &str) -> Result<BTreeMap<String, Channel>, String> {
 }
 impl Animation {
     /// Instance values are separate for every aircraft, never global mutable state.
+    #[must_use]
     pub fn channel(self, channel: Channel) -> f32 {
         (match channel {
             Channel::Gear => self.gear,

@@ -240,7 +240,7 @@ OpenATC brings the controller and crew into the same flight. Request your IFR cl
 | --- | --- |
 | IFR departure | Planning/SimBrief import, clearance, readback checks, start-up/pushback permissions, taxi, runway crossings, Tower handoff and takeoff permission. |
 | Airborne controller | Check-ins, sector handoffs, altitude requests, direct-to requests, heading/speed assignments, lateral deviations and selected procedure/runway amendments. Eligibility depends on phase, controller role and available navigation data. |
-| Arrival | Separate approach and landing permissions, Tower check-in, touchdown/runway-exit monitoring, Ground handoff and taxi to a selected stand. |
+| Arrival | Separate approach and landing permissions, Tower check-in, touchdown/runway-exit monitoring, Ground handoff and taxi to a selected stand. Generated arrival planning can try later verified runway exits when an earlier exit cannot reach free parking. |
 | Copilot | Optional spoken readbacks, frequency changes and check-ins, mapped aircraft controls, and two checklist modes. |
 | Ground and cabin crew | Compound control/service requests, one confirmation after simulator acknowledgements, request history, refreshment requests and a simulated passenger cabin. |
 | Missions | Eight A320-family flight stories, mission selection, a form/TOML editor, phase and probability triggers, choices and a flight journal. |
@@ -357,7 +357,7 @@ The bundled chat API supports grammar-constrained `response_format: {"type":"jso
 
 ### 1. Plan and request clearance
 
-Create a flight in **Planning** or import a SimBrief OFP. Check the departure, destination, callsign, runway, route and cruise level. A clearance request uses this flight automatically. Aircraft identification and flight callsign can differ, so verify the callsign shown in the plan.
+Create a flight in **Planning** or import a SimBrief OFP. Check the departure, destination, callsign, runway, route and cruise level. When no plan provides a callsign, Settings → General → **Default callsign** supplies it. A clearance request uses this flight automatically. Aircraft identification and flight callsign can differ, so verify the callsign shown in the plan.
 
 Power the radio and tune a published station in **Channels**. Clearance duties are inferred from installed services: Delivery first, otherwise Ground, otherwise Tower. At an airport with only Tower, that controller can handle clearance and ground duties. Airports and frequencies are not hardcoded for test routes.
 
@@ -550,11 +550,110 @@ ATC can ask whether you need assistance after repeated deviations, and Ground ca
 
 ## Traffic and performance
 
+### TOML setup cache and Re-setup
+
+The companion engine caches parsed plugin TOML in
+`<data directory>/setup-cache/toml-v1.sqlite3`. Editable TOML remains the source of
+truth: a content hash changes on every edit, and each consumer still deserializes
+and validates its configuration. The cache covers distributed traffic, speech,
+prompts, aircraft, cabin, mission, region, radio-station and intent TOML, plus the
+existing configuration/environment override locations. The separate AI server's
+model/server TOML and user settings JSON are outside this cache. The simulator
+plugin performs no SQLite work. Engine calls outside startup/CPU workers continue
+to parse directly.
+
+In **Settings → Appearance → Developer tools**, enable debugging tools and press
+**Re-setup**. The engine drops and recreates the TOML and scenery cache tables,
+then imports the current TOML files again. Progress and named errors appear there.
+Old workers cannot restore rows from before the reset. Scenery is rebuilt on
+demand. Editable files, settings, plans, logs and active flights are preserved.
+Restart the plugin after completion to reload every active policy; this button
+does not change an existing flight's clearances or restart its traffic.
+
+The TOML cache retains up to 128 MiB of parsed payloads/8,192 entries, with a
+256 MiB SQLite page limit and 32 MiB source-file limit. A damaged or unavailable
+cache falls back to source parsing. Setup scans are bounded and report oversized
+or invalid files. Configuration errors retain their normal rejection behavior.
+
+A release benchmark of operational responses, traffic profiles/routes and prompts
+measured about **10.0 ms per direct parse batch versus 3.9 ms from SQLite** (30
+iterations); initial cache population took 20.3 ms. This improves repeated parsing,
+not the much larger scenery scan or complete traffic lifecycle. Native plugin UI
+acceptance remains to be checked in X-Plane launched by the user through Steam.
+
+### Traffic setup and smoother motion
+
+**Settings → Traffic → Traffic setup** shows the current preparation stage, scenery
+region, cache use and any cache error. Scenery is indexed on demand as traffic is
+planned. The first visit still needs to parse the installed scenery; subsequent
+visits can reuse the compiled data. A ready cache does not guarantee that every
+flight passes the route, weather, terrain, obstacle and clearance checks.
+
+The companion engine stores its rebuildable SQLite cache in
+`scenery-index/scenery-v2.sqlite3` under the platform data directory: normally
+`~/.local/share/openatc-ai` on Linux, `%LOCALAPPDATA%/openatc-ai` on Windows, or
+`~/Library/Application Support/openatc-ai` on macOS. `OPENATC_AI_DATA_DIR` overrides
+the data directory; `OPENATC_SCENERY_CACHE_DIR` selects an isolated cache directory.
+The cache records source size/modification times and missing resources, scenery
+pack order and parser version. Changes invalidate affected entries. Cache writes
+are transactional and checksummed; a cache failure falls back to scenery parsing.
+Entries are limited to 256 MiB, stored payloads to 1.5 GiB and the SQLite database
+to 2 GiB, plus temporary transaction space. Planning retains at most 24 tile stacks
+and 512 MiB per planner; this is not a limit on the entire engine's peak memory.
+Use **Scenery cache details → Clear scenery index** to rebuild it on demand.
+Settings, flight plans and active flights are retained.
+
+Version 2 rebuilds derived scenery after correcting vegetation-area elevation
+bounds. Candidate terrain triangles are clipped to the area's bounding rectangle
+and known object reach; interior ridges remain protected. A nearby triangle's
+vertices outside that rectangle no longer raise the whole vegetation area. Route
+refusals now include both endpoints, heights and the aircraft envelope for diagnosis.
+
+**Traffic update rate** offers Every frame, Every N frames and Hertz. The default
+is now Every frame; saved explicit choices are retained. A short 750 ms sample
+buffer smooths movement between engine updates, including when TCAS is active.
+If updates stop, aircraft hold at the last received position without extrapolating
+past a clearance limit. The delay affects displayed generated traffic and TCAS;
+controller decisions continue to use current engine positions. Visual smoothness,
+takeoff/landing and frame-time acceptance still require an X-Plane check.
+
+The current installed-scenery replay prepares six nominal flights across Nice,
+Milan and Toulouse. One passes production protection and completes taxi-out,
+takeoff, landing and parking; five still fail conservative scenery checks. With a
+newly rebuilt version 2 cache, preparation took 59.44 seconds and the full replay
+65.46 seconds. Full mixed traffic and native visual/audio/frame-time acceptance
+remain open. See [validation](docs/VALIDATION.md) for the test scope and timings.
+
+Discovery divides its survey budget between configured operator links and nearby
+fields, considering requested traffic categories separately. A worker shares one
+scenery planner across airport directions to avoid repeating static checks.
+
+Scene publication keeps render/radio identities and movement ownership aligned:
+a rejected or hidden aircraft no longer retains a live stand reservation. Surface
+previews keep their parked actors. This does not establish full production flight
+or simulator acceptance; conservative planning exclusions still need review.
+
+The active acceptance queue includes complete generated VFR/CTAF flights, wake
+warning/wait/release, mixed-speed arrivals and eventual landing. Source now includes
+predictive arrival speed control, a player traffic-holding setting and separate
+reason-based percentage chances for traffic questions and ATC shortcut offers.
+These source paths still require integrated production and native verification;
+they do not establish that the complete traffic system works in X-Plane.
+
+
 **Suppress X-Plane AI traffic** is enabled by default in Traffic settings. While connected, OpenATC requests control of native AI and reduces its active count to ownship; another traffic plugin retains priority. Generated traffic uses the supported TCAS override instead. Disable suppression to use the optional native AI amount controls. The plugin also mutes X-Plane's native COM radio audio while the companion engine is connected, preserving each panel's previous volume for disconnect or plugin disable; OpenATC speech uses its own audio output.
 
 X-Plane's **Draw Parked Aircraft** population and aircraft embedded in scenery are separate from flying AI. Turn off Draw Parked Aircraft in X-Plane when replacing that population with a traffic plugin. OpenATC does not remove scenery objects or modify airport files. Generated parked aircraft and their later departures must share stand reservations and verified movement paths; that complete lifecycle is still under development. An amber map connector is an aid across an unmapped apron, not verified pavement or permission to cross a runway.
 
-**Informal pilot conversations** are optional under Settings → Realism. Choose an identified aircraft on Traffic and type a message; weather/landing/crosswind buttons remain available separately. **Allow light humour** enables restrained friendly replies, and **Allow other pilots to call me** permits occasional ride/weather/arrival questions or greetings. These are simulated conversations, not multiplayer transmissions. Clearances, pending readbacks, emergencies, takeoff/landing, runway crossings and other critical situations take priority. Replies do not issue permissions or operate aircraft controls.
+**Informal pilot conversations** are optional under Settings → Realism. Choose an identified aircraft on Traffic and type a message; weather/landing/crosswind buttons remain available separately. **Allow light humour** enables restrained friendly replies. **Allow other pilots to call me** permits an operational weather question when fresh nearby surface observations show strong wind or low visibility. It requires a known matching radio frequency and a quiet, noncritical phase. Surface weather is a reason to ask for a report, not evidence of weather aloft. These are simulated conversations, not multiplayer transmissions. Clearances, pending readbacks, emergencies, takeoff/landing, runway crossings and other critical situations take priority. Replies do not issue permissions or operate aircraft controls.
+
+Traffic calls and ATC shortcuts have separate **0–100% chance** settings. The plugin
+finds a useful eligible reason before rolling: 0% suppresses optional offers;
+100% selects eligible opportunities but never creates a reason or overrides radio
+priority. A pilot/airport/weather-concern episode and a shortcut route-fix pair
+are each attempted once, including unsuccessful rolls, with cooldown between
+opportunities. A weather concern that ends and later returns can be considered
+again. Direct questions and necessary safety instructions are never chance-based.
 
 Trigger words, response priority, humour flags and fact conditions are editable in the `traffic_chat_*` entries of `speech/runtime/responses.toml`. `traffic/behaviour.toml` controls quiet phases, timing, range, history and pilot personality within validated limits. Personal overrides belong in the engine configuration's `traffic` folder and load on a new flight or engine restart. General free-text answers use the configured language model; without it, editable matching rules provide brief fallback replies.
 
@@ -566,21 +665,40 @@ Open **Traffic** from the visible page tabs to see simulator-reported aircraft. 
 - It can hold taxiing aircraft for an observed conflict and resume when clear, protect individual runway crossings, and issue a short-final go-around for runway conflicts.
 - Crossing completion and arrival Ground handoff include aircraft dimensions and the relevant holding line, so a centre point outside the runway does not immediately mean the tail is clear.
 - Unknown aircraft use conservative dimensions.
-- Limited automatic speed spacing uses the aircraft's editable indicated-speed envelope, including piston GA, turboprops, regional jets and airliners.
-- It operates on established approaches outside eight miles and below10,000 feet, releases adjustments by five miles with the shipped policy, preserves published speed limits and prioritises a slower leader over a faster follower.
+- Automatic speed spacing uses editable indicated-speed envelopes for piston GA, turboprops, regional jets and airliners. The shared predictor considers reaction/deceleration, final-speed transition, wake/surveillance planning distance, following traffic and threshold timing.
+- It seeks an achievable complete speed solution in the configured 8–20 NM window below 10,000 feet, preserves published limits and releases by five miles with the shipped policy. Australia receives no new speed instruction once final approach is cleared. Unknown regional/type data refuses an automatic solution.
+- Generated pilots read back a proposed reduction before movement applies it. It preserves route authority, uses the movement model's acceleration/braking and leaves final/recovery speeds unchanged. Fresh traffic and accepted route identity are checked again after readback.
 - It does not accelerate an aircraft towards a nearby leader.
 - Pilots can answer **Unable**; it does not repeatedly offer the same rejected speed.
-- This remains a limited speed workflow rather than complete mixed-traffic sequencing or holding/vector integration.
+- When speed cannot solve the predicted encounter, the plugin does not force an airliner down to a light aircraft's speed. General protected vector/resequencing and complete generated/player parity remain unfinished; late runway/wake conflicts retain their existing go-around checks.
 
-The `[spacing]` table and each aircraft's `spacing_speed` in `traffic/aircraft.toml` configure these thresholds and nominal speed ranges. Omit `spacing_speed` to disable automatic offers for that aircraft. Profile reloads publish a complete validated snapshot; controller checks retain the previous valid policy while a reload runs. Invalid initial overrides disable these offers rather than silently enabling fallback speeds. An approach clearance explicitly releases a prior assigned speed when it is not restated; published restrictions remain applicable.
+The `[spacing]`, `[spacing.prediction]` and each aircraft's `spacing_speed` in `traffic/aircraft.toml` configure these thresholds, planning margins and nominal speed ranges. These predictions do not replace actual runway/wake checks. Omit `spacing_speed` to disable automatic offers for that aircraft. Profile reloads publish a complete validated snapshot; controller checks retain the previous valid policy while a reload runs. Invalid initial overrides disable these offers rather than silently enabling fallback speeds. An approach clearance explicitly releases a prior assigned speed when it is not restated; published restrictions remain applicable.
 
-- **Wake protection** now uses FAA consolidated wake categories for the represented US airports and supported aircraft.
+**Allow ATC to assign traffic holding**, under Realism → Arrival sequencing, controls
+new discretionary player delay holds. Turning it off retains an accepted hold,
+published missed approach and safety separation. The implemented arrival path
+requires an acknowledged IFR clearance, a named upcoming fix suitable for direct
+entry, level flight below 10,000 feet, fresh weather, terrain margins and published
+controller coverage for the entire pattern. Missing protection refuses the hold.
+It specifies the fix/course/turns/level/one-minute legs/maximum speed and a UTC
+expected-further-clearance time, then validates readback, including strict mode. Unknown traffic
+climb profiles receive horizontal corridor protection at every level. Release
+requires stable clear spacing and a fresh onward clearance/readback; the player
+leaves at the inbound fix crossing. Pause/time jumps cannot silently release it,
+and the expected time is never permission to leave. This is a restricted direct-entry
+implementation; general published/parallel/teardrop entry, vectors and full native
+flight acceptance remain open.
+
+- **Wake protection** uses FAA consolidated categories for represented US airports and a separate Australian MATS ICAO-category table for Australian airports. Other regions are not assigned guessed minima by these new checks.
 - Observed departures can produce a **Hold for wake turbulence** instruction, with different intervals for full-length, intersection and opposite-direction departures and qualifying close parallel runways.
 - Timing uses simulator flight time, stops while paused and does not expire instantly after a clock jump.
 - Starting the interval at observed liftoff is conservative; no pilot waiver is assumed.
+- Australian heavy-behind-heavy departures use a live distance check; a timer or a missing leader cannot satisfy it. Missing verified medium-aircraft MTOW conservatively applies the Medium→Light protection to all supported Medium types.
 - Approach checks consider the aircraft pair, closing speed, parallel runway geometry and displaced landing thresholds.
 - Insufficient spacing at the preceding aircraft's threshold passage remains a conflict after it touches down or disappears from the feed, and can require a go-around.
 - These checks follow the [FAA departure rules](https://www.faa.gov/air_traffic/publications/atpubs/atc_html/chap3_section_9.html) and [approach wake table](https://www.faa.gov/air_traffic/publications/atpubs/atc_html/chap5_section_5.html).
+- Australian references are [MATS 77.3](https://www.airservices.gov.au/mats/docs/nos-saf-2000.pdf), effective 3 September–25 November 2026, §§9.5, 10.6 and 11.1. The arrival predictor uses a conservative 5 NM Australian surveillance planning floor; it does not infer eligibility for a local 3 NM service.
+- The represented US terminal service models the FAA FUSION 3 NM standard; Center-controlled generated arrivals and player-hold release use 5 NM. Airport distance alone does not establish eligibility for reduced radar separation. These are explicit simulator service assumptions, with wake separation applied in addition.
 - Intersecting flight paths, preceding low/missed approaches and complete worldwide separation are still unfinished.
 
 - **Download and install Bluebell** downloads the publisher's 12 DDS archives and installs them for you. **Settings → Traffic** shows the current archive, downloaded bytes and extraction progress, with Cancel and Retry controls.
@@ -645,11 +763,16 @@ Generated flight clearances now accept published Departure controllers for climb
 
 - **Advisory traffic at untowered fields** flies a right-hand visual circuit at any field that publishes a CTAF or UNICOM frequency and no Tower service.
 - The aircraft announces its own position on the published frequency: downwind, base, final and landing. No call contains a clearance, and none of them can grant one.
+- Calls use the standard advisory form: field, traffic, callsign, leg and runway, field - for example, "KCTF traffic, N12345, entering downwind runway 09, KCTF".
 - The procedure is the authority for that traffic, so it never enters the controlled-clearance path and never occupies a taxiway or a runway outside its published pattern.
 - The pattern repeats: the aircraft climbs from the end of the landing roll, rejoins the downwind and flies the circuit again.
+- A straight-in arrival announces five miles final, final and runway vacated, lands on the same runway and leaves the world after its landing roll. It never repeats.
+- A departure announces the departing runway and leaving the pattern, holds the runway during the climb-out and leaves the world after turning out. It never repeats.
+- A cross-country VFR flight is planned between two untowered fields 10-40 nm apart; departure calls use the origin frequency, approach and landing calls use the destination frequency. An occupied destination runway produces a go-around on the destination pattern.
 - A runway held by the player or another aircraft at the final call produces a go-around instead of a landing.
 - These calls are heard only while that frequency is tuned, and are recorded as background information rather than as an instruction.
 - The wording is editable in the `ctaf_*` entries of `speech/runtime/responses.toml`.
+- General-aviation piston aircraft can use tie-down and hangar stands whose published equipment lists turboprops but omits `props`; gates and airline ramps keep their equipment restrictions.
 - Fields are selected from the published station index near the player, and at most two advisory aircraft are published.
 - This is source and installed-data behaviour; it has not been seen in the simulator.
 
@@ -896,10 +1019,10 @@ See [Architecture](docs/ARCHITECTURE.md), [Rust workspace](docs/RUST_WORKSPACE.m
 
 ## Detailed implementation and validation notes
 
-For current limitations and platform acceptance, see [Validation](docs/VALIDATION.md) and the [Roadmap](docs/ROADMAP.md). The detailed notes below retain the feature behavior, engineering limits and test history for readers who need them.
+For current limitations and platform acceptance, see [Validation](docs/VALIDATION.md) and the [Roadmap](docs/ROADMAP.md). The notes below cover platform behavior and implementation details. Dated test results are kept in the validation guide.
 
 <details>
-<summary>Platform behavior, detailed feature notes and validation history</summary>
+<summary>Platform behavior and implementation details</summary>
 
 Before IFR clearance, the ATC message controls and radio checks use the callsign reviewed in Planning, including a SimBrief import. A clearance request with an empty Planning draft receives a callsign-addressed “you have not filed a flight plan” response. An incomplete or invalid draft receives a refusal with the missing fields or validation error; a corrected valid plan is submitted automatically on the next clearance request. Filing the flight still happens when requesting clearance; an issued clearance prevents draft edits from changing the active radio identity. Drag the OpenATC AI title area to move the floating window. Initial and restored floating windows are fitted to a visible monitor, with recovery after display-layout changes.
 
@@ -944,7 +1067,7 @@ The experimental complete-flight consumer sends a runway-vacated pilot report on
 
 Nominal generated departure rolls require fresh airport weather and convert indicated rotation speed into TAS and runway ground speed at the selected runway's rotation height. Published elevations at both runway ends define a nominal slope, including displaced thresholds. Lineup connects continuously from the taxi hold, and rollout follows that same selected runway datum. Missing, conflicting or stale inputs reject the preparation.
 
-The production worker also prepares a continuous nominal arrival from the published threshold crossing through flare, rollout, runway exit and taxi to a compatible free stand. Candidate selection now checks that complete nominal arrival before accepting a procedure, trying the next bounded candidate if its landing or parking connection fails. This latest selection repair is not installed. Editable aircraft-family profiles control roundout height and touchdown sink rate. Threshold crossing remains airborne; it is not treated as touchdown. These profiles are nominal visual envelopes, not certified per-aircraft performance. Taxi-node heights and actual pavement slope still need native terrain placement. Background pilot readbacks use a `TFC · callsign` log badge rather than appearing as the player. Generated radio exchanges use the operator’s editable spoken callsign and the same flight number retained in their short TCAS identity. Nearby visual/TCAS publication now follows the player with configurable range and slot hysteresis; distant flights retain their movement state and engine separation observations. This display turnover does not generate replacement flights. The full protected airborne route, recovery paths, controller permissions, live gate ownership and continuous nearby-flight replenishment remain unfinished. These changes are installed for testing; source checks do not establish native visibility, audio or FPS acceptance.
+The production worker also prepares a continuous nominal arrival from the published threshold crossing through flare, rollout, runway exit and taxi to a compatible free stand. Candidate selection now checks that complete nominal arrival before accepting a procedure, trying the next bounded candidate if its landing or parking connection fails. Editable aircraft-family profiles control roundout height and touchdown sink rate. Threshold crossing remains airborne; it is not treated as touchdown. These profiles are nominal visual envelopes, not certified per-aircraft performance. Taxi-node heights and actual pavement slope still need native terrain placement. Background pilot readbacks use a `TFC · callsign` log badge rather than appearing as the player. Generated radio exchanges use the operator’s editable spoken callsign and the same flight number retained in their short TCAS identity. Nearby visual/TCAS publication now follows the player with configurable range and slot hysteresis; distant flights retain their movement state and engine separation observations. This display turnover does not generate replacement flights. The full protected airborne route, recovery paths, controller permissions, live gate ownership and continuous nearby-flight replenishment remain unfinished. These changes are installed for testing; source checks do not establish native visibility, audio or FPS acceptance.
 
 
 All voice actors share the controller engine’s LLM transport and reply-decoding pipeline. Editable TOML role instructions, shared framing in `prompts/interaction.toml`, and example phrases teach tone and behaviour; live facts and conversation history guide fresh replies. Aircraft permissions and confirmed action outcomes remain enforced by Rust. Crew conversation now has its own compact prompt and ordered user/assistant history, independent of the larger aircraft-control catalogue. Mixed requests are separated into current control proposals and exact conversational excerpts, so a sandwich, family remark or joke does not need its own programmed service. Current control interpretations are checked independently; disagreements require quoted current-request evidence. Range, role, freshness and simulator-acknowledgement checks still determine whether a proposed operation can proceed.
@@ -981,157 +1104,50 @@ Linux AI release builds use Ubuntu’s Vulkan development library, shader compil
 Windows AI packages obtain the x64 Vulkan loader from a pinned, checksum-verified LunarG runtime archive during CI. Both server executables receive startup linkage checks before packaging; runtime binaries are not stored in the source repository.
 
 Flatpak packaging uses a pre-rendered PNG tower icon and checks a small export/bundle fixture before packaging the real server, avoiding dependence on an SVG decoder on the build host.
-## Controller contract construction and clearance levels — 17 October 2026
-
-Checked flight assembly now has a controller-contract constructor using the selected SID/STAR/approach, retained IAS/weather references, actual taxi instructions and published station coverage. It refuses missing or mismatched weather, unknown runway resources, unavailable controllers and unrepresentable assigned flight levels. It constructs separate lineup, takeoff/initial SID, airborne, approach, landing/rollout and taxi permissions with full readbacks. Identical approach and taxi wording is retained within explicit spans. The initial SID clearance covers its intermediate procedural limits; those limits are not treated as separate altitude assignments. No complete production airborne flight is activated by this constructor alone.
-
-The joint planner can select standard flight levels inside each crossing's reachable physical envelope. Available levels propagate both forward and backward before a preferred level is chosen, so a narrow later band can start descent earlier. IAS, turn geometry and travel time are recomputed together. Below transition altitude the underlying physical constraints are retained; the approach clearance retains its published vertical restrictions. The constructor independently converts the chosen level back through the same pressure reference. Tests cover out-of-band selectors, missing grid levels, future restrictions and nonstandard weather.
-
-Station planning first narrows the global index to the two airports and area-control volumes intersecting the route bounds. Full segment coverage is still checked, including explicit combined duties. This avoids repeatedly scanning the global station index for each taxi segment. The complete assembly regression now uses the real contract constructor and drives those readbacks through the movement/controller loop to parking, including a cancelled-landing branch into the checked missed route. Full obstacle protection, distinct route networks, GA VFR and native acceptance remain open; generated traffic stays disabled by default.
-
-## Landing clearance through rollout — 17 October 2026
-
-Complete flight assembly requires an explicit Tower landing clearance before the flare. Its readback can cover the final landing segment and the complete contiguous rollout on the same protected runway, without another clearance at touchdown. Validation rejects spans that absorb taxi, a controller/frequency change, different wording, another runway permission or an incomplete rollout. Approach clearances cannot absorb this separate landing permission.
-
-The runway check includes the landing/rollout interval and is repeated at readback and before the relevant movement limit. An unexpected conflict withdraws the upcoming landing/rollout grants without stopping the current airborne leg. If no new landing clearance is received, the aircraft follows its checked missed route. Busy-radio cancellations retain their identity, and movement-worker publication carries revocations back even if newer telemetry says the conflict has cleared. The complete assembly/controller regression verifies one landing instruction through parking, invalid span rejection, and cancellation after readback followed by a missed approach, with no rollout after the withdrawal. Native acceptance remains open.
-
-## Generated departure conflict checks — 17 October 2026
-
-Lineup and takeoff planning now check approaching traffic over the planned runway movement time plus the editable clearance buffer. This extends the existing timed crossing check; a takeoff gate no longer consults wake alone. The controller rechecks before accepting the pilot readback. Movement and observation refreshes withdraw an accepted but unstarted takeoff and its initial-climb authority if a conflict appears, retain the cancellation reason while the radio is busy, and require a fresh clearance after the conflict clears. An already rolling aircraft is not stopped by this pre-roll gate. Wake and other traffic have separate editable hold/cancellation wording.
-
-The controller/movement regression places an arrival outside the fixed five-mile final radius but inside the configured movement-time protection. It verifies cancellation both at readback and after the grant, keeps the radio busy while the conflict clears, checks that the old takeoff/initial-climb permissions cannot restart the roll, then completes a fresh exchange and continues through parking. Wake regressions move the observed leader clear of the runway after liftoff, checking residual wake independently of continued runway occupation. These are source checks; production airborne preparation and native acceptance remain incomplete.
-
-## Installed scenery and airborne permission checks — 17 October 2026
-
-The production worker now calls the complete flight factory with installed grid MORA and enabled physical scenery meshes. The DSF reader supports plain and 7z-compressed tiles, scaled coordinate pools, physical triangle primitives and elevation rasters. It retains scenery-stack priority and checks the full line through intersecting triangles, including ridges between endpoints; missing mesh coverage remains unknown. Codec, tile, point, triangle, cache and worker limits are bounded. The decoder uses one thread inside the planning worker, with no simulator SDK calls. Its tests cover malformed records, pooled coordinate encodings, overlay/base priority, disabled packs, negative tile coordinates, tile boundaries, ridges and unknown gaps. The installed Nice base mesh and enabled custom scenery stack decode successfully.
-
-Static obstacle groundwork now retains DSF object definitions, placement, rotation and optional height, then reads the drawn OBJ8 triangle and line bounds. Library lookup retains all indexed regional, seasonal, ratio and fallback variants, including a taller alternative to a local object. Unsupported animation, terrain alignment, missing resources and exhausted resource budgets remain unresolved. Bounds checks include the aircraft's horizontal envelope. Ground-only polygon and line resources are classified from their actual file headers across every indexed library variant. A virtual .pol/.lin suffix alone cannot suppress an obstacle; a redirected object, missing file or unknown header remains unresolved. Local mesh resolution does not yet establish neighboring-tile coverage, polygon/facade/forest or road-network protection, so object-bearing low-level corridors remain withheld. The installed enabled-stack and synthetic placement/library checks pass; this is not production airborne or native simulator acceptance. See Laminar's [OBJ8 specification](https://developer.x-plane.com/article/obj8-file-format-specification/) and [library specification](https://developer.x-plane.com/article/library-library-txt-file-format-specification/).
-
-This is physical-mesh evidence. Low-level object, polygon and network obstacles remain unresolved and prevent production release. The latest installed Nice–Milan check constructs nine complete nominal flights and their controller/recovery joins, but releases zero flights because those obstacle checks remain incomplete. The factory is wired to the existing Tower-ready installation path for independently releasable flights; it does not use an accepting fixture callback. Generated traffic stays disabled by default. Scenery data comes from the user's installation and is not redistributed. See Laminar's [DSF format](https://developer.x-plane.com/article/dsf-file-format-specification/) and [DSF usage](https://developer.x-plane.com/article/dsf-usage-in-x-plane/).
-
-Airborne permissions now check proposed movement against a forecast of actual accepted scopes, speed changes and registered fallback holds. Continuous relative-motion checks test horizontal proximity during the interval with insufficient vertical separation, rather than comparing only snapshot endpoints. The editable conservative defaults are five nautical miles and 2,000 feet; these are simulation defaults, not a claim that all regional separation or wake rules are implemented. The forecast covers the proposed clearance scope and an additional planning interval, bounded at fifteen minutes. Unknown external speed or climb increases the prediction envelope; an unidentified provider target is kept separate from the player.
-
-The controller checks before an airborne or onward grant and again when its readback completes. Accepted but unstarted departures are also rechecked before movement; a new conflict removes takeoff and initial-SID authority, preserves the cancellation while radio is busy, and requires a fresh clearance after traffic clears. The controller regression covers crossing traffic beyond the runway monitor before, during and after takeoff readback, then completes a fresh exchange through parking. Wake expiry alone cannot release an obstructed departure path. Accepted landing clearances are also rechecked against airborne conflicts. The controller/movement regression covers both a runway occupant and nearby airborne traffic after readback, carries revocations through a busy radio and worker publication, and follows the checked missed route without rollout. Once recovery starts, delayed landing cancellations are discarded so they cannot tell an aircraft already going around to continue approach. Further airborne conflict resolution, regional wake/sequence rules and native acceptance remain open.
-
-After a contingent holding report, the controller can prepare the unchanged checked onward route, perform any required handoff, recheck the proposed exit against traffic, and accept a separate onward readback. It leaves at the holding fix, then continues through landing and parking. This automatic path is covered by the actual movement/radio-loop regression. It does not grant an automatic exit from a published missed-approach hold; that still needs a newly planned approach. Successful scene replacement clears old grants, pending radio state and rejoin ownership rather than reusing them for recycled traffic IDs.
-
-
-Terminal planning prefers less-used candidates within the configured catalogue budget, retaining the original candidate indices for controller and recovery metadata. A preferred candidate must still connect through landing and a free compatible stand; failures retry other candidates. This is procedure selection for the current airport pair, not complete independent destination coverage or GA VFR generation.
-
-## Airborne clearance-limit recoveries — 17 October 2026
-
-Production assembly now constructs recoveries at every airborne movement limit. Final-approach limits use the separately checked published missed variants. Climb, cruise and descent limits use a level racetrack aligned with the actual incoming path. The controller instruction and readback state the contingent geographic limit, magnetic inbound course, right turns, leg time, level and maximum IAS. The initial SID's contingent limit is included in the takeoff and whole-SID clearance. Holding geometry remains subject to independent protection; the movement engine also checks that the preceding segment provides enough distance to slow before entry. A recovery cannot silently change its cleared pattern or inherit a different limit's authority.
-
-The editable operations policy caps these controller-specified limit holds at 200 KIAS; published missed-approach holds retain their own restrictions. IAS is converted through the retained atmosphere and wind at the actual level, so high-altitude ground speed can exceed 300 knots without raising the indicated holding limit. Holds use 60-second legs through 14,000 feet and 90-second legs above, with bank capped at 25 degrees and the configured turn-rate limit. These are nominal movement envelopes, not aircraft-specific certified holding performance. See [FAA AIM 5-3-8](https://www.faa.gov/air_traffic/publications/atpubs/aim_html/chap5_section_3.html).
-
-The installed-data test now joins the actual Nice–Milan jet and turboprop nominal routes, published controller contracts, every clearance-limit hold and every final recovery into validated complete prepared flights. It also checks missing recoveries and mismatched holding instructions. Its accepting protection callback is a geometry fixture, not terrain or native simulator acceptance. Focused movement checks cover upstream braking, continued flight around the hold, excessive entry-speed rejection and altered-pattern rejection; a radio check covers one holding report without stale onward grants or retuning.
-
-A checked clearance-limit hold can now prepare an onward suffix of its original route. Geometry and future recovery paths remain unchanged while controller, holding, landing and taxi scopes and vacated reports are reindexed. The controller-loop regression uses this producer, completes a handoff/readback when the onward controller differs, then accepts a separate onward clearance and leaves the hold only at its fix before continuing to parking. It retains owner-invalidation and clock-reset checks. Published missed holds require a newly planned approach; this suffix does not turn a missed route backward or grant automatic onward movement.
-
-The en-route planner independently checks every solved curved cruise edge against known grid MORA and both endpoint pressure references. A higher local floor propagates back into the adjacent crossing constraints before the coupled speed/turn/level profile is solved again. Unknown cells, incompatible ceilings and nonconvergence reject the draft. This does not replace missing terminal corridor protection. Full production activation, distinct route networks, nearby replenishment, GA VFR and native traffic performance remain open; generated traffic stays disabled by default.
-
-## Complete flight assembly and recovery checks — 17 October 2026
-
-Production preparation now retains a complete nominal flight draft joining the actual departure surface, solved SID/en-route/STAR/approach, flare, runway exit and taxi route to a reserved parking stand. Releasing that draft requires an independent protection check for every airborne edge, the missed approach and holding circuit, and the flare. The final assembly also requires controller contracts and a checked recovery at every airborne limit before it can be installed. The production controller and all-boundary recovery providers are connected to the installed terrain checks, but unresolved low-level obstacles still prevent release in the installed fixture. These nominal drafts do not activate airborne traffic. Controller construction is described above.
-
-Checking the complete route exposed a taxi-in braking defect: a short turn required 14.8 metres to slow from 15 to 8 knots but provided only 4.8 metres. Surface planning now works backward from turns, clearance stops and parking to reduce upstream speed targets without moving taxi geometry or increasing a configured limit. A movement regression verifies braking and arrival at the stand. Installed Nice–Milan jet and turboprop geometry checks pass for the complete nominal join; their accepting fixture callback establishes geometry only, not terrain protection.
-
-Final recovery construction retains the remaining lateral final path through the MAP for an early missed approach. A late recovery may join only the first published missed leg ahead, with its climb reprofiled to the original next fix and level; every modified edge needs independent protection. It rejects backward/off-track joins, insufficient climb distance, invalid positions and entry heights above the published missed/hold limits. For higher early entries, the planner now re-solves each final boundary against the original published restrictions and constructs one explicit amended missed level when needed. That level appears in the approach instruction and full readback; an onward rejoin cannot silently drop it. The installed Nice–Milan jet/turboprop geometry check verifies every early, MAP and supported late-flare recovery boundary. Unknown protection or a conflicting published ceiling still rejects the flight. Published missed protection is not assumed to extend past the MAP: see [FAA AIM 5-4-21](https://www.faa.gov/Air_traffic/publications/atpubs/aim_html/chap5_section_4.html).
-
-A complete assembly/controller regression now drives a checked route and its recoveries through actual controller exchanges, readbacks, movement permissions and parking. This is source integration evidence, not a complete production factory or simulator acceptance. Distinct route networks, continuous nearby coverage, GA VFR, complete operational coordination and native performance remain open. Generated traffic remains disabled by default.
-
-
-## Bidirectional traffic and sector coordination — 17 October 2026
-
-Preparation now divides the configured aircraft count between the selected airport pair and its return direction. Each aircraft retains its own departure airport, runway, taxi orders, model-compatible identity and terminal candidate index. Initial occupied stands remain owned during the atomic scene merge; IDs and callsigns cannot be duplicated. A reverse arrival may try a bounded same-flow parallel runway if the original runway has no complete landing-to-parking route. That step initially covered one airport pair; wider route acceptance, replenishment and GA VFR remain unfinished.
-
-Published course-to-intercept legs now retain a bank-limited prescribed turn before resolving the intercept. The following course-to-fix distance is separate from the intercept's own distance limit. Solved virtual crossings are retained through controller construction. The joint IAS/altitude solver keeps a feasible discrete level between iterations. Small direct holding entries are protected separately; parallel and teardrop entries remain unsupported. A typed, explicitly cleared missed-level amendment can change its named holding fix and the coincident prefix crossing; a scalar floor cannot override published ceilings, and unrelated restrictions remain unchanged.
-
-Controller loading now preserves lower and upper sectors sharing a facility ID within the selected navdata file, while retaining scenery priority between files. Coordinated enroute contracts retain actual published receivers and contact/readback/check-in exchanges within a route movement. A holding supervisor can retain its frequency with explicit neighboring-sector coordination; missing coverage or radio reception still refuses construction. Queued airborne contracts no longer intercept earlier ground readbacks. These are source changes under integrated two-direction testing, not simulator acceptance or completion of generated traffic. Production obstacle checks and the default-disabled generated-traffic setting remain in force.
-
-
-### Integrated flight and sector checks — 18 October 2026
-
-The installed-data controller/runtime fixture now completes both Nice–Milan and Milan–Nice through parking. It exercises real published stations and terminal inputs, readback-gated movement, sector contacts, landing and taxi-in. This fixture explicitly uses geometry protection callbacks; it does not establish production obstacle release, simulator visibility/audio/FPS, or Windows/macOS acceptance. The four-aircraft airline/regional runtime fixture also passes through every required phase to parking. It exposed and verified repairs for planned stand footprints and runway-crossing endpoints that left the tail inside a holding line.
-
-Long movements now gain intermediate clearance limits on their existing solved path at assignable pressure levels. Original published endpoint restrictions remain intact; each added limit still needs a separately protected fallback. Initial SID and grouped clearance durations fit the complete forecast budget rather than truncating conflict prediction. A slower onward route can be accepted after braking in the holding circuit, with another circuit if the clearance arrives too late. Sector coverage checks follow the same great-circle interpolation as movement, including interior crossings and the dateline. Shared polygon edges are closed within numerical roundoff; genuine horizontal and vertical gaps still reject.
-
-Arrival planning now retains committed stand footprints as well as names and rejects later taxi-in routes that cross them. Grounded-player observations are included in preparation. Unknown aircraft dimensions retain the conservative footprint, so a route may be refused if no checked path remains. Native acceptance, wider route networks, continuous coverage, GA VFR and complete obstacle support are still open. Published controller data is described in [Laminar’s atc.dat specification](https://developer.x-plane.com/article/atc-dat/); controller transfer and coordination rules are described in [FAA general control procedures](https://www.faa.gov/Air_Traffic/publications/atpubs/atc_html/chap2_section_1.html).
-
-Preparation now observes fresh simulator weather while the worker runs. Unchanged pressure, temperature, wind, variation and airport coordinates can revalidate the same plan; changed conditions or a missing/stale observation refuse further preparation. Taxi-in samples use the same bounded equal-speed merging as taxi-out, preserving all path points, resource ownership and clearance boundaries.
-
-Heading-to-intercept and course-to-intercept legs now differ in wind: the heading leg retains drift and recomputes its intercept during the joint altitude/airspeed solve. Generated aircraft also retain planning wind with their movement metadata so body heading can differ from ground track in the renderer; TCAS and surveillance keep ground track. Checked onward route suffixes retain the corresponding wind entries. Native visual confirmation remains outstanding.
-
-### Additional traffic airport pairs — 18 October 2026
-
-The production preparation path now discovers a bounded set of additional installed airports using published controllers, hub preferences and model-compatible fleets. The default is four airports, with a 16-candidate search within 750 NM; the planned endpoints count toward that limit. Each scheduled direction needs its own supported published terminal connection and compatible fleet. Discovery prefers two-way coverage within the airport budget, then retains valid one-way alternatives without inventing a return route. Category allocation prefers eligible two-way pairs and uses one-way alternatives where that coverage is unavailable. Discovery requests actual simulator weather before building flights, and every pair shares the configured aircraft counts and the same global 63-aircraft limit. Later pairs account for earlier departure stands and committed arrival footprints.
-
-The installed worker/publisher test now retains nominal flights from at least three airports while receiving fresh weather updates. A stronger check now constructs controller and recovery contracts for seven nominal flights across Nice, Milan and Marseille. This remains geometry/controller acceptance with explicit test protection callbacks. Unresolved production scenery still prevents release; generated traffic remains disabled by default. Continuous nearby replenishment, full GA VFR, performance and native acceptance are unfinished.
-
-Arrival selection now checks that the landing path can join the first published missed-approach leg after the threshold. An incompatible candidate is refused before earlier final recoveries are built; the planner tries another supported candidate rather than turning back or skipping a leg. Landing searches are reused only when threshold, descent angle, airspeed, aircraft, weather and stand reservations are unchanged within one request. Committed arrival footprints retain the full planned tail/wing resources across airport pairs. Aircraft without a released complete flight remain parked instead of receiving departure taxi or pushback clearances.
-
-### Multi-airport movement validation
-
-Seven checked airline/regional flights now complete the controller and movement loop through parking across Nice, Milan and Marseille. Arrival planning prevents later parking assignments from obstructing earlier taxi-in corridors, while preserving stand ownership and shared taxiway use. Aircraft without a released complete flight remain stationary. Nearby model-compatible pairs with fresh simulator weather can prepare independently of unavailable distant weather; stale or missing endpoints remain ineligible. Fleet selection checks compatible stand equipment before weighting aircraft choices.
-
-These are source and installed-data controller checks. Production scenery obstacle release, continuous nearby replenishment, GA VFR and native visibility/audio/performance acceptance remain incomplete. Generated traffic remains disabled by default.
-
-Traffic airport discovery can also start with an unfiled player plan. It uses nearby installed controlled airports and leaves the player's planning fields unchanged. The installed-data worker/controller fixture completes three flights through parking in this mode. Generated runway retries stay within the wind-compatible flow and retain the same published-procedure and pavement checks. Shared SID/STAR boundaries can omit an extra cruise leg when their level, course, speed and weather constraints agree; conflicting joins still reject.
-
-Ramp metadata now retains operator ICAO preferences. Generated departures and arrivals prefer the operating airline and service category, then the closest suitable size; hangars are a last resort and miscellaneous player start locations are excluded. An operation of `none` can still accommodate moving aircraft. Equipment, physical size, occupied stands and committed surface corridors remain mandatory checks. This follows the distinction between preferences and physical fit in [Laminar's ramp-start guide](https://developer.x-plane.com/article/guide-to-ramp-starts/).
-
-### Cargo and GA integration limits — 18 October 2026
-
-Heading-to-altitude procedure legs now retain their prescribed heading with wind drift, rather than treating heading as ground course. A real Memphis-to-Louisville terminal candidate check passes. Manual-terminated procedure legs still require a controller amendment and remain unsupported by the automatic route join.
-
-The broader installed-data cargo/GA lifecycle check currently fails: it does not produce complete flights for every required category. The initial Memphis surface check exposed passenger, cargo and GA stands outside apt.dat pavement. The verified draped apron sources and published-route alternatives described below now address that ground-routing failure. Pavement and aircraft-fit checks remain enforced. Production obstacle release, continuous traffic replenishment and GA VFR remain unfinished; generated traffic stays disabled by default.
-
-Draped scenery polygons retain their actual rings, holes and coordinate layout for physical surface verification. Verified airport-owned asphalt/concrete now reaches the shared departure/arrival airport loader; the broader mixed flight lifecycle still remains incomplete.
-
-### Physical apron integration checkpoint — 18 October 2026
-
-The generated airport loader now retains verified, airport-owned draped pavement as well as apt.dat pavement. It preserves holes and curve controls and conservatively rejects surfaces affected by higher-priority polygon exclusions. The Memphis installed-data coverage check improves from zero to 271 covered stand centers out of 279. At the initial apron checkpoint, connector/turn checks still refused complete passenger, cargo and GA routes; the later published-route alternative check below resolves that demonstrated blockage. Scenery coverage now follows runway, taxi-node and parking extents across up to four tiles with an aircraft/connector margin. Ownership, exclusion and bounded-input regressions pass. Generated traffic remains disabled by default.
-
-Memphis departure routing now passes the installed passenger/cargo/GA holding-point check: 19 B738, 53 B752 and 10 C172 stands have verified routes to runway 36L. When a sampled connector leaves physical pavement, the planner can try up to four alternatives through existing published non-runway edges. Ambiguous matches and runway links are never removed, and every alternative retains the original geometry and clearance checks. Individual unsuitable stands still reject. This resolves the demonstrated ground-route blockage; full mixed flight lifecycle and production/native acceptance remain incomplete.
-
-FACF altitude code J now preserves its published minimum independently of its glide-slope intercept reference. Different values no longer cause an unsupported-descriptor refusal or become an invented altitude window. Pressure references remain mandatory, and final approach geometry and crossing restrictions still apply.
-
-For a missed approach beginning with a course/heading-to-altitude leg, a late runway recovery now gets a separate complete draft from its actual position and height. It preserves the published termination altitude and hold, retains the original MAP identity and still requires independent protection. Fixed legs retain their existing forward-join guard. The seven-flight source fixture continues to pass; the broader mixed test now retains two nominal flights but still fails origin/category coverage and production scenery release.
-
-Same-flow runway selection now considers coverage of the requested traffic categories before complete nominal count, while retaining its existing bounded search and all weather/geometry checks. It no longer stops with only airline/regional drafts when cargo or GA was also requested. Unknown or ambiguous operator categories do not count toward coverage. The mixed installed-data test still fails reverse/third-origin and category acceptance.
-
-### Published manual-termination arrivals — 18 October 2026
-
-A STAR whose published route ends at a manual termination is now usable instead of being discarded. The computable published legs are kept with all their restrictions, and the transition itself is retained as typed provenance: procedure, transition, terminator and manual fix. A terminator that is not last is still refused, because computable legs after it would otherwise be dropped without notice.
-
-Continuing past that point requires an explicit controller amendment. The planner directs the flight to the published approach entry, solves that bridge with actual wind, and protects it with the same terrain, MORA and separation checks as any other leg. The approach clearance announces the amendment, names the amended target in both the instruction and the readback, and carries the directive with it. The flown path must reach the target it was cleared to, and a flight planned with an amendment cannot be installed without that directive present. Every published crossing restriction stays in force across the bridge, because the amendment changes the lateral path only.
-
-Fully published arrivals are preferred; an amended candidate is only used where no published route reaches the approach entry. That matters in practice: Memphis publishes 25 STAR variants ending in a manual transition, and reverse arrivals into KMEM runway 36L now produce candidates where they previously produced none. Runways without a supported approach or published recovery are still refused, so the amendment does not mask those gaps. A pre-existing Nice–Milan installed-data check fails independently of this change.
-
-A short route whose departure ends exactly where the arrival begins is no longer refused just because the two airports report different weather. The join now compares the intended indicated speed, and still refuses a real speed change that would need an upstream deceleration plan. Previously two airports could effectively never share a pressure setting, so these routes could not connect at all.
-
-Traffic that has finished its flights is now topped back up. A scene is only rebuilt once every aircraft has finished, parked or turned around: anything still flying, taxiing or awaiting a clearance blocks the rebuild, because publishing a scene replaces the whole traffic runtime and would otherwise remove aircraft mid-flight. The airport survey is reused, so only the aircraft themselves are prepared again. Following the player to new airports, and seeding traffic that is already airborne, remain open.
-
-A supplied role-prompt catalogue is now checked for completeness. If a `prompts.toml` is present but leaves out a role, the engine names the missing roles and stops rather than starting with a partial set and quietly falling back. The bundled catalogue and the guidance keys the engine actually reads are kept in step by a test, so a prompt that exists but is never used, or one that is read but missing, is caught instead of drifting.
-
-Traffic reported from a real flight is now acted on. Movement no longer depends on the simulator's nearby-traffic feed, so aircraft across the whole airport keep moving instead of only those close to the player; a generated follower queued behind the hold-short line is no longer counted as runway occupancy for the aircraft ahead, which had been deadlocking the first departure; scenes seed some aircraft already on approach, some taxiing and the rest at the gate with staggered dwells instead of everyone starting up together; and a vacate instruction now requires the aircraft to be on the planned destination runway and names the end matching its direction of travel. Transponder reminders are bounded to two calls per mismatch.
-
-Generated traffic now passes the production obstacle gate for the first time. Flights are released by the real gate rather than only by test fixtures: the mixed cargo/GA scene releases a departure and the Nice/Milan seven-flight scene releases a departure, each having passed terrain, obstacle, corridor-protection, controller and readback checks. Nothing was cleared to achieve this; every remaining refusal comes from a checked intersection or an unresolved scenery class.
-
-Reaching that needed four corrections. Object-bearing tiles were being treated as unresolved as a blanket rule even when every placement loaded, which no airport could ever satisfy; that was replaced by the precise rule that a tile resolves when its placements resolve and stays unresolved when any placement fails. Road and rail chains were being checked against an overlay's empty terrain mesh instead of the base mesh beneath it. Building and forest heights, which are published above ground, were being added to the terrain a second time. And forests were tested as bounding boxes, so a corridor passing through a concave gap or a hole was refused along with one crossing the trees; forests are now tested against their real polygon, with holes clear and uncertain geometry still refusing.
-
-Forest protection now reads the definitions ships actually use. X-Plane 12 forests are usually built from 3-D tree geometry rather than the older tree-height commands, the definition files are larger than the simple quad format, and their fields are tab-separated. Heights therefore come from the vertical span of each tree's own geometry, and the read limit is 64 MB. This took unresolved forest placements in the Memphis cargo fixture from 18,738 to zero.
-
-Object loading no longer refuses a building merely because it declares a material finish. Shading, specular, transparency and export-name directives cannot move geometry, so they are ignored, while anything that can change position is still refused. The per-tile cap on distinct object resources also rose from 256 to 4096, which had been rejecting hundreds of placements per airport tile; memory remains bounded by the existing 32 MB geometry budget. Together these resolved about nine thousand placements.
-
-Buildings and forests are now checked as real obstacles instead of making a whole scenery tile unusable. A facade is recognised from its definition file, its footprint rings are kept, and its published parameter is used as the building height. A forest's heights come from the tallest tree its definition publishes, since the polygon parameter is a density rather than a height. Both become obstacle boxes that flight paths are checked against, and shapes that cannot be resolved stay unresolved rather than being assumed clear. Forest definitions are read once per tile because they are referenced many times over.
-
-Road, rail and water networks remain unresolved on purpose. Their points carry elevations, so a section above the terrain is a bridge and must be reported; resolving that needs the junction offset, the 32-bit pool rules and a terrain comparison, none of which are handled yet. Leaving them unresolved refuses release rather than clearing a bridge.
-
-A facade or wall can share its header with an apron, and pavement detection previously inspected only that header, so vertical scenery was being treated as flat ground an aircraft could fly over. Ground-level detection now also checks that a polygon carries no vertical geometry, so walls refuse as obstacles instead of being assumed to be ground. Extracting the actual wall footprint and height is still outstanding.
-
-Untwowered fields now carry advisory traffic. A field qualifies only when it publishes a CTAF or UNICOM frequency and no Tower service, so an advisory aircraft can never appear where a controlled clearance is required. Its circuit is a right-hand pattern: downwind on the right of the runway flown against the landing direction, base across to the extended centreline, final on the runway heading and a landing roll on the published runway. Each leg carries one self-announced call, and no wording contains a clearance.
-
-The advisory procedure is the authority for that traffic rather than a controller. The movement world grants the segments of the admitted route and refuses a taxi, a runway entry or any other surface movement outside the published pattern, so the controlled-clearance path is not reachable from an advisory route. The pattern repeats from the exact point the previous circuit ended, and a runway held by the player or another aircraft at the final call produces a go-around instead of a landing.
+### Traffic implementation
+
+Complete-flight planning joins departure taxi and takeoff, published SID/en-route/
+STAR/approach legs, flare, rollout, runway exit and taxi to a compatible stand.
+Published crossing restrictions remain in force. Runway selection considers the
+requested aircraft categories and requires a workable landing exit and parking
+connection. Manual-termination arrivals need an explicit protected controller
+amendment to the published approach entry.
+
+Every released route must pass installed terrain and obstacle checks. The worker
+reads DSF mesh, object, facade, forest and network data, preserving scenery priority,
+polygon holes and neighbouring-tile coverage. Missing or unsupported scenery stays
+unresolved. Vegetation uses conservative area bounds; the version 2 cache retains
+clipped terrain maxima so unrelated triangle vertices cannot inflate those bounds.
+The renderer applies terrain placement separately from the worker's nominal path.
+
+Movement requires the appropriate controller clearance and readback. Taxi limits,
+runway crossings, takeoff, airborne scopes, approach and landing keep separate
+authority. Traffic is rechecked before a proposed airborne grant, after readback
+and before an accepted but unstarted departure moves. A later conflict can revoke
+permission and require a fresh exchange. Unpublished aircraft release their live
+stand and surface ownership.
+
+Airborne clearance limits have protected fallback holds; final limits use checked
+missed-approach variants. Generated onward routing requires a separate traffic
+check and readback, then leaves at the holding fix. The planner retains published
+levels, including an explicit restriction on an immediately repeated holding fix.
+Unknown levels, unsupported joins or unprotected paths are refused. These are
+nominal simulation envelopes, not certified aircraft holding performance.
+
+The static apron can publish before full-flight planning and retain its identities
+when the full scene arrives. Ground-only routes have their own taxi/radio loop.
+A separate local Tower layer can add a repeating GA circuit and prepared departures
+when the network releases little traffic; it uses published frequencies, spoken
+clearances, readbacks and the same scenery checks. Its spare departure pool is
+finite, so continuous replenishment remains unfinished.
+
+Untowered traffic requires a published CTAF/UNICOM frequency and no Tower service.
+It announces its position and intentions without issuing controller clearances.
+An occupied runway at final causes a go-around. Source tests cover circuits,
+straight-in arrivals, departures and cross-country calls; full mixed-flight and
+native acceptance remain open.
+
+See [validation](docs/VALIDATION.md) for current test results and earlier engineering
+checks, and the [roadmap](docs/ROADMAP.md) for the remaining traffic scope.
 
 </details>

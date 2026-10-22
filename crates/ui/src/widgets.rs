@@ -1,5 +1,15 @@
 //! Shared UI controls, typography, icons and branding.
 
+// Layout tests compare exact fixture coordinates.
+#![allow(clippy::float_cmp)]
+// Layout limits bound the numeric casts below.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+
 /// Accent cyan, muted grey, warning amber.
 pub const ACCENT: [f32; 4] = [0.31, 0.79, 0.94, 1.0];
 /// Muted grey for secondary text.

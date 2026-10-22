@@ -297,8 +297,8 @@ fn installed_parallel_runway_route_names_actual_first_hold() {
         })
         .unwrap();
     let telemetry = Telemetry {
-        latitude: 33.940738,
-        longitude: -118.383234,
+        latitude: 33.940_738,
+        longitude: -118.383_234,
         on_ground: true,
         position_valid: true,
         ..Default::default()
@@ -308,17 +308,17 @@ fn installed_parallel_runway_route_names_actual_first_hold() {
     assert_eq!(route.hold_short_runway, "25R");
     let end = route.points.last().unwrap();
     let holding = Telemetry {
-        latitude: airport.reference_latitude + end.north / 111320.0,
+        latitude: airport.reference_latitude + end.north / 111_320.0,
         longitude: airport.reference_longitude
-            + end.east / (111320.0 * airport.reference_latitude.to_radians().cos()),
+            + end.east / (111_320.0 * airport.reference_latitude.to_radians().cos()),
         ..telemetry
     };
     let cross =
         openatc_core::airport::calculate_crossing_route(&airport, &holding, "25R", 'C').unwrap();
     println!("cross={:?}", cross.points);
     let reported = Telemetry {
-        latitude: 33.938285,
-        longitude: -118.383085,
+        latitude: 33.938_285,
+        longitude: -118.383_085,
         ground_speed_knots: 8.0,
         ..holding.clone()
     };
@@ -328,8 +328,8 @@ fn installed_parallel_runway_route_names_actual_first_hold() {
     let reported_route = calculate_taxi_route(&airport, &reported, "25L", false, 'C').unwrap();
     assert_eq!(reported_route.hold_short_runway, "25L");
     let actual_hold = Telemetry {
-        latitude: 33.938318,
-        longitude: -118.383084,
+        latitude: 33.938_318,
+        longitude: -118.383_084,
         ground_speed_knots: 0.19,
         ..reported
     };
@@ -346,9 +346,9 @@ fn installed_parallel_runway_route_names_actual_first_hold() {
 
     let end = cross.points.last().unwrap();
     let clear = Telemetry {
-        latitude: airport.reference_latitude + end.north / 111320.0,
+        latitude: airport.reference_latitude + end.north / 111_320.0,
         longitude: airport.reference_longitude
-            + end.east / (111320.0 * airport.reference_latitude.to_radians().cos()),
+            + end.east / (111_320.0 * airport.reference_latitude.to_radians().cos()),
         ..holding
     };
     let onward = calculate_taxi_route(&airport, &clear, "25L", false, 'C').unwrap();
@@ -455,7 +455,7 @@ fn installed_klax_identifies_reported_aircraft_positions() {
             std::fs::read_to_string(p).map_err(|e| e.to_string())
         })
         .unwrap();
-    for (latitude, longitude) in [(33.940528, -118.383405), (33.938282, -118.383087)] {
+    for (latitude, longitude) in [(33.940_528, -118.383_405), (33.938_282, -118.383_087)] {
         let telemetry = Telemetry {
             latitude,
             longitude,
@@ -506,8 +506,8 @@ fn displayed_fallback_hold_circle_is_a_reachable_clearance_limit() {
     let marker = holding_marker_position(&airport, &route.points).unwrap();
     assert!(marker.north.abs() > 120.0);
     let telemetry = Telemetry {
-        latitude: marker.north / 111320.0,
-        longitude: marker.east / 111320.0,
+        latitude: marker.north / 111_320.0,
+        longitude: marker.east / 111_320.0,
         position_valid: true,
         on_ground: true,
         ..Default::default()
@@ -517,7 +517,7 @@ fn displayed_fallback_hold_circle_is_a_reachable_clearance_limit() {
         &airport,
         &route,
         &Telemetry {
-            latitude: -800.0 / 111320.0,
+            latitude: -800.0 / 111_320.0,
             ..telemetry
         }
     ));

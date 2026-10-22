@@ -1,15 +1,43 @@
 //! Static OBJ8 geometry used by the worker's obstacle check.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+#[allow(unused_imports)]
+use std::fmt::Write as _;
 use std::{io::Read, path::Path};
 
-#[derive(Clone, Copy, Debug)]
+/// A box in the local metre frame of one scenery object.
+///
+/// The coordinates are tile-local metres, so single precision keeps a fraction of a
+/// millimetre and halves the memory a dense tile needs.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub(super) struct Bounds {
-    pub low: [f64; 3],
-    pub high: [f64; 3],
+    pub low: [f32; 3],
+    pub high: [f32; 3],
+}
+
+/// Build a box from the parser's double precision values.
+fn bound(low: [f64; 3], high: [f64; 3]) -> Bounds {
+    Bounds {
+        low: [
+            super::narrow(true, low[0]),
+            super::narrow(true, low[1]),
+            super::narrow(true, low[2]),
+        ],
+        high: [
+            super::narrow(false, high[0]),
+            super::narrow(false, high[1]),
+            super::narrow(false, high[2]),
+        ],
+    }
 }
 
 pub(super) fn load(path: &Path) -> Result<Vec<Bounds>, String> {
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
+    super::cache::open_file(path)
         .map_err(|e| e.to_string())?
         .take(32 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)
@@ -23,6 +51,7 @@ pub(super) fn load(path: &Path) -> Result<Vec<Bounds>, String> {
     parse(&String::from_utf8_lossy(&bytes))
 }
 
+#[allow(clippy::items_after_statements)]
 fn parse(text: &str) -> Result<Vec<Bounds>, String> {
     let mut lines = text
         .lines()
@@ -59,7 +88,9 @@ fn parse(text: &str) -> Result<Vec<Bounds>, String> {
             // ANIM_trans publishes start and end offsets; ANIM_trans_key publishes one position
             // per key. Both are in object metres.
             let positions = if command == "ANIM_trans" {
-                values.get(..6).map(|values| vec![&values[..3], &values[3..6]])
+                values
+                    .get(..6)
+                    .map(|values| vec![&values[..3], &values[3..6]])
             } else if command == "ANIM_trans_key" {
                 values.get(1..4).map(|values| vec![&values[..3]])
             } else {
@@ -67,8 +98,13 @@ fn parse(text: &str) -> Result<Vec<Bounds>, String> {
             };
             for position in positions.into_iter().flatten() {
                 if position.iter().all(|value| value.is_finite()) {
-                    translation = translation
-                        .max(position.iter().map(|value| value * value).sum::<f64>().sqrt());
+                    translation = translation.max(
+                        position
+                            .iter()
+                            .map(|value| value * value)
+                            .sum::<f64>()
+                            .sqrt(),
+                    );
                 }
             }
             continue;
@@ -92,7 +128,7 @@ fn parse(text: &str) -> Result<Vec<Bounds>, String> {
                 | "smoke_black"
                 | "smoke_white"
                 | "EXPORT"
-                | "EXPORT_EXCLUDE" 
+                | "EXPORT_EXCLUDE"
                 | "EXPORT_EXTEND"
                 | "SHADOW"
                 | "SHADOW_BLUR"
@@ -134,7 +170,7 @@ fn parse(text: &str) -> Result<Vec<Bounds>, String> {
                 let values = line
                     .split_whitespace()
                     .skip(1)
-                    .map(|value| value.parse::<f64>())
+                    .map(str::parse::<f64>)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|_| "Invalid OBJ8 coordinate")?;
                 let expected = if command == "VT" { 8 } else { 6 };
@@ -195,7 +231,7 @@ fn parse(text: &str) -> Result<Vec<Bounds>, String> {
                             high[axis] = high[axis].max(point[axis]);
                         }
                     }
-                    bounds.push(Bounds { low, high });
+                    bounds.push(bound(low, high));
                 }
             }
             _ if command.starts_with("ATTR_")
@@ -240,14 +276,12 @@ fn parse(text: &str) -> Result<Vec<Bounds>, String> {
         if !radius.is_finite() || radius > 100_000.0 {
             return Err("OBJ8 animation exceeds its shape budget".into());
         }
-        return Ok(vec![Bounds {
-            low: [-radius; 3],
-            high: [radius; 3],
-        }]);
+        return Ok(vec![bound([-radius; 3], [radius; 3])]);
     }
     if tilted {
         for bound in &mut bounds {
-            let height = bound.high[1] - bound.low[1];
+            let height = f64::from(bound.high[1]) - f64::from(bound.low[1]);
+            let height = height as f32;
             bound.low[0] -= height;
             bound.high[0] += height;
             bound.low[2] -= height;
@@ -264,16 +298,17 @@ fn parse(text: &str) -> Result<Vec<Bounds>, String> {
         let mut high = [f64::NEG_INFINITY; 3];
         for bound in &bounds {
             for axis in 0..3 {
-                low[axis] = low[axis].min(bound.low[axis]);
-                high[axis] = high[axis].max(bound.high[axis]);
+                low[axis] = low[axis].min(f64::from(bound.low[axis]));
+                high[axis] = high[axis].max(f64::from(bound.high[axis]));
             }
         }
-        bounds = vec![Bounds { low, high }];
+        bounds = vec![bound(low, high)];
     }
     Ok(bounds)
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     const OBJECT: &str = "I\n800\nOBJ\nPOINT_COUNTS 4 0 0 3\nVT 0 0 0 0 1 0 0 0\nVT 2 12 0 0 1 0 0 0\nVT 0 0 3 0 1 0 0 0\nVT 900 900 900 0 1 0 0 0\nIDX 0\nIDX 1\nIDX 2\nTRIS 0 3\n";
@@ -295,13 +330,10 @@ mod tests {
         let animated = parse(&format!("{OBJECT}ANIM_rotate 0 1 0 0 90 0 1 sim/test\n")).unwrap();
         assert_eq!(animated.len(), 1);
         let reach = 900.0 * 3.0_f64.sqrt();
-        assert!(animated[0].low[0] <= -3.0 * reach);
-        assert!(animated[0].high[0] >= 3.0 * reach);
+        assert!(f64::from(animated[0].low[0]) <= -3.0 * reach);
+        assert!(f64::from(animated[0].high[0]) >= 3.0 * reach);
         // A published translation adds to that envelope rather than being discarded.
-        let moving = parse(&format!(
-            "{OBJECT}ANIM_trans 0 0 0 5000 0 0 0 0 none\n"
-        ))
-        .unwrap();
+        let moving = parse(&format!("{OBJECT}ANIM_trans 0 0 0 5000 0 0 0 0 none\n")).unwrap();
         assert!(moving[0].high[0] >= 5000.0);
         for invalid in [
             OBJECT.replace("IDX 2", "IDX 9"),
@@ -325,9 +357,9 @@ mod tests {
         let mut text = format!("I\n800\nOBJ\nPOINT_COUNTS 2 0 0 {}\n", triangles * 3);
         text.push_str("VT 0 0 0 0 1 0 0 0\nVT 4 9 1 0 1 0 0 0\n");
         for index in 0..triangles * 3 {
-            text.push_str(&format!("IDX {}\n", index % 2));
+            writeln!(text, "IDX {}", index % 2).unwrap();
         }
-        text.push_str(&format!("TRIS 0 {}\n", triangles * 3));
+        writeln!(text, "TRIS 0 {}", triangles * 3).unwrap();
         let geometry = parse(&text).unwrap();
         assert_eq!(geometry.len(), 1);
         assert_eq!(geometry[0].low, [0.0, 0.0, 0.0]);

@@ -134,6 +134,8 @@ pub struct Telemetry {
     pub paused: bool,
     /// Elapsed simulator flight time; absent from older clients.
     pub simulation_seconds: Option<f64>,
+    /// Simulator UTC seconds since midnight, used for expected further clearance times.
+    pub zulu_seconds: Option<f64>,
     /// Local radio playback, microphone or a pending crew radio exchange.
     pub radio_busy: bool,
     /// Latest transmission observed by the simulator audio queue.
@@ -180,6 +182,7 @@ impl Default for Telemetry {
             engines_running: false,
             paused: false,
             simulation_seconds: None,
+            zulu_seconds: None,
             radio_busy: false,
             radio_sequence_seen: None,
             vertical_speed_fpm: 0.0,
@@ -251,7 +254,7 @@ pub struct RouteFix {
 }
 
 fn default_callsign() -> String {
-    "VH-BIL".to_owned()
+    String::new()
 }
 
 fn default_departure() -> String {
@@ -805,6 +808,9 @@ pub struct State {
     /// Generated models ready for simulator rendering; observations remain in telemetry.
     #[serde(default)]
     pub generated_traffic: Vec<GeneratedTraffic>,
+    /// Simulator sample clock and session identity for buffered rendering.
+    #[serde(default)]
+    pub generated_traffic_clock: Option<(u64, f64)>,
     /// Validated per-instance animation channel mapping supplied by the engine.
     #[serde(default)]
     pub generated_animation_channels:
@@ -905,12 +911,13 @@ impl Default for State {
             weather_airports: Vec::new(),
             control_radio: Radio::Com1,
             generated_traffic: Vec::new(),
-            generated_animation_channels: Default::default(),
+            generated_traffic_clock: None,
+            generated_animation_channels: std::collections::BTreeMap::default(),
             generated_traffic_diagnostics: Vec::new(),
             traffic_call: None,
             departure_wake_seconds: 0.0,
             arrival_wake_conflict: false,
-            mission: Default::default(),
+            mission: crate::missions::Status::default(),
             atc_offer: None,
             emergency_declared: false,
             crew_actions: Vec::new(),

@@ -1,4 +1,12 @@
 //! Nominal published missed approach from the MAP to its stated holding fix.
+
+#![allow(clippy::default_trait_access)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use openatc_core::{
     arrival::distance_nm,
     traffic::{
@@ -119,7 +127,7 @@ impl LimitHold {
             && self.inbound_true_degrees.is_finite()
             && (0.0..360.0).contains(&self.inbound_true_degrees)
             && (40.0..=200.0).contains(&self.indicated_knots)
-            && self.reference.indicated_knots == self.indicated_knots
+            && (self.reference.indicated_knots - self.indicated_knots).abs() <= f64::EPSILON
             && self
                 .reference
                 .ground_knots(self.position.altitude_feet, self.inbound_true_degrees)
@@ -143,6 +151,7 @@ impl LimitHold {
 #[derive(Clone)]
 pub(super) struct Draft {
     /// Published MAP provenance, retained when a late path starts farther along the runway.
+    #[allow(dead_code)]
     pub map: Waypoint,
     pub holding_fix: String,
     pub holding_feet: f64,
@@ -399,6 +408,46 @@ pub(super) fn final_variants(
     Ok((variants, instruction))
 }
 
+/// Reuse an explicit crossing level only when the hold immediately repeats the same published fix.
+/// A bare ceiling or a restriction at another fix cannot supply the holding floor.
+fn holding_restriction(
+    hold: &openatc_core::traffic::procedures::Leg,
+    prefix: &[openatc_core::traffic::procedures::Leg],
+) -> Option<openatc_core::traffic::procedures::Leg> {
+    if hold.altitude_one.is_some() {
+        return Some(hold.clone());
+    }
+    if hold.altitude_two.is_some()
+        || hold.altitude_one_is_flight_level.is_some()
+        || hold.altitude_two_is_flight_level.is_some()
+        || !hold.altitude_description.trim().is_empty()
+    {
+        return None;
+    }
+    let incoming = prefix.last()?;
+    if !matches!(incoming.terminator.as_str(), "IF" | "TF" | "DF" | "CF")
+        || incoming.identifier.is_empty()
+        || incoming.identifier != hold.identifier
+        || incoming.region != hold.region
+        || incoming.section != hold.section
+        || incoming.subsection != hold.subsection
+        || incoming.altitude_one.is_none()
+        || incoming.altitude_one_is_flight_level.is_none()
+        || incoming.altitude_two.is_some()
+        || incoming.altitude_two_is_flight_level.is_some()
+        || !matches!(incoming.altitude_description.trim(), "" | "+")
+    {
+        return None;
+    }
+    let mut resolved = hold.clone();
+    resolved
+        .altitude_description
+        .clone_from(&incoming.altitude_description);
+    resolved.altitude_one = incoming.altitude_one;
+    resolved.altitude_one_is_flight_level = incoming.altitude_one_is_flight_level;
+    Some(resolved)
+}
+
 /// This seed starts at the published MAP, not at an arbitrary early or late go-around position.
 pub(super) fn prepare(
     planner: &super::airborne::Planner<'_>,
@@ -473,12 +522,14 @@ fn prepare_start(
     if published.terminator != "HM"
         || prefix.is_empty()
         || prefix.iter().any(|leg| leg.terminator == "HM")
-        || published.altitude_one.is_none()
     {
         return Err(
             "Missed approach needs a complete path and an explicit terminal hold level".into(),
         );
     }
+    let published = holding_restriction(published, prefix)
+        .ok_or("Missed approach holding level has no explicit same-fix restriction")?;
+    let published = &published;
     let weather = planner.arrival_weather;
     if !weather.fresh() {
         return Err("Missed approach weather is stale".into());
@@ -522,8 +573,8 @@ fn prepare_start(
     };
     let map_speed = map.airspeed.ok_or("Missed approach has no MAP airspeed")?;
     if map_speed.atmosphere != weather.atmosphere
-        || map_speed.wind_from != weather.wind_from
-        || map_speed.wind_knots != weather.wind_knots
+        || (map_speed.wind_from - weather.wind_from).abs() > f64::EPSILON
+        || (map_speed.wind_knots - weather.wind_knots).abs() > f64::EPSILON
     {
         return Err("Missed approach weather does not match its MAP inputs".into());
     }
@@ -706,6 +757,7 @@ fn prepare_start(
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     use openatc_core::{
@@ -1023,7 +1075,6 @@ mod tests {
             enroute_to: [0.0, 0.0],
             enroute_minimum_feet: 1000,
             departure_name: String::new(),
-            departure_transition: String::new(),
             departure: vec![],
             arrival_name: String::new(),
             arrival_transition: String::new(),
@@ -1112,6 +1163,29 @@ mod tests {
             hold.points[0].altitude_feet,
             weather.atmosphere.geometric(2000.0, false).unwrap()
         );
+        let mut repeated = terminal.clone();
+        let last = repeated.missed.last_mut().unwrap();
+        last.altitude_one = None;
+        last.altitude_one_is_flight_level = None;
+        last.altitude_description.clear();
+        let repeated_draft = prepare(&planner, &repeated, &map, 0.0).unwrap();
+        assert_eq!(repeated_draft.holding_feet, draft.holding_feet);
+        assert_eq!(repeated_draft.holding_fix, draft.holding_fix);
+        assert!(repeated_draft.protect(|_, _| false).is_err());
+        assert!(repeated.missed.last().unwrap().altitude_one.is_none());
+        let before_hold = repeated.missed.len() - 2;
+        for change in 0..5 {
+            let mut invalid = repeated.clone();
+            let incoming = &mut invalid.missed[before_hold];
+            match change {
+                0 => incoming.identifier = "OTHER".into(),
+                1 => incoming.region = "XX".into(),
+                2 => incoming.altitude_description = "-".into(),
+                3 => incoming.altitude_one_is_flight_level = None,
+                _ => incoming.altitude_one = None,
+            }
+            assert!(prepare(&planner, &invalid, &map, 0.0).is_err());
+        }
         let mut late_terminal = terminal.clone();
         late_terminal.missed[0].terminator = "CA".into();
         let point = planner

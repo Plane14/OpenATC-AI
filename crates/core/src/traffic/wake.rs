@@ -1,4 +1,4 @@
-//! FAA consolidated wake rules. Aircraft categories come from JO 7360.1K.
+//! FAA CWT and Australian MATS wake rules, selected by procedure region.
 
 /// Departure relationship to the preceding aircraft's flight path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +24,62 @@ pub fn applies(airport: &str) -> bool {
         || ["PA", "PF", "PH", "PO", "PP"]
             .iter()
             .any(|p| airport.starts_with(p))
+}
+
+/// Reviewed procedure regions, including Australia's separate ICAO-category rules.
+#[must_use]
+pub fn supported(airport: &str) -> bool {
+    applies(airport) || airport.len() == 4 && airport.starts_with('Y')
+}
+
+/// Wake-only arrival distance. No visual waiver or reduced runway standard is inferred.
+#[must_use]
+pub fn arrival_for(airport: &str, leader: &str, follower: &str) -> Option<f64> {
+    if applies(airport) {
+        return approach_nm(category(leader)?, category(follower)?);
+    }
+    if !supported(airport) {
+        return None;
+    }
+    let a = super::profiles::aircraft(leader)?.wake;
+    let b = super::profiles::aircraft(follower)?.wake;
+    Some(match (a, b) {
+        ('J', 'H') => 6.0,
+        ('J', 'M') => 7.0,
+        ('J', 'L') => 8.0,
+        ('H', 'H') => 4.0,
+        ('H', 'M') => 5.0,
+        ('H', 'L') => 6.0,
+        // No verified MTOW catalogue: conservatively protect all Medium->Light pairs.
+        ('M', 'L') => 5.0,
+        (a, b) if "JHML".contains(a) && "JHML".contains(b) => 0.0,
+        _ => return None,
+    })
+}
+
+/// Regional departure delay. Australian intermediate departures use their own table.
+#[must_use]
+pub fn departure_for(airport: &str, leader: &str, follower: &str, kind: Departure) -> Option<u16> {
+    if applies(airport) {
+        return departure_seconds(category(leader)?, category(follower)?, kind);
+    }
+    if !supported(airport) {
+        return None;
+    }
+    let a = super::profiles::aircraft(leader)?.wake;
+    let b = super::profiles::aircraft(follower)?.wake;
+    let seconds = match (a, b, kind) {
+        ('J', 'H' | 'M' | 'L', Departure::Intersection) => 240,
+        ('J', 'H', Departure::FullLength) => 120,
+        ('J', 'H' | 'M' | 'L', _) => 180,
+        ('H', 'M' | 'L', Departure::Intersection) | ('M', 'L', Departure::Intersection) => 180,
+        ('H', 'M' | 'L', _) | ('M', 'L', _) => 120,
+        // Heavy->Heavy is distance-only in MATS, checked by the live observer.
+        ('H', 'H', _) => 0,
+        (a, b, _) if "JHML".contains(a) && "JHML".contains(b) => 0,
+        _ => return None,
+    };
+    Some(seconds)
 }
 
 /// Required departure interval. The observer may use liftoff as a conservative timing origin.
@@ -88,10 +144,14 @@ pub fn related_runways(
         ((p.east - b.first.east) * dn - (p.north - b.first.north) * dx) / length
     };
     let distance = cross(a.first).abs().max(cross(a.second).abs());
-    let limit = match category {
-        Some('E') => 213.36,
-        Some('F'..='I') => 0.0,
-        _ => 762.0,
+    let limit = if airport.icao.starts_with('Y') {
+        760.0
+    } else {
+        match category {
+            Some('E') => 213.36,
+            Some('F'..='I') => 0.0,
+            _ => 762.0,
+        }
     };
     distance < limit
 }
@@ -221,5 +281,32 @@ mod tests {
         assert_eq!(approach_nm('B', 'I'), Some(6.0));
         assert_eq!(approach_nm('C', 'F'), Some(3.5));
         assert_eq!(approach_nm('?', 'I'), None);
+    }
+    #[test]
+    fn australian_tables_do_not_reuse_us_cwt_or_infer_medium_mtow() {
+        assert_eq!(arrival_for("YSSY", "B77W", "C172"), Some(6.0));
+        assert_eq!(arrival_for("YSSY", "A388", "B77W"), Some(6.0));
+        assert_eq!(arrival_for("YSSY", "A320", "C172"), Some(5.0));
+        assert_eq!(
+            departure_for("YSSY", "A388", "C172", Departure::Intersection),
+            Some(240)
+        );
+        assert_eq!(
+            departure_for("YSSY", "B77W", "C172", Departure::Intersection),
+            Some(180)
+        );
+        assert_eq!(
+            departure_for("YSSY", "A320", "C172", Departure::FullLength),
+            Some(120)
+        );
+        assert_eq!(
+            departure_for("YSSY", "B77W", "B744", Departure::FullLength),
+            Some(0)
+        );
+        assert_eq!(arrival_for("LFMN", "B77W", "C172"), None);
+        assert_eq!(
+            departure_for("YSSY", "UNKNOWN", "C172", Departure::FullLength),
+            None
+        );
     }
 }

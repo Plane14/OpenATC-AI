@@ -409,14 +409,14 @@ mod tests {
                 airport: "TEST".into(),
                 name: "Test Ground".into(),
                 service: "Ground".into(),
-                khz: 121400,
+                khz: 121_400,
                 ..Default::default()
             },
             Station {
                 airport: "TEST".into(),
                 name: "Test Tower".into(),
                 service: "Tower".into(),
-                khz: 118700,
+                khz: 118_700,
                 ..Default::default()
             },
         ];
@@ -428,7 +428,7 @@ mod tests {
             position_valid: true,
             on_ground: true,
             radio_power: true,
-            com1_khz: 121400,
+            com1_khz: 121_400,
             ground_speed_knots: 3.0,
             ..Default::default()
         }
@@ -439,7 +439,7 @@ mod tests {
         for protected in 0..3 {
             let mut state = fixture();
             state.session.taxi_clearance.guidance_complete = true;
-            state.session.taxi_clearance.holding_channel = 121400;
+            state.session.taxi_clearance.holding_channel = 121_400;
             let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
             let copy = shared.clone();
             let (ready, waiting) = tokio::sync::oneshot::channel();
@@ -448,7 +448,7 @@ mod tests {
                     shared: copy,
                     generation: 0,
                     sequence: 42,
-                    channel: 121400,
+                    channel: 121_400,
                 };
                 let _ = ready.send(());
                 std::future::pending::<()>().await;
@@ -472,7 +472,7 @@ mod tests {
             }
             assert_eq!(
                 shared.read().await.session.taxi_clearance.holding_channel,
-                if protected == 0 { 0 } else { 121400 }
+                if protected == 0 { 0 } else { 121_400 }
             );
         }
     }
@@ -499,9 +499,9 @@ mod tests {
         state.session.plan.runway = "04R".into();
         state.session.plan.aircraft = "A20N".into();
         let t = Telemetry {
-            latitude: 43.652637,
-            longitude: 7.203133,
-            com1_khz: 121705,
+            latitude: 43.652_637,
+            longitude: 7.203_133,
+            com1_khz: 121_705,
             ground_speed_knots: 0.0,
             traffic: Some(vec![]),
             ..telemetry()
@@ -509,8 +509,8 @@ mod tests {
         state.session.taxi_clearance = openatc_core::airport::calculate_taxi_route(
             &airport,
             &Telemetry {
-                latitude: 43.655753,
-                longitude: 7.202489,
+                latitude: 43.655_753,
+                longitude: 7.202_489,
                 ..t.clone()
             },
             "04R",
@@ -575,7 +575,7 @@ mod tests {
         .await;
         assert_eq!(
             shared.read().await.session.recommended_frequency_khz,
-            118700
+            118_700
         );
     }
 
@@ -603,7 +603,7 @@ mod tests {
         post_telemetry(AxumState(shared.clone()), Json(t.clone())).await;
         {
             let state = shared.read().await;
-            assert_eq!(state.session.recommended_frequency_khz, 118700);
+            assert_eq!(state.session.recommended_frequency_khz, 118_700);
             assert_eq!(state.session.transcript.len(), 1);
             let entry = &state.session.transcript[0];
             assert!(entry.text.contains("Test Tower") && entry.text.contains("118.700"));
@@ -614,7 +614,7 @@ mod tests {
         post_telemetry(
             AxumState(shared.clone()),
             Json(Telemetry {
-                com1_khz: 118700,
+                com1_khz: 118_700,
                 ..t
             }),
         )
@@ -640,7 +640,7 @@ mod tests {
         post_telemetry(AxumState(shared.clone()), Json(telemetry())).await;
         assert_eq!(
             shared.read().await.session.recommended_frequency_khz,
-            118700
+            118_700
         );
     }
 
@@ -656,8 +656,8 @@ mod tests {
         )
         .unwrap();
         let t = Telemetry {
-            latitude: 33.938318,
-            longitude: -118.383084,
+            latitude: 33.938_318,
+            longitude: -118.383_084,
             ground_speed_knots: 0.19,
             ..telemetry()
         };

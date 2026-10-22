@@ -1,5 +1,14 @@
 //! Generated surface exchanges use the same readback templates as the player.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+#[allow(unused_imports, clippy::wildcard_imports)]
 use super::*;
+use super::{Airport, Arc, Duration, EngineState, Instant, cells, external_surface_cells};
 use openatc_core::{
     apply::add_transmission,
     dialogue::say,
@@ -9,6 +18,7 @@ use openatc_core::{
 
 #[derive(Clone)]
 pub(super) struct Exchange {
+    pub(super) speed: Option<super::sequencing::Instruction>,
     pub(super) id: u32,
     pub(super) segment: usize,
     pub(super) station: Station,
@@ -110,6 +120,109 @@ pub(super) fn cancel_crossing(mut exchange: Exchange, runway: Option<&str>) -> E
     exchange.tune_after = None;
     exchange.due = Instant::now();
     exchange
+}
+
+/// Keep the compact flight identity in the transcript tag while the spoken text uses the
+/// airline name (for example tag AAF115, text "Aigle Azur 115").
+fn decorate_apron_exchange(state: &EngineState, exchange: &mut Exchange) {
+    if !state.generated.apron_ids.contains(&exchange.id) {
+        return;
+    }
+    let Some(frame) = state
+        .generated
+        .frames
+        .iter()
+        .find(|frame| frame.target.id == exchange.id)
+    else {
+        return;
+    };
+    let display = super::display_callsign(&frame.target);
+    if display == frame.target.callsign {
+        return;
+    }
+    for (_, text) in &mut exchange.messages {
+        *text = text.replace(&frame.target.callsign, &display);
+    }
+}
+
+/// A short ground exchange for an apron taxi aircraft that has no full flight plan yet.
+fn apron_exchange(state: &mut EngineState) -> Option<Exchange> {
+    let id = state.generated.active_flights.iter().copied().find(|id| {
+        state.generated.apron_ids.contains(id) && !state.generated.apron_radio.contains(id)
+    })?;
+    let airport = state.generated.departure_airport(id)?;
+    let ground = station(state, &airport)?;
+    let pose = state
+        .generated
+        .world
+        .snapshot()
+        .into_iter()
+        .find(|pose| pose.id == id)?;
+    let frame = state
+        .generated
+        .frames
+        .iter()
+        .find(|frame| frame.target.id == id)?
+        .clone();
+    let runway = state
+        .generated
+        .orders
+        .get(&id)
+        .and_then(|orders| orders.last())
+        .map(|(_, order)| order.hold_short_runway.clone())
+        .filter(|runway| !runway.is_empty())
+        .unwrap_or_else(|| state.session.plan.runway.clone());
+    if runway.is_empty() {
+        return None;
+    }
+    let callsign = frame.target.callsign.clone();
+    let display = super::display_callsign(&frame.target);
+    let instruction = format!(
+        "{display}, {}",
+        say("taxi_to_holding_point", &[("runway", runway.clone())])
+    );
+    let readback = say(
+        "pilot_taxi_holding_point_readback",
+        &[("runway", runway), ("callsign", display)],
+    );
+    state.generated.apron_radio.insert(id);
+    if let (Some(segments), Some(route)) = (
+        state.generated.apron_segments.get(&id).copied(),
+        state.generated.apron_routes.get(&id).cloned(),
+    ) {
+        for segment in 0..segments {
+            if route.segment(segment).is_some_and(|segment| {
+                segment.stage != openatc_core::traffic::motion::Stage::Crossing
+            }) {
+                state.generated.approved_orders.insert((id, segment));
+            }
+        }
+    } else {
+        state.generated.approved_orders.insert((id, pose.segment));
+    }
+    if let Some(frame) = state
+        .generated
+        .frames
+        .iter_mut()
+        .find(|frame| frame.target.id == id)
+    {
+        frame.target.com1_khz = Some(ground.khz);
+    }
+    Some(Exchange {
+        speed: None,
+        id,
+        segment: pose.segment,
+        station: ground,
+        callsign,
+        messages: vec![(true, instruction), (false, readback)],
+        next: 0,
+        due: Instant::now(),
+        grant: false,
+        tune_after: None,
+        sector_transfer: None,
+        recovery_from: None,
+        rejoin: false,
+    })
 }
 
 fn station(state: &EngineState, airport: &Airport) -> Option<Station> {
@@ -258,6 +371,7 @@ fn departure_hold(state: &mut EngineState) {
                 (tower.clone(), Some(tower.clone()))
             };
         state.generated.exchange = Some(Exchange {
+            speed: None,
             id: pose.id,
             segment: pose.segment,
             station: speaker,
@@ -301,7 +415,7 @@ fn blocked(state: &EngineState, id: u32, order: &openatc_core::state::TaxiCleara
             ) * 1852.0
         })
         .sum::<f64>();
-    let window = distance / (segment.knots.max(1.0) * 0.514444)
+    let window = distance / (segment.knots.max(1.0) * 0.514_444)
         + order.instructions.chars().count() as f64 * 2.0 / policy.radio_characters_per_second
         + policy.radio_gap_seconds * 2.0
         + policy.runway_clearance_buffer_seconds;
@@ -317,10 +431,11 @@ fn blocked(state: &EngineState, id: u32, order: &openatc_core::state::TaxiCleara
 pub fn tick(state: &mut EngineState) {
     super::flight::synchronise_recoveries(&mut state.generated);
     super::ctaf::announce(state);
+    let apron = !state.generated.apron_ids.is_empty();
     if !state.settings.generated_traffic
         || state.generated.epoch != Some(state.session_generation)
         || state.generated.simulation_job.is_some()
-        || state.generated.preparation_job.is_some()
+        || (!apron && state.generated.preparation_job.is_some())
         || state.generated.turnaround_job.is_some()
         || state.session.telemetry.paused
         || state.session.telemetry.radio_busy
@@ -345,7 +460,9 @@ pub fn tick(state: &mut EngineState) {
     };
     if state.generated.exchange.is_none() {
         super::flight::prepare_limit_rejoins(&mut state.generated);
-        state.generated.exchange = super::flight::exchange(state);
+        state.generated.exchange = super::flight::exchange(state)
+            .or_else(|| super::sequencing::exchange(state))
+            .or_else(|| apron_exchange(state));
     }
     if state.generated.exchange.is_none() {
         for pose in state.generated.world.snapshot().into_iter().filter(|pose| {
@@ -412,6 +529,7 @@ pub fn tick(state: &mut EngineState) {
                 .approved_orders
                 .remove(&(pose.id, pose.segment));
             state.generated.exchange = Some(Exchange {
+                speed: None,
                 id: pose.id,
                 segment: pose.segment,
                 station,
@@ -496,6 +614,7 @@ pub fn tick(state: &mut EngineState) {
                     frame.target.com1_khz = Some(station.khz);
                 }
                 state.generated.exchange = Some(Exchange {
+                    speed: None,
                     id: pose.id,
                     segment: pose.segment,
                     station,
@@ -592,6 +711,7 @@ pub fn tick(state: &mut EngineState) {
                         say("generated_taxi_hold", &[("callsign", callsign.clone())])
                     };
                     state.generated.exchange = Some(Exchange {
+                        speed: None,
                         id: pose.id,
                         segment: pose.segment,
                         station,
@@ -674,6 +794,7 @@ pub fn tick(state: &mut EngineState) {
                 }
             }
             state.generated.exchange = Some(Exchange {
+                speed: None,
                 id: pose.id,
                 segment: pose.segment,
                 station,
@@ -691,7 +812,8 @@ pub fn tick(state: &mut EngineState) {
         }
     }
     if state.generated.exchange.is_none() {
-        state.generated.exchange = super::flight::exchange(state);
+        state.generated.exchange =
+            super::flight::exchange(state).or_else(|| super::sequencing::exchange(state));
     }
     if state.generated.exchange.is_none() {
         departure_hold(state);
@@ -699,6 +821,7 @@ pub fn tick(state: &mut EngineState) {
     let Some(mut exchange) = state.generated.exchange.take() else {
         return;
     };
+    decorate_apron_exchange(state, &mut exchange);
     if exchange.sector_transfer.as_ref().is_some_and(|(plan, _)| {
         !state
             .generated
@@ -713,6 +836,25 @@ pub fn tick(state: &mut EngineState) {
         return;
     }
     if exchange.next == exchange.messages.len() {
+        if let Some(speed) = exchange.speed.take() {
+            if !super::sequencing::accept(
+                &mut state.generated,
+                &state.session.telemetry,
+                exchange.id,
+                &speed,
+            ) {
+                exchange.messages = vec![(
+                    true,
+                    say(
+                        "generated_arrival_speed_cancelled",
+                        &[("callsign", exchange.callsign.clone())],
+                    ),
+                )];
+                exchange.next = 0;
+                state.generated.exchange = Some(exchange);
+            }
+            return;
+        }
         if exchange.rejoin {
             if let Some(receiver) = exchange.tune_after.as_ref() {
                 if let Some(frame) = state

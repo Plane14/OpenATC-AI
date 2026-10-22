@@ -109,12 +109,12 @@ pub fn blocked_during<'a>(
             .ground_speed_knots
             .filter(|speed| (20.0..=600.0).contains(speed))
         else {
-            if distance <= seconds * 600.0 * 0.514444 {
+            if distance <= seconds * 600.0 * 0.514_444 {
                 return Some("holding_standby");
             }
             continue;
         };
-        if distance / (speed * 0.514444) <= seconds {
+        if distance / (speed * 0.514_444) <= seconds {
             return Some("holding_traffic_final");
         }
     }
@@ -200,8 +200,8 @@ mod tests {
         };
         let mut t = Telemetry {
             aircraft_icao: "A320".into(),
-            longitude: 1000.0 / 111320.0,
-            latitude: 100.0 / 111320.0,
+            longitude: 1000.0 / 111_320.0,
+            latitude: 100.0 / 111_320.0,
             heading_degrees: 0.0,
             on_ground: true,
             position_valid: true,
@@ -209,13 +209,13 @@ mod tests {
         };
         assert!(!crate::airport::crossing_vacated(&airport, &route, &t));
         assert!(crate::airport::aircraft_on_runway(&airport, &t));
-        t.latitude = 125.0 / 111320.0;
+        t.latitude = 125.0 / 111_320.0;
         assert!(crate::airport::crossing_vacated(&airport, &route, &t));
         assert!(!crate::airport::aircraft_on_runway(&airport, &t));
         let target = TrafficTarget {
             aircraft: "B77W".into(),
-            longitude: 1000.0 / 111320.0,
-            latitude: 65.0 / 111320.0,
+            longitude: 1000.0 / 111_320.0,
+            latitude: 65.0 / 111_320.0,
             on_ground: true,
             track_degrees: 0.0,
             ..Default::default()

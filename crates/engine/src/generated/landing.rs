@@ -1,5 +1,10 @@
 //! Runway exits use the installed taxi graph; an apron gap is never an exit.
+#[allow(unused_imports, clippy::wildcard_imports)]
 use super::*;
+use super::{
+    Airport, BTreeMap, BTreeSet, GroundPlan, Operations, Point, TrafficTarget, animation, cells,
+    position,
+};
 use openatc_core::traffic::motion::{Segment, Stage, Waypoint};
 
 #[derive(Clone)]
@@ -29,7 +34,7 @@ pub(super) struct Request<'a> {
     pub parking_exclusions: &'a BTreeSet<String>,
     pub preference: &'a openatc_core::parking::TrafficPreference,
 }
-pub(super) fn prepare(input: Request<'_>) -> Result<Arrival, String> {
+pub(super) fn prepare(input: &Request<'_>) -> Result<Arrival, String> {
     let knots = input
         .airspeed
         .ground_knots(input.crossing.altitude_feet, input.surface.heading())?;
@@ -318,7 +323,7 @@ fn plan_select(
     {
         return Err("Touchdown is not aligned with the nominal runway surface".into());
     }
-    let braking = (touchdown_knots.powi(2) - handling.taxi_turn_knots.powi(2)).max(0.0) * 0.514444
+    let braking = (touchdown_knots.powi(2) - handling.taxi_turn_knots.powi(2)).max(0.0) * 0.514_444
         / (2.0 * handling.braking_knots_sec);
     let radius = handling.taxi_turn_radius_meters;
     let envelope = aircraft.wingspan.max(aircraft.length) / 2.0;
@@ -549,8 +554,177 @@ fn plan_select(
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+    #[test]
+    fn arrival_uses_a_later_exit_when_the_first_cannot_reach_parking() {
+        use openatc_core::airport::{Parking as Stand, Runway, TaxiEdge, TaxiNode};
+        let point = |east, north| Point {
+            east,
+            north,
+            height: 0.0,
+        };
+        let node = |id, east, north| TaxiNode {
+            id,
+            point: point(east, north),
+        };
+        let edge = |first, second, runway, one_way, name: &str| TaxiEdge {
+            first,
+            second,
+            runway,
+            one_way,
+            name: name.into(),
+            size: 'F',
+            ..Default::default()
+        };
+        let airport = Airport {
+            icao: "TEST".into(),
+            runways: vec![Runway {
+                first_name: "09".into(),
+                second_name: "27".into(),
+                first: point(0.0, 0.0),
+                second: point(2500.0, 0.0),
+                width: 45.0,
+                ..Default::default()
+            }],
+            nodes: vec![
+                node(1, 0.0, 0.0),
+                node(2, 1000.0, 0.0),
+                node(3, 1800.0, 0.0),
+                node(4, 2500.0, 0.0),
+                node(5, 1000.0, 150.0),
+                node(6, 1800.0, 150.0),
+                node(7, 1800.0, 300.0),
+            ],
+            edges: vec![
+                edge(1, 2, true, false, "09/27"),
+                edge(2, 3, true, false, "09/27"),
+                edge(3, 4, true, false, "09/27"),
+                edge(2, 5, false, true, "A"),
+                edge(3, 6, false, true, "B"),
+                edge(6, 7, false, false, "B"),
+            ],
+            parking: vec![Stand {
+                name: "GA1".into(),
+                kind: "tie_down".into(),
+                equipment: "props".into(),
+                size: "A".into(),
+                operations: "general_aviation".into(),
+                point: point(1800.0, 350.0),
+                heading: 0.0,
+                ..Default::default()
+            }],
+            pavement_triangles: vec![
+                [
+                    point(-100.0, -100.0),
+                    point(2600.0, -100.0),
+                    point(2600.0, 500.0),
+                ],
+                [
+                    point(-100.0, -100.0),
+                    point(2600.0, 500.0),
+                    point(-100.0, 500.0),
+                ],
+            ],
+            ..Default::default()
+        };
+        let policy = parse_operations(include_str!("../../../../traffic/operations.toml")).unwrap();
+        let aircraft = openatc_core::traffic::profiles::aircraft("C172").unwrap();
+        let handling = &animation::builtin().unwrap()[&animation::Kind::Piston];
+        let thresholds = ["09", "27"].map(|runway| openatc_core::arrival::Threshold {
+            runway: runway.into(),
+            elevation_feet: 0.0,
+        });
+        let surface = super::super::runway::Surface::new(&airport, "09", &thresholds, 2.0).unwrap();
+        let coordinate = position(&airport, surface.point(surface.threshold));
+        let crossing = Waypoint {
+            latitude: coordinate[0],
+            longitude: coordinate[1],
+            altitude_feet: 50.0,
+        };
+        let speed = openatc_core::traffic::trajectory::Airspeed {
+            indicated_knots: 65.0,
+            atmosphere: openatc_core::traffic::air::Atmosphere::surface(1013.25, 15.0, 0.0)
+                .unwrap(),
+            wind_from: 0.0,
+            wind_knots: 0.0,
+        };
+        let knots = speed.ground_knots(50.0, surface.heading()).unwrap();
+        let flare = surface
+            .flare(
+                &airport,
+                crossing,
+                -3.0,
+                knots,
+                handling,
+                policy.surface_sample_meters,
+            )
+            .unwrap();
+        let first = plan(
+            &airport,
+            "09",
+            *flare.points.last().unwrap(),
+            knots,
+            aircraft,
+            handling,
+            &policy,
+            &surface,
+        )
+        .unwrap();
+        let first_position = openatc_core::airport::airport_point(
+            &airport,
+            first.vacated.latitude,
+            first.vacated.longitude,
+        );
+        assert!((first_position.east - 1000.0).abs() < 5.0);
+        let empty = BTreeSet::new();
+        let preference = openatc_core::parking::TrafficPreference::default();
+        assert!(
+            parking(
+                &airport,
+                first,
+                aircraft,
+                handling,
+                &policy,
+                &[],
+                &empty,
+                &empty,
+                &empty,
+                &preference
+            )
+            .is_err()
+        );
+        let request = |reserved| Request {
+            airport: &airport,
+            surface: &surface,
+            crossing,
+            angle_degrees: -3.0,
+            airspeed: speed,
+            aircraft,
+            handling,
+            policy: &policy,
+            observed: &[],
+            reserved,
+            occupied_stand_cells: &empty,
+            parking_exclusions: &empty,
+            preference: &preference,
+        };
+        let arrival = prepare(&request(&empty)).unwrap();
+        assert_eq!(arrival.parking.stand, "GA1");
+        let selected = openatc_core::airport::airport_point(
+            &airport,
+            arrival.parking.exit.vacated.latitude,
+            arrival.parking.exit.vacated.longitude,
+        );
+        assert!((selected.east - 1800.0).abs() < 5.0);
+        let occupied = BTreeSet::from(["GA1".to_owned()]);
+        assert!(
+            prepare(&request(&occupied)).is_err(),
+            "A later exit cannot release an occupied stand"
+        );
+    }
+
     #[test]
     #[ignore = "requires installed airport scenery"]
     fn louisville_forward_exits_keep_the_aircraft_stopping_envelope() {
@@ -718,7 +892,7 @@ mod tests {
         let aircraft = openatc_core::traffic::profiles::aircraft("C172").unwrap();
         let builtin = animation::builtin().unwrap();
         let policy = parse_operations(include_str!("../../../../traffic/operations.toml")).unwrap();
-        let error = match plan(
+        let Err(error) = plan(
             &airport,
             "09",
             touchdown,
@@ -727,9 +901,8 @@ mod tests {
             &builtin[&animation::Kind::Piston],
             &policy,
             &surface,
-        ) {
-            Ok(_) => panic!("Expected the exit screening to reject the fixture"),
-            Err(error) => error,
+        ) else {
+            panic!("Expected the exit screening to reject the fixture");
         };
         // The aligned entrance beyond the stopping distance is still a candidate.
         assert!(error.contains("1 mapped candidates"), "{error}");

@@ -1,5 +1,7 @@
 //! Conservative library variants for obstacle bounds, including seasonal and regional alternatives.
 use super::object;
+#[allow(unused_imports)]
+use std::fmt::Write as _;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -101,9 +103,9 @@ thread_local! {
 /// ambiguous directory keeps the original path so the obstacle stays unresolved rather than
 /// choosing the wrong file.
 pub(super) fn case_insensitive(path: PathBuf) -> PathBuf {
+    super::cache::observe(&path);
     let cacheable = !path.starts_with(std::env::temp_dir());
-    if cacheable
-        && let Some(resolved) = CASE_CACHE.with(|cache| cache.borrow().get(&path).cloned())
+    if cacheable && let Some(resolved) = CASE_CACHE.with(|cache| cache.borrow().get(&path).cloned())
     {
         return resolved;
     }
@@ -135,6 +137,7 @@ fn case_insensitive_uncached(path: PathBuf) -> PathBuf {
                 let Some(name) = name.to_str() else {
                     return path;
                 };
+                super::cache::observe(&resolved);
                 let Ok(entries) = std::fs::read_dir(&resolved) else {
                     return path;
                 };
@@ -173,8 +176,10 @@ impl Library {
     }
 
     pub fn load(root: &Path, packs: &[PathBuf]) -> Result<Self, String> {
+        CASE_CACHE.with(|cache| cache.borrow_mut().clear());
         let mut folders = packs.iter().cloned().collect::<BTreeSet<_>>();
         let defaults = root.join("Resources/default scenery");
+        super::cache::observe(&defaults);
         if defaults.is_dir() {
             for (index, entry) in std::fs::read_dir(defaults)
                 .map_err(|e| e.to_string())?
@@ -200,7 +205,7 @@ impl Library {
                 continue;
             }
             let mut text = String::new();
-            std::fs::File::open(path)
+            super::cache::open_file(path)
                 .map_err(|e| e.to_string())?
                 .take(8 * 1024 * 1024 + 1)
                 .read_to_string(&mut text)
@@ -280,12 +285,9 @@ impl Library {
                 return Err("Scenery library export budget exceeded".into());
             }
             let destination = rest.trim().replace('\\', "/");
-            let destination = match relative(&destination) {
-                Ok(path) => path,
-                Err(_) => {
-                    self.incomplete.insert(name);
-                    continue;
-                }
+            let Ok(destination) = relative(&destination) else {
+                self.incomplete.insert(name);
+                continue;
             };
             let variants = self.exports.entry(name.clone()).or_default();
             let path = folder.join(destination);
@@ -328,16 +330,13 @@ impl Library {
         if paths.is_empty() || local.is_file() {
             paths.insert(local);
         }
-        Ok(paths
-            .into_iter()
-            .map(case_insensitive)
-            .collect())
+        Ok(paths.into_iter().map(case_insensitive).collect())
     }
 
     pub fn paved_surface(&self, pack: &Path, name: &str) -> Result<bool, String> {
         for path in self.resources(pack, name)? {
             let mut text = String::new();
-            std::fs::File::open(&path)
+            super::cache::open_file(&path)
                 .map_err(|e| e.to_string())?
                 .take(64 * 1024 + 1)
                 .read_to_string(&mut text)
@@ -365,8 +364,7 @@ impl Library {
             return self.forest_height_uncached(pack, name);
         }
         if let Some(cached) = self.forest_cache.borrow().get(&key) {
-            return (*cached)
-                .ok_or_else(|| "Forest definition is unresolved".into());
+            return (*cached).ok_or_else(|| "Forest definition is unresolved".into());
         }
         let result = self.forest_height_uncached(pack, name);
         self.forest_cache
@@ -384,7 +382,7 @@ impl Library {
             let mut text = String::new();
             // A mesh-built forest lists every vertex of every tree it can draw, so a shipped
             // definition is far larger than the simple quad format. The cap still bounds it.
-            std::fs::File::open(&path)
+            super::cache::open_file(&path)
                 .map_err(|e| e.to_string())?
                 .take(64 * 1024 * 1024 + 1)
                 .read_to_string(&mut text)
@@ -475,8 +473,7 @@ impl Library {
             return self.string_height_uncached(pack, name, autogen, known);
         }
         if let Some(cached) = self.string_cache.borrow().get(&key) {
-            return (*cached)
-                .ok_or_else(|| "Object string definition is unresolved".into());
+            return (*cached).ok_or_else(|| "Object string definition is unresolved".into());
         }
         let result = self.string_height_uncached(pack, name, autogen, known);
         self.string_cache
@@ -497,7 +494,7 @@ impl Library {
         let mut found = false;
         for path in self.resources(pack, name)? {
             let mut text = String::new();
-            std::fs::File::open(&path)
+            super::cache::open_file(&path)
                 .map_err(|e| e.to_string())?
                 .take(16 * 1024 * 1024 + 1)
                 .read_to_string(&mut text)
@@ -511,7 +508,7 @@ impl Library {
                 let line = line.split('#').next().unwrap_or("").trim();
                 let mut fields = line.split_whitespace();
                 let command = fields.next();
-                if !matches!(command, Some("OBJECT") | Some("VEGETATION")) {
+                if !matches!(command, Some("OBJECT" | "VEGETATION")) {
                     continue;
                 }
                 if command == Some("VEGETATION") && !autogen {
@@ -538,9 +535,7 @@ impl Library {
                         let resources = if reference.to_ascii_lowercase().starts_with("lib/") {
                             self.resources(pack, &reference).ok()
                         } else {
-                            nested(parent, &reference)
-                                .ok()
-                                .map(|path| vec![path])
+                            nested(parent, &reference).ok().map(|path| vec![path])
                         };
                         resources.and_then(|resources| {
                             let mut height: Option<f64> = None;
@@ -548,7 +543,9 @@ impl Library {
                             for resource in resources {
                                 let geometry = object::load(&resource).ok()?;
                                 for bound in geometry {
-                                    height = Some(height.unwrap_or(0.0_f64).max(bound.high[1]));
+                                    height = Some(
+                                        height.unwrap_or(0.0_f64).max(f64::from(bound.high[1])),
+                                    );
                                     reach = reach.max(super::horizontal_reach(&bound));
                                 }
                             }
@@ -558,8 +555,9 @@ impl Library {
                     known.insert(reference.clone(), height);
                     height
                 };
-                let (height, object_reach) = height
-                    .ok_or_else(|| format!("Object string reference {reference} is unresolvable"))?;
+                let (height, object_reach) = height.ok_or_else(|| {
+                    format!("Object string reference {reference} is unresolvable")
+                })?;
                 if !height.is_finite() || !(0.0..=1000.0).contains(&height) {
                     return Err("Object string reference height is outside its range".into());
                 }
@@ -582,8 +580,7 @@ impl Library {
             return self.facade_solid_uncached(pack, name);
         }
         if let Some(cached) = self.solid_cache.borrow().get(name) {
-            return (*cached)
-                .ok_or_else(|| "Facade definition is unresolved".into());
+            return (*cached).ok_or_else(|| "Facade definition is unresolved".into());
         }
         let result = self.facade_solid_uncached(pack, name);
         self.solid_cache
@@ -596,7 +593,7 @@ impl Library {
         let mut solid = false;
         for path in self.resources(pack, name)? {
             let mut bytes = Vec::new();
-            std::fs::File::open(&path)
+            super::cache::open_file(&path)
                 .map_err(|e| e.to_string())?
                 .take(4 * 1024 * 1024 + 1)
                 .read_to_end(&mut bytes)
@@ -608,10 +605,7 @@ impl Library {
             }
             for line in String::from_utf8_lossy(&bytes).lines() {
                 let command = line.split_whitespace().next().unwrap_or("");
-                if matches!(
-                    command,
-                    "HARD_ROOF" | "ROOF" | "ROOF_MESH" | "SHADER_ROOF"
-                ) {
+                if matches!(command, "HARD_ROOF" | "ROOF" | "ROOF_MESH" | "SHADER_ROOF") {
                     solid = true;
                 }
             }
@@ -622,7 +616,7 @@ impl Library {
     pub fn ground_only(&self, pack: &Path, name: &str) -> Result<bool, String> {
         for path in self.resources(pack, name)? {
             let mut text = String::new();
-            std::fs::File::open(path)
+            super::cache::open_file(path)
                 .map_err(|e| e.to_string())?
                 .take(16384)
                 .read_to_string(&mut text)
@@ -673,6 +667,7 @@ fn paved_definition(text: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     #[test]
@@ -741,7 +736,11 @@ mod tests {
             "expected the vertical span of the mesh, got {height}"
         );
         // A definition with neither a tree command nor usable geometry still refuses.
-        std::fs::write(root.join("trees.for"), "A\n1200\nFOREST\nTEXTURE pines.png\n").unwrap();
+        std::fs::write(
+            root.join("trees.for"),
+            "A\n1200\nFOREST\nTEXTURE pines.png\n",
+        )
+        .unwrap();
         assert!(library.forest_height(&root, "trees.for").is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -776,7 +775,11 @@ mod tests {
         .unwrap();
         assert_eq!(library.forest_height(&root, "trees.for").unwrap(), 28.0);
         // A forest with no usable height must refuse rather than be treated as flat ground.
-        std::fs::write(root.join("trees.for"), "A\n800\nFOREST\nTEXTURE pines.png\n").unwrap();
+        std::fs::write(
+            root.join("trees.for"),
+            "A\n800\nFOREST\nTEXTURE pines.png\n",
+        )
+        .unwrap();
         assert!(library.forest_height(&root, "trees.for").is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -905,7 +908,7 @@ mod tests {
         }
         let mut crowded = "I\n800\nLIBRARY\n".to_owned();
         for index in 0..257 {
-            crowded.push_str(&format!("EXPORT /lib/crowded.obj model{index}.obj\n"));
+            writeln!(crowded, "EXPORT /lib/crowded.obj model{index}.obj").unwrap();
         }
         library.add(Path::new("scenery/A"), &crowded).unwrap();
         assert!(
@@ -936,7 +939,10 @@ mod tests {
         std::fs::write(root.join("Dir_Ramp_Lit.obj"), "A\n800\nOBJ\n").unwrap();
         let mut library = Library::default();
         library
-            .add(&root, "A\n1200\nLIBRARY\nEXPORT ramp.obj dir_ramp_lit.obj\n")
+            .add(
+                &root,
+                "A\n1200\nLIBRARY\nEXPORT ramp.obj dir_ramp_lit.obj\n",
+            )
             .unwrap();
         assert_eq!(
             library.resources(&root, "ramp.obj").unwrap(),

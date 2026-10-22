@@ -47,7 +47,8 @@ impl Policy {
         if text.len() > 65536 {
             return Err("Vertical policy exceeds 64 KiB".into());
         }
-        let policy: Self = toml::from_str(text).map_err(|error| error.to_string())?;
+        let policy: Self =
+            openatc_core::configuration::from_str(text).map_err(|error| error.to_string())?;
         if policy.version != 1
             || !(2.5..=3.5).contains(&policy.descent_degrees)
             || !(5.0..=30.0).contains(&policy.lead_nm)

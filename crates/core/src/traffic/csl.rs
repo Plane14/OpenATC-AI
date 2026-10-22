@@ -1,4 +1,11 @@
 //! Installed CSL metadata and deterministic aircraft/operator matching.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -50,6 +57,9 @@ struct Definition {
 
 impl Catalogue {
     /// Read installed packages only. Symlinks and paths outside the CSL root are excluded.
+    /// # Panics
+    ///
+    /// Panics if a catalogue entry is shorter than the documented field layout.
     pub fn scan(root: &Path) -> Result<Self, String> {
         let root = root
             .canonicalize()
@@ -61,7 +71,7 @@ impl Catalogue {
             for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
                 let entry = entry.map_err(|e| e.to_string())?;
                 visited += 1;
-                if visited > 100000 {
+                if visited > 100_000 {
                     return Err("CSL catalogue scan exceeds the file limit".into());
                 }
                 let kind = entry.file_type().map_err(|e| e.to_string())?;

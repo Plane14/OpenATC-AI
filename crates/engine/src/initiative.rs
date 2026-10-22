@@ -16,10 +16,27 @@ use std::time::Instant;
 
 #[derive(Default)]
 pub struct Monitor {
-    last: Option<Instant>,
-    quiet_seconds: f64,
+    roll_generation: Option<u64>,
+    pub(crate) chat_allowed: bool,
+    shortcut_attempts: std::collections::BTreeSet<(usize, usize)>,
+    last_roll: Option<Instant>,
     offered: Option<Instant>,
     previous_fix: String,
+}
+
+/// Enable optional offers after the first handoff; check eligibility before rolling.
+pub fn roll_for_flight(state: &mut EngineState) {
+    if state.initiative.roll_generation == Some(state.session_generation) {
+        return;
+    }
+    state.initiative.roll_generation = Some(state.session_generation);
+    state.initiative.chat_allowed = true;
+    state.initiative.shortcut_attempts.clear();
+    state.initiative.last_roll = None;
+}
+
+pub(crate) fn roll_percent(percent: u8) -> bool {
+    percent >= 100 || (percent > 0 && rand::random::<f64>() * 100.0 < f64::from(percent))
 }
 
 fn candidate(state: &EngineState, index: usize) -> bool {
@@ -34,6 +51,7 @@ fn candidate(state: &EngineState, index: usize) -> bool {
     if fixes[next..=index].iter().any(|f| {
         f.minimum_altitude_feet.is_some()
             || f.maximum_altitude_feet.is_some()
+            || f.minimum_speed_knots.is_some()
             || f.maximum_speed_knots.is_some()
     }) {
         return false;
@@ -84,17 +102,12 @@ fn candidate(state: &EngineState, index: usize) -> bool {
 }
 
 pub fn tick(state: &mut EngineState) {
-    let elapsed = state
-        .initiative
-        .last
-        .replace(Instant::now())
-        .map_or(0.0, |last| last.elapsed().as_secs_f64().min(2.0));
     if !state.settings.atc_shortcut_offers
+        || state.settings.atc_shortcut_chance_percent == 0
         || state.session.emergency_declared
         || state.session.phase != PhaseCode::Cruise
     {
         state.session.atc_offer = None;
-        state.initiative.quiet_seconds = 0.0;
         return;
     }
     if state
@@ -120,15 +133,13 @@ pub fn tick(state: &mut EngineState) {
         || state.flow.monitor.heading.is_some()
         || state.flow.monitor.deviation.is_some()
         || state.session.atc_offer.is_some()
+        || state
+            .initiative
+            .last_roll
+            .is_some_and(|at| at.elapsed().as_secs() < 300)
     {
         return;
     }
-    state.initiative.quiet_seconds += elapsed;
-    if state.initiative.quiet_seconds < f64::from(state.settings.atc_offer_interval_minutes) * 60.0
-    {
-        return;
-    }
-    state.initiative.quiet_seconds = 0.0;
     let stations = stations::nearby(&state.stations, &state.session.telemetry);
     let Some(station) = state
         .session
@@ -141,13 +152,19 @@ pub fn tick(state: &mut EngineState) {
     let next = state.flow.monitor.next_fix.max(1);
     let target = (next + 1..state.session.plan.fixes.len().min(next + 4)).find(|&i| {
         state.session.plan.fixes[i].identifier != state.initiative.previous_fix
+            && !state.initiative.shortcut_attempts.contains(&(next, i))
             && candidate(state, i)
     });
     let Some(target) = target else {
         return;
     };
+    state.initiative.shortcut_attempts.insert((next, target));
+    state.initiative.last_roll = Some(Instant::now());
+    if !roll_percent(state.settings.atc_shortcut_chance_percent) {
+        return;
+    }
     let waypoint = state.session.plan.fixes[target].identifier.clone();
-    state.initiative.previous_fix = waypoint.clone();
+    state.initiative.previous_fix.clone_from(&waypoint);
     state.initiative.offered = Some(Instant::now());
     let offer = AtcOffer {
         waypoint,
@@ -260,10 +277,25 @@ pub async fn answer(AxumState(shared): AxumState<Shared>, Json(body): Json<Value
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn opportunity_probability_uses_percent_and_flight_reset_clears_attempts() {
+        assert!(!roll_percent(0));
+        assert!(roll_percent(100));
+        let mut state = crate::test_state();
+        roll_for_flight(&mut state);
+        state.initiative.shortcut_attempts.insert((1, 2));
+        roll_for_flight(&mut state);
+        assert!(state.initiative.shortcut_attempts.contains(&(1, 2)));
+        state.session_generation += 1;
+        roll_for_flight(&mut state);
+        assert!(state.initiative.shortcut_attempts.is_empty());
+    }
+
     #[tokio::test]
     async fn optional_shortcut_needs_terrain_restrictions_and_pilot_acceptance() {
         let mut s = crate::test_state();
         s.settings.atc_shortcut_offers = true;
+        s.settings.atc_shortcut_chance_percent = 100;
         s.session.phase = PhaseCode::Cruise;
         s.session.telemetry = openatc_core::state::Telemetry {
             latitude: 0.1,
@@ -271,7 +303,7 @@ mod tests {
             altitude_feet: 5000.0,
             on_ground: false,
             position_valid: true,
-            com1_khz: 123100,
+            com1_khz: 123_100,
             ..Default::default()
         };
         s.session.clearance = Some(openatc_core::state::Clearance {
@@ -302,7 +334,7 @@ mod tests {
         s.stations = vec![stations::Station {
             service: "Center".into(),
             name: "Test Center".into(),
-            khz: 123100,
+            khz: 123_100,
             latitude: 0.1,
             longitude: 0.1,
             ..Default::default()
@@ -313,8 +345,10 @@ mod tests {
         s.session.plan.fixes[1].minimum_altitude_feet = Some(4000);
         assert!(!candidate(&s, 2));
         s.session.plan.fixes[1].minimum_altitude_feet = None;
+        s.session.plan.fixes[1].minimum_speed_knots = Some(210.0);
+        assert!(!candidate(&s, 2));
+        s.session.plan.fixes[1].minimum_speed_knots = None;
         let prior = s.session.clearance.clone();
-        s.initiative.quiet_seconds = 600.0;
         tick(&mut s);
         let offer = s.session.atc_offer.clone().expect("offer");
         assert_eq!(s.session.clearance, prior);

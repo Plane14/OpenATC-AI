@@ -38,6 +38,7 @@ impl ArrivalAirport {
     /// Choose a published ILS for an otherwise unspecified arrival. Prefer the
     /// higher entry altitude when variants share a runway; the controller must
     /// announce the choice before issuing its approach clearance.
+    #[must_use]
     pub fn default_ils(&self, runway: &str) -> Option<String> {
         if runway.is_empty() {
             return None;

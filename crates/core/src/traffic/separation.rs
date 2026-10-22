@@ -3,6 +3,7 @@ use super::motion::Waypoint;
 
 /// Check horizontal separation only during the interval with insufficient vertical separation.
 /// The caller supplies the applicable minima and a sufficiently short prediction interval.
+#[allow(clippy::many_single_char_names)]
 pub fn breach(
     a: [Waypoint; 2],
     b: [Waypoint; 2],
@@ -10,7 +11,7 @@ pub fn breach(
     vertical_feet: f64,
 ) -> Result<bool, String> {
     if !(0.1..=1000.0).contains(&horizontal_nm)
-        || !(100.0..=1000000.0).contains(&vertical_feet)
+        || !(100.0..=1_000_000.0).contains(&vertical_feet)
         || a.iter().chain(&b).any(|p| {
             !p.latitude.is_finite()
                 || p.latitude.abs() >= 85.0

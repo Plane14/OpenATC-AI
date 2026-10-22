@@ -281,6 +281,7 @@ pub fn update_flight_phase(state: &mut State, telemetry: &Telemetry) -> Result<(
             f64::NEG_INFINITY,
             f64::INFINITY,
         ),
+        ("zuluSeconds", telemetry.zulu_seconds, 0.0, 86399.999999),
         (
             "simulationSeconds",
             telemetry.simulation_seconds,
@@ -437,6 +438,7 @@ pub fn update_flight_phase(state: &mut State, telemetry: &Telemetry) -> Result<(
 }
 
 /// Allow callsign edits while parked, before a clearance is issued.
+#[must_use]
 pub fn planning_callsign<'a>(state: &crate::state::State, proposed: &'a str) -> Option<&'a str> {
     let proposed = proposed.trim();
     (state.phase == crate::state::PhaseCode::Parked
@@ -451,6 +453,7 @@ pub fn planning_callsign<'a>(state: &crate::state::State, proposed: &'a str) -> 
 }
 
 /// Explain why a Planning draft cannot be submitted for IFR clearance.
+#[must_use]
 pub fn flight_plan_clearance_feedback(plan: &FlightPlan) -> Option<String> {
     let callsign = if plan.callsign.trim().is_empty() {
         "Aircraft"

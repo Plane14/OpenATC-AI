@@ -212,7 +212,7 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(covered.len(), 1);
             assert_eq!(covered[0].name, expected);
-            assert_eq!(covered[0].khz, 118030);
+            assert_eq!(covered[0].khz, 118_030);
         }
         assert!(
             stations
@@ -229,17 +229,17 @@ mod tests {
         );
         assert_eq!(
             parsed[0].frequencies,
-            [118025, 125275, 125725, 136975, 118020, 118030]
+            [118_025, 125_275, 125_725, 136_975, 118_020, 118_030]
         );
         for record in [54, 1054] {
             let input = format!(
                 "1 100 0 0 TEST Test airport\n100 45 1 0 0 1 1 0 25L 33.93 -118.38 0 0 1 0 0 0 07R 33.93 -118.42 0 0 1 0 0 0\n{record} {} Test Tower\n99\n",
-                if record == 54 { 11802 } else { 118020 }
+                if record == 54 { 11802 } else { 118_020 }
             );
             let airport = crate::airport::load_airport(&input, "TEST").unwrap();
             assert_eq!(
                 airport.frequencies[0].khz,
-                if record == 54 { 118025 } else { 118020 }
+                if record == 54 { 118_025 } else { 118_020 }
             );
         }
     }

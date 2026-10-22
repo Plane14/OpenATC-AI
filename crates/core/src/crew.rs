@@ -10,6 +10,7 @@ fn one() -> f64 {
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 /// Allowed aircraft control and its simulator mapping.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Control {
     /// Name shown in the controls list.
     pub label: String,
@@ -105,6 +106,7 @@ pub struct Action {
 }
 
 /// Parse explicit control requests; model proposals use the same validation.
+#[must_use]
 pub fn parse(profile: &CrewProfile, role: &str, text: &str) -> Option<(String, f64)> {
     let text = text.to_lowercase().replace("auto throttle", "autothrottle");
     if [
@@ -170,12 +172,13 @@ pub fn parse(profile: &CrewProfile, role: &str, text: &str) -> Option<(String, f
             value = captures[1].parse::<f64>().ok()? * 100.0;
         }
     }
-    if id.as_str() == "heading" && value == 360.0 {
+    if id.as_str() == "heading" && (value - 360.0).abs() <= f64::EPSILON {
         value = 0.0;
     }
     validate(profile, role, id, value).then(|| ((*id).clone(), value))
 }
 /// Parse explicit control clauses, inheriting an action verb across conjunctions.
+#[must_use]
 pub fn parse_many(profile: &CrewProfile, role: &str, text: &str) -> Option<Vec<(String, f64)>> {
     let mut lower = text.to_lowercase();
     if role == "cabin" {
@@ -240,7 +243,9 @@ pub fn validate(profile: &CrewProfile, role: &str, id: &str, value: f64) -> bool
             && value >= c.min
             && value <= c.max
             && (!c.integer || value.fract() == 0.0)
-            && (c.on_command.is_empty() || value == c.on || value == c.off)
+            && (c.on_command.is_empty()
+                || (value - c.on).abs() <= f64::EPSILON
+                || (value - c.off).abs() <= f64::EPSILON)
     })
 }
 
@@ -254,6 +259,7 @@ pub struct PushbackRequest {
     pub turn_degrees: f64,
 }
 /// Parse metres and degrees in either order, with a 90-degree left/right default.
+#[must_use]
 pub fn parse_pushback(text: &str) -> Option<PushbackRequest> {
     let text = text.to_lowercase();
     if !text.contains("pushback") && !text.contains("push back") {
@@ -510,6 +516,7 @@ fn build_standard_profile() -> CrewProfile {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     #[test]

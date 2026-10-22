@@ -1,5 +1,7 @@
 //! Check proposed airborne grants against the movement world and current external observations.
+#[allow(unused_imports, clippy::wildcard_imports)]
 use super::*;
+use super::{BTreeSet, Runtime, TrafficTarget, flight};
 use openatc_core::{
     state::Telemetry,
     traffic::motion::{Pose, Stage, Waypoint, World},
@@ -38,7 +40,7 @@ fn external(target: &TrafficTarget, rate: f64, time: f64) -> Waypoint {
     }
 }
 
-fn accepted_world(runtime: &Runtime) -> World {
+pub(super) fn accepted_world(runtime: &Runtime) -> World {
     let mut world = runtime.world.clone();
     for &(id, index) in &runtime.approved_orders {
         if let Some(contract) = runtime
@@ -151,7 +153,7 @@ pub(super) fn rejoin_check(
     }
 }
 
-fn forecast_clear(
+pub(super) fn forecast_clear(
     runtime: &Runtime,
     telemetry: &Telemetry,
     id: u32,
@@ -303,7 +305,7 @@ mod tests {
             coordinated_recovery: Vec::new(),
             station: Station {
                 service: "Center".into(),
-                khz: 118675,
+                khz: 118_675,
                 ..Default::default()
             },
             instruction: "Maintain the cleared route and level".into(),
@@ -358,6 +360,7 @@ mod tests {
             runtime.flights.insert(
                 id,
                 Arc::new(flight::Prepared {
+                    spacing_floor: None,
                     airspeeds: BTreeMap::new(),
                     route,
                     recovery: BTreeMap::from([(0, recovery)]),

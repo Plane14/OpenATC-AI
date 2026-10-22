@@ -1,4 +1,11 @@
 //! Route progress in simulator time. Clearances remain the controller's responsibility.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use crate::arrival::{bearing, destination, distance_nm};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -165,6 +172,27 @@ impl Route {
         climb_fpm: f64,
         descent_fpm: f64,
     ) -> Result<Self, String> {
+        Self::compile_inner(segments, climb_fpm, descent_fpm, false)
+    }
+
+    /// Compile an advisory departure whose last segment intentionally ends off-field.
+    ///
+    /// The caller retires the aircraft when the route completes. Controlled traffic must use
+    /// `compile`, which still requires a protected landing or holding continuation.
+    pub fn compile_departure(
+        segments: Vec<Segment>,
+        climb_fpm: f64,
+        descent_fpm: f64,
+    ) -> Result<Self, String> {
+        Self::compile_inner(segments, climb_fpm, descent_fpm, true)
+    }
+
+    fn compile_inner(
+        segments: Vec<Segment>,
+        climb_fpm: f64,
+        descent_fpm: f64,
+        allow_open_end: bool,
+    ) -> Result<Self, String> {
         if segments.is_empty()
             || segments.len() > 512
             || !(100.0..=10000.0).contains(&climb_fpm)
@@ -241,7 +269,8 @@ impl Route {
             }
             legs.push(compiled);
         }
-        if !segments.last().unwrap().stage.on_ground()
+        if !allow_open_end
+            && !segments.last().unwrap().stage.on_ground()
             && segments.last().unwrap().stage != Stage::Holding
         {
             return Err(
@@ -317,6 +346,7 @@ impl Route {
         self.segments.len()
     }
     /// Nominal duration of an explicit controller scope, before acceleration adjustments.
+    #[must_use]
     pub fn nominal_seconds(&self, first: usize, last: usize) -> Option<f64> {
         if first > last || last >= self.legs.len() {
             return None;
@@ -341,11 +371,17 @@ impl Route {
         })
     }
     /// Exact compiled endpoint, used when planning a continuous next phase.
+    /// # Panics
+    ///
+    /// Panics if the route has no segments or a segment has no points.
     #[must_use]
     pub fn end_position(&self) -> Waypoint {
         *self.segments.last().unwrap().points.last().unwrap()
     }
     /// Exact compiled start point, used when planning a continuous next phase.
+    /// # Panics
+    ///
+    /// Panics if the route has no segments or a segment has no points.
     #[must_use]
     pub fn start_position(&self) -> Waypoint {
         *self.segments.first().unwrap().points.first().unwrap()
@@ -421,7 +457,7 @@ impl SpeedChange {
     fn sample(&self, seconds: f64) -> (f64, f64) {
         let ramp = seconds.min(self.ramp_seconds());
         let speed = self.initial + self.rate * ramp;
-        let distance = (self.initial + speed) * 0.5 * ramp + self.target * (seconds - ramp);
+        let distance = f64::midpoint(self.initial, speed) * ramp + self.target * (seconds - ramp);
         (distance, speed.max(0.0))
     }
     fn seconds_to(&self, distance: f64) -> f64 {
@@ -429,7 +465,7 @@ impl SpeedChange {
             return 0.0;
         }
         let ramp = self.ramp_seconds();
-        let ramp_distance = (self.initial + self.target) * 0.5 * ramp;
+        let ramp_distance = f64::midpoint(self.initial, self.target) * ramp;
         if distance <= ramp_distance {
             let speed = (self.initial.powi(2) + 2.0 * self.rate * distance)
                 .max(0.0)
@@ -489,7 +525,7 @@ impl BoundarySpeed {
     fn sample(&self, seconds: f64) -> (f64, f64) {
         let first_time = seconds.min(self.first.ramp_seconds());
         let (first_distance, first_speed) = self.first.sample(first_time);
-        if first_time == seconds {
+        if (first_time - seconds).abs() <= f64::EPSILON {
             return (first_distance, first_speed);
         }
         let coast_time = (seconds - first_time).min(self.coast);
@@ -523,6 +559,7 @@ struct HoldExit {
 }
 
 #[derive(Clone)]
+#[allow(clippy::struct_excessive_bools)]
 struct Aircraft {
     assigned_route: std::sync::Arc<Route>,
     route: std::sync::Arc<Route>,
@@ -533,6 +570,7 @@ struct Aircraft {
     next_authorised: bool,
     airborne_authority: Option<(usize, usize)>,
     hold_exit: Option<HoldExit>,
+    speed_limits: BTreeMap<usize, f64>,
     rates: Option<(f64, f64)>,
     speed: f64,
     holding: bool,
@@ -629,11 +667,54 @@ impl Aircraft {
             complete: self.complete,
             recovering: self.recovery_from.is_some(),
             recovery_from: self.recovery_from,
-            seconds_to_limit: (self.duration() - self.elapsed).max(0.0),
+            seconds_to_limit: self.seconds_to_limit(),
         }
     }
     fn duration(&self) -> f64 {
         self.route.moving_seconds[self.segment] + self.route.segments[self.segment].dwell_seconds
+    }
+    fn seconds_to_limit(&self) -> f64 {
+        let nominal = (self.duration() - self.elapsed).max(0.0);
+        let segment = &self.route.segments[self.segment];
+        let Some((acceleration, braking)) = self.rates else {
+            return nominal;
+        };
+        if !self.authorised || !self.speed_limits.contains_key(&self.segment) {
+            return nominal;
+        }
+        let cap = self
+            .speed_limits
+            .get(&self.segment)
+            .copied()
+            .unwrap_or(segment.knots);
+        let next_authorised = self.next_authorised
+            || self
+                .airborne_authority
+                .is_some_and(|(first, end)| (first..=end).contains(&(self.segment + 1)));
+        let next_speed = self.route.segments.get(self.segment + 1).map_or(cap, |s| {
+            self.speed_limits
+                .get(&(self.segment + 1))
+                .copied()
+                .unwrap_or(s.knots)
+        });
+        let end = if next_authorised {
+            next_speed
+        } else {
+            self.recoveries
+                .get(&self.segment)
+                .map_or(cap, |r| r.segments[0].knots)
+        };
+        BoundarySpeed::new(
+            self.speed,
+            cap,
+            end,
+            nominal * segment.knots,
+            acceleration,
+            braking,
+        )
+        .map_or(nominal, |profile| {
+            profile.seconds_to(nominal * segment.knots)
+        })
     }
 }
 
@@ -766,6 +847,7 @@ impl World {
         {
             return false;
         }
+        aircraft.speed_limits.clear();
         aircraft.assigned_route = route.clone();
         aircraft.route = route;
         aircraft.segment = 0;
@@ -782,6 +864,7 @@ impl World {
         true
     }
     /// Identify the reserved surface traffic preventing the next taxi clearance.
+    #[must_use]
     pub fn surface_blocker(&self, id: u32) -> Option<u32> {
         let aircraft = self.aircraft.get(&id)?;
         let stage = aircraft.route.segments[aircraft.segment].stage;
@@ -796,11 +879,13 @@ impl World {
             .find(|owner| *owner != id)
     }
     /// Inspect the current clearance limit without exposing mutable route state.
+    #[must_use]
     pub fn current_segment(&self, id: u32) -> Option<&Segment> {
         let aircraft = self.aircraft.get(&id)?;
         aircraft.route.segments.get(aircraft.segment)
     }
     /// Resources one aircraft currently holds, including those retained while standing.
+    #[must_use]
     pub fn owned_resources(&self, id: u32) -> BTreeSet<String> {
         self.owners
             .iter()
@@ -809,6 +894,7 @@ impl World {
             .collect()
     }
     /// Current owner of one protected resource.
+    #[must_use]
     pub fn resource_owner(&self, resource: &str) -> Option<u32> {
         self.owners.get(resource).copied()
     }
@@ -823,6 +909,12 @@ impl World {
             generation: self.generation.wrapping_add(1),
             ..Self::default()
         };
+    }
+
+    /// Remove one finished aircraft and release every surface resource it owns.
+    pub fn remove(&mut self, id: u32) -> bool {
+        self.owners.retain(|_, owner| *owner != id);
+        self.aircraft.remove(&id).is_some()
     }
     /// Admit a compiled route within the active-aircraft cap.
     pub fn insert(&mut self, generation: u64, id: u32, route: std::sync::Arc<Route>) -> bool {
@@ -863,6 +955,7 @@ impl World {
                 next_authorised: false,
                 airborne_authority: None,
                 hold_exit: None,
+                speed_limits: BTreeMap::new(),
                 rates: None,
                 speed: initial_speed,
                 holding: false,
@@ -945,6 +1038,7 @@ impl World {
                 next_authorised: false,
                 airborne_authority: None,
                 hold_exit: None,
+                speed_limits: BTreeMap::new(),
                 rates: None,
                 speed,
                 holding: false,
@@ -990,6 +1084,9 @@ impl World {
     /// The procedure is the authority, so the grant follows the admitted route. A taxi, a
     /// runway entry and a segment beyond the route are refused: an advisory procedure never
     /// authorises controlled movement.
+    /// # Panics
+    ///
+    /// Panics if the route segment index is outside the validated range.
     pub fn authorise_advisory(
         &mut self,
         generation: u64,
@@ -1048,6 +1145,9 @@ impl World {
     ///
     /// The procedure continues from the exact point the aircraft reached, so it is never
     /// repositioned, and its movement permission follows it onto the new circuit.
+    /// # Panics
+    ///
+    /// Panics if the route segment index is outside the validated range.
     pub fn redirect_advisory(
         &mut self,
         generation: u64,
@@ -1072,6 +1172,7 @@ impl World {
         }
         let authorised = aircraft.authorised;
         let aircraft = self.aircraft.get_mut(&id).unwrap();
+        aircraft.speed_limits.clear();
         aircraft.assigned_route = route.clone();
         aircraft.route = route;
         aircraft.segment = 0;
@@ -1154,6 +1255,7 @@ impl World {
                 next_authorised: false,
                 airborne_authority: None,
                 hold_exit: None,
+                speed_limits: BTreeMap::new(),
                 rates: None,
                 speed,
                 holding: false,
@@ -1188,6 +1290,9 @@ impl World {
         true
     }
     /// Returns false for stale, conflicting or already completed instructions.
+    /// # Panics
+    ///
+    /// Panics if the route segment index is outside the validated range.
     pub fn authorise(
         &mut self,
         generation: u64,
@@ -1336,6 +1441,7 @@ impl World {
         for resource in &first.resources {
             self.owners.insert(resource.clone(), id);
         }
+        aircraft.speed_limits.clear();
         aircraft.assigned_route = route.clone();
         aircraft.route = route;
         aircraft.segment = 0;
@@ -1483,6 +1589,7 @@ impl World {
     }
 
     /// Include any extra circuit and the actual braking time before a queued holding exit.
+    #[must_use]
     pub fn holding_exit_seconds(&self, id: u32) -> Option<f64> {
         let aircraft = self.aircraft.get(&id)?;
         let exit = aircraft.hold_exit.as_ref()?;
@@ -1587,6 +1694,9 @@ impl World {
     }
 
     /// Replace a hold only after the controller approves a complete onward path.
+    /// # Panics
+    ///
+    /// Panics if the replacement route has no segments.
     pub fn leave_hold(&mut self, generation: u64, id: u32, route: std::sync::Arc<Route>) -> bool {
         if generation != self.generation
             || route.segments.last().unwrap().stage != Stage::Holding
@@ -1684,6 +1794,9 @@ impl World {
     }
     /// Grant the explicit airborne limits covered by one accepted readback.
     /// Landing, holding, runway and surface permissions cannot be included.
+    /// # Panics
+    ///
+    /// Panics if the cleared segment index is outside the route.
     pub fn authorise_airborne_until(
         &mut self,
         generation: u64,
@@ -1763,6 +1876,9 @@ impl World {
     }
 
     /// Protect a clearance while its readback is pending, without moving the aircraft.
+    /// # Panics
+    ///
+    /// Panics if the route has no segments or the segment index is outside the route.
     pub fn reserve_surface_route(
         &mut self,
         generation: u64,
@@ -1941,6 +2057,42 @@ impl World {
             }
         }
     }
+    /// Apply a read-back pre-final speed restriction along existing protected geometry.
+    /// This grants no movement authority and never changes final, hold or recovery speeds.
+    pub fn restrict_arrival_speed(
+        &mut self,
+        generation: u64,
+        id: u32,
+        limits: &BTreeMap<usize, f64>,
+    ) -> bool {
+        if generation != self.generation || limits.is_empty() || limits.len() > 512 {
+            return false;
+        }
+        let Some(a) = self.aircraft.get_mut(&id) else {
+            return false;
+        };
+        if a.recovery_from.is_some() || a.complete || a.rates.is_none()
+            || limits.keys().next().copied() != Some(a.segment)
+            || limits.iter().enumerate().any(|(offset, (&index, &speed))| {
+                index != a.segment + offset || a.route.segments.get(index).is_none_or(|segment| {
+                    !matches!(segment.stage, Stage::Cruise | Stage::Descent)
+                        || !(40.0..=segment.knots).contains(&speed)
+                        // Retain the checked speed contract at a clearance-limit hold.
+                        || a.recoveries.get(&index).is_some_and(|route| speed < route.segments[0].knots)
+                })
+            }) { return false; }
+        a.speed_limits.clone_from(limits);
+        true
+    }
+
+    /// Whether the current pre-final segment has an accepted speed restriction.
+    #[must_use]
+    pub fn arrival_speed_restricted(&self, id: u32) -> bool {
+        self.aircraft
+            .get(&id)
+            .is_some_and(|a| a.recovery_from.is_none() && a.speed_limits.contains_key(&a.segment))
+    }
+
     /// Set per-aircraft acceleration and braking from a validated profile.
     pub fn ground_rates(&mut self, id: u32, acceleration: f64, braking: f64) -> bool {
         if !(0.1..=10.0).contains(&acceleration) || !(0.1..=10.0).contains(&braking) {
@@ -2004,6 +2156,9 @@ impl World {
         true
     }
     /// Pausing and large clock changes cannot move traffic through a clearance limit.
+    /// # Panics
+    ///
+    /// Panics if a segment duration or sample count is outside the validated range.
     pub fn advance(&mut self, seconds: f64, paused: bool) -> Advance {
         if !seconds.is_finite() || seconds < 0.0 {
             return Advance::Invalid;
@@ -2046,6 +2201,11 @@ impl World {
                         || aircraft.airborne_authority.is_some_and(|(first, end)| {
                             (first..=end).contains(&(aircraft.segment + 1))
                         });
+                    let cruise_limit = aircraft
+                        .speed_limits
+                        .get(&aircraft.segment)
+                        .copied()
+                        .unwrap_or(segment.knots);
                     let duration = aircraft.duration();
                     let remaining_seconds = (duration - aircraft.elapsed).max(0.0);
                     let consumed = if let Some((acceleration, braking)) = aircraft.rates
@@ -2069,7 +2229,13 @@ impl World {
                                 .route
                                 .segments
                                 .get(aircraft.segment + 1)
-                                .map(|segment| segment.knots)
+                                .map(|segment| {
+                                    aircraft
+                                        .speed_limits
+                                        .get(&(aircraft.segment + 1))
+                                        .copied()
+                                        .unwrap_or(segment.knots)
+                                })
                         } else {
                             aircraft
                                 .recoveries
@@ -2093,7 +2259,7 @@ impl World {
                             0.0
                         } else {
                             let limit = if nonstop {
-                                segment.knots
+                                cruise_limit
                             } else {
                                 (2.0 * braking * (1852.0 / 3600.0) * distance_to_limit).sqrt()
                                     / (1852.0 / 3600.0)
@@ -2102,7 +2268,7 @@ impl World {
                                 (speed.powi(2) + 2.0 * braking * remaining / (1852.0 / 3600.0))
                                     .sqrt()
                             });
-                            segment.knots.min(limit).min(next_limit)
+                            cruise_limit.min(limit).min(next_limit)
                         };
                         let change =
                             SpeedChange::new(aircraft.speed, target, acceleration, braking);
@@ -2113,7 +2279,7 @@ impl World {
                             next_speed.and_then(|end| {
                                 BoundarySpeed::new(
                                     aircraft.speed,
-                                    segment.knots,
+                                    cruise_limit,
                                     end,
                                     to_boundary,
                                     acceleration,
@@ -2170,6 +2336,7 @@ impl World {
                             aircraft.hold_exit.as_mut().unwrap().defer_circuits -= 1;
                         } else if let Some(exit) = aircraft.hold_exit.take() {
                             self.owners.retain(|_, owner| *owner != *id);
+                            aircraft.speed_limits.clear();
                             aircraft.assigned_route = exit.route.clone();
                             aircraft.route = exit.route;
                             aircraft.recoveries = exit.recoveries;
@@ -2191,6 +2358,7 @@ impl World {
                             aircraft.airborne_authority = None;
                             aircraft.hold_exit = None;
                             aircraft.recovery_from = Some(aircraft.segment);
+                            aircraft.speed_limits.clear();
                             aircraft.route = recovery;
                             aircraft.segment = 0;
                             aircraft.elapsed = 0.0;
@@ -2258,6 +2426,7 @@ impl World {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     fn point(meters: f64, altitude: f64) -> Waypoint {
@@ -2846,7 +3015,7 @@ mod tests {
             let mut entered = false;
             let mut before = 200.0;
             for tick in 1..=6000 {
-                world.advance(tick as f64 * step, false);
+                world.advance(f64::from(tick) * step, false);
                 let pose = &world.snapshot()[0];
                 assert!((before - pose.knots).abs() <= step + 1e-7);
                 if pose.segment == 1 {
@@ -2862,6 +3031,97 @@ mod tests {
             }
             assert!(entered);
         }
+    }
+
+    #[test]
+    fn arrival_speed_amendment_is_smooth_and_preserves_final_and_recovery() {
+        let point = |nm: f64| {
+            let p = destination([0.0, 0.0], 90.0, nm);
+            Waypoint {
+                latitude: p[0],
+                longitude: p[1],
+                altitude_feet: 6000.0,
+            }
+        };
+        let hold = |fix| {
+            crate::traffic::holding::Pattern {
+                fix,
+                inbound_degrees: 90.0,
+                right: true,
+                ground_knots: 140.0,
+                leg_seconds: 60.0,
+                bank_degrees: 25.0,
+                turn_rate_degrees_sec: 3.0,
+            }
+            .compile(|_, _| true)
+            .unwrap()
+        };
+        let route = std::sync::Arc::new(
+            Route::compile(
+                vec![
+                    Segment {
+                        stage: Stage::Descent,
+                        points: vec![point(0.0), point(10.0)],
+                        knots: 220.0,
+                        resources: vec![],
+                        dwell_seconds: 0.0,
+                    },
+                    Segment {
+                        stage: Stage::Approach,
+                        points: vec![point(10.0), point(15.0)],
+                        knots: 140.0,
+                        resources: vec![],
+                        dwell_seconds: 0.0,
+                    },
+                    hold(point(15.0)),
+                ],
+                1000.0,
+                1000.0,
+            )
+            .unwrap(),
+        );
+        let mut world = World::default();
+        assert!(world.insert(0, 1, route));
+        assert!(world.ground_rates(1, 1.0, 0.5));
+        for (index, end) in [(0, 10.0), (1, 15.0)] {
+            assert!(world.recovery(
+                0,
+                1,
+                index,
+                std::sync::Arc::new(
+                    Route::compile(vec![hold(point(end))], 1000.0, 1000.0).unwrap()
+                )
+            ));
+        }
+        assert!(world.authorise(0, 1, 0, &BTreeSet::new()));
+        world.advance(0.0, false);
+        assert!(!world.restrict_arrival_speed(1, 1, &BTreeMap::from([(0, 180.0)])));
+        assert!(
+            !world.restrict_arrival_speed(0, 1, &BTreeMap::from([(0, 130.0)])),
+            "recovery speed contract"
+        );
+        assert!(
+            !world.restrict_arrival_speed(0, 1, &BTreeMap::from([(0, 180.0), (1, 120.0)])),
+            "no final speed amendment"
+        );
+        assert!(world.restrict_arrival_speed(0, 1, &BTreeMap::from([(0, 180.0)])));
+        assert_eq!(world.snapshot()[0].knots, 220.0);
+        world.advance(1.0, false);
+        assert!((world.snapshot()[0].knots - 219.5).abs() < 1e-6);
+        let still = world.snapshot()[0].position;
+        world.advance(20.0, true);
+        assert_eq!(world.snapshot()[0].position, still);
+        assert!(world.authorise_continuation(0, 1, 1, &BTreeSet::new()));
+        for second in 21..600 {
+            world.advance(f64::from(second), false);
+            if world.snapshot()[0].segment == 1 {
+                break;
+            }
+        }
+        let final_pose = &world.snapshot()[0];
+        assert_eq!(final_pose.stage, Stage::Approach);
+        assert!((final_pose.knots - 140.0).abs() < 0.1);
+        assert!(!world.arrival_speed_restricted(1));
     }
 
     #[test]
@@ -3140,7 +3400,7 @@ mod tests {
                 let time = f64::from(step) * 0.5;
                 world.advance(time, false);
                 let current = world.snapshot()[0].clone();
-                assert!((current.knots - previous.knots).abs() <= 0.500001);
+                assert!((current.knots - previous.knots).abs() <= 0.500_001);
                 assert!(
                     distance_nm(
                         previous.position.coordinate(),
@@ -3461,9 +3721,9 @@ mod tests {
                 let radians = course.to_radians();
                 points.push(Waypoint {
                     latitude: anchor.latitude
-                        + (along * radians.cos() - right * radians.sin()) / 111320.0,
+                        + (along * radians.cos() - right * radians.sin()) / 111_320.0,
                     longitude: anchor.longitude
-                        + (along * radians.sin() + right * radians.cos()) / 111320.0,
+                        + (along * radians.sin() + right * radians.cos()) / 111_320.0,
                     altitude_feet: anchor.altitude_feet,
                 });
             }
@@ -3715,7 +3975,11 @@ mod tests {
         assert!(world.authorise_advisory(0, 1, 0, &BTreeSet::new()));
         world.advance(0.0, false);
         world.advance(30.0, false);
-        let pose = world.snapshot().into_iter().find(|pose| pose.id == 1).unwrap();
+        let pose = world
+            .snapshot()
+            .into_iter()
+            .find(|pose| pose.id == 1)
+            .unwrap();
         assert_eq!(pose.stage, Stage::Descent);
         assert!(pose.knots > 0.0);
         // Controlled traffic is never granted by an advisory procedure.
@@ -3730,7 +3994,11 @@ mod tests {
         world.advance(20.0, false);
         world.advance(40.0, false);
         world.advance(60.0, false);
-        let pose = world.snapshot().into_iter().find(|pose| pose.id == 1).unwrap();
+        let pose = world
+            .snapshot()
+            .into_iter()
+            .find(|pose| pose.id == 1)
+            .unwrap();
         assert_eq!(pose.segment, 1);
         assert!(pose.awaiting_clearance);
         assert_eq!(pose.knots, 0.0);
@@ -3738,7 +4006,11 @@ mod tests {
         assert!(world.authorise_advisory(0, 1, 1, &BTreeSet::new()));
         world.advance(61.0, false);
         world.advance(90.0, false);
-        let moved = world.snapshot().into_iter().find(|pose| pose.id == 1).unwrap();
+        let moved = world
+            .snapshot()
+            .into_iter()
+            .find(|pose| pose.id == 1)
+            .unwrap();
         assert_eq!(moved.segment, 1);
         assert!(moved.knots > 0.0);
     }
@@ -3750,7 +4022,11 @@ mod tests {
         let mut clock = 0.0;
         // Fly the whole circuit, granting each leg as the procedure reaches it.
         for _ in 0..600 {
-            let pose = world.snapshot().into_iter().find(|pose| pose.id == 1).unwrap();
+            let pose = world
+                .snapshot()
+                .into_iter()
+                .find(|pose| pose.id == 1)
+                .unwrap();
             if pose.complete {
                 break;
             }
@@ -3760,7 +4036,11 @@ mod tests {
             clock += 1.0;
             world.advance(clock, false);
         }
-        let pose = world.snapshot().into_iter().find(|pose| pose.id == 1).unwrap();
+        let pose = world
+            .snapshot()
+            .into_iter()
+            .find(|pose| pose.id == 1)
+            .unwrap();
         assert!(pose.complete);
         // The continuation starts where the landing roll ended and climbs away from it.
         let next = std::sync::Arc::new(
@@ -3801,7 +4081,11 @@ mod tests {
             .unwrap(),
         );
         assert!(world.continue_advisory(0, 1, next.clone()));
-        let resumed = world.snapshot().into_iter().find(|pose| pose.id == 1).unwrap();
+        let resumed = world
+            .snapshot()
+            .into_iter()
+            .find(|pose| pose.id == 1)
+            .unwrap();
         assert!(!resumed.complete);
         assert_eq!(resumed.segment, 0);
         assert!(resumed.awaiting_clearance);
@@ -3811,7 +4095,11 @@ mod tests {
         world.advance(clock, false);
         clock += 20.0;
         world.advance(clock, false);
-        let climbing = world.snapshot().into_iter().find(|pose| pose.id == 1).unwrap();
+        let climbing = world
+            .snapshot()
+            .into_iter()
+            .find(|pose| pose.id == 1)
+            .unwrap();
         assert_eq!(climbing.stage, Stage::Climb);
         assert!(climbing.position.altitude_feet > 0.0);
     }

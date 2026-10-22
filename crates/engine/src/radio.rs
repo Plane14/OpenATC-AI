@@ -1,4 +1,6 @@
 //! Station discovery and simulator-authoritative airport weather/ATIS.
+
+#![allow(clippy::default_trait_access)]
 use crate::Shared;
 use axum::{
     Json,
@@ -88,7 +90,7 @@ pub async fn ensure_index(shared: &Shared) -> Result<(), String> {
         };
         let mut s = shared.write().await;
         if s.settings.simulator_root == root {
-            s.map_root = root.clone();
+            s.map_root.clone_from(&root);
             s.station_root = root;
             s.stations = index.0;
             s.map_airports = index.1;
@@ -132,7 +134,7 @@ fn weather_signature(body: &Value) -> String {
         body["dewpointC"].as_f64().unwrap_or(0.),
         body.get("cloudSignature").map_or_else(
             || body["clouds"].as_str().unwrap_or("").to_owned(),
-            |value| value.to_string()
+            std::string::ToString::to_string
         )
     )
 }
@@ -335,26 +337,25 @@ pub async fn atis(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
     let root = s.settings.simulator_root.clone();
     let workers = s.workers.clone();
     drop(s);
-    let runways = match cached {
-        Some(runways) => runways,
-        None => {
-            let id = station.airport.clone();
-            let path = root.clone();
-            workers
-                .run(move || {
-                    openatc_core::airport::load_airport_from_simulator(
-                        &path,
-                        &id,
-                        &|path| std::path::Path::new(path).is_file(),
-                        &|path| std::fs::read_to_string(path).map_err(|error| error.to_string()),
-                    )
-                    .map(|airport| airport.runways)
-                })
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .unwrap_or_default()
-        }
+    let runways = if let Some(runways) = cached {
+        runways
+    } else {
+        let id = station.airport.clone();
+        let path = root.clone();
+        workers
+            .run(move || {
+                openatc_core::airport::load_airport_from_simulator(
+                    &path,
+                    &id,
+                    &|path| std::path::Path::new(path).is_file(),
+                    &|path| std::fs::read_to_string(path).map_err(|error| error.to_string()),
+                )
+                .map(|airport| airport.runways)
+            })
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default()
     };
     let mut s = shared.write().await;
     if s.settings.simulator_root != root
@@ -403,7 +404,7 @@ pub async fn atis(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
     let runway_text = if runway.is_empty() {
         openatc_core::dialogue::say("runway_information_unavailable", &[])
     } else {
-        openatc_core::dialogue::say("atis_runway_in_use", &[("runway", (runway).to_string())])
+        openatc_core::dialogue::say("atis_runway_in_use", &[("runway", (runway).clone())])
     };
     let pressure = if station.airport.starts_with('K') {
         openatc_core::dialogue::say(
@@ -661,17 +662,14 @@ pub async fn debug_map(AxumState(shared): AxumState<Shared>, Json(body): Json<Va
     if root != indexed_root {
         let path = root.clone();
         let workers = shared.read().await.workers.clone();
-        let airports = match workers
+        let Ok(Ok(airports)) = workers
             .run(move || openatc_core::stations::map_airports(&path))
             .await
-        {
-            Ok(Ok(v)) => v,
-            _ => {
-                return error(openatc_core::dialogue::say(
-                    "notice_could_not_index_airport_markers_bb8fa639",
-                    &[],
-                ));
-            }
+        else {
+            return error(openatc_core::dialogue::say(
+                "notice_could_not_index_airport_markers_bb8fa639",
+                &[],
+            ));
         };
         let mut s = shared.write().await;
         if s.settings.simulator_root != root {
@@ -681,7 +679,7 @@ pub async fn debug_map(AxumState(shared): AxumState<Shared>, Json(body): Json<Va
             ));
         }
         s.map_airports = airports;
-        s.map_root = root.clone();
+        s.map_root.clone_from(&root);
     }
     let s = shared.read().await;
     let lat = body
@@ -724,7 +722,7 @@ pub async fn debug_map(AxumState(shared): AxumState<Shared>, Json(body): Json<Va
         .filter(|a| distance(a.latitude, a.longitude) <= range * 1.5)
         .collect();
     Json(json!({"stations":stations,"airports":airports,
-        "notice":if s.station_root != root { "Waiting for the radio station index." } else { "Installed airport data and published ATC coverage. Green outlines contain the aircraft on the tuned frequency." }})).into_response()
+        "notice":if s.station_root == root { "Installed airport data and published ATC coverage. Green outlines contain the aircraft on the tuned frequency." } else { "Waiting for the radio station index." }})).into_response()
 }
 
 #[cfg(test)]
@@ -749,7 +747,7 @@ mod tests {
             airport: "TEST".into(),
             name: "Test Tower".into(),
             service: "Tower".into(),
-            khz: 118700,
+            khz: 118_700,
             ..Default::default()
         };
         let settings = state.settings.clone();
@@ -774,14 +772,14 @@ mod tests {
             .station_root
             .clone_from(&state.settings.simulator_root);
         state.session.telemetry.position_valid = true;
-        state.session.telemetry.com1_khz = 121400;
-        state.session.telemetry.com2_khz = Some(118700);
+        state.session.telemetry.com1_khz = 121_400;
+        state.session.telemetry.com2_khz = Some(118_700);
         state.stations.push(openatc_core::stations::Station {
             airport: "TEST".into(),
             airport_name: "Test Airport".into(),
             name: "Test Information".into(),
             service: "ATIS".into(),
-            khz: 118700,
+            khz: 118_700,
             ..Default::default()
         });
         let sample = json!({"windDegrees":240,"windKnots":8,"visibilityMeters":10000,
@@ -816,7 +814,7 @@ mod tests {
             .unwrap();
         let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(result["radio"], "com2");
-        assert_eq!(result["frequency"], 118700);
+        assert_eq!(result["frequency"], 118_700);
         assert!(
             result["text"]
                 .as_str()
@@ -872,7 +870,7 @@ mod tests {
                 .atis_logged
                 .insert("Com1/OTHER".into(), "unchanged".into());
         }
-        for frequency in [121700, 118700] {
+        for frequency in [121_700, 118_700] {
             let mut telemetry = shared.read().await.session.telemetry.clone();
             telemetry.com2_khz = Some(frequency);
             telemetry.radio_busy = true;
@@ -940,8 +938,9 @@ mod tests {
         );
         {
             let mut state = shared.write().await;
-            state.sim_weather.get_mut("TEST").unwrap().1 =
-                std::time::Instant::now() - std::time::Duration::from_secs(46);
+            state.sim_weather.get_mut("TEST").unwrap().1 = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(46))
+                .unwrap();
         }
         assert!(
             !super::atis(State(shared.clone()), Json(json!({"radio":"com2"})))
@@ -956,7 +955,7 @@ mod tests {
                 .status()
                 .is_success()
         );
-        assert_eq!(shared.read().await.session.telemetry.com1_khz, 121400);
+        assert_eq!(shared.read().await.session.telemetry.com1_khz, 121_400);
     }
 
     #[test]

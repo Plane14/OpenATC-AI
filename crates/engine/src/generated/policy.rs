@@ -43,6 +43,7 @@ pub(super) fn load(config: &Path) -> Result<Loaded, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     #[test]

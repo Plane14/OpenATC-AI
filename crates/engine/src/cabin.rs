@@ -1,4 +1,11 @@
 //! Simulated passenger activity; aircraft controls still require simulator readback.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use crate::EngineState;
 use openatc_core::{
     dialogue::{phrases, say},
@@ -28,8 +35,10 @@ struct Policy {
     simulation_tick_limit_seconds: f64,
 }
 fn ground_policy_value(key: &str) -> f64 {
-    toml::from_str::<toml::Value>(include_str!("../../../cabin/behaviour.toml"))
-        .expect("bundled cabin policy")[key]
+    openatc_core::configuration::from_str::<toml::Value>(include_str!(
+        "../../../cabin/behaviour.toml"
+    ))
+    .expect("bundled cabin policy")[key]
         .as_float()
         .expect("ground movement threshold")
 }
@@ -40,17 +49,20 @@ fn default_ground_meters() -> f64 {
     ground_policy_value("ground_disconnect_meters")
 }
 fn default_mood() -> String {
-    toml::from_str::<toml::Value>(include_str!("../../../cabin/behaviour.toml"))
-        .ok()
-        .and_then(|value| value["passenger_mood"].as_str().map(str::to_owned))
-        .unwrap_or_default()
+    openatc_core::configuration::from_str::<toml::Value>(include_str!(
+        "../../../cabin/behaviour.toml"
+    ))
+    .ok()
+    .and_then(|value| value["passenger_mood"].as_str().map(str::to_owned))
+    .unwrap_or_default()
 }
 impl Policy {
     fn parse(text: &str) -> Result<Self, String> {
         if text.len() > 8192 {
             return Err("Cabin policy exceeds 8 KiB".into());
         }
-        let policy: Self = toml::from_str(text).map_err(|error| error.to_string())?;
+        let policy: Self =
+            openatc_core::configuration::from_str(text).map_err(|error| error.to_string())?;
         let bounded =
             |value: f64, low: f64, high: f64| value.is_finite() && (low..=high).contains(&value);
         if policy.passenger_mood.is_empty()
@@ -83,6 +95,7 @@ impl Policy {
 }
 
 #[derive(Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Cabin {
     #[serde(skip)]
     policy: Policy,
@@ -376,6 +389,7 @@ pub fn follow_up(state: &mut EngineState) {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     #[test]

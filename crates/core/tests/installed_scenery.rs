@@ -8,9 +8,9 @@ fn los_angeles_surface_ownership_and_stations() {
     let airports = stations::map_airports(&root).unwrap();
     let index = stations::load_index(&root).unwrap();
     for (latitude, longitude) in [
-        (33.938282, -118.383087),
-        (33.940738, -118.383234),
-        (33.941596, -118.382634),
+        (33.938_282, -118.383_087),
+        (33.940_738, -118.383_234),
+        (33.941_596, -118.382_634),
     ] {
         let telemetry = Telemetry {
             latitude,

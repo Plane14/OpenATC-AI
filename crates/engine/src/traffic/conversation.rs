@@ -1,5 +1,10 @@
 //! Optional pilot conversation; operational radio exchanges always take priority.
+#[allow(unused_imports, clippy::wildcard_imports)]
 use super::*;
+use super::{
+    BTreeMap, Duration, EngineState, Instant, IntoResponse, Json, PhaseCode, Pilot, Response,
+    Shared, SpeechTag, Value, add_transmission, json, ready, say, transmit,
+};
 
 fn policy(state: &mut EngineState) {
     if state.traffic.policy.is_none() {
@@ -41,6 +46,8 @@ fn available(state: &EngineState, id: u32) -> Option<&Pilot> {
         p.seen.elapsed() < Duration::from_secs(policy.observation_age_seconds)
             && !p.target.callsign.is_empty()
             && p.target.callsign != state.session.plan.callsign
+            && p.target.com1_khz.is_some()
+            && p.target.com1_khz == state.session.control_frequency()
             && openatc_core::ops::distance_nm(
                 state.session.telemetry.latitude,
                 state.session.telemetry.longitude,
@@ -258,9 +265,10 @@ pub(super) async fn request(shared: Shared, body: Value) -> Response {
 pub(super) fn initiate(state: &mut EngineState) -> bool {
     policy(state);
     let configuration = state.traffic.policy.as_ref().unwrap().clone();
-    if !state.settings.pilots_call_me
+    if !state.initiative.chat_allowed
+        || !state.settings.pilots_call_me
         || !state.settings.talk_to_traffic
-        || !state.settings.informal_pilot_chat
+        || state.settings.pilot_chat_chance_percent == 0
         || state.traffic.chat_pending
         || !quiet(state)
         || state.traffic.last_radio.is_some_and(|at| {
@@ -276,10 +284,6 @@ pub(super) fn initiate(state: &mut EngineState) -> bool {
     if last.elapsed() < Duration::from_secs(configuration.initiation_interval_seconds) {
         return false;
     }
-    state.traffic.last_chat = Some(Instant::now());
-    if rand::random::<f64>() >= configuration.initiation_probability {
-        return false;
-    }
     let candidates: Vec<_> = state
         .traffic
         .pilots
@@ -287,28 +291,77 @@ pub(super) fn initiate(state: &mut EngineState) -> bool {
         .copied()
         .filter(|id| available(state, *id).is_some())
         .collect();
-    let Some(id) = state
-        .traffic
-        .pilots
-        .keys()
-        .copied()
-        .find(|id| *id > state.traffic.last_chat_pilot && candidates.contains(id))
-        .or_else(|| candidates.first().copied())
-    else {
-        return false;
-    };
-    let pilot = &state.traffic.pilots[&id];
-    let callsign = pilot.target.callsign.clone();
-    let voice = pilot.voice.clone();
     let phase = match state.session.phase {
         PhaseCode::Parked => "parked",
         PhaseCode::Cruise => "cruise",
         PhaseCode::TaxiIn => "taxi_in",
         _ => "critical",
     };
+    // A current operational reason is required before rolling. Surface observations
+    // justify asking for a report, never a claim about unobserved weather aloft.
+    let opportunities: std::collections::BTreeSet<_> = candidates
+        .iter()
+        .flat_map(|id| {
+            let pilot = &state.traffic.pilots[id];
+            state
+                .sim_weather
+                .iter()
+                .filter_map(move |(airport, (weather, observed))| {
+                    let relevant = observed.elapsed().as_secs() <= 180
+                        && weather["latitude"]
+                            .as_f64()
+                            .zip(weather["longitude"].as_f64())
+                            .is_some_and(|(lat, lon)| {
+                                openatc_core::ops::distance_nm(
+                                    pilot.target.latitude,
+                                    pilot.target.longitude,
+                                    lat,
+                                    lon,
+                                ) <= configuration.range_nm
+                            });
+                    let wind = weather["windKnots"]
+                        .as_f64()
+                        .is_some_and(|v| v >= configuration.weather_wind_knots);
+                    let visibility = weather["visibilityMeters"]
+                        .as_f64()
+                        .is_some_and(|v| v >= 0.0 && v <= configuration.weather_visibility_meters);
+                    (relevant && (wind || visibility)).then(|| {
+                        (
+                            *id,
+                            pilot.target.callsign.clone(),
+                            airport.clone(),
+                            u8::from(wind) + 2 * u8::from(visibility),
+                        )
+                    })
+                })
+        })
+        .collect();
+    // One roll for each pilot/weather-concern episode. A failed roll is remembered;
+    // periodic polling does not eventually force the same unsolicited call.
+    state
+        .traffic
+        .chat_attempts
+        .retain(|key| opportunities.contains(key));
+    let eligible: Vec<_> = opportunities
+        .into_iter()
+        .filter(|key| !state.traffic.chat_attempts.contains(key))
+        .collect();
+    let Some(opportunity) = eligible
+        .iter()
+        .find(|key| key.0 > state.traffic.last_chat_pilot)
+        .or_else(|| eligible.first())
+        .cloned()
+    else {
+        return false;
+    };
+    let id = opportunity.0;
+    let pilot = &state.traffic.pilots[&id];
+    let callsign = pilot.target.callsign.clone();
+    let voice = pilot.voice.clone();
     let facts = BTreeMap::from([
         ("on_ground".into(), json!(pilot.target.on_ground)),
         ("phase".into(), json!(phase)),
+        ("weather_concern".into(), json!(true)),
     ]);
     let Some(key) = openatc_core::dialogue::matched_response(
         "traffic_chat_initiate_",
@@ -318,6 +371,11 @@ pub(super) fn initiate(state: &mut EngineState) -> bool {
     ) else {
         return false;
     };
+    state.traffic.last_chat = Some(Instant::now());
+    state.traffic.chat_attempts.insert(opportunity);
+    if !crate::initiative::roll_percent(state.settings.pilot_chat_chance_percent) {
+        return false;
+    }
     let text = say(
         &key,
         &[

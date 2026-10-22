@@ -1,4 +1,11 @@
 //! Heading-constrained connectors, prepared once and checked before movement is granted.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use crate::state::Point;
 use dubins_paths::{
     PathType, SegmentType,
@@ -42,6 +49,9 @@ pub struct Sample {
 }
 
 /// Choose the shortest permitted curve whose complete sampled path is protected.
+/// # Panics
+///
+/// Panics if the connection limits produce an invalid rotation.
 pub fn connect(
     from: Pose,
     to: Pose,
@@ -65,7 +75,7 @@ pub fn connect(
         || !valid(to)
         || !(1.0..=25000.0).contains(&limits.radius)
         || !(0.25..=250.0).contains(&limits.spacing)
-        || !(1.0..=300000.0).contains(&limits.length)
+        || !(1.0..=300_000.0).contains(&limits.length)
     {
         return Err("Invalid heading-constrained connection".into());
     }
@@ -161,6 +171,7 @@ pub fn connect(
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     #[test]
@@ -171,7 +182,7 @@ mod tests {
         };
         let to = Pose {
             point: Point {
-                north: 100000.0,
+                north: 100_000.0,
                 ..Default::default()
             },
             heading: 0.0,
@@ -182,7 +193,7 @@ mod tests {
             &Limits {
                 radius: 1000.0,
                 spacing: 250.0,
-                length: 100100.0,
+                length: 100_100.0,
                 initial_turn: None,
             },
             |_, _| true,
@@ -199,8 +210,8 @@ mod tests {
         }));
         let turned = Pose {
             point: Point {
-                east: 100000.0,
-                north: 100000.0,
+                east: 100_000.0,
+                north: 100_000.0,
                 height: 0.0,
             },
             heading: 90.0,
@@ -211,7 +222,7 @@ mod tests {
             &Limits {
                 radius: 1000.0,
                 spacing: 250.0,
-                length: 150000.0,
+                length: 150_000.0,
                 initial_turn: None,
             },
             |_, _| true,

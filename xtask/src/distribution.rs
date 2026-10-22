@@ -53,6 +53,15 @@ fn atomic_copy(source: &Path, target: &Path) -> Result {
 }
 pub(crate) fn install_plugin(sim: &Path, backup: bool) -> Result {
     let root = repo();
+    println!("Building release plugin and engine...");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = Command::new(cargo)
+        .args(["build", "--locked", "--release"])
+        .current_dir(&root)
+        .status()?;
+    if !status.success() {
+        return Err("Release build failed; nothing installed".into());
+    }
     let release = root.join("target/release");
     let plugin = sim.join("Resources/plugins/OpenATC");
     let mut entries = vec![

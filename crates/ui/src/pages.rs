@@ -1,5 +1,15 @@
 //! Communication, radio, flight planning, airport and settings pages.
 
+// Layout tests compare exact fixture coordinates.
+#![allow(clippy::float_cmp)]
+// Layout limits bound the numeric casts below.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+
 use crate::interface::Interface;
 use crate::widgets;
 use openatc_core::ops::{phase_name, request_available};
@@ -35,24 +45,7 @@ fn draw_request_editor(ui: &imgui::Ui, interface: &mut Interface, state: &State)
         .build(|| {
             ui.text(&interface.modal_title);
             ui.spacing();
-            if !["altitude", "descent"].contains(&interface.modal_intent.as_str()) {
-                let label = match interface.modal_intent.as_str() {
-                    "departure_runway" | "arrival_runway" => "Runway (e.g. 25L)",
-                    "change_approach" => "Published approach ID",
-                    "speed" => "Indicated airspeed (knots)",
-                    "deviation" => "Direction and degrees (e.g. LEFT 20)",
-                    _ => "Waypoint",
-                };
-                widgets::muted_wrapped(ui, label);
-                ui.set_next_item_width(-1.0);
-                widgets::edit_text_flags(
-                    ui,
-                    "##request-value",
-                    &mut interface.requested_waypoint,
-                    32,
-                    imgui::InputTextFlags::CHARS_UPPERCASE,
-                );
-            } else {
+            if ["altitude", "descent"].contains(&interface.modal_intent.as_str()) {
                 widgets::muted_wrapped(
                     ui,
                     if metric {
@@ -84,6 +77,23 @@ fn draw_request_editor(ui: &imgui::Ui, interface: &mut Interface, state: &State)
                     "Current altitude: {}",
                     altitude_text(state.telemetry.altitude_feet, units, false)
                 ));
+            } else {
+                let label = match interface.modal_intent.as_str() {
+                    "departure_runway" | "arrival_runway" => "Runway (e.g. 25L)",
+                    "change_approach" => "Published approach ID",
+                    "speed" => "Indicated airspeed (knots)",
+                    "deviation" => "Direction and degrees (e.g. LEFT 20)",
+                    _ => "Waypoint",
+                };
+                widgets::muted_wrapped(ui, label);
+                ui.set_next_item_width(-1.0);
+                widgets::edit_text_flags(
+                    ui,
+                    "##request-value",
+                    &mut interface.requested_waypoint,
+                    32,
+                    imgui::InputTextFlags::CHARS_UPPERCASE,
+                );
             }
             let available = request_available(state, &interface.modal_intent);
             if !available {
@@ -100,18 +110,18 @@ fn draw_request_editor(ui: &imgui::Ui, interface: &mut Interface, state: &State)
                     intent: intent.clone(),
                     altitude_feet: interface.requested_altitude,
                     waypoint: interface.requested_waypoint.clone(),
-                    text: if !["altitude", "descent"].contains(&intent.as_str()) {
+                    text: if ["altitude", "descent"].contains(&intent.as_str()) {
+                        format!(
+                            "Request {intent} {}",
+                            altitude_text(f64::from(interface.requested_altitude), units, true)
+                        )
+                    } else {
                         openatc_core::dialogue::say(
                             &format!("pilot_request_{intent}_change"),
                             &[
                                 ("value", interface.requested_waypoint.clone()),
                                 ("callsign", state.plan.callsign.clone()),
                             ],
-                        )
-                    } else {
-                        format!(
-                            "Request {intent} {}",
-                            altitude_text(f64::from(interface.requested_altitude), units, true)
                         )
                     },
                     ..Default::default()
@@ -1102,9 +1112,23 @@ fn request_grid(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
     }
     ui.child_window("Requests").size([0.0, 0.0]).build(|| {
         let _alignment = ui.push_style_var(imgui::StyleVar::ButtonTextAlign([0.0, 0.5]));
+        if interface
+            .pending_request
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > std::time::Duration::from_secs(2))
+        {
+            interface.pending_request = None;
+        }
         for (intent_id, button_title) in openatc_core::catalog::buttons() {
             let intent = intent_id.as_str();
             let title = button_title.as_str();
+            if interface
+                .pending_request
+                .as_ref()
+                .is_some_and(|(pending, _)| pending == intent)
+            {
+                continue;
+            }
             if !quick_request_available(state, station, intent)
                 || (!filter.is_empty() && !title.to_lowercase().contains(&filter))
             {
@@ -1141,6 +1165,8 @@ fn request_grid(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
                         ..Default::default()
                     };
                     request.text = quick_request_text(interface, state, station, intent, title);
+                    interface.pending_request =
+                        Some((intent.to_owned(), std::time::Instant::now()));
                     interface.send(&request);
                 }
             }
@@ -1215,7 +1241,7 @@ pub fn atc_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
 
 /// Dispatch page: `SimBrief` import and the flight used for clearance.
 pub fn plan_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
-    let _import_disabled = ui.begin_disabled(interface.importing || !interface.engine.connected());
+    let import_disabled = ui.begin_disabled(interface.importing || !interface.engine.connected());
     if ui.button(if interface.importing {
         "Downloading OFP..."
     } else {
@@ -1227,7 +1253,7 @@ pub fn plan_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
             serde_json::json!({"userid": interface.settings.simbrief_id}),
         );
     }
-    drop(_import_disabled);
+    drop(import_disabled);
     if ui.content_region_avail()[0] >= 700.0 {
         ui.same_line();
     }
@@ -1786,6 +1812,7 @@ fn airport_procedures_tab(ui: &imgui::Ui, interface: &mut Interface) {
 }
 
 /// Settings tabs wrap so every section stays within reach.
+#[allow(clippy::items_after_statements)]
 pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
     if interface.show_voice_popup {
         voice_popup(ui, interface);
@@ -1824,7 +1851,7 @@ pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
     {
         let _disabled = ui.begin_disabled(!interface.settings_loaded);
         if interface.settings_section == 0 {
-            settings_general(ui, interface);
+            settings_general(ui, interface, state);
         }
         if interface.settings_section == 1 {
             settings_appearance(ui, interface);
@@ -1946,7 +1973,24 @@ pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
 }
 
 /// First-run connections and installed data.
-fn settings_general(ui: &imgui::Ui, interface: &mut Interface) {
+fn settings_general(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
+    widgets::section_title(ui, "FLIGHT IDENTITY");
+    let previous_callsign = interface.settings.callsign.clone();
+    setting_input(ui, "Default callsign", &mut interface.settings.callsign, 16);
+    if interface.settings.callsign != previous_callsign
+        && openatc_core::ops::planning_callsign(state, &interface.settings.callsign).is_some()
+        && (interface.draft.callsign.trim().is_empty()
+            || interface
+                .draft
+                .callsign
+                .eq_ignore_ascii_case(previous_callsign.trim()))
+    {
+        interface
+            .draft
+            .callsign
+            .clone_from(&interface.settings.callsign);
+    }
+    ui.text_wrapped("Used when the flight plan does not provide a callsign. SimBrief import and the dispatch sheet still override it. Changing it before clearance also updates the Planning draft and ATC identity.");
     widgets::section_title(ui, "GETTING STARTED");
     ui.text_wrapped("1. Start the OpenATC AI server on this computer or another computer on your network.\n2. Connect the services below, then test your microphone and a voice in Audio.\n3. Import or enter a flight plan and tune Clearance Delivery (or Ground/Tower if combined). Available requests appear on the ATC page.");
     ui.text_colored(
@@ -2049,7 +2093,7 @@ fn settings_appearance(ui: &imgui::Ui, interface: &mut Interface) {
         "Keep the full window open",
         &mut interface.settings.pin_open,
     );
-    let _fade_disabled = ui.begin_disabled(interface.settings.pin_open);
+    let fade_disabled = ui.begin_disabled(interface.settings.pin_open);
     labeled_slider(
         ui,
         "Collapse after idle seconds",
@@ -2066,13 +2110,16 @@ fn settings_appearance(ui: &imgui::Ui, interface: &mut Interface) {
         0.85,
         "%.2f",
     );
-    drop(_fade_disabled);
+    drop(fade_disabled);
     widgets::section_title(ui, "UNITS");
     units_combo(ui, interface);
     ui.text_wrapped("Imperial is the aviation standard: feet, knots, nautical miles. Metric uses meters, km/h, kilometers. Region follows local procedure for the departure country. Weights stay in kilograms; pressure and visibility follow regional procedure.");
     if ui.collapsing_header("Developer tools", imgui::TreeNodeFlags::empty()) {
         ui.checkbox("Enable debugging tools", &mut interface.settings.dev_mode);
         ui.text_wrapped("Shows the controller coverage map, phase fast-forward and detailed errors. Fast-forward moves your aircraft; leave this off for normal flights.");
+        if interface.settings.dev_mode {
+            crate::setup::controls(ui, interface);
+        }
     }
 }
 
@@ -2266,6 +2313,16 @@ fn spoken_voices(ui: &imgui::Ui, interface: &mut Interface) {
         1.0,
         "%.2f",
     );
+    let mut digit_by_digit =
+        interface.settings.callsign_numbers == openatc_settings::CallsignNumbers::Digits;
+    if ui.checkbox("Read flight numbers digit by digit", &mut digit_by_digit) {
+        interface.settings.callsign_numbers = if digit_by_digit {
+            openatc_settings::CallsignNumbers::Digits
+        } else {
+            openatc_settings::CallsignNumbers::Group
+        };
+    }
+    ui.text_wrapped("On: Air Canada 160 is spoken as one six zero. Off: group form, one sixty, as preferred in Australia and the USA.");
 }
 
 /// Controller fallback, pool, delivery and speed range.
@@ -2705,7 +2762,15 @@ fn realism_tab(ui: &imgui::Ui, interface: &mut Interface) {
         "Allow other pilots to call me",
         &mut interface.settings.pilots_call_me,
     );
-    ui.text_wrapped("Optional simulated exchanges during quiet periods. Operational calls, emergencies and critical flight phases take priority. Traffic radio and pilot conversations can also be enabled in Traffic settings.");
+    let mut chat_chance = i32::from(interface.settings.pilot_chat_chance_percent);
+    widgets::muted_wrapped(ui, "Chance per eligible opportunity (%)");
+    ui.set_next_item_width(-1.0);
+    let _chat_disabled = ui.begin_disabled(!interface.settings.pilots_call_me);
+    if ui.slider("##pilot-chat-chance", 0, 100, &mut chat_chance) {
+        interface.settings.pilot_chat_chance_percent = chat_chance as u8;
+    }
+    drop(_chat_disabled);
+    ui.text_wrapped("Checks for a current reason before rolling: recent strong wind or reduced visibility near the other pilot can prompt a request for a weather report. No reason means no call, even at 100%. Checks are spaced by the conversation interval; 0% disables unsolicited calls. Operational questions remain available independently of informal chat.");
     widgets::section_title(ui, "TAXI GUIDANCE");
     ui.checkbox(
         "Show taxi arrows in plugin map",
@@ -2811,18 +2876,26 @@ fn discipline_preset_row(ui: &imgui::Ui, interface: &mut Interface) {
 
 /// Readback and radio toggles.
 fn readbacks_row(ui: &imgui::Ui, interface: &mut Interface) {
+    widgets::section_title(ui, "ARRIVAL SEQUENCING");
+    ui.checkbox(
+        "Allow ATC to assign traffic holding",
+        &mut interface.settings.player_traffic_holding,
+    );
+    ui.text_wrapped("Allows a discretionary delay hold when arrival spacing needs more time and a protected holding route is available. Turning this off prevents new optional holds; accepted holds, wake separation, runway protection and go-arounds still apply. Holding and safety instructions do not use a random chance.");
     widgets::section_title(ui, "OPTIONAL ATC OFFERS");
     ui.checkbox(
         "Allow ATC to offer en-route shortcuts",
         &mut interface.settings.atc_shortcut_offers,
     );
-    let mut interval = i32::from(interface.settings.atc_offer_interval_minutes);
-    widgets::muted_wrapped(ui, "Minimum minutes between offers");
+    let mut chance = i32::from(interface.settings.atc_shortcut_chance_percent);
+    widgets::muted_wrapped(ui, "Chance per eligible opportunity (%)");
     ui.set_next_item_width(-1.0);
-    if ui.slider("##offer-interval", 2, 60, &mut interval) {
-        interface.settings.atc_offer_interval_minutes = interval as u8;
+    let _disabled = ui.begin_disabled(!interface.settings.atc_shortcut_offers);
+    if ui.slider("##shortcut-chance", 0, 100, &mut chance) {
+        interface.settings.atc_shortcut_chance_percent = chance as u8;
     }
-    ui.text_wrapped("Offers use known route fixes and terrain data, preserve crossing restrictions and leave enough distance for descent. Accepting requests a new clearance; the copilot does not accept optional route changes for you. Safety instructions and handoffs remain active with offers off.");
+    drop(_disabled);
+    ui.text_wrapped("Rolled only after finding a useful shortcut with checked terrain, crossing restrictions and descent distance. Each route opportunity is tried once, with at least five minutes between checks. 0% disables offers; 100% offers every eligible opportunity. Accepting requests a new clearance. Required traffic spacing, holding, handoffs and go-arounds do not use this percentage.");
     widgets::section_title(ui, "CLEARANCE COMPLIANCE");
     ui.checkbox(
         "Monitor altitude, course, heading and speed",
@@ -2915,7 +2988,7 @@ fn emergencies_row(ui: &imgui::Ui, interface: &mut Interface) {
 /// Session tab: demo controls, flight state and the reset modal.
 fn session_tab(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
     widgets::section_title(ui, "DEMO CONTROLS");
-    let _demo_disabled = ui.begin_disabled(!state.demo);
+    let demo_disabled = ui.begin_disabled(!state.demo);
     if ui.button("Airborne demo") {
         interface.engine.post(
             "/demo",
@@ -2944,7 +3017,7 @@ fn session_tab(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
             serde_json::json!({"icao": "DEMO", "demo": true}),
         );
     }
-    drop(_demo_disabled);
+    drop(demo_disabled);
     widgets::section_title(ui, "ACTIVE FLIGHT");
     ui.text(format!(
         "Stage: {}",
@@ -3236,19 +3309,19 @@ mod tests {
             ..Default::default()
         });
         state.telemetry = openatc_core::state::Telemetry {
-            latitude: 33.914847,
-            longitude: -118.384915,
+            latitude: 33.914_847,
+            longitude: -118.384_915,
             altitude_feet: 3600.0,
             on_ground: false,
             position_valid: true,
             radio_power: true,
-            com1_khz: 118025,
+            com1_khz: 118_025,
             ..Default::default()
         };
         let stations = vec![openatc_core::stations::Station {
             name: "LOS ANGELES Center".into(),
             service: "Center".into(),
-            khz: 118025,
+            khz: 118_025,
             latitude: 33.9,
             longitude: -118.4,
             ..Default::default()
@@ -3283,8 +3356,8 @@ mod tests {
             }
         };
         let mut t = Telemetry {
-            latitude: 33.941596,
-            longitude: -118.382634,
+            latitude: 33.941_596,
+            longitude: -118.382_634,
             altitude_feet: 125.0,
             on_ground: true,
             position_valid: true,
@@ -3366,7 +3439,7 @@ mod tests {
     fn parked_requests_include_radio_and_local_information_before_filing() {
         use openatc_core::state::{FlightPlan, PhaseCode};
         use openatc_core::stations::Station;
-        let mut state = State {
+        let state = State {
             plan: FlightPlan::default(),
             phase: PhaseCode::Parked,
             telemetry: openatc_core::state::Telemetry {
@@ -3631,7 +3704,7 @@ mod tests {
                 frame(&mut ctx, &mut interface);
             }
             let b = interface.collapse_bounds;
-            let target = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
+            let target = [f32::midpoint(b[0], b[2]), f32::midpoint(b[1], b[3])];
             ctx.io_mut().add_mouse_pos_event(target);
             frame(&mut ctx, &mut interface);
             ctx.io_mut()
@@ -3797,7 +3870,7 @@ mod tests {
                     ..template
                 },
                 &interface.airport,
-                118700
+                118_700
             ),
             "ATIS"
         );
@@ -3821,12 +3894,12 @@ mod tests {
         };
         let entry = &mut entry;
         let airport = openatc_core::airport::Airport::default();
-        assert_eq!(transcript_badge(entry, &airport, 118700), "TFC · SIA1975");
+        assert_eq!(transcript_badge(entry, &airport, 118_700), "TFC · SIA1975");
         entry.speaker = "F-GABC".into();
-        assert_eq!(transcript_badge(entry, &airport, 118700), "TFC · F-GABC");
+        assert_eq!(transcript_badge(entry, &airport, 118_700), "TFC · F-GABC");
         entry.position.clear();
         entry.background = false;
-        assert_eq!(transcript_badge(entry, &airport, 118700), "YOU");
+        assert_eq!(transcript_badge(entry, &airport, 118_700), "YOU");
     }
 
     #[test]
@@ -3862,7 +3935,10 @@ mod tests {
                         "clipped icon {index} at width {width}, scale {scale}: {bounds:?}"
                     );
                     assert!(bounds[1] >= position[1] && bounds[3] <= position[1] + 95.0 * scale);
-                    let target = [(bounds[0] + bounds[2]) * 0.5, (bounds[1] + bounds[3]) * 0.5];
+                    let target = [
+                        f32::midpoint(bounds[0], bounds[2]),
+                        f32::midpoint(bounds[1], bounds[3]),
+                    ];
                     ctx.io_mut().add_mouse_pos_event(target);
                     interface.draw(ctx.frame());
                     ctx.render();
@@ -3914,7 +3990,7 @@ mod tests {
                 .build(|| {
                     plan_page(ui, &mut interface, &state);
                     let b = interface.plan_callsign_bounds;
-                    target = [b[0] + 20.0, (b[1] + b[3]) * 0.5];
+                    target = [b[0] + 20.0, f32::midpoint(b[1], b[3])];
                 });
             ctx.render();
         }
@@ -3934,7 +4010,7 @@ mod tests {
         let b = interface.plan_callsign_bounds;
         assert!(b[2] > b[0]);
         ctx.io_mut()
-            .add_mouse_pos_event([b[0] + 20.0, (b[1] + b[3]) * 0.5]);
+            .add_mouse_pos_event([b[0] + 20.0, f32::midpoint(b[1], b[3])]);
         interface.draw(ctx.frame());
         ctx.render();
         ctx.io_mut()
@@ -3968,7 +4044,7 @@ mod tests {
             }
             let b = interface.toolbar_drag_bounds;
             assert!(b[2] - b[0] > 30.0);
-            let point = [(b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5];
+            let point = [f32::midpoint(b[0], b[2]), f32::midpoint(b[1], b[3])];
             ctx.io_mut().add_mouse_pos_event(point);
             interface.draw(ctx.frame());
             ctx.render();
@@ -3991,10 +4067,10 @@ mod tests {
     #[test]
     fn chat_frequency_links_accept_only_decimal_com_frequencies() {
         for (text, expected) in [
-            ("118.1", 118100),
-            ("(121.900),", 121900),
-            ("136.975", 136975),
-            ("123.45", 123450),
+            ("118.1", 118_100),
+            ("(121.900),", 121_900),
+            ("136.975", 136_975),
+            ("123.45", 123_450),
         ] {
             assert_eq!(transcript_frequency(text), Some(expected));
         }
@@ -4016,7 +4092,7 @@ mod tests {
     fn clicking_an_atc_frequency_requests_com1_tuning() {
         let _guard = CONTEXT_LOCK.lock().unwrap();
         for (links, powered, expected) in [
-            (true, true, Some(121900)),
+            (true, true, Some(121_900)),
             (true, false, None),
             (false, true, None),
         ] {
@@ -4265,7 +4341,7 @@ mod tests {
                 .build(|| {
                     interface
                         .missions
-                        .page(ui, &interface.engine, mission_state)
+                        .page(ui, &interface.engine, mission_state);
                 });
             let _ = ctx.render();
         }
@@ -4437,7 +4513,7 @@ mod tests {
         let click = |ctx: &mut imgui::Context, interface: &mut Interface, index: usize| {
             let b = interface.reset_button_bounds[index];
             ctx.io_mut()
-                .add_mouse_pos_event([(b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5]);
+                .add_mouse_pos_event([f32::midpoint(b[0], b[2]), f32::midpoint(b[1], b[3])]);
             interface.draw(ctx.frame());
             ctx.render();
             ctx.io_mut()
@@ -4546,7 +4622,7 @@ mod tests {
             ceiling: 5000.,
             points: (0..300)
                 .map(|i| {
-                    let a = (i as f64) * std::f64::consts::TAU / 300.;
+                    let a = f64::from(i) * std::f64::consts::TAU / 300.;
                     [a.sin() * 0.1, a.cos() * 0.1]
                 })
                 .collect(),
@@ -4554,7 +4630,7 @@ mod tests {
         interface.map_stations = (0..500)
             .map(|i| openatc_core::stations::Station {
                 name: format!("Test controller {i}"),
-                khz: 120000 + i,
+                khz: 120_000 + i,
                 coverage: vec![volume.clone()],
                 ..Default::default()
             })

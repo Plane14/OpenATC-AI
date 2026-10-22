@@ -1,5 +1,16 @@
 //! Bounded DSF v1 mesh decoding; unfamiliar placement commands remain errors.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use super::{DrapedPolygon, Placement, Tile, Vertex};
+
+/// Dense installed tiles can exceed one million polygon points. Retain them up to this bound and
+/// let the tile geometry byte budget decide whether they fit.
+const MAX_POLYGON_POINTS: usize = 2 * 1024 * 1024;
 
 struct Reader<'a> {
     bytes: &'a [u8],
@@ -69,8 +80,8 @@ fn strings(bytes: &[u8]) -> Result<Vec<&str>, String> {
         })
         .collect()
 }
-fn only<'a>(atoms: &[([u8; 4], &'a [u8])], id: &[u8; 4]) -> Result<&'a [u8], String> {
-    let mut found = atoms.iter().filter(|(key, _)| key == id);
+fn only<'a>(atoms: &[([u8; 4], &'a [u8])], id: [u8; 4]) -> Result<&'a [u8], String> {
+    let mut found = atoms.iter().filter(|(key, _)| *key == id);
     let result = found.next().ok_or("Required DSF atom is missing")?.1;
     if found.next().is_some() {
         return Err("Required DSF atom is duplicated".into());
@@ -115,6 +126,7 @@ fn forest(names: &[&str], definition: usize) -> bool {
 }
 
 /// A polygon that rises above the ground instead of draping over it: a building or a forest.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Facade {
     pub resource: std::sync::Arc<str>,
     /// Geographic footprint, outer ring first, latitude and longitude.
@@ -128,6 +140,7 @@ pub(super) struct Facade {
 
 /// A polygon definition that repeats objects along its rings: an object string (`.str`) or an
 /// autogen string (`.ags`). Its height comes from the catalogue it references.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct StringPolygon {
     pub resource: std::sync::Arc<str>,
     /// Geographic footprint, latitude and longitude.
@@ -153,6 +166,7 @@ fn string_definition(names: &[&str], definition: usize) -> Option<bool> {
     }
 }
 
+#[allow(clippy::option_option)] // Absent, excluded, replaced.
 fn filter_comment(
     comment: &[u8],
     filters: &[std::sync::Arc<str>],
@@ -272,7 +286,7 @@ fn pool(bytes: &[u8], scale: &[u8], width: usize) -> Result<Pool, String> {
                 }
             }
         }
-        let divisor = if width == 2 { 65535.0 } else { 4294967295.0 };
+        let divisor = if width == 2 { 65535.0 } else { 4_294_967_295.0 };
         let mut last = 0u32;
         for (index, value) in values.into_iter().enumerate() {
             let value = if encoding & 1 != 0 {
@@ -336,7 +350,7 @@ impl Raster {
             || !matches!(size, 1 | 2 | 4)
             || flags & !7 != 0
             || flags & 3 == 3
-            || flags & 3 == 0 && size != 4
+            || flags.trailing_zeros() >= 2 && size != 4
             || !scale.is_finite()
             || !offset.is_finite()
             || reader.at != info.len()
@@ -396,8 +410,8 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
         return Err("Unsupported or truncated DSF header".into());
     }
     let top = atoms(&bytes[12..bytes.len() - 16])?;
-    let header = atoms(only(&top, b"DAEH")?)?;
-    let properties = strings(only(&header, b"PORP")?)?;
+    let header = atoms(only(&top, *b"DAEH")?)?;
+    let properties = strings(only(&header, *b"PORP")?)?;
     if properties.len() % 2 != 0 {
         return Err("Invalid DSF property pairs".into());
     }
@@ -468,7 +482,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
     {
         return Err("DSF tile bounds exceed the supported projection".into());
     }
-    let definitions = atoms(only(&top, b"NFED")?)?;
+    let definitions = atoms(only(&top, *b"NFED")?)?;
     let polygon_names = definitions
         .iter()
         .find(|(key, _)| key == b"YLOP")
@@ -502,7 +516,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
         .unwrap_or_default();
     let elevation = raster_names.iter().position(|name| *name == "elevation");
     let raster = if let Some(index) = elevation {
-        let rasters = atoms(only(&top, b"SMED")?)?;
+        let rasters = atoms(only(&top, *b"SMED")?)?;
         let info = rasters
             .iter()
             .filter(|(key, _)| key == b"IMED")
@@ -519,7 +533,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
     } else {
         None
     };
-    let geodata = atoms(only(&top, b"DOEG")?)?;
+    let geodata = atoms(only(&top, *b"DOEG")?)?;
     let raw_pools = geodata
         .iter()
         .filter(|(key, _)| key == b"LOOP")
@@ -556,7 +570,9 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
         .map(|(_, bytes)| *bytes)
         .collect::<Vec<_>>();
     if network_raw.len() != network_scales.len() || network_raw.len() > 8192 {
-        return Err("DSF vector coordinate pools have missing scales or exceed their budget".into());
+        return Err(
+            "DSF vector coordinate pools have missing scales or exceed their budget".into(),
+        );
     }
     let mut network_pools = Vec::new();
     for (raw, scaling) in network_raw.into_iter().zip(network_scales) {
@@ -567,7 +583,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
         }
         network_pools.push(decoded);
     }
-    let mut reader = Reader::new(only(&top, b"SDMC")?);
+    let mut reader = Reader::new(only(&top, *b"SDMC")?);
     let mut current = None;
     let mut physical = false;
     let mut triangles = Vec::new();
@@ -712,7 +728,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
                     let mut rings = Vec::new();
                     for indices in indices {
                         polygon_points += indices.len();
-                        if polygon_points > 1024 * 1024 {
+                        if polygon_points > MAX_POLYGON_POINTS {
                             return Err("DSF facade points exceed their budget".into());
                         }
                         let mut ring = Vec::new();
@@ -760,7 +776,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
                     let mut rings = Vec::new();
                     for indices in indices {
                         polygon_points += indices.len();
-                        if polygon_points > 1024 * 1024 {
+                        if polygon_points > MAX_POLYGON_POINTS {
                             return Err("DSF string points exceed their budget".into());
                         }
                         let mut ring = Vec::new();
@@ -801,7 +817,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
                     let mut rings = Vec::new();
                     for indices in indices {
                         polygon_points += indices.len();
-                        if polygon_points > 1024 * 1024 {
+                        if polygon_points > MAX_POLYGON_POINTS {
                             return Err("DSF draped polygon points exceed their budget".into());
                         }
                         let mut ring = Vec::new();
@@ -971,6 +987,9 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
         // loaded, so a tile whose placements all resolve is understood and a tile with any
         // unloadable placement still refuses release.
         unresolved_obstacles,
+        unresolved_classes: std::collections::BTreeSet::new(),
+        unresolved_objects: Vec::new(),
+        unresolved_objects_overflow: false,
         objects,
         obstacles: Vec::new(),
         draped_resources,
@@ -994,7 +1013,13 @@ mod tests {
     fn facades_and_ground_polygons_are_told_apart_by_their_definition() {
         // X-Plane decides whether a polygon is a building or ground from the definition file
         // extension, so the loader must use the same rule.
-        let names = ["buildings.fac", "apron.pol", "road.lin", "trees.for", "coast.bch"];
+        let names = [
+            "buildings.fac",
+            "apron.pol",
+            "road.lin",
+            "trees.for",
+            "coast.bch",
+        ];
         assert!(facade(&names, 0));
         assert!(!facade(&names, 1));
         assert!(!facade(&names, 2));
@@ -1126,8 +1151,8 @@ mod tests {
         wrapped.extend(70000u32.to_le_bytes());
         wrapped.extend(1u32.to_le_bytes());
         let decoded = pool(&wrapped, &scale, 4).unwrap();
-        assert!((decoded.points[0][0] - (7.0 + 70000.0 / 4294967295.0)).abs() < 1e-12);
-        assert!((decoded.points[1][0] - (7.0 + 70001.0 / 4294967295.0)).abs() < 1e-12);
+        assert!((decoded.points[0][0] - (7.0 + 70000.0 / 4_294_967_295.0)).abs() < 1e-12);
+        assert!((decoded.points[1][0] - (7.0 + 70001.0 / 4_294_967_295.0)).abs() < 1e-12);
         // The default scenery appends an empty 32-bit pool; it must not fail the whole tile.
         let empty = [0u8; 4].into_iter().chain([0u8]).collect::<Vec<_>>();
         assert!(pool(&empty, &[], 4).unwrap().points.is_empty());
@@ -1136,6 +1161,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)]
     fn raster_offsets_and_pixel_formats_keep_unknown_heights_out_of_the_mesh() {
         let mut info = vec![1, 2];
         info.extend(5u16.to_le_bytes());

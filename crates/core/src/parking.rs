@@ -92,10 +92,25 @@ pub fn supports_aircraft(stand: &Parking, aircraft: &crate::traffic::profiles::A
     } else {
         "jets"
     };
+    // A general-aviation tie-down or hangar that lists turboprops also takes piston aircraft.
+    // X-Plane commonly omits "props" from those ramps even when they are the field's GA parking.
+    let light_ga = aircraft.handling == Some(crate::traffic::animation::Kind::Piston)
+        && matches!(
+            stand.kind.to_ascii_lowercase().as_str(),
+            "tie_down" | "hangar"
+        )
+        && stand
+            .operations
+            .to_ascii_lowercase()
+            .contains("general_aviation")
+        && stand
+            .equipment
+            .split('|')
+            .any(|value| value == "turboprops");
     fits(stand, aircraft.parking_size())
-        && stand.equipment.split('|').any(|value| {
+        && (stand.equipment.split('|').any(|value| {
             value == equipment || value == "heavy" && matches!(aircraft.wake, 'H' | 'J')
-        })
+        }) || light_ga)
 }
 
 /// Moving traffic cannot use starts reserved for miscellaneous player positioning.
@@ -109,7 +124,7 @@ pub fn moving_supports(stand: &Parking, aircraft: &crate::traffic::profiles::Air
 pub struct TrafficPreference {
     /// Actual operating airline ICAO code, empty for a private registration.
     pub operator: String,
-    /// Ramp operation category such as airline, cargo or general_aviation.
+    /// Ramp operation category such as airline, cargo or `general_aviation`.
     pub operation: String,
 }
 impl TrafficPreference {
@@ -261,6 +276,28 @@ mod tests {
         let mut misc = stand.clone();
         misc.kind = "misc".into();
         assert!(!moving_supports(&misc, aircraft));
+    }
+
+    #[test]
+    fn piston_aircraft_can_use_a_general_aviation_tie_down_that_lists_turboprops() {
+        let aircraft = crate::traffic::profiles::aircraft("C172").unwrap();
+        let stand = Parking {
+            kind: "tie_down".into(),
+            equipment: "jets|turboprops".into(),
+            size: "B".into(),
+            operations: "general_aviation".into(),
+            ..Default::default()
+        };
+        assert!(moving_supports(&stand, aircraft));
+        let mut gate = stand.clone();
+        gate.kind = "gate".into();
+        assert!(!moving_supports(&gate, aircraft));
+        let mut airline = stand.clone();
+        airline.operations = "airline".into();
+        assert!(!moving_supports(&airline, aircraft));
+        let mut helo = stand.clone();
+        helo.equipment = "helos".into();
+        assert!(!moving_supports(&helo, aircraft));
     }
 
     #[test]

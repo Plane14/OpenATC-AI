@@ -7,6 +7,7 @@ pub mod arrival;
 mod atc;
 pub mod catalog;
 pub mod compliance;
+pub mod configuration;
 pub mod crew;
 pub mod debug_jump;
 pub mod dialogue;

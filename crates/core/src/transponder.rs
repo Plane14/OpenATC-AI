@@ -30,7 +30,8 @@ impl Controls {
         if text.len() > 4096 {
             return Err("Transponder bindings exceed 4 KiB".into());
         }
-        let result: Self = toml::from_str(text).map_err(|error| error.to_string())?;
+        let result: Self =
+            crate::configuration::from_str(text).map_err(|error| error.to_string())?;
         let valid = |name: &str| {
             !name.is_empty()
                 && name.len() <= 256

@@ -1,5 +1,12 @@
 //! Aircraft TOML profiles, radio datarefs and electrical power checks.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+
 /// Comms datarefs: call lights, never buttons.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AircraftComms {
@@ -139,8 +146,7 @@ fn sub<'a>(table: &'a toml::Table, section: &str, key: &str) -> Result<&'a str, 
 pub fn load_aircraft_profile(path: &std::path::Path) -> Result<AircraftProfile, String> {
     let text =
         std::fs::read_to_string(path).map_err(|error| format!("cannot open file: {error}"))?;
-    let table: toml::Table = text
-        .parse()
+    let table: toml::Table = crate::configuration::from_str(&text)
         .map_err(|error| format!("malformed file: {error}"))?;
     for key in table.keys() {
         if key != "aircraft" {

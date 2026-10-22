@@ -139,6 +139,7 @@ fn named_identifier(words: &[String], fix: &str) -> bool {
 }
 
 /// Check the speed component even when a readback supplied structured altitude fields.
+#[must_use]
 pub fn matches_clearance_speed(text: &str, clearance: &crate::state::Clearance) -> bool {
     let Some(speed) = speed_component(clearance) else {
         return true;
@@ -158,6 +159,7 @@ pub fn matches_clearance_speed(text: &str, clearance: &crate::state::Clearance) 
 }
 
 /// Build a descent readback from the same level and speed facts as the instruction.
+#[must_use]
 pub fn descent_reply(clearance: &crate::state::Clearance, callsign: &str) -> String {
     let altitude = crate::altitude_text(
         f64::from(clearance.altitude_feet),
@@ -186,6 +188,10 @@ pub fn descent_reply(clearance: &crate::state::Clearance, callsign: &str) -> Str
 }
 
 /// Check identifiers, numeric values and safety words in a short instruction reply.
+/// # Panics
+///
+/// Panics if a token ends in a multi-byte character.
+#[must_use]
 pub fn matches_pilot_reply(actual: &str, expected: &str, callsign: &str) -> bool {
     let normalize = |text: &str| {
         let words = tokens(text);
@@ -273,7 +279,7 @@ pub fn matches_pilot_reply(actual: &str, expected: &str, callsign: &str) -> bool
             v.len() > 1
                 && v.chars().any(|c| c.is_ascii_alphabetic())
                 && v.chars()
-                    .filter(|c| c.is_ascii_alphabetic())
+                    .filter(char::is_ascii_alphabetic)
                     .all(|c| c.is_ascii_uppercase())
         })
         .map(normalize)
@@ -417,13 +423,13 @@ pub fn prepare(state: &State, request: &mut Request) {
         if !c.readback_scope.is_empty() {
             match c.readback_scope.as_str() {
                 "altitude" if !altitude(&request.text, c.altitude_feet) => {
-                    missing.push(crate::dialogue::say("readback_field_altitude", &[]))
+                    missing.push(crate::dialogue::say("readback_field_altitude", &[]));
                 }
                 "direct" if !spoken.contains(&compact(&c.route)) => {
-                    missing.push(crate::dialogue::say("readback_field_route", &[]))
+                    missing.push(crate::dialogue::say("readback_field_route", &[]));
                 }
                 "runway" if !spoken.contains(&format!("runway{}", compact(&c.runway))) => {
-                    missing.push(crate::dialogue::say("readback_field_runway", &[]))
+                    missing.push(crate::dialogue::say("readback_field_runway", &[]));
                 }
                 _ => {}
             }

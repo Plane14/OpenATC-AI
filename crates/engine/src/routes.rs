@@ -1,5 +1,7 @@
 //! HTTP endpoints for dialogue, flight plans, simulator data and speech.
 
+#![allow(clippy::default_trait_access)]
+
 use super::Shared;
 use super::llm::{clean_reply, text as chat_complete};
 use super::support::service_ok;
@@ -22,7 +24,7 @@ use openatc_core::simbrief::parse_simbrief;
 use openatc_core::speech::{PromptContext, SpeechPool, parse_ai_output, sample_slots};
 use openatc_core::state::{PhaseCode, Request, SpeechTag, State, TaxiClearance};
 use openatc_core::{UnitSystem, resolve_units};
-use openatc_settings::{Congestion, Delivery, Settings, Units};
+use openatc_settings::{CallsignNumbers, Congestion, Delivery, Settings, Units};
 use rand::Rng;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
@@ -153,7 +155,8 @@ async fn refresh_voices(shared: &Shared, force: bool) -> Result<(), String> {
             state.voices.clear();
         }
         state.voices_refreshed = Some(std::time::Instant::now());
-        state.voices_source = state.settings.tts_url.clone();
+        let tts_url = state.settings.tts_url.clone();
+        state.voices_source = tts_url;
         (state.client.clone(), state.settings.tts_url.clone())
     };
     let mut call = client
@@ -246,7 +249,25 @@ pub async fn post_settings(
             &[],
         ));
     }
+    let previous_callsign = state.settings.callsign.clone();
     state.settings = proposed.clone();
+    if state.session.clearance.is_none() {
+        let current = state.session.plan.callsign.trim().to_owned();
+        if current.is_empty() || current.eq_ignore_ascii_case(previous_callsign.trim()) {
+            let callsign = proposed.callsign.trim();
+            if !callsign.is_empty() {
+                state.session.plan.callsign = callsign.to_ascii_uppercase();
+                let registration = state.session.plan.registration.trim();
+                if registration.is_empty()
+                    || registration.eq_ignore_ascii_case(previous_callsign.trim())
+                {
+                    let callsign = state.session.plan.callsign.clone();
+                    state.session.plan.registration.clone_from(&callsign);
+                }
+            }
+        }
+    }
+    state.apply_settings_callsign();
     let controllers_path = state.config_dir.join("controllers.json");
     let _ = super::support::save_json(
         &controllers_path,
@@ -365,6 +386,7 @@ fn reset_flight(state: &mut crate::EngineState) {
     let demo = state.session.demo;
     let next_sequence = state.session.next_sequence;
     state.session = State::default();
+    state.apply_settings_callsign();
     state.atis_logged.clear();
     state.flow = super::flight::FlightFlow::default();
     state.crew.checklist = None;
@@ -424,15 +446,32 @@ pub async fn session_load(AxumState(state): AxumState<Shared>) -> Response {
         ));
     }
     state.session = restored;
+    state.apply_settings_callsign();
     state.session.taxi_clearance = TaxiClearance::default();
     let snapshot = snapshot(&state.session, &state.settings);
     Json(snapshot).into_response()
+}
+
+/// A filed plan keeps its own callsign; the settings value only fills an empty one.
+fn fill_plan_callsign(plan: &mut openatc_core::state::FlightPlan, fallback: &str) {
+    if !plan.callsign.trim().is_empty() {
+        return;
+    }
+    let callsign = fallback.trim();
+    if callsign.is_empty() {
+        return;
+    }
+    plan.callsign = callsign.to_ascii_uppercase();
+    if plan.registration.trim().is_empty() {
+        plan.registration.clone_from(&plan.callsign);
+    }
 }
 
 pub async fn post_plan(
     AxumState(state): AxumState<Shared>,
     Json(mut plan): Json<openatc_core::state::FlightPlan>,
 ) -> Response {
+    let shared = state.clone();
     let (root, generation, config) = {
         let state = state.read().await;
         (
@@ -441,6 +480,7 @@ pub async fn post_plan(
             state.config_dir.clone(),
         )
     };
+    fill_plan_callsign(&mut plan, &state.read().await.settings.callsign.clone());
     let workers = state.read().await.workers.clone();
     let loaded = workers
         .run(move || {
@@ -513,7 +553,12 @@ pub async fn post_plan(
     state.arrival_profile = profile;
     state.vertical_policy = policy;
     state.mora = mora;
+    let generated = state.settings.generated_traffic;
     let snapshot = snapshot(&state.session, &state.settings);
+    drop(state);
+    if generated {
+        start_generated(shared);
+    }
     Json(snapshot).into_response()
 }
 
@@ -655,7 +700,24 @@ pub async fn post_airport_load(
     if body.get("active").and_then(Value::as_bool).unwrap_or(true) {
         state.write().await.airport = Some(loaded.clone());
     }
+    let start = {
+        let state = state.read().await;
+        state.settings.generated_traffic
+            && (state.session.plan.departure.is_empty() || state.session.plan.departure == icao)
+    };
+    if start {
+        start_generated(state.clone());
+    }
     Json(serde_json::to_value(&loaded).unwrap_or(Value::Null)).into_response()
+}
+
+/// Start the apron and the production preparation as soon as the departure airport or plan is
+/// known, instead of waiting for the first telemetry frame.
+fn start_generated(shared: Shared) {
+    tokio::spawn(async move {
+        crate::generated::prepare_apron(shared.clone()).await;
+        crate::generated::prepare(shared).await;
+    });
 }
 
 pub async fn post_online_weather(
@@ -853,7 +915,7 @@ pub async fn post_transcribe(
                 "notice_stt_request_failed_check_endpoint_model_and_openatc_stt_1016f227",
                 &[],
             )
-            .to_owned(),
+            .clone(),
         );
     };
     if !reply.status().is_success() {
@@ -862,7 +924,7 @@ pub async fn post_transcribe(
                 "notice_stt_request_failed_check_endpoint_model_and_openatc_stt_1016f227",
                 &[],
             )
-            .to_owned(),
+            .clone(),
         );
     }
     let Ok(mut transcription) = reply.json::<Value>().await else {
@@ -871,7 +933,7 @@ pub async fn post_transcribe(
                 "notice_stt_request_failed_check_endpoint_model_and_openatc_stt_1016f227",
                 &[],
             )
-            .to_owned(),
+            .clone(),
         );
     };
     if transcription.get("text").and_then(Value::as_str).is_none()
@@ -1034,7 +1096,7 @@ pub async fn post_speak(AxumState(state): AxumState<Shared>, Json(body): Json<Va
             .and_then(Value::as_bool)
             .unwrap_or(false),
     );
-    let (callsign, airports, pronunciation) = {
+    let (callsign, airports, pronunciation, traffic_codes, group_numbers) = {
         let current = state.read().await;
         let mut airports = Vec::new();
         for token in text.split_whitespace() {
@@ -1053,18 +1115,30 @@ pub async fn post_speak(AxumState(state): AxumState<Shared>, Json(body): Json<Va
                 airports.push((id.to_owned(), airport.name.clone()));
             }
         }
+        let traffic_codes = current
+            .session
+            .generated_traffic
+            .iter()
+            .map(|frame| frame.target.callsign.clone())
+            .collect::<Vec<_>>();
         (
             current.session.plan.callsign.clone(),
             airports,
             current.pronunciation.clone(),
+            traffic_codes,
+            current.settings.callsign_numbers == CallsignNumbers::Group,
         )
     };
-    let spoken_text = openatc_core::radiotelephony::spoken_with_pronunciation(
+    let mut spoken_text = openatc_core::radiotelephony::spoken_with_pronunciation(
         &text,
         &callsign,
         &airports,
         &pronunciation,
     );
+    for code in traffic_codes {
+        spoken_text =
+            openatc_core::radiotelephony::spoken_flight_number(&spoken_text, &code, group_numbers);
+    }
     let tts_body = json!({
         "model": settings.tts_model,
         "voice": voice,
@@ -1104,7 +1178,7 @@ pub async fn post_speak(AxumState(state): AxumState<Shared>, Json(body): Json<Va
                 "notice_tts_request_failed_check_endpoint_model_and_openatc_tts_0db775d1",
                 &[],
             )
-            .to_owned(),
+            .clone(),
         );
     }
     let Ok(bytes) = reply.bytes().await else {
@@ -1116,7 +1190,7 @@ pub async fn post_speak(AxumState(state): AxumState<Shared>, Json(body): Json<Va
                 "notice_tts_request_failed_check_endpoint_model_and_openatc_tts_0db775d1",
                 &[],
             )
-            .to_owned(),
+            .clone(),
         );
     };
     (
@@ -1377,14 +1451,11 @@ async fn record_response(
     response: Response,
 ) -> Response {
     let (parts, body) = response.into_parts();
-    let bytes = match axum::body::to_bytes(body, 16 * 1024 * 1024).await {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return bad_request(openatc_core::dialogue::say(
-                "notice_request_response_could_not_be_read_85e2a2a9",
-                &[],
-            ));
-        }
+    let Ok(bytes) = axum::body::to_bytes(body, 16 * 1024 * 1024).await else {
+        return bad_request(openatc_core::dialogue::say(
+            "notice_request_response_could_not_be_read_85e2a2a9",
+            &[],
+        ));
     };
     let result = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
     let mut state = shared.write().await;
@@ -2485,6 +2556,9 @@ pub(crate) async fn atc_request(
             return Json(json!({"result":{"accepted":true,"message":text},"state":snapshot(&state.session,&state.settings)})).into_response();
         }
     }
+    if crate::traffic::holding::request(&mut state, &receiving, &request) {
+        return Json(json!({"result":{"accepted":false,"message":state.session.transcript.last().map(|t| &t.text)},"state":snapshot(&state.session,&state.settings)})).into_response();
+    }
     if request.intent == "direct" && !state.session.plan.fixes.is_empty() {
         let next = openatc_core::navigation::route_ahead(
             &state.session.plan.fixes,
@@ -2515,6 +2589,7 @@ pub(crate) async fn atc_request(
                 .any(|fix| {
                     fix.minimum_altitude_feet.is_some()
                         || fix.maximum_altitude_feet.is_some()
+                        || fix.minimum_speed_knots.is_some()
                         || fix.maximum_speed_knots.is_some()
                 })
         {
@@ -2586,6 +2661,9 @@ pub(crate) async fn atc_request(
         region: &region,
     };
     let mut result = apply_request(&mut state.session, &ctx);
+    if result.accepted && ["acknowledge", "readback"].contains(&request.intent.as_str()) {
+        crate::traffic::holding::acknowledge(&mut state, request.clearance_sequence);
+    }
     if result.accepted
         && !matches!(
             request.intent.as_str(),
@@ -2851,7 +2929,7 @@ pub async fn post_suggest(
     let role = body.get("role").and_then(Value::as_str).unwrap_or("atc");
     if !["atc", "copilot", "ground", "attendant"].contains(&role) {
         return bad_request(
-            openatc_core::dialogue::say("notice_unknown_role_1db2d66a", &[]).to_owned(),
+            openatc_core::dialogue::say("notice_unknown_role_1db2d66a", &[]).clone(),
         );
     }
     let situations: Vec<String> = body
@@ -2914,7 +2992,7 @@ pub async fn post_suggest(
         if !["ifr", "vfr"].contains(&flight_rules) {
             return bad_request(
                 openatc_core::dialogue::say("notice_flightrules_must_be_ifr_or_vfr_014fc7fc", &[])
-                    .to_owned(),
+                    .clone(),
             );
         }
         let examples =
@@ -2927,7 +3005,7 @@ pub async fn post_suggest(
                     "notice_no_examples_for_that_role_and_situation_7bdff3c5",
                     &[],
                 )
-                .to_owned(),
+                .clone(),
             );
         }
         let samples = sample_slots();
@@ -2951,7 +3029,7 @@ pub async fn post_suggest(
     };
     if !settings.ai_enabled || settings.ai_model.is_empty() {
         return bad_request(
-            openatc_core::dialogue::say("notice_ai_generation_is_off_587c5e7e", &[]).to_owned(),
+            openatc_core::dialogue::say("notice_ai_generation_is_off_587c5e7e", &[]).clone(),
         );
     }
     let current_request = shared
@@ -3056,6 +3134,7 @@ mod chatter_tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)]
     fn cockpit_voices_are_clean_while_received_radio_keeps_effects() {
         let mut settings = Settings {
             radio_effects: true,
@@ -3085,6 +3164,7 @@ mod chatter_tests {
         assert_eq!(speech_effects(&settings, "pilot", true), clean);
     }
     #[tokio::test]
+    #[allow(clippy::float_cmp)]
     async fn planned_airports_get_weather_before_a_radio_handoff() {
         let mut state = crate::test_state();
         state
@@ -3148,13 +3228,13 @@ mod chatter_tests {
                 state.session.telemetry.position_valid = true;
                 state.session.telemetry.latitude = 0.0;
                 state.session.telemetry.longitude = 0.0;
-                state.session.telemetry.com1_khz = 121400;
-                state.session.telemetry.com2_khz = Some(121400);
+                state.session.telemetry.com1_khz = 121_400;
+                state.session.telemetry.com2_khz = Some(121_400);
                 state.stations = vec![openatc_core::stations::Station {
                     airport: "TEST".into(),
                     name: format!("Test {service}"),
                     service: service.into(),
-                    khz: 121400,
+                    khz: 121_400,
                     ..Default::default()
                 }];
                 let plan = state.session.plan.clone();
@@ -3222,14 +3302,14 @@ mod chatter_tests {
             state.voices_source.clone_from(&state.settings.tts_url);
             state.voices_refreshed = Some(std::time::Instant::now());
             state.session.telemetry.position_valid = true;
-            state.session.telemetry.com1_khz = 121400;
-            state.session.telemetry.com2_khz = Some(118700);
+            state.session.telemetry.com1_khz = 121_400;
+            state.session.telemetry.com2_khz = Some(118_700);
             state.session.plan.callsign = "C-GTLT".into();
             state.stations.push(openatc_core::stations::Station {
                 airport: "TEST".into(),
                 name: "Test Delivery".into(),
                 service: "Clearance".into(),
-                khz: 118700,
+                khz: 118_700,
                 ..Default::default()
             });
             if scenario == "stale" {
@@ -3289,7 +3369,7 @@ mod chatter_tests {
             assert!(!reply.voice.is_empty());
             assert_eq!(reply.radio, Some(openatc_core::state::Radio::Com2));
             assert_eq!(reply.position, "Test Delivery");
-            assert_eq!(state.session.telemetry.com1_khz, 121400);
+            assert_eq!(state.session.telemetry.com1_khz, 121_400);
         }
     }
 
@@ -3300,7 +3380,7 @@ mod chatter_tests {
             airport: "TEST".into(),
             name: "Test Delivery".into(),
             service: "Clearance".into(),
-            khz: 121700,
+            khz: 121_700,
             ..Default::default()
         };
         let identity = crate::flight::tag(&mut state, &station);
@@ -3331,13 +3411,13 @@ mod chatter_tests {
         state.voices_source.clone_from(&state.settings.tts_url);
         state.voices_refreshed = Some(std::time::Instant::now());
         state.session.telemetry.position_valid = true;
-        state.session.telemetry.com1_khz = 121400;
-        state.session.telemetry.com2_khz = Some(118700);
+        state.session.telemetry.com1_khz = 121_400;
+        state.session.telemetry.com2_khz = Some(118_700);
         state.stations.push(openatc_core::stations::Station {
             airport: "TEST".into(),
             name: "Test Tower".into(),
             service: "Tower".into(),
-            khz: 118700,
+            khz: 118_700,
             ..Default::default()
         });
         let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
@@ -3364,8 +3444,8 @@ mod chatter_tests {
                 .any(|entry| entry.speaker == "C-GTLT" && entry.text.contains("C-GTLT"))
         );
         assert_eq!(first.radio, Some(openatc_core::state::Radio::Com2));
-        assert_eq!(shared.read().await.session.telemetry.com1_khz, 121400);
-        shared.write().await.session.telemetry.com1_khz = 118700;
+        assert_eq!(shared.read().await.session.telemetry.com1_khz, 121_400);
+        shared.write().await.session.telemetry.com1_khz = 118_700;
         let response = handle_request(
             AxumState(shared.clone()),
             Json(json!({"intent":"radio_check","role":"atc"})),
@@ -3410,14 +3490,14 @@ mod chatter_tests {
         let root = std::env::var("OPENATC_TEST_SIMULATOR_ROOT").unwrap();
         let stations = openatc_core::stations::load_index(&root).unwrap();
         let telemetry = openatc_core::state::Telemetry {
-            latitude: 33.914847,
-            longitude: -118.384915,
+            latitude: 33.914_847,
+            longitude: -118.384_915,
             altitude_feet: 3600.0,
             height_agl_feet: 3569.9,
             on_ground: false,
             position_valid: true,
             radio_power: true,
-            com1_khz: 118025,
+            com1_khz: 118_025,
             ..Default::default()
         };
         let nearby = openatc_core::stations::nearby(&stations, &telemetry);
@@ -3457,8 +3537,8 @@ mod chatter_tests {
             ..Default::default()
         });
         state.session.telemetry = Telemetry {
-            latitude: 33.914847,
-            longitude: -118.384915,
+            latitude: 33.914_847,
+            longitude: -118.384_915,
             altitude_feet: 3600.0,
             height_agl_feet: 3569.9,
             on_ground: false,
@@ -3466,13 +3546,13 @@ mod chatter_tests {
             radio_power: true,
             ground_speed_knots: 266.59,
             heading_degrees: 180.0,
-            com1_khz: 124500,
+            com1_khz: 124_500,
             ..Default::default()
         };
         for _ in 0..4 {
             crate::flight::tick(&mut state);
         }
-        assert_eq!(state.session.recommended_frequency_khz, 118025);
+        assert_eq!(state.session.recommended_frequency_khz, 118_025);
         assert!(
             state
                 .session
@@ -3501,7 +3581,7 @@ mod chatter_tests {
             .status()
             .is_success()
         );
-        shared.write().await.session.telemetry.com1_khz = 118025;
+        shared.write().await.session.telemetry.com1_khz = 118_025;
         assert!(
             post_copilot_checkin(AxumState(shared.clone()), Json(json!({})))
                 .await
@@ -3538,7 +3618,7 @@ mod chatter_tests {
         assert!(
             openatc_core::stations::tuned(
                 &openatc_core::stations::nearby(&state.stations, &state.session.telemetry),
-                118025
+                118_025
             )
             .is_some()
         );
@@ -3549,8 +3629,8 @@ mod chatter_tests {
     async fn com2_readback_stays_on_com2_and_retuning_invalidates_it() {
         let mut state = crate::test_state();
         state.settings.copilot_replies = true;
-        state.session.telemetry.com1_khz = 121400;
-        state.session.telemetry.com2_khz = Some(121400);
+        state.session.telemetry.com1_khz = 121_400;
+        state.session.telemetry.com2_khz = Some(121_400);
         add_transmission(
             &mut state.session,
             "ATC",
@@ -3574,14 +3654,14 @@ mod chatter_tests {
             let state = shared.read().await;
             let pending = state.pending_copilot_reply.as_ref().unwrap();
             assert_eq!(pending.request.radio, openatc_core::state::Radio::Com2);
-            assert_eq!(pending.frequency, 121400);
+            assert_eq!(pending.frequency, 121_400);
             assert_eq!(
                 state.session.transcript.last().unwrap().radio,
                 Some(openatc_core::state::Radio::Com2)
             );
             pending.sequence
         };
-        shared.write().await.session.telemetry.com2_khz = Some(119100);
+        shared.write().await.session.telemetry.com2_khz = Some(119_100);
         let response = post_copilot_reply(
             AxumState(shared.clone()),
             Json(json!({"sequence":sequence})),
@@ -3589,14 +3669,14 @@ mod chatter_tests {
         .await;
         assert!(!response.status().is_success());
         assert!(shared.read().await.pending_copilot_reply.is_none());
-        assert_eq!(shared.read().await.session.telemetry.com1_khz, 121400);
+        assert_eq!(shared.read().await.session.telemetry.com1_khz, 121_400);
     }
 
     #[tokio::test]
     async fn delayed_playback_cannot_acknowledge_a_replacement_or_another_frequency() {
         let mut state = crate::test_state();
         state.settings.copilot_replies = true;
-        state.session.telemetry.com1_khz = 121400;
+        state.session.telemetry.com1_khz = 121_400;
         add_transmission(
             &mut state.session,
             "ATC",
@@ -3662,7 +3742,7 @@ mod chatter_tests {
             current
         );
         let mut telemetry = shared.read().await.session.telemetry.clone();
-        telemetry.com1_khz = 118100;
+        telemetry.com1_khz = 118_100;
         assert!(
             crate::surface::post_telemetry(AxumState(shared.clone()), Json(telemetry))
                 .await
@@ -3684,7 +3764,7 @@ mod chatter_tests {
     async fn plan_import_keeps_preflight_exchange_but_resets_a_finished_flight() {
         let mut state = crate::test_state();
         state.session.demo = false;
-        state.session.telemetry.com1_khz = 121400;
+        state.session.telemetry.com1_khz = 121_400;
         add_transmission(
             &mut state.session,
             "GROUND",
@@ -3726,7 +3806,7 @@ mod chatter_tests {
         let s = shared.read().await;
         assert_eq!(s.session_generation, 1);
         assert_eq!(s.session.next_sequence, sequence);
-        assert_eq!(s.session.telemetry.com1_khz, 121400);
+        assert_eq!(s.session.telemetry.com1_khz, 121_400);
         assert!(!s.session.demo);
         assert_eq!(s.session.phase, PhaseCode::Parked);
         assert!(s.session.transcript.is_empty());
@@ -3808,5 +3888,26 @@ mod chatter_tests {
             maybe_chatter(&mut session, &settings, &[], &SpeechTag::default());
         }
         assert!(session.transcript.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod callsign_tests {
+    use super::*;
+
+    #[test]
+    fn filed_callsign_wins_over_the_settings_default() {
+        let mut plan = openatc_core::state::FlightPlan {
+            callsign: "QFA123".into(),
+            ..Default::default()
+        };
+        fill_plan_callsign(&mut plan, "VH-BIL");
+        assert_eq!(plan.callsign, "QFA123");
+        assert!(plan.registration.is_empty());
+
+        let mut empty = openatc_core::state::FlightPlan::default();
+        fill_plan_callsign(&mut empty, "VH-BIL");
+        assert_eq!(empty.callsign, "VH-BIL");
+        assert_eq!(empty.registration, "VH-BIL");
     }
 }

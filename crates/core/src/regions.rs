@@ -74,8 +74,7 @@ pub fn builtin_region(icao: &str) -> Region {
 pub fn load_regions(path: &Path) -> Result<BTreeMap<String, Region>, String> {
     let text =
         std::fs::read_to_string(path).map_err(|error| format!("cannot open file: {error}"))?;
-    let table: toml::Table = text
-        .parse()
+    let table: toml::Table = crate::configuration::from_str(&text)
         .map_err(|error| format!("malformed file: {error}"))?;
     let regions = table
         .get("regions")

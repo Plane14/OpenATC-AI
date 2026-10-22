@@ -72,18 +72,24 @@ pub struct Leg {
 
 impl Leg {
     /// The second description column explicitly marks a fly-over waypoint.
+    #[must_use]
     pub fn fly_over(&self) -> bool {
         self.description.as_bytes().get(1) == Some(&b'Y')
     }
     /// The third column marks the first leg after the missed-approach point.
+    #[must_use]
     pub fn starts_missed(&self) -> bool {
         self.description.as_bytes().get(2) == Some(&b'M')
     }
     /// The fourth column marks the published missed-approach point itself.
+    #[must_use]
     pub fn missed_point(&self) -> bool {
         self.description.as_bytes().get(3) == Some(&b'M')
     }
     /// Resolve ordinary crossing limits; unsupported descriptors cannot silently lose a restriction.
+    /// # Panics
+    ///
+    /// Panics if a published altitude descriptor has an unsupported shape.
     pub fn altitude_limits(&self) -> Result<(Option<i32>, Option<i32>), String> {
         let first = self.altitude_one;
         let second = self.altitude_two;
@@ -363,8 +369,7 @@ impl Catalogue {
         } else {
             return Err("Missed approach is missing or ambiguous".into());
         };
-        if landing.is_empty() || missed.is_empty() || !landing.iter().any(|leg| leg.missed_point())
-        {
+        if landing.is_empty() || missed.is_empty() || !landing.iter().any(Leg::missed_point) {
             return Err("Approach has no explicit missed-approach point and recovery".into());
         }
         Ok(Approach {

@@ -1,4 +1,11 @@
 //! Route geometry and published crossing limits, separate from planned altitudes.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use crate::state::{FlightPlan, RouteFix, Telemetry};
 
 /// A known route leg near the aircraft.
@@ -16,6 +23,8 @@ pub struct Leg {
     pub distance_nm: f64,
 }
 /// Project onto a straight imported leg. Procedure arcs and vector legs are not inferred.
+#[allow(clippy::many_single_char_names)]
+#[must_use]
 pub fn leg(fixes: &[RouteFix], next: usize, t: &Telemetry) -> Option<Leg> {
     let a = fixes.get(next.checked_sub(1)?)?;
     let b = fixes.get(next)?;
@@ -50,18 +59,15 @@ pub fn leg(fixes: &[RouteFix], next: usize, t: &Telemetry) -> Option<Leg> {
 
 /// The first leg that is still ahead of the aircraft. A vector or direct-to must
 /// never target a fix the aircraft has already passed, even when it is off course.
+#[must_use]
 pub fn route_ahead(fixes: &[RouteFix], next: usize, t: &Telemetry) -> usize {
     let mut next = next.max(1).min(fixes.len().saturating_sub(1).max(1));
     while next + 1 < fixes.len() {
         let Some(fix) = fixes.get(next) else {
             break;
         };
-        let captured = crate::ops::distance_nm(
-            t.latitude,
-            t.longitude,
-            fix.latitude,
-            fix.longitude,
-        ) < 0.05;
+        let captured =
+            crate::ops::distance_nm(t.latitude, t.longitude, fix.latitude, fix.longitude) < 0.05;
         let passed = !fix.fly_over
             && (leg(fixes, next, t).is_some_and(|leg| leg.along >= 1.0)
                 || fix_passed_on_outbound(fixes, next, t));
@@ -75,6 +81,7 @@ pub fn route_ahead(fixes: &[RouteFix], next: usize, t: &Telemetry) -> usize {
 }
 
 /// Recover missed telemetry sequencing only when established on a later straight STAR leg./// This observes route progress; it does not authorise a shortcut or infer missed crossing levels.
+#[must_use]
 pub fn established_star_leg(fixes: &[RouteFix], next: usize, t: &Telemetry) -> Option<usize> {
     let source = &fixes.get(next)?.constraint_source;
     if !source.starts_with("STAR ") || !t.position_valid {
@@ -104,6 +111,7 @@ pub fn established_star_leg(fixes: &[RouteFix], next: usize, t: &Telemetry) -> O
 
 /// Observe a fly-by fix from its known outbound track without requiring a
 /// sample over the waypoint or extending the incoming course through a turn.
+#[must_use]
 pub fn fix_passed_on_outbound(fixes: &[RouteFix], next: usize, t: &Telemetry) -> bool {
     let Some(fix) = fixes.get(next).filter(|fix| {
         ["IF", "TF", "DF", "CF", "AF", "RF"].contains(&fix.path_terminator.as_str())
@@ -111,6 +119,17 @@ pub fn fix_passed_on_outbound(fixes: &[RouteFix], next: usize, t: &Telemetry) ->
     }) else {
         return false;
     };
+    // The aircraft has flown by the fix when the fix is behind its track and close enough to
+    // matter. This holds for a turning leg, where no straight projection exists, and it stops
+    // the monitor from measuring the aircraft against the leg it has already left.
+    let track = t.ground_track_degrees.unwrap_or(t.heading_degrees);
+    let bearing_to_fix =
+        crate::arrival::bearing([t.latitude, t.longitude], [fix.latitude, fix.longitude]);
+    if crate::ops::distance_nm(t.latitude, t.longitude, fix.latitude, fix.longitude) < 2.0
+        && turn(track, bearing_to_fix).abs() > 90.0
+    {
+        return true;
+    }
     let Some(following) = leg(fixes, next + 1, t) else {
         return false;
     };
@@ -192,6 +211,9 @@ fn record_order(
         .copied()
 }
 /// Merge the selected runway and procedure transitions only.
+/// # Panics
+///
+/// Panics if a procedure record is shorter than the documented field layout.
 pub fn load_constraints(plan: &mut FlightPlan, kind: &str, text: &str) {
     let (name, runway, transition) = match kind {
         "SID" => (&plan.sid, &plan.runway, &plan.sid_transition),
@@ -296,7 +318,11 @@ fn apply_transition_fallback(
     let (name, runway, transition) = if kind == "SID" {
         (&plan.sid, &plan.runway, plan.sid_transition.clone())
     } else if kind == "STAR" {
-        (&plan.star, &plan.arrival_runway, plan.star_transition.clone())
+        (
+            &plan.star,
+            &plan.arrival_runway,
+            plan.star_transition.clone(),
+        )
     } else {
         return;
     };
@@ -307,9 +333,10 @@ fn apply_transition_fallback(
     {
         return;
     }
-    let published = catalogue.0.keys().any(|key| {
-        key.kind == kind && key.name == *name && key.transition == transition
-    });
+    let published = catalogue
+        .0
+        .keys()
+        .any(|key| key.kind == kind && key.name == *name && key.transition == transition);
     if published {
         return;
     }
@@ -528,11 +555,13 @@ fn expand_terminal(plan: &mut FlightPlan, kind: &str, procedure: &str, fixes: &s
     }
 }
 /// Smallest signed turn from one heading to another.
+#[must_use]
 pub fn turn(from: f64, to: f64) -> f64 {
     (to - from + 180.0).rem_euclid(360.0) - 180.0
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     #[test]
@@ -750,10 +779,8 @@ mod tests {
     }
     #[test]
     fn an_unpublished_transition_is_reported_in_the_plan_and_not_dropped() {
-        let root = std::env::temp_dir().join(format!(
-            "openatc-transition-notice-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("openatc-transition-notice-{}", std::process::id()));
         let cifp = root.join("Custom Data/CIFP/TEST.dat");
         std::fs::create_dir_all(cifp.parent().unwrap()).unwrap();
         let row = |sequence, transition, identifier| {
@@ -790,7 +817,11 @@ mod tests {
             ..Default::default()
         };
         enrich(&mut plan, root.to_str().unwrap());
-        assert!(plan.procedure_notice.contains("VIPPA"), "{}", plan.procedure_notice);
+        assert!(
+            plan.procedure_notice.contains("VIPPA"),
+            "{}",
+            plan.procedure_notice
+        );
         assert!(plan.procedure_notice.contains("common route"));
         assert_eq!(plan.fixes[0].maximum_altitude_feet, Some(12000));
         std::fs::remove_dir_all(root).ok();
@@ -972,6 +1003,7 @@ mod tests {
 pub struct Mora(pub std::collections::BTreeMap<(i32, i32), i32>);
 impl Mora {
     /// Custom navdata takes priority over the bundled grid.
+    #[must_use]
     pub fn load(root: &str) -> Self {
         let custom = format!("{root}/Custom Data/earth_mora.dat");
         let path = if std::path::Path::new(&custom).is_file() {
@@ -982,6 +1014,7 @@ impl Mora {
         std::fs::read_to_string(path).map_or_else(|_| Self::default(), |text| Self::parse(&text))
     }
     /// Rows contain thirty consecutive longitude cells, each in hundreds of feet.
+    #[must_use]
     pub fn parse(text: &str) -> Self {
         let mut cells = std::collections::BTreeMap::new();
         for line in text.lines() {
@@ -1003,6 +1036,7 @@ impl Mora {
         Self(cells)
     }
     /// Conservative floor along a prospective off-route vector; missing cells stay unknown.
+    #[must_use]
     pub fn corridor(&self, from: [f64; 2], to: [f64; 2]) -> Option<i32> {
         if [from, to].iter().any(|point| {
             !point.iter().all(|value| value.is_finite())
@@ -1086,6 +1120,7 @@ impl Mora {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod mora_tests {
     use super::Mora;
     use std::collections::BTreeMap;
@@ -1141,6 +1176,7 @@ mod mora_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod route_ahead_tests {
     use super::*;
     use crate::state::{RouteFix, Telemetry};
@@ -1171,5 +1207,33 @@ mod route_ahead_tests {
             ..t
         };
         assert_eq!(route_ahead(&fixes, 1, &t), 1);
+    }
+
+    #[test]
+    fn a_fix_flown_by_on_a_turning_leg_counts_as_passed() {
+        // The aircraft has left the first fix on a turn, so no straight projection exists for
+        // the leg that follows it. The fix is behind the aircraft and close, so the route
+        // progress must move on rather than measure the aircraft against the leg it left.
+        let fixes = vec![
+            fix("ORIGIN", 0.0),
+            fix("LEFT", 0.1),
+            RouteFix {
+                identifier: "TURN".into(),
+                longitude: 0.1,
+                latitude: 0.02,
+                path_terminator: "RF".into(),
+                ..Default::default()
+            },
+        ];
+        let t = Telemetry {
+            position_valid: true,
+            latitude: 0.02,
+            longitude: 0.11,
+            heading_degrees: 0.0,
+            ground_track_degrees: Some(0.0),
+            ..Default::default()
+        };
+        assert!(fix_passed_on_outbound(&fixes, 1, &t));
+        assert_eq!(route_ahead(&fixes, 1, &t), 2);
     }
 }

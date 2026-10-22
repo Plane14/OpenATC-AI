@@ -67,6 +67,7 @@ pub fn check_compliance(
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 
@@ -213,6 +214,7 @@ impl WarningCount {
     }
 }
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod warning_tests {
     #[test]
     fn three_corrections_then_escalate_and_reset() {

@@ -1,12 +1,145 @@
+# Validation
+
+## Traffic, setup and arrival controls — 22 October 2026
+
+The Linux plugin and companion engine were built and installed with X-Plane closed.
+Installed binaries matched the release build, and all 209 installed resources matched
+source. Speech validation passed for 614 situations and 2,307 phrases. Simulator
+visuals, audio, frame times and the Developer Re-setup button still need native testing.
+
+| Check | Result |
+| --- | --- |
+| Engine unit tests | 303 passed; 34 installed-data tests skipped |
+| Core traffic tests | 102 passed; 5 installed-data tests skipped |
+| Scenery tests, included in the engine suite | 36 passed; 4 installed-data tests skipped |
+| Settings | 13 passed |
+| Telemetry readers | 3 passed |
+| UI | 46 passed; 1 native fixture skipped |
+| Engine Clippy, all targets | Passed with warnings |
+| Locked Linux engine/plugin release build | Passed |
+
+Focused checks cover arrival closure and braking, final-speed transitions, runway
+threshold timing, following traffic, published speed restrictions, readback before
+speed changes and smooth generated-aircraft deceleration. Holding tests cover the
+setting, instruction/readback, onward clearance, route/runway identity, inbound-fix
+exit, pause/time changes and missing weather or protection data. Wake checks include
+Australian Heavy-to-Heavy departures, for which a timer cannot replace observed
+distance. Conversation checks cover eligibility, matching frequency, percentages,
+cooldown and remembering unsuccessful rolls. Existing VFR/CTAF tests also pass.
+
+### Production flight replay
+
+The installed-scenery fixture prepared six nominal flights with origins at Nice,
+Milan and Toulouse. One passed production scenery checks and completed taxi-out,
+takeoff, climb, cruise, descent, approach, landing, taxi-in and parking through the
+controller and movement loop. It started on the ground; single-flight approach
+seeding was disabled.
+
+With a newly rebuilt version 2 scenery cache, survey took 1.21 seconds, route
+preparation 49.04 seconds and total preparation 59.44 seconds. Movement assertions
+took 0.56 seconds; the whole test took 65.46 seconds. Five proposed flights still
+failed conservative scenery checks. This establishes one complete protected flight,
+not mixed cargo/GA traffic or three completed origins. The earlier multi-flight
+arrival stall also remains open.
+
+Run the opt-in fixture against an installed simulator and CSL catalogue:
+
+```sh
+OPENATC_TEST_SIMULATOR_ROOT="/path/to/X-Plane 12" \
+OPENATC_SCENERY_CACHE_DIR="/path/to/test-scenery-cache" \
+cargo test --locked --release -p openatc-engine \
+  installed_production_network_lifecycles_reach_parking -- --ignored --nocapture
+```
+
+The production test keeps the 180-second preparation deadline, scenery checks and
+movement assertions. Other nominal geometry tests use explicit accepting callbacks;
+those results do not establish production scenery clearance.
+
+### Scenery bounds and cache
+
+Vegetation-area terrain bounds now clip candidate mesh triangles to the complete
+bounding rectangle plus known object reach before finding the maximum elevation.
+Tests retain an interior ridge and reject flight through trees, while excluding a
+ridge outside the area's bounds. Scenery cache version 2 invalidates old geometry.
+Nice's `natural.ags` area still refuses the affected routes after this correction;
+more precise local placement or a valid alternative path is needed.
+
+Airport discovery reads only the selected airport's apt.dat block. Network workers
+share a scenery planner across directions and balance configured operator links
+with nearby fields. Publication removes rejected actors and releases their live
+stand/resource ownership. Planning exclusions for rejected candidates still need
+review.
+
+Earlier cache measurements found 2.10 seconds cold versus 0.12 seconds warm for the
+Nice clearance fixture, and 66.24 versus 39.67 seconds for a full network run and
+repeat. That first network run already had one tile cached and released only one
+of eleven nominal routes. These older measurements used the previous scenery
+interpretation and do not predict native frame rates. Peak process RSS reached
+about 1.29 GiB; the 512 MiB retention cap applies per planner, not to total memory.
+
+Scenery format references: Laminar's [autogen string format](https://developer.x-plane.com/article/autogen-string-ags-file-format-specification/)
+and [autogen placement rules](https://developer.x-plane.com/article/x-plane-10-autogen-scenery-file-format/).
+
+### TOML setup and reset
+
+An isolated companion-engine API test imported 85 TOML files and exercised setup
+status and rebuild. Reset dropped and recreated both cache schemas, removed probe
+indexes and repopulated TOML. Tests cover content changes with unchanged size/mtime,
+corruption fallback, preserved TOML types, invalid configuration, old writers and
+last-good traffic profiles. Editable files, settings, plans and logs survived reset.
+Malformed TOML produced a named error; correcting it allowed a retry. Developer mode
+is required for rebuild. Active policies retain their normal reload boundaries, so
+restart the plugin after Re-setup.
+
+A release parsing benchmark measured 20.33 ms for initial SQLite population,
+307.32 ms for 30 direct parsing batches and 111.89 ms for 30 warm cache loads.
+This measures syntax reuse, not complete startup or traffic preparation.
+
+### Procedure scope and remaining checks
+
+The arrival, holding and wake work was checked against [FAA JO 7110.65](https://www.faa.gov/air_traffic/publications/atpubs/atc_html/)
+sections 5-7, 5-5, 4-6, 3-9 and 3-10, and [Australian MATS 77.3](https://www.airservices.gov.au/mats/docs/nos-saf-2000.pdf)
+(effective 3 September–25 November 2026), sections 9.5, 9.6, 10.6 and 11.1.
+The US terminal model uses FUSION's 3 NM service; generated Center service and
+player-hold release use 5 NM. Australia uses a conservative 5 NM surveillance floor
+plus its wake table. Unknown Medium MTOW receives conservative Medium-to-Light
+protection. These assumptions do not cover every regional procedure.
+
+Remaining work includes the five refused corridors, mixed cargo/GA/VFR lifecycles,
+protected vector or extended-route alternatives, broader hold entries and amendments,
+player/generated parity, native Steam testing and Windows/macOS acceptance. Generated
+traffic remains disabled by default. See the [roadmap](ROADMAP.md).
+
+## Earlier validation
+
+The records below describe earlier builds and tests. Current traffic and setup
+results are listed above.
+
+## General-aviation piston parking — 21 October 2026
+
+Piston aircraft can now use general-aviation tie-down and hangar stands whose published equipment lists turboprops but omits props. X-Plane publishes many GA ramps that way, including all 151 stands at Cannes LFMD, so the previous equipment test rejected every piston aircraft there.
+
+The apt parser appends `props` to those stands when the kind is `tie_down` or `hangar` and the operations include `general_aviation`; `supports_aircraft` also accepts a piston aircraft on such a stand when the data has not been normalised. Gates and airline ramps are unchanged, and a stand that lists only `helos` still refuses piston aircraft.
+
+Evidence: new `parking` unit test; `installed_cannes_piston_scene_uses_propeller_stands` passes with the C172 frames on propeller stands and pavement; core `parking` 6 passed; workspace 585 passed and 0 failed.
+
+Not claimed: KSDF GA Apron still has an unverified runway-entry connector and an unverified surface connector at 38.1828784, -85.7244169, so the mixed cargo/GA fixture still cannot depart GA there. Every GA Apron stand is on pavement and the airport loads 43,485 pavement triangles; the connector point lies 3.065 m from the nearest triangle. No tolerance was added, because that would let a route cross a real three-metre gap. Exclusions were ruled out: clearing every exclusion for the tile leaves the triangle count and the gap unchanged, so the pavement is genuinely absent from the source. The fix is to route around it or correct the source pavement.
+
 ## Advisory traffic at untowered fields — 21 October 2026
 
 Untwowered fields that publish a CTAF or UNICOM frequency now carry advisory traffic. A field qualifies only when no Tower service is published for it, so advisory traffic cannot appear where a controlled clearance is required; a towered airport is refused even when it also publishes a UNICOM frequency. The frequency must be inside 118.000–136.975 MHz.
 
-The circuit is a right-hand pattern: downwind on the right of the runway flown against the landing direction, base across to the extended centreline, final on the runway heading, then a landing roll on the published runway. Every leg carries one self-announced call, and no wording contains a clearance. The advisory procedure is the authority for that traffic: the movement world grants the segments of the admitted route and refuses a taxi, a runway entry or any other surface movement outside the published pattern, so the controlled-clearance path is not reachable from an advisory route. The pattern repeats: the aircraft climbs from the end of the landing roll, rejoins the downwind and flies the circuit again, starting from the exact point the previous circuit ended. A runway held by the player or another aircraft at the final call turns the aircraft away instead, and the go-around call replaces the final call.
+The circuit is a right-hand pattern: downwind on the right of the runway flown against the landing direction, base across to the extended centreline, final on the runway heading, then a landing roll on the published runway. Every leg carries one self-announced call, and no wording contains a clearance. Calls follow the standard advisory form — field, traffic, callsign, leg and runway, field — for example, "KCTF traffic, N12345, entering downwind runway 09, KCTF". The advisory procedure is the authority for that traffic: the movement world grants the segments of the admitted route and refuses a taxi, a runway entry or any other surface movement outside the published pattern, so the controlled-clearance path is not reachable from an advisory route. The pattern repeats: the aircraft climbs from the end of the landing roll, rejoins the downwind and flies the circuit again, starting from the exact point the previous circuit ended. A runway held by the player or another aircraft at the final call turns the aircraft away instead, and the go-around call replaces the final call.
+
+Straight-in arrivals and departures cover aircraft that are not flying a circuit. When the shared capacity still allows one, the field publishes an arrival from about five miles final: it announces five miles final, final and runway vacated, uses the same runway resource for its landing roll, and is removed from the advisory map, frames and movement world when the roll completes. A departure starts at the runway threshold, announces the runway and leaving the pattern, holds the runway resource during the climb-out, and is removed after it turns out. Neither repeats, and the runway-occupied go-around still applies to arrivals. No taxi is modelled at an untowered field; the departure starts at the runway and the straight-in at five miles.
+
+The route compiler still requires a protected landing or closed holding continuation for controlled traffic. Advisory departures use `Route::compile_departure`, a separate entry point, and the caller retires the aircraft when the route ends.
+
+Cross-country VFR flights are published when two untowered fields are 10-40 nm apart. The route starts on the origin runway, climbs and cruises, joins the destination five-mile final and lands. Departure and leaving calls use the origin frequency; five miles final, final and runway vacated use the destination frequency. The aircraft is removed after landing. When the destination runway is occupied at the final, the arrival switches to a local go-around on the destination pattern and never lands on the held runway.
 
 Selection is bounded. The untowered fields come from the published station index, are sorted by distance from the player and are limited by the same candidate and radius budget as the rest of the traffic network. At most two advisory aircraft are published, and each needs a light aircraft with an installed model that can use the field's runway. Advisory aircraft share the 63-aircraft scene cap with the controlled fleet: the capacity is the remaining slots, capped at two, so advisory traffic never pushes the scene beyond the cap. The calls are spoken on the published frequency, so they are heard only when that frequency is tuned, and they are recorded as background information rather than as an instruction to the player. The wording is editable in the `ctaf_*` entries of `speech/runtime/responses.toml`, so a customised library must carry those keys with their declared placeholders.
 
-Evidence: core `traffic::ctaf` 8 passed, core `traffic::motion` 26 passed, engine `generated::ctaf` 5 passed, `openatc-engine` 267 passed, workspace 584 passed and 0 failed, and the locked Linux release build passes. Plain clippy passes without errors; `--all-targets -D warnings` still reports pre-existing lints in `openatc-settings`, which this work does not touch. No native simulator acceptance is claimed: the installed-scenery fixtures need the user's X-Plane installation, and advisory traffic has not been seen in the simulator.
+Evidence: core `traffic::ctaf` 8 passed, core `traffic::motion` 26 passed, engine `generated::ctaf` 9 passed, `openatc-engine` 270 passed, workspace 593 passed and 0 failed, and the locked Linux release build passes. The documented `--all-targets -D warnings` clippy command reports 0 errors; one narrow item-level allow remains on `enroute::crossings`, which takes its request by value because the function advances mutable departure borrows. The workspace count is 593 tests after adding pavement-fallback and apt-parser regressions and removing a duplicated `#[test]` that had registered one test twice. No native simulator acceptance is claimed: the installed-scenery fixtures need the user's X-Plane installation, and advisory traffic has not been seen in the simulator.
 
 ## Traffic planning cost, CSL catalogue and prompt reload — 20 October 2026
 
@@ -890,3 +1023,25 @@ Evidence: workspace 536 passed, 0 failed; installed scenery 4/4 and landing 3/3 
 Fresh plugin settings use http://127.0.0.1:8099 for language, recognition and synthesis, enable AI understanding with the bundled Qwen2.5 model, enable controller/copilot/pilot speech and copilot radio readbacks/tuning, and enable heard reports from observed traffic. Existing explicit settings survive loading and serialization; autopilot target control, unsolicited/social chat and experimental generated traffic remain opt-in. Settings regressions pass10 tests, UI tests pass45 with1 ignored, and the non-installed release engine suite passes216 with8 ignored/19 filtered. The no-chatter advisory test explicitly disables chatter instead of relying on the retired default. The locked Linux plugin/engine release build passes. Native fresh-install audio, NVIDIA DLL discovery and Windows/macOS runtime checks remain separate.
 
 README validation confirms all7 registered simulator commands documented and all prior detailed paragraphs retained after whitespace/bullet normalization, apart from the intentionally corrected own-pilot speech default. Setup and NVIDIA runtime download guidance now precede the feature catalogue; long implementation history remains expandable. Markdown fences/disclosures and local documentation link targets were checked.
+
+## GA departure runway split — 21 October 2026
+
+The generated scene now builds departure plans for both same-flow runways. A general-aviation flight uses the runway nearest its own stand, while the other categories keep the scored primary runway. This removes the KSDF GA Apron conflict where the 17R entry sat inside 11/29's protected strip: the GA C172/CRJ7 now depart 17L and complete.
+
+The mixed cargo/GA fixture prepares 13 aircraft and 126 terminal candidates (was 12 and 60) with 3 complete nominal flights and 2 released (was 1). It still fails the first origins check: every complete flight departs KMEM, so KSDF is missing as an origin. A full-length departure retry removes the KSDF departure refusals (B2/GA/UPS); the reverse flights now fail at the KMEM arrival instead: B2 terminal level or missed-approach hold, UPS Ramp 11 repeated runway crossing, UPS Ramp 7 36C vacate. The small-field SID gap is a later blocker and is not reached.
+
+Empty-root unit scenes now receive synthetic runway threshold elevations, so the demo model/stand test still prepares flights without simulator data. Workspace 593 passed, 0 failed; clippy reports 0 errors under the documented command; installed routing 4/4, scenery 4/4, landing 3/3, and the seven-flight, bidirectional and unfiled lifecycles pass. No native simulator acceptance is claimed.
+
+### Complete runway-exit and parking selection — 22 October 2026
+
+A generated arrival can retain a later verified runway exit when the first exit cannot reach free parking. The bounded search checks up to eight complete exit-to-stand candidates, retains all stopping/pavement/aircraft-clearance/resource checks, and compiles flare, rollout and taxi-in together before retaining a candidate. The new two-exit regression first proves that the initial exit is a safe dead end, then exercises actual arrival preparation through the later connected exit. Reserving the sole stand still rejects the arrival.
+
+The focused generated suite passes127 tests (three ignored); the locked Linux plugin/engine release build passes. The installed mixed cargo/GA fixture still fails after64.02seconds: four nominal flights, all fromKMEM, and zero production releases. Reverse missed-approach/hold metadata, clearance-duration feasibility and connected GA parking remain blockers. Physical-obstacle and unresolved-facade protection still refuse nominal routes. Other traffic source changes were present during this run, so this is a current snapshot rather than a controlled before/after comparison. Native visibility, audio, FPS and Windows/macOS acceptance remain separate.
+
+### Explicit level on the repeated holding fix — 22 October 2026
+
+The recovery regression now also tests a blank-altitude HM record immediately following an explicit exact/minimum altitude at the same identifier, region, section and subsection. Actual recovery preparation retains that level and named fix; denying protection still refuses the draft, and source records remain unchanged. Different fix/region, a maximum-only condition and missing altitude or pressure reference reject. All127 focused generated tests and the locked Linux plugin/engine release build pass after the change.
+
+The installed Memphis I36L input uses this repeated-fix pattern. Its explicit5000-foot level is corroborated by the [FAA ILS or LOC36L chart for01–29October2026](https://aeronav.faa.gov/d-tpp/2610/00253IL36L.PDF). This is evidence for retaining the explicit same-fix restriction, not a rule for guessing altitude from unrelated earlier legs. Full mixed-route and native acceptance remain separate.
+
+With the repeated-fix level support, the mixed installed-data rerun retains seven complete nominal drafts from both KMEM and KSDF (76.41seconds). It passes the two-primary-origin check, then fails the required third-origin check before category or controller/movement acceptance. Production protection releases zero flights because of physical-obstacle intersections and unresolved facades. This is progress in candidate planning, not seven completed simulator flights. Discovery coverage, valid cargo/operator pairs, some connected stands and clearance/holding cases remain open.

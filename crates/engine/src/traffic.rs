@@ -1,8 +1,16 @@
 //! Local traffic observations, surface conflict holds and optional simulated pilot reports.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 pub mod advisories;
 mod conversation;
 #[cfg(test)]
 mod conversation_tests;
+pub(crate) mod holding;
 mod policy;
 mod wake;
 use crate::{EngineState, Shared};
@@ -54,9 +62,13 @@ pub struct Traffic {
     speed: Option<(f64, Option<f64>)>,
     speed_declined: bool,
     speed_sequence: u32,
+    pub(crate) spacing_path_required: bool,
+    hold: Option<holding::Hold>,
+    hold_declined: bool,
     chat_pending: bool,
     last_chat: Option<Instant>,
     last_chat_pilot: u32,
+    chat_attempts: std::collections::BTreeSet<(u32, String, String, u8)>,
     policy: Option<policy::Chat>,
 }
 
@@ -76,6 +88,7 @@ pub(crate) fn departure_wake_delay(
 }
 
 pub fn observe(state: &mut EngineState) {
+    holding::observe(state);
     wake::observe(state);
     crate::generated::refresh_departure_wake(state);
     if state.session.telemetry.paused
@@ -161,40 +174,42 @@ pub fn observe(state: &mut EngineState) {
             .pilots
             .get(&target.id)
             .filter(|p| p.target.callsign == target.callsign)
-            .map(|p| p.voice.clone())
-            .unwrap_or_else(|| {
-                let available: Vec<_> = state
-                    .voices
-                    .iter()
-                    .filter(|v| !state.settings.english_voices_only || v.english)
-                    .collect();
-                available
-                    .iter()
-                    .min_by_key(|v| {
-                        let reserved = state
-                            .controllers
-                            .assignments
-                            .values()
-                            .any(|c| c.voice == v.id)
-                            || [
-                                &state.settings.pilot_voice,
-                                &state.settings.copilot_voice,
-                                &state.settings.attendant_voice,
-                                &state.settings.ground_voice,
-                            ]
-                            .contains(&&v.id);
-                        (
-                            reserved,
-                            state
-                                .traffic
-                                .pilots
+            .map_or_else(
+                || {
+                    let available: Vec<_> = state
+                        .voices
+                        .iter()
+                        .filter(|v| !state.settings.english_voices_only || v.english)
+                        .collect();
+                    available
+                        .iter()
+                        .min_by_key(|v| {
+                            let reserved = state
+                                .controllers
+                                .assignments
                                 .values()
-                                .filter(|p| p.voice == v.id)
-                                .count(),
-                        )
-                    })
-                    .map_or_else(|| state.settings.pilot_voice.clone(), |v| v.id.clone())
-            });
+                                .any(|c| c.voice == v.id)
+                                || [
+                                    &state.settings.pilot_voice,
+                                    &state.settings.copilot_voice,
+                                    &state.settings.attendant_voice,
+                                    &state.settings.ground_voice,
+                                ]
+                                .contains(&&v.id);
+                            (
+                                reserved,
+                                state
+                                    .traffic
+                                    .pilots
+                                    .values()
+                                    .filter(|p| p.voice == v.id)
+                                    .count(),
+                            )
+                        })
+                        .map_or_else(|| state.settings.pilot_voice.clone(), |v| v.id.clone())
+                },
+                |p| p.voice.clone(),
+            );
         let old = state
             .traffic
             .pilots
@@ -280,13 +295,13 @@ pub(crate) fn ready(state: &EngineState) -> bool {
                     .iter()
                     .any(|t| t.sequence > seen && !t.background)
             })
-        && !state
+        && state
             .session
             .transcript
             .iter()
             .rev()
             .find(|t| t.is_controller_instruction())
-            .is_some_and(|t| !t.pilot_reply.is_empty())
+            .is_none_or(|t| t.pilot_reply.is_empty())
 }
 fn atc(
     state: &mut EngineState,
@@ -318,7 +333,11 @@ pub fn tick(state: &mut EngineState) {
     else {
         return;
     };
-    if advisories::tick(state, &station) || surface(state, &station) || spacing(state, &station) {
+    if advisories::tick(state, &station)
+        || surface(state, &station)
+        || holding::active(state)
+        || spacing(state, &station)
+    {
         return;
     }
     if conversation::initiate(state) {
@@ -471,15 +490,16 @@ pub(crate) fn clear_approach_speed(state: &mut EngineState) -> Option<(String, S
     ))
 }
 
-fn spacing(state: &mut EngineState, station: &Station) -> bool {
+pub(crate) fn spacing(state: &mut EngineState, station: &Station) -> bool {
     let Some(profiles) = state.traffic_profiles.current() else {
         return false;
     };
     let policy = &profiles.spacing;
     if state.session.emergency_declared
+        || holding::active(state)
         || !["Approach", "Tower"].contains(&station.service.as_str())
         || state.session.telemetry.on_ground
-        || !state.flow.approach_cleared
+        || !(state.flow.approach_cleared || state.session.phase == PhaseCode::Arrival)
     {
         return false;
     }
@@ -487,7 +507,7 @@ fn spacing(state: &mut EngineState, station: &Station) -> bool {
         return false;
     };
     let t = &state.session.telemetry;
-    let Some(position) = openatc_core::traffic::runway_position(
+    let Some(position) = openatc_core::traffic::approach_position(
         airport,
         &state.session.plan.arrival_runway,
         t.latitude,
@@ -553,92 +573,43 @@ fn spacing(state: &mut EngineState, station: &Station) -> bool {
     } else {
         &t.aircraft_icao
     };
-    let Some(envelope) = profiles
-        .aircraft_for(aircraft)
-        .and_then(|aircraft| aircraft.spacing_speed.as_ref())
-    else {
+    let mut observed = t.clone();
+    observed.aircraft_icao = aircraft.clone();
+    let fixes = state
+        .session
+        .plan
+        .fixes
+        .iter()
+        .skip(state.flow.monitor.next_fix)
+        .take(2);
+    let minimum = fixes
+        .clone()
+        .filter_map(|f| f.minimum_speed_knots)
+        .max_by(f64::total_cmp);
+    let maximum = fixes
+        .filter_map(|f| f.maximum_speed_knots)
+        .min_by(f64::total_cmp);
+    use openatc_core::traffic::sequencing::{self, Decision};
+    let decision = sequencing::assess(
+        airport,
+        &state.session.plan.arrival_runway,
+        &observed,
+        &profiles,
+        minimum,
+        maximum,
+        policy.release_nm,
+        // Represented terminal service uses the FAA FUSION standard; en-route
+        // control is not admitted by this workflow's service guard.
+        3.0,
+    );
+    state.traffic.spacing_path_required = matches!(decision, Decision::PathRequired);
+    let Decision::Reduce(speed) = decision else {
         return false;
     };
-    let Some(ias) = t
-        .indicated_speed_knots
-        .filter(|s| (envelope.minimum_knots..=envelope.maximum_knots).contains(s))
-    else {
-        return false;
-    };
-    let Some(targets) = &t.traffic else {
-        return false;
-    };
-    let mut ahead = false;
-    let mut reduction = None;
-    let mut increase_candidate = None;
-    for p in targets.iter().take(126).filter(|p| !p.on_ground) {
-        let candidate = (|| {
-            let other = openatc_core::traffic::runway_position(
-                airport,
-                &state.session.plan.arrival_runway,
-                p.latitude,
-                p.longitude,
-            )?;
-            if other.1.abs() > policy.lateral_meters
-                || (p.altitude_feet - t.altitude_feet).abs() > policy.vertical_feet
-                || openatc_core::navigation::turn(p.track_degrees, position.3).abs()
-                    > policy.alignment_degrees
-            {
-                return None;
-            }
-            let gap = (other.0 - position.0) / 1852.0;
-            if gap > 0.0 && gap <= policy.gap_max_nm {
-                ahead = true;
-            }
-            let speed = p.ground_speed_knots?;
-            if (policy.gap_min_nm..policy.gap_max_nm).contains(&gap)
-                && t.ground_speed_knots > speed + policy.closing_knots
-            {
-                Some((
-                    envelope.minimum_knots.max(ias - policy.speed_step_knots),
-                    false,
-                ))
-            } else if (-policy.gap_max_nm..-policy.gap_min_nm).contains(&gap)
-                && speed > t.ground_speed_knots + policy.closing_knots
-            {
-                Some((
-                    envelope.maximum_knots.min(ias + policy.speed_step_knots),
-                    true,
-                ))
-            } else {
-                None
-            }
-        })();
-        if let Some((speed, increase)) = candidate {
-            if increase {
-                increase_candidate = Some((speed, true));
-            } else {
-                reduction = Some((speed, false));
-            }
-        }
-    }
-    let candidate = reduction.or(if ahead { None } else { increase_candidate });
-    let Some((speed, increase)) = candidate else {
-        return false;
-    };
-    let minimum = (envelope.minimum_knots / 5.0).ceil() * 5.0;
-    let maximum = (envelope.maximum_knots / 5.0).floor() * 5.0;
-    if minimum > maximum {
-        return false;
-    }
-    let speed = ((speed / policy.speed_step_knots).round() * policy.speed_step_knots)
-        .clamp(minimum, maximum);
-    if (speed - ias).abs() < policy.minimum_change_knots
-        || (increase && speed <= ias)
-        || (!increase && speed >= ias)
-        || state
-            .session
-            .plan
-            .fixes
-            .iter()
-            .skip(state.flow.monitor.next_fix)
-            .take(2)
-            .any(|f| f.maximum_speed_knots.is_some_and(|v| speed > v))
+    // Australian MATS prohibits changing final approach speed. An approach clearance
+    // ends the pre-final speed workflow here; it is not used as permission to slow on final.
+    if sequencing::Region::for_airport(&airport.icao) == Some(sequencing::Region::Australia)
+        && state.session.phase == PhaseCode::Approach
     {
         return false;
     }
@@ -651,11 +622,7 @@ fn spacing(state: &mut EngineState, station: &Station) -> bool {
     atc(
         state,
         station,
-        if increase {
-            "traffic_increase_speed"
-        } else {
-            "traffic_reduce_speed"
-        },
+        "traffic_reduce_speed",
         &slots,
         "pilot_speed_readback",
     );
@@ -682,6 +649,7 @@ pub fn unable(
         return false;
     };
     state.traffic.speed_declined = true;
+    state.traffic.spacing_path_required = true;
     if state.flow.monitor.speed == Some(issued) {
         state.flow.monitor.speed = prior;
     }
@@ -958,160 +926,153 @@ mod tests {
         s.session.telemetry.traffic = Some(vec![]);
         assert!(surface(&mut s, &station));
         assert!(s.session.taxi_clearance.traffic_hold);
-        s.traffic.clear_since = Some(Instant::now() - Duration::from_secs(4));
+        s.traffic.clear_since = Some(Instant::now().checked_sub(Duration::from_secs(4)).unwrap());
         assert!(surface(&mut s, &station));
         assert!(!s.session.taxi_clearance.traffic_hold);
         assert_eq!(s.session.taxi_clearance.hold_short_runway, "36");
         assert!(s.session.taxi_clearance.crossing_runway.is_empty());
     }
-    #[test]
-    fn mixed_spacing_prioritises_the_leader_and_respects_each_aircraft_envelope() {
-        for (code, ias, minimum) in [
-            ("C172", 90.0, 80.0),
-            ("DH8D", 160.0, 135.0),
-            ("A320", 180.0, 170.0),
-        ] {
-            let make = |airspeed| {
-                let mut state = crate::test_state();
-                state.arrival_airport = Some(airport());
-                state.flow.approach_cleared = true;
-                state.session.plan.arrival_runway = "36".into();
-                state.session.plan.aircraft = code.into();
-                state.session.telemetry = Telemetry {
-                    latitude: -0.18,
-                    on_ground: false,
-                    ground_speed_knots: airspeed,
-                    indicated_speed_knots: Some(airspeed),
-                    traffic: Some(vec![
-                        TrafficTarget {
-                            id: 1,
-                            latitude: -0.25,
-                            aircraft: "A320".into(),
-                            on_ground: false,
-                            ground_speed_knots: Some(230.0),
-                            ..Default::default()
-                        },
-                        TrafficTarget {
-                            id: 2,
-                            latitude: -0.11,
-                            aircraft: "PA28".into(),
-                            on_ground: false,
-                            ground_speed_knots: Some(airspeed - 30.0),
-                            ..Default::default()
-                        },
-                    ]),
-                    ..Default::default()
-                };
-                state
-            };
-            let station = Station {
-                service: "Approach".into(),
+    fn arrival(
+        code: &str,
+        speed: f64,
+        distance: f64,
+        lead_code: &str,
+        lead_speed: f64,
+        lead_distance: f64,
+    ) -> EngineState {
+        let mut state = crate::test_state();
+        let mut port = airport();
+        port.icao = "KTEST".into();
+        state.arrival_airport = Some(port);
+        state.session.phase = PhaseCode::Arrival;
+        state.session.plan.arrival_runway = "36".into();
+        state.session.plan.aircraft = code.into();
+        state.session.telemetry = Telemetry {
+            latitude: -distance / 60.0,
+            on_ground: false,
+            aircraft_icao: code.into(),
+            position_valid: true,
+            ground_speed_knots: speed,
+            indicated_speed_knots: Some(speed),
+            traffic: Some(vec![TrafficTarget {
+                id: 1,
+                latitude: -lead_distance / 60.0,
+                aircraft: lead_code.into(),
+                on_ground: false,
+                ground_speed_knots: Some(lead_speed),
                 ..Default::default()
-            };
-            let mut state = make(ias);
+            }]),
+            ..Default::default()
+        };
+        state
+    }
+    #[test]
+    fn mixed_spacing_predicts_the_whole_approach_and_respects_aircraft_envelopes() {
+        let station = Station {
+            service: "Approach".into(),
+            ..Default::default()
+        };
+        for (code, speed, distance, lead_code, lead_speed, lead_distance, minimum) in [
+            ("C172", 105.0, 12.0, "PA28", 60.0, 6.0, 80.0),
+            ("DH8D", 180.0, 14.0, "DH8D", 120.0, 8.0, 135.0),
+            ("A320", 210.0, 18.0, "A320", 140.0, 10.0, 170.0),
+        ] {
+            let mut state = arrival(code, speed, distance, lead_code, lead_speed, lead_distance);
             assert!(spacing(&mut state, &station), "{code}");
-            assert_eq!(state.flow.monitor.speed, Some(ias - 10.0));
-            let mut below_floor = make(minimum - 10.0);
+            let issued = state.flow.monitor.speed.unwrap();
+            assert!((minimum..speed).contains(&issued));
             assert!(
-                !spacing(&mut below_floor, &station),
-                "{code}: must not issue reduce-to-higher-speed"
+                state
+                    .session
+                    .transcript
+                    .last()
+                    .unwrap()
+                    .pilot_reply
+                    .contains(&format!("{issued:.0}"))
             );
-            assert!(below_floor.flow.monitor.speed.is_none());
-            let mut clear_ahead = make(ias);
-            clear_ahead
-                .session
-                .telemetry
-                .traffic
-                .as_mut()
-                .unwrap()
-                .pop();
-            assert!(
-                spacing(&mut clear_ahead, &station),
-                "{code}: feasible increase"
+            let mut impossible = arrival(
+                code,
+                minimum - 5.0,
+                distance,
+                lead_code,
+                40.0,
+                lead_distance,
             );
-            assert_eq!(clear_ahead.flow.monitor.speed, Some(ias + 10.0));
+            assert!(!spacing(&mut impossible, &station));
+            assert!(impossible.flow.monitor.speed.is_none());
             for published in [false, true] {
-                let mut release = make(ias);
-                release.session.telemetry.latitude = -0.08;
-                release.flow.monitor.speed = Some(ias + 10.0);
-                release.traffic.speed = Some((ias + 10.0, None));
+                let mut release = arrival(code, speed, 4.5, lead_code, lead_speed, 1.0);
+                release.flow.monitor.speed = Some(issued);
+                release.traffic.speed = Some((issued, None));
                 if published {
                     release
                         .session
                         .plan
                         .fixes
                         .push(openatc_core::state::RouteFix {
-                            maximum_speed_knots: Some(ias),
+                            maximum_speed_knots: Some(speed),
                             ..Default::default()
                         });
                 }
                 assert!(spacing(&mut release, &station));
                 assert!(release.flow.monitor.speed.is_none());
-                let text = &release.session.transcript.last().unwrap().text;
-                assert!(text.contains(if published {
-                    "published"
-                } else {
-                    "normal speed"
-                }));
+                assert!(
+                    release
+                        .session
+                        .transcript
+                        .last()
+                        .unwrap()
+                        .text
+                        .contains(if published {
+                            "published"
+                        } else {
+                            "normal speed"
+                        })
+                );
             }
         }
+        let mut ample = arrival("A320", 210.0, 20.0, "A320", 140.0, 4.0);
+        assert!(!spacing(&mut ample, &station));
+        assert!(!ample.traffic.spacing_path_required);
+        let mut slow_ga = arrival("A320", 210.0, 18.0, "PA28", 70.0, 10.0);
+        assert!(!spacing(&mut slow_ga, &station));
+        assert!(slow_ga.traffic.spacing_path_required);
+        assert!(slow_ga.flow.monitor.speed.is_none());
     }
     #[test]
-    fn spacing_obeys_published_speed_short_final_and_unable() {
-        let mut s = crate::test_state();
-        s.arrival_airport = Some(airport());
-        s.flow.approach_cleared = true;
-        s.session.plan.arrival_runway = "36".into();
-        s.session.plan.aircraft = "A320".into();
-        s.session.telemetry = Telemetry {
-            latitude: -0.18,
-            on_ground: false,
-            ground_speed_knots: 170.0,
-            indicated_speed_knots: Some(170.0),
-            traffic: Some(vec![TrafficTarget {
-                latitude: -0.25,
-                on_ground: false,
-                ground_speed_knots: Some(210.0),
-                ..Default::default()
-            }]),
-            ..Default::default()
-        };
+    fn spacing_obeys_published_limits_final_regional_scope_and_unable() {
         let station = Station {
             service: "Approach".into(),
             ..Default::default()
         };
-        s.session.plan.fixes = vec![openatc_core::state::RouteFix {
-            maximum_speed_knots: Some(170.0),
-            ..Default::default()
-        }];
-        assert!(!spacing(&mut s, &station));
-        s.session.plan.fixes.clear();
-        assert!(spacing(&mut s, &station));
-        assert_eq!(s.flow.monitor.speed, Some(180.0));
+        let mut state = arrival("A320", 210.0, 18.0, "A320", 140.0, 10.0);
+        state
+            .session
+            .plan
+            .fixes
+            .push(openatc_core::state::RouteFix {
+                minimum_speed_knots: Some(210.0),
+                ..Default::default()
+            });
+        assert!(!spacing(&mut state, &station));
+        state.session.plan.fixes.clear();
+        assert!(spacing(&mut state, &station));
         assert!(unable(
-            &mut s,
+            &mut state,
             &station,
             &openatc_core::state::Request {
                 text: "Unable that speed".into(),
                 ..Default::default()
             }
         ));
-        assert!(s.flow.monitor.speed.is_none());
-        assert!(!spacing(&mut s, &station));
-        assert_eq!(
-            s.session
-                .transcript
-                .iter()
-                .filter(|t| t.text == "Unable that speed")
-                .count(),
-            1
-        );
-        // A pilot's own assigned speed is not replaced by automatic spacing.
-        s.flow.monitor.speed = Some(160.0);
-        assert!(!spacing(&mut s, &station));
-        s.flow.monitor.speed = None;
-        s.session.telemetry.latitude = -0.03;
-        assert!(!spacing(&mut s, &station));
+        assert!(state.flow.monitor.speed.is_none());
+        assert!(state.traffic.spacing_path_required);
+        assert!(!spacing(&mut state, &station));
+        let mut final_leg = arrival("A320", 210.0, 4.0, "PA28", 70.0, 1.0);
+        assert!(!spacing(&mut final_leg, &station));
+        let mut unsupported = arrival("A320", 210.0, 18.0, "A320", 140.0, 10.0);
+        unsupported.arrival_airport.as_mut().unwrap().icao = "LFMN".into();
+        assert!(!spacing(&mut unsupported, &station));
     }
     #[tokio::test]
     async fn traffic_talk_requires_current_target_and_remembers_observed_landing_weather() {
@@ -1176,7 +1137,7 @@ mod tests {
             .pilots
             .get_mut(&42)
             .unwrap()
-            .seen = Instant::now() - Duration::from_secs(10);
+            .seen = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
         assert!(
             !talk(AxumState(shared), Json(json!({"id":42,"topic":"landing"})))
                 .await

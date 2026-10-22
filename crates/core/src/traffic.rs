@@ -12,6 +12,7 @@ pub mod procedures;
 pub mod profiles;
 pub mod resolved;
 pub mod separation;
+pub mod sequencing;
 pub mod surface;
 pub mod trajectory;
 pub mod vertical;
@@ -112,7 +113,7 @@ pub fn landing_blocked(
     let Some(targets) = &telemetry.traffic else {
         return Some("holding_standby");
     };
-    if wake::applies(&airport.icao) && own.0 < 0.0 {
+    if wake::supported(&airport.icao) && own.0 < 0.0 {
         for target in targets.iter().take(126).filter(|t| !t.on_ground) {
             let Some(lead_runway) = wake::approach_runway(airport, runway, target) else {
                 continue;
@@ -136,11 +137,14 @@ pub fn landing_blocked(
             {
                 continue;
             }
-            let required_wake = wake::category(&target.aircraft)
-                .zip(wake::category(&telemetry.aircraft_icao))
-                .and_then(|(a, b)| wake::approach_nm(a, b))
-                .unwrap_or(10.0);
-            let required = required_wake.max(3.0);
+            let required_wake =
+                wake::arrival_for(&airport.icao, &target.aircraft, &telemetry.aircraft_icao)
+                    .unwrap_or(10.0);
+            let required = required_wake.max(if airport.icao.starts_with('Y') {
+                5.0
+            } else {
+                3.0
+            });
             let gap = (relative.0 - own.0).hypot(relative.1 - own.1) / 1852.0;
             let threshold_gap =
                 target
@@ -185,6 +189,7 @@ pub fn landing_blocked(
 
 /// Predict a taxi collision over the next twenty seconds. Parallel traffic moving away is ignored.
 #[must_use]
+#[allow(clippy::many_single_char_names)]
 pub fn taxi_conflict<'a>(airport: &Airport, telemetry: &'a Telemetry) -> Option<&'a TrafficTarget> {
     if !telemetry.on_ground {
         return None;
@@ -193,7 +198,7 @@ pub fn taxi_conflict<'a>(airport: &Airport, telemetry: &'a Telemetry) -> Option<
     if crate::airport::within_runway(airport, &own) {
         return None;
     }
-    let speed = telemetry.ground_speed_knots.max(0.0) * 0.514444;
+    let speed = telemetry.ground_speed_knots.max(0.0) * 0.514_444;
     let heading = telemetry
         .ground_track_degrees
         .unwrap_or(telemetry.heading_degrees)
@@ -214,11 +219,11 @@ pub fn taxi_conflict<'a>(airport: &Airport, telemetry: &'a Telemetry) -> Option<
             if e.hypot(n) > 300.0 {
                 return false;
             }
-            let width = (telemetry.wingspan_meters.unwrap_or(36.0)
-                + target.wingspan_meters.unwrap_or(36.0))
-                / 2.0
-                + 12.0;
-            let v = target.ground_speed_knots.unwrap_or(0.0) * 0.514444;
+            let width = f64::midpoint(
+                telemetry.wingspan_meters.unwrap_or(36.0),
+                target.wingspan_meters.unwrap_or(36.0),
+            ) + 12.0;
+            let v = target.ground_speed_knots.unwrap_or(0.0) * 0.514_444;
             let h = target.track_degrees.to_radians();
             let (ve, vn) = (
                 v * h.sin() - speed * heading.sin(),
@@ -332,7 +337,7 @@ mod tests {
                 .collect(),
         );
         t.traffic.as_mut().unwrap().push(TrafficTarget {
-            id: 0xf00001,
+            id: 0x00f0_0001,
             longitude: 0.01,
             on_ground: true,
             ..Default::default()

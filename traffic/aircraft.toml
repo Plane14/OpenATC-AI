@@ -15,6 +15,14 @@ closing_knots = 15.0
 speed_step_knots = 10.0
 minimum_change_knots = 5.0
 
+# Simulation planning margins, not published separation minima.
+[spacing.prediction]
+reaction_seconds = 15.0
+deceleration = 0.5
+release_nm = 5.0
+buffer_nm = 0.5
+runway_seconds = 90.0
+
 [aircraft.C172]
 spacing_speed = { minimum_knots = 80.0, maximum_knots = 105.0 }
 fixed_gear = true

@@ -18,7 +18,8 @@ impl Pronunciation {
         if text.len() > 16384 {
             return Err("Radio pronunciation exceeds 16 KiB".into());
         }
-        let value: Self = toml::from_str(text).map_err(|error| error.to_string())?;
+        let value: Self =
+            crate::configuration::from_str(text).map_err(|error| error.to_string())?;
         if value.version != 1
             || value.letters.len() != 26
             || value.digits.len() != 10
@@ -79,16 +80,147 @@ fn bundled() -> &'static Pronunciation {
 }
 
 /// Format radio identifiers for speech without changing the transcript.
+#[must_use]
 pub fn spoken(text: &str, callsign: &str) -> String {
     spoken_with_airports(text, callsign, &[])
 }
 
 /// Resolve known airport identifiers to their names in spoken transmissions.
+#[must_use]
 pub fn spoken_with_airports(text: &str, callsign: &str, airports: &[(String, String)]) -> String {
     spoken_with_pronunciation(text, callsign, airports, bundled())
 }
 
+/// Spoken copy of a flight number for a traffic callsign. The displayed transcript keeps the
+/// number; `group` selects Australia/FAA group form instead of digit-by-digit ICAO form.
+#[must_use]
+pub fn spoken_flight_number(text: &str, speaker: &str, group: bool) -> String {
+    let digits = speaker
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    if digits.is_empty() || digits.len() > 4 || text.contains(speaker) {
+        return text.to_owned();
+    }
+    let words = if group {
+        group_number(&digits)
+    } else {
+        digits.chars().map(digit_word).collect::<Vec<_>>().join(" ")
+    };
+    let mut output = String::with_capacity(text.len());
+    for part in text.split_inclusive(|c: char| !c.is_ascii_alphanumeric()) {
+        let word = part.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+        if word == digits {
+            output.push_str(&words);
+        } else {
+            output.push_str(word);
+        }
+        output.push_str(&part[word.len()..]);
+    }
+    output
+}
+
+fn group_number(digits: &str) -> String {
+    match digits.len() {
+        1 => digits
+            .chars()
+            .next()
+            .map_or_else(String::new, |digit| digit_word(digit).to_owned()),
+        2 => number_words(digits.parse().unwrap_or(0)),
+        3 => {
+            let first = digits.chars().next().map_or("zero", digit_word);
+            let rest = &digits[1..];
+            if rest == "00" {
+                format!("{first} hundred")
+            } else if let Some(rest) = rest.strip_prefix('0') {
+                format!("{first} zero {}", number_words(rest.parse().unwrap_or(0)))
+            } else {
+                format!("{first} {}", number_words(rest.parse().unwrap_or(0)))
+            }
+        }
+        4 => {
+            let first = pair_words(&digits[..2]);
+            let second = if &digits[2..] == "00" {
+                "hundred".to_owned()
+            } else if let Some(rest) = digits[2..].strip_prefix('0') {
+                format!("zero {}", number_words(rest.parse().unwrap_or(0)))
+            } else {
+                number_words(digits[2..].parse().unwrap_or(0))
+            };
+            format!("{first} {second}")
+        }
+        _ => digits.to_owned(),
+    }
+}
+
+fn pair_words(pair: &str) -> String {
+    if let Some(rest) = pair.strip_prefix('0') {
+        format!("zero {}", number_words(rest.parse().unwrap_or(0)))
+    } else {
+        number_words(pair.parse().unwrap_or(0))
+    }
+}
+
+fn number_words(value: u32) -> String {
+    const ONES: [&str; 20] = [
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+    ];
+    const TENS: [&str; 10] = [
+        "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    ];
+    if value < 20 {
+        return ONES[value as usize].to_owned();
+    }
+    let tens = TENS[(value / 10) as usize];
+    let ones = value % 10;
+    if ones == 0 {
+        tens.to_owned()
+    } else {
+        format!("{tens} {}", ONES[ones as usize])
+    }
+}
+
+fn digit_word(digit: char) -> &'static str {
+    match digit {
+        '0' => "zero",
+        '1' => "one",
+        '2' => "two",
+        '3' => "three",
+        '4' => "four",
+        '5' => "five",
+        '6' => "six",
+        '7' => "seven",
+        '8' => "eight",
+        '9' => "niner",
+        _ => "",
+    }
+}
+
 /// Use a loaded pronunciation policy for the spoken copy of a transmission.
+#[must_use]
 pub fn spoken_with_pronunciation(
     text: &str,
     callsign: &str,
@@ -266,6 +398,35 @@ mod tests {
         assert!(spoken.contains("cleared to John Wayne Airport"));
         assert!(spoken.contains("I F R"));
         assert!(text.contains("GND"));
+    }
+
+    #[test]
+    fn flight_numbers_are_spoken_digit_by_digit() {
+        assert_eq!(
+            super::spoken_flight_number("Air Canada 160, taxi via Alpha.", "ACA160", false),
+            "Air Canada one six zero, taxi via Alpha."
+        );
+        assert_eq!(
+            super::spoken_flight_number("Speedbird 123, hold short.", "BAW123", false),
+            "Speedbird one two three, hold short."
+        );
+        assert_eq!(
+            super::spoken_flight_number("ACA160, cleared for takeoff.", "ACA160", false),
+            "ACA160, cleared for takeoff.",
+            "the compact code itself is left for the tag, not the spoken callsign"
+        );
+        assert_eq!(
+            super::spoken_flight_number("Air Canada 160, taxi via Alpha.", "ACA160", true),
+            "Air Canada one sixty, taxi via Alpha."
+        );
+        assert_eq!(
+            super::spoken_flight_number("Qantas 1220, contact Tower.", "QFA1220", true),
+            "Qantas twelve twenty, contact Tower."
+        );
+        assert_eq!(
+            super::spoken_flight_number("Velocity 1300, contact Tower.", "VOZ1300", true),
+            "Velocity thirteen hundred, contact Tower."
+        );
     }
 
     #[test]

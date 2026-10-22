@@ -1,5 +1,7 @@
 //! Keep nearby visual slots bounded without removing flights from the movement world.
+#[allow(unused_imports, clippy::wildcard_imports)]
 use super::*;
+use super::{BTreeSet, GeneratedTraffic, Operations};
 use openatc_core::state::Telemetry;
 
 pub(super) fn select(

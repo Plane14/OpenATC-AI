@@ -171,6 +171,7 @@ fn on_leg(
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     use crate::state::RouteFix;

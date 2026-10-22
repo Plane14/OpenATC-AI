@@ -40,7 +40,9 @@ impl Workers {
                             break;
                         };
                         // A failed import must not permanently remove a worker.
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            crate::config_cache::on_worker(job)
+                        }));
                     }
                 })
                 .map_err(|e| format!("Could not start CPU worker: {e}"))?;

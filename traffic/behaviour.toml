@@ -3,13 +3,16 @@
 range_nm = 20.0
 observation_age_seconds = 5
 initiation_interval_seconds = 300
-initiation_probability = 0.35
+# Legacy compatibility only; the Settings percentage is the sole probability.
+initiation_probability = 1.0
+weather_wind_knots = 20.0
+weather_visibility_meters = 5000.0
 operational_quiet_seconds = 60
 maximum_reply_characters = 240
 maximum_message_bytes = 1000
 history_exchanges = 6
 model_timeout_seconds = 15
-allowed_phases = ["parked", "cruise", "taxi_in"]
+allowed_phases = ["cruise", "taxi_in"]
 stationary_speed_knots = 1.0
 critical_airport_radius_nm = 10.0
 critical_height_feet = 2000.0

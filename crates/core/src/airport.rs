@@ -1,5 +1,12 @@
 //! Airport scenery and navdata loading, local coordinates and taxi routing.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+
 use super::state::{Point, TaxiClearance, Telemetry};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -207,6 +214,9 @@ pub struct Airport {
     pub pavements: Vec<Vec<Point>>,
     /// Triangulated pavement faces, preserving cutouts.
     pub pavement_triangles: Vec<[Point; 3]>,
+    /// Contour ranges for each published pavement group. The first contour in a
+    /// group is the outer ring; the rest are holes.
+    pub pavement_groups: Vec<(usize, usize)>,
     /// Taxi graph nodes.
     pub nodes: Vec<TaxiNode>,
     /// Taxi graph edges.
@@ -490,6 +500,7 @@ pub fn runway_at_point<'a>(airport: &'a Airport, point: &Point) -> Option<&'a Ru
 
 /// True when a local point lies on (or just beside) a runway strip.
 /// Whether a point lies within a physical runway corridor.
+#[must_use]
 pub fn within_runway(airport: &Airport, point: &Point) -> bool {
     for runway in &airport.runways {
         let east = runway.second.east - runway.first.east;
@@ -650,10 +661,26 @@ fn taxi_path(
                 via += ", ";
             }
             via += name;
-            last = name.to_owned();
+            last.clear();
+            last.push_str(name);
         }
     }
     (points, via)
+}
+
+/// A straight connector to the taxi network must stay on non-runway pavement.
+fn paved_connector(airport: &Airport, from: Point, to: Point) -> bool {
+    let distance = flat_distance(&from, &to);
+    let samples = (distance / 1.0).ceil().max(1.0) as usize;
+    (0..=samples).all(|index| {
+        let amount = index as f64 / samples as f64;
+        let point = Point {
+            east: from.east + (to.east - from.east) * amount,
+            north: from.north + (to.north - from.north) * amount,
+            height: 0.0,
+        };
+        on_pavement(airport, point) && !within_runway(airport, &point)
+    })
 }
 
 /// Route to the destination over connected taxi edges sized for the aircraft.
@@ -706,19 +733,35 @@ pub fn calculate_taxi_route(
             &[],
         ));
     }
-    let (mut start, mut nearest) = (-1, f64::INFINITY);
-    for (id, point) in &nodes {
-        if within_runway(airport, point) || !graph.contains_key(id) {
+    let limit = if airport.inferred_taxi { 35.0 } else { 350.0 };
+    let mut candidates: Vec<_> = nodes
+        .iter()
+        .filter(|(id, point)| !within_runway(airport, point) && graph.contains_key(id))
+        .map(|(id, point)| (flat_distance(&start_point, point), *id))
+        .filter(|(separation, _)| *separation <= limit)
+        .collect();
+    candidates.sort_by(|first, second| first.0.total_cmp(&second.0));
+    let mut start = -1;
+    let mut nearest = f64::INFINITY;
+    for (separation, id) in candidates.iter().take(8) {
+        let point = nodes[id];
+        if airport.inferred_taxi && holds_or_pavement_conflict(airport, start_point, point) {
             continue;
         }
-        let separation = flat_distance(&start_point, point);
-        if separation < nearest {
-            nearest = separation;
+        if paved_connector(airport, start_point, point) {
             start = *id;
+            nearest = *separation;
+            break;
         }
     }
     if start < 0
-        || nearest > if airport.inferred_taxi { 35.0 } else { 350.0 }
+        && let Some((separation, id)) = candidates.first()
+    {
+        start = *id;
+        nearest = *separation;
+    }
+    if start < 0
+        || nearest > limit
         || (airport.inferred_taxi
             && (holds_or_pavement_conflict(airport, start_point, nodes[&start])))
     {
@@ -855,7 +898,10 @@ pub fn calculate_taxi_route(
             &[("destination", destination.to_owned())],
         )
     } else if via.is_empty() {
-        return Err(crate::dialogue::say("taxi_route_without_named_taxiways", &[]));
+        return Err(crate::dialogue::say(
+            "taxi_route_without_named_taxiways",
+            &[],
+        ));
     } else if needs_backtrack {
         crate::dialogue::say(
             "taxi_hold_for_backtrack",
@@ -1078,10 +1124,16 @@ pub fn load_airport(text: &str, icao: &str) -> Result<Airport, String> {
         }
     }
     pavement_starts.push(builder.airport.pavements.len());
-    for limits in pavement_starts.windows(2) {
-        builder.airport.pavement_triangles.extend(pavement_faces(
-            &builder.airport.pavements[limits[0]..limits[1]],
-        ));
+    builder.airport.pavement_groups = pavement_starts
+        .windows(2)
+        .filter(|limits| limits[1] > limits[0])
+        .map(|limits| (limits[0], limits[1]))
+        .collect();
+    for (start, end) in &builder.airport.pavement_groups {
+        builder
+            .airport
+            .pavement_triangles
+            .extend(pavement_faces(&builder.airport.pavements[*start..*end]));
     }
     builder.airport.taxi_centerlines = centerlines
         .iter()
@@ -1166,7 +1218,11 @@ pub fn append_pavement(
     {
         return Err("Supplementary pavement could not preserve its boundaries and holes".into());
     }
+    let start = airport.pavements.len();
     airport.pavements.extend(contours);
+    airport
+        .pavement_groups
+        .push((start, airport.pavements.len()));
     airport.pavement_triangles.extend(faces);
     Ok(())
 }
@@ -1327,7 +1383,13 @@ impl AirportBuilder {
     // Record 1204 appends to whatever edge came last.
     fn extend_edge(&mut self, line: &str) {
         if let Some(edge) = self.airport.edges.last_mut() {
-            edge.active_runways += rest_after_tokens(line, 2);
+            let extra = rest_after_tokens(line, 2).trim();
+            if !extra.is_empty() {
+                if !edge.active_runways.is_empty() {
+                    edge.active_runways.push(' ');
+                }
+                edge.active_runways.push_str(extra);
+            }
         }
     }
 
@@ -1386,6 +1448,20 @@ impl AirportBuilder {
                 .collect();
             stand.airlines.sort();
             stand.airlines.dedup();
+            // X-Plane commonly omits "props" from general-aviation tie-downs that list
+            // turboprops, even when those ramps are the field's piston parking.
+            let kind = stand.kind.to_ascii_lowercase();
+            let equipment = stand.equipment.to_ascii_lowercase();
+            if matches!(kind.as_str(), "tie_down" | "hangar")
+                && stand
+                    .operations
+                    .to_ascii_lowercase()
+                    .contains("general_aviation")
+                && equipment.split('|').any(|value| value == "turboprops")
+                && !equipment.split('|').any(|value| value == "props")
+            {
+                stand.equipment.push_str("|props");
+            }
         }
     }
 
@@ -1642,7 +1718,7 @@ pub fn load_airport_from_simulator(
             continue;
         }
         let mut selected = load_airport(&text, icao)?;
-        selected.source = path.clone();
+        selected.source.clone_from(path);
         airport = Some(selected);
         break;
     }
@@ -1729,14 +1805,69 @@ pub fn on_pavement(airport: &Airport, p: Point) -> bool {
         return true;
     }
 
-    airport.pavement_triangles.iter().any(|t| {
+    if airport.pavement_triangles.iter().any(|t| {
         let signs = [
             cross(difference(t[1], t[0]), difference(p, t[0])),
             cross(difference(t[2], t[1]), difference(p, t[1])),
             cross(difference(t[0], t[2]), difference(p, t[2])),
         ];
         signs.iter().all(|s| *s >= -0.01) || signs.iter().all(|s| *s <= 0.01)
-    })
+    }) {
+        return true;
+    }
+    // Earcut can leave slivers in a long, near-degenerate contour. Fall back to
+    // the published rings so a valid pavement is not reported as a gap.
+    for (start, end) in &airport.pavement_groups {
+        if *end > airport.pavements.len() {
+            continue;
+        }
+        let mut inside = false;
+        for contour in &airport.pavements[*start..*end] {
+            if contour_contains(p, contour) {
+                inside = !inside;
+            }
+        }
+        if inside {
+            return true;
+        }
+    }
+    false
+}
+
+/// Even-odd containment across one pavement ring.
+fn contour_contains(point: Point, contour: &[Point]) -> bool {
+    if contour.len() < 3 {
+        return false;
+    }
+    let (mut min_east, mut max_east) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut min_north, mut max_north) = (f64::INFINITY, f64::NEG_INFINITY);
+    for vertex in contour {
+        min_east = min_east.min(vertex.east);
+        max_east = max_east.max(vertex.east);
+        min_north = min_north.min(vertex.north);
+        max_north = max_north.max(vertex.north);
+    }
+    if point.east < min_east
+        || point.east > max_east
+        || point.north < min_north
+        || point.north > max_north
+    {
+        return false;
+    }
+    let mut inside = false;
+    for index in 0..contour.len() {
+        let first = contour[index];
+        let second = contour[(index + 1) % contour.len()];
+        if (first.north > point.north) != (second.north > point.north)
+            && point.east
+                < (second.east - first.east) * (point.north - first.north)
+                    / (second.north - first.north)
+                    + first.east
+        {
+            inside = !inside;
+        }
+    }
+    inside
 }
 /// Use only installed painted centerlines. Never join unrelated lines across an apron,
 /// invent taxiway names, cross hold markings, or override a published routing network.
@@ -1850,6 +1981,18 @@ pub fn calculate_runway_taxi_route(
     destination: &str,
     size: char,
 ) -> Result<TaxiClearance, String> {
+    calculate_runway_taxi_route_with(airport, telemetry, destination, size, false)
+}
+
+/// Route to the departure runway. `full_length` prefers the runway threshold when the
+/// normal intersection entry cannot support the roll.
+pub fn calculate_runway_taxi_route_with(
+    airport: &Airport,
+    telemetry: &Telemetry,
+    destination: &str,
+    size: char,
+    full_length: bool,
+) -> Result<TaxiClearance, String> {
     let failure = || crate::dialogue::say("runway_taxi_unavailable", &[]);
     if !telemetry.on_ground || !telemetry.position_valid {
         return Err(failure());
@@ -1939,8 +2082,22 @@ pub fn calculate_runway_taxi_route(
                     && clear_runway_connector(airport, &surface, runway, point, entry)
             })
             .min_by(|a, b| {
-                let score =
-                    |id: &i64| costs[id] + segment_distance(nodes[id], runway.first, runway.second);
+                let along_threshold = |point: Point| {
+                    let dx = opposite.east - threshold.east;
+                    let dn = opposite.north - threshold.north;
+                    let length = dx.hypot(dn).max(1.0);
+                    ((point.east - threshold.east) * dx + (point.north - threshold.north) * dn)
+                        / length
+                };
+                let score = |id: &i64| {
+                    costs[id]
+                        + segment_distance(nodes[id], runway.first, runway.second)
+                        + if full_length {
+                            along_threshold(nodes[id]).max(0.0) * 10.0
+                        } else {
+                            0.0
+                        }
+                };
                 score(a).total_cmp(&score(b))
             })
             .ok_or_else(failure)?;
@@ -2331,14 +2488,14 @@ fn calculate_crossing_route_with(
     }
     let across =
         |p: Point| ((p.east - r.first.east) * dn - (p.north - r.first.north) * dx) / length;
-    let side = across(start_point);
-    if side.abs() < r.width / 2.0 + 10.0 {
+    let lateral = across(start_point);
+    if lateral.abs() < r.width / 2.0 + 10.0 {
         return Err(fail());
     }
     let nodes: BTreeMap<_, _> = airport.nodes.iter().map(|n| (n.id, n.point)).collect();
     let start = nodes
         .iter()
-        .filter(|(_, p)| flat_distance(&start_point, p) < 50.0 && across(**p) * side > 0.0)
+        .filter(|(_, p)| flat_distance(&start_point, p) < 50.0 && across(**p) * lateral > 0.0)
         .min_by(|a, b| {
             flat_distance(&start_point, a.1).total_cmp(&flat_distance(&start_point, b.1))
         })
@@ -2407,8 +2564,8 @@ fn calculate_crossing_route_with(
     let target = costs
         .iter()
         .filter_map(|(id, cost)| {
-            if *cost >= 500.0
-                || across(nodes[id]) * side >= 0.0
+            if *cost >= 800.0
+                || across(nodes[id]) * lateral >= 0.0
                 || across(nodes[id]).abs() <= r.width / 2.0 + 50.0
             {
                 return None;
@@ -2418,9 +2575,9 @@ fn calculate_crossing_route_with(
                 let end = *path.last()?;
                 let before = *path.iter().rev().nth(1)?;
                 let observed = Telemetry {
-                    latitude: airport.reference_latitude + end.north / 111320.0,
+                    latitude: airport.reference_latitude + end.north / 111_320.0,
                     longitude: airport.reference_longitude
-                        + end.east / (111320.0 * airport.reference_latitude.to_radians().cos()),
+                        + end.east / (111_320.0 * airport.reference_latitude.to_radians().cos()),
                     heading_degrees: (end.east - before.east)
                         .atan2(end.north - before.north)
                         .to_degrees()
@@ -2505,7 +2662,7 @@ mod generated_crossing_tests {
         for (east, heading) in [(-200.0, 90.0), (200.0, 270.0)] {
             let observed = Telemetry {
                 latitude: 0.0,
-                longitude: east / 111320.0,
+                longitude: east / 111_320.0,
                 heading_degrees: heading,
                 on_ground: true,
                 position_valid: true,
@@ -2520,14 +2677,14 @@ mod generated_crossing_tests {
             let end = *complete.points.last().unwrap();
             assert!((end.east.abs() - 200.0).abs() < 1e-6);
             let at_end = Telemetry {
-                longitude: end.east / 111320.0,
+                longitude: end.east / 111_320.0,
                 ..observed.clone()
             };
             assert!(!aircraft_on_named_runway_for(
                 &airport, "36", &at_end, profile
             ));
             let at_line = Telemetry {
-                longitude: end.east.signum() * 140.0 / 111320.0,
+                longitude: end.east.signum() * 140.0 / 111_320.0,
                 ..observed
             };
             assert!(aircraft_on_named_runway_for(
@@ -2539,7 +2696,7 @@ mod generated_crossing_tests {
         }
         let wrong_way = Telemetry {
             latitude: 0.0,
-            longitude: 200.0 / 111320.0,
+            longitude: 200.0 / 111_320.0,
             heading_degrees: 270.0,
             on_ground: true,
             position_valid: true,
@@ -2587,6 +2744,40 @@ mod pavement_tests {
             .sum();
         assert!((area - 64.0).abs() < 1e-8);
     }
+
+    #[test]
+    fn pavement_rings_fill_a_triangulation_gap_and_keep_holes_open() {
+        let point = |east, north| Point {
+            east,
+            north,
+            height: 0.0,
+        };
+        let mut airport = Airport {
+            reference_latitude: 0.0,
+            reference_longitude: 0.0,
+            pavements: vec![
+                vec![
+                    point(0.0, 0.0),
+                    point(10.0, 0.0),
+                    point(10.0, 10.0),
+                    point(0.0, 10.0),
+                ],
+                vec![
+                    point(4.0, 4.0),
+                    point(6.0, 4.0),
+                    point(6.0, 6.0),
+                    point(4.0, 6.0),
+                ],
+            ],
+            pavement_groups: vec![(0, 2)],
+            ..Default::default()
+        };
+        assert!(on_pavement(&airport, point(1.0, 1.0)));
+        assert!(!on_pavement(&airport, point(5.0, 5.0)));
+        assert!(!on_pavement(&airport, point(20.0, 20.0)));
+        airport.pavement_groups = vec![(0, 1)];
+        assert!(on_pavement(&airport, point(5.0, 5.0)));
+    }
 }
 
 #[cfg(test)]
@@ -2630,8 +2821,41 @@ mod taxi_name_tests {
         let route = calculate_taxi_route(&airport, &observed, "Gate 1", true, 'C')
             .expect("unnamed taxiways still form a usable route");
         assert!(route.via.is_empty(), "{:?}", route.via);
-        assert!(!route.instructions.contains("via -"), "{}", route.instructions);
-        assert!(!route.instructions.contains("via ."), "{}", route.instructions);
-        assert!(route.instructions.contains("Gate 1"), "{}", route.instructions);
+        assert!(
+            !route.instructions.contains("via -"),
+            "{}",
+            route.instructions
+        );
+        assert!(
+            !route.instructions.contains("via ."),
+            "{}",
+            route.instructions
+        );
+        assert!(
+            route.instructions.contains("Gate 1"),
+            "{}",
+            route.instructions
+        );
+    }
+}
+
+#[cfg(test)]
+mod apt_parser_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_active_runway_lines_keep_separate_names() {
+        let text = "\
+1 0 0 0 TEST Test Airport
+100 45.72 1 0 0.25 0 3 0 17L 38.1873 -85.731342 0 0 0 0 0 0 35R 38.164556 -85.723575 0 0 0 0 0 0
+1201 38.0 -85.0 0 1
+1201 38.001 -85.0 0 2
+1202 1 2 twoway taxiway_B
+1204 departure 17L,35R
+1204 arrival 17L,35R
+";
+        let airport = load_airport(text, "TEST").unwrap();
+        assert_eq!(airport.edges.len(), 1);
+        assert_eq!(airport.edges[0].active_runways, "17L,35R 17L,35R");
     }
 }

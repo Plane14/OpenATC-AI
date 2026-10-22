@@ -12,8 +12,9 @@ use std::sync::{OnceLock, RwLock};
 static ACTIVE: OnceLock<RwLock<IntentCatalogue>> = OnceLock::new();
 fn active() -> &'static RwLock<IntentCatalogue> {
     ACTIVE.get_or_init(|| {
-        let file = toml::from_str::<CatalogueFile>(include_str!("../../../intents.toml"))
-            .expect("bundled intents");
+        let file =
+            crate::configuration::from_str::<CatalogueFile>(include_str!("../../../intents.toml"))
+                .expect("bundled intents");
         RwLock::new(IntentCatalogue {
             entries: file.intent,
             order: file.buttons.order,
@@ -44,8 +45,9 @@ pub fn buttons() -> Vec<(String, String)> {
 /// Load an editable catalogue without changing controller authorization.
 pub fn activate(path: &Path) -> Result<(), String> {
     let overrides = load_intents(path)?;
-    let defaults = toml::from_str::<CatalogueFile>(include_str!("../../../intents.toml"))
-        .map_err(|error| error.to_string())?;
+    let defaults =
+        crate::configuration::from_str::<CatalogueFile>(include_str!("../../../intents.toml"))
+            .map_err(|error| error.to_string())?;
     let mut catalogue = IntentCatalogue {
         entries: defaults.intent,
         order: defaults.buttons.order,
@@ -251,8 +253,8 @@ pub fn parser() -> Parser {
 pub fn load_intents(path: &Path) -> Result<IntentCatalogue, String> {
     let text =
         std::fs::read_to_string(path).map_err(|error| format!("cannot open file: {error}"))?;
-    let file: CatalogueFile =
-        toml::from_str(&text).map_err(|error| format!("cannot parse catalogue: {error}"))?;
+    let file: CatalogueFile = crate::configuration::from_str(&text)
+        .map_err(|error| format!("cannot parse catalogue: {error}"))?;
     Ok(IntentCatalogue {
         entries: file.intent,
         order: file.buttons.order,

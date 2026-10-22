@@ -20,7 +20,7 @@ fn shipped_configuration_loads() {
         if path.extension().and_then(|value| value.to_str()) == Some("toml") {
             match path.file_name().and_then(|value| value.to_str()) {
                 // The plugin's callout tests validate this separate policy schema.
-                Some("callouts.toml") => continue,
+                Some("callouts.toml") => {}
                 Some("transponder.toml") => {
                     openatc_core::transponder::Controls::load(&path)
                         .unwrap_or_else(|error| panic!("{}: {error}", path.display()));

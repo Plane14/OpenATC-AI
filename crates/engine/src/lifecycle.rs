@@ -2,7 +2,7 @@
 use std::time::{Duration, Instant};
 
 const STARTUP_GRACE: Duration = Duration::from_secs(60);
-const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn expired(started: Instant, last_seen: Instant, now: Instant) -> bool {
     (last_seen > started || now.duration_since(started) >= STARTUP_GRACE)
@@ -85,24 +85,25 @@ pub async fn request_shutdown(
     axum::Json(serde_json::json!({"accepted": true})).into_response()
 }
 
-pub async fn wait_for_plugin_exit(session: &PluginSession, parent: u32) {
+pub async fn wait_for_plugin_exit(session: &PluginSession, parent: u32) -> &'static str {
     let started = Instant::now();
     loop {
         tokio::select! {
-            () = session.shutdown.notified() => return,
+            () = session.shutdown.notified() => return "plugin requested shutdown",
             () = tokio::time::sleep(Duration::from_secs(1)) => {}
         }
-        if !host_alive(parent)
-            || expired(
-                started,
-                *session
-                    .last_seen
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-                Instant::now(),
-            )
-        {
-            return;
+        if !host_alive(parent) {
+            return "plugin process exited";
+        }
+        if expired(
+            started,
+            *session
+                .last_seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            Instant::now(),
+        ) {
+            return "plugin heartbeat timed out";
         }
     }
 }
@@ -114,10 +115,11 @@ pub async fn serve(
 ) {
     if let Some(parent) = session.parent {
         use std::future::IntoFuture;
+        println!("OpenATC engine: plugin parent pid {parent}");
         tokio::select! {
             result = axum::serve(listener, app).into_future() => result.unwrap(),
-            () = wait_for_plugin_exit(&session, parent) => {
-                println!("OpenATC engine: plugin gone; shutting down");
+            reason = wait_for_plugin_exit(&session, parent) => {
+                println!("OpenATC engine: {reason}; shutting down");
             }
         }
     } else {
@@ -144,17 +146,17 @@ mod tests {
         assert!(!expired(start, start, start + Duration::from_secs(59)));
         assert!(expired(start, start, start + Duration::from_secs(60)));
         let first_seen = start + Duration::from_secs(1);
-        assert!(!expired(start, first_seen, start + Duration::from_secs(10)));
-        assert!(expired(start, first_seen, start + Duration::from_secs(11)));
-        let now = start + Duration::from_secs(100);
+        assert!(!expired(start, first_seen, start + Duration::from_secs(60)));
+        assert!(expired(start, first_seen, start + Duration::from_secs(61)));
+        let now = start + Duration::from_secs(200);
         assert!(!expired(
             start,
-            now.checked_sub(Duration::from_secs(9)).unwrap(),
+            now.checked_sub(Duration::from_secs(59)).unwrap(),
             now
         ));
         assert!(expired(
             start,
-            now.checked_sub(Duration::from_secs(10)).unwrap(),
+            now.checked_sub(Duration::from_secs(60)).unwrap(),
             now
         ));
     }

@@ -1,5 +1,12 @@
 //! Build controller contracts from the checked flight, published stations and retained IAS inputs.
-use super::{flight::Clearance, *};
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+use super::{Airport, Arc, BTreeMap, environment, flight::Clearance, routing};
 use openatc_core::{
     dialogue::say,
     regions::Region,
@@ -379,7 +386,7 @@ fn coordinated_centers(
         .iter()
         .filter(|station| {
             role(station, "Center")
-                && (118000..=136990).contains(&station.khz)
+                && (118_000..=136_990).contains(&station.khz)
                 && !station.coverage.is_empty()
         })
         .collect::<Vec<_>>();
@@ -485,7 +492,10 @@ fn coordinated_centers(
         let mut previous = initial.clone();
         for (seconds, station) in selected.into_iter().skip(1) {
             if station.khz == previous.khz
-                && station.name.trim().eq_ignore_ascii_case(previous.name.trim())
+                && station
+                    .name
+                    .trim()
+                    .eq_ignore_ascii_case(previous.name.trim())
             {
                 continue;
             }
@@ -509,7 +519,7 @@ fn station(
     let mut candidates = context
         .stations
         .iter()
-        .filter(|station| (118000..=136990).contains(&station.khz))
+        .filter(|station| (118_000..=136_990).contains(&station.khz))
         .filter_map(|station| {
             services
                 .iter()
@@ -794,8 +804,8 @@ pub(super) fn contracts(
         .any(|(fix, weather)| {
             fix.airspeed.is_none_or(|speed| {
                 speed.atmosphere != weather.atmosphere
-                    || speed.wind_from != weather.wind_from
-                    || speed.wind_knots != weather.wind_knots
+                    || (speed.wind_from - weather.wind_from).abs() > f64::EPSILON
+                    || (speed.wind_knots - weather.wind_knots).abs() > f64::EPSILON
             })
         })
     {
@@ -843,9 +853,11 @@ pub(super) fn contracts(
     // The amendment may only replace a genuine published manual termination, and only with
     // the approach entry the controller is about to clear. Nothing else authorises the path.
     if let Some(amendment) = context.amendment {
-        let published = context.terminal.arrival_manual.as_ref().ok_or(
-            "Route amendment is not supported by a published manual termination",
-        )?;
+        let published = context
+            .terminal
+            .arrival_manual
+            .as_ref()
+            .ok_or("Route amendment is not supported by a published manual termination")?;
         let arrival_leg = context
             .terminal
             .arrival
@@ -1345,7 +1357,7 @@ mod tests {
         let center = |name: &str, west: f64, east: f64, floor: f64, ceiling: f64| Station {
             name: name.into(),
             service: "Center".into(),
-            khz: 118675,
+            khz: 118_675,
             coverage: vec![openatc_core::stations::Coverage {
                 floor,
                 ceiling,
@@ -1383,7 +1395,7 @@ mod tests {
             "Same-frequency sectors still have distinct controller ownership"
         );
         assert!((transfers[0].remaining_seconds - 90.06).abs() < 0.1);
-        let gap = center("East", 0.000001, 1.0, 0.0, 45000.0);
+        let gap = center("East", 0.000_001, 1.0, 0.0, 45000.0);
         assert!(
             coordinated_centers(&[west, gap], &segment).is_err(),
             "A gap between route samples cannot be bridged silently"
@@ -1424,7 +1436,7 @@ mod tests {
         let lower = Station {
             name: "Lower".into(),
             service: "Center".into(),
-            khz: 118030,
+            khz: 118_030,
             coverage: vec![openatc_core::stations::Coverage {
                 floor: 0.0,
                 ceiling: 50000.0,
@@ -1460,7 +1472,7 @@ mod tests {
         let west = Station {
             name: "West".into(),
             service: "Center".into(),
-            khz: 118030,
+            khz: 118_030,
             coverage: vec![openatc_core::stations::Coverage {
                 floor: 0.0,
                 ceiling: 50000.0,
@@ -1498,8 +1510,8 @@ mod tests {
         assert_eq!(sender.name, "West");
         assert_eq!(transfers.len(), 1);
         assert_eq!(transfers[0].station.name, "East");
-        east.coverage[0].points[0][1] = -179.999999;
-        east.coverage[0].points[3][1] = -179.999999;
+        east.coverage[0].points[0][1] = -179.999_999;
+        east.coverage[0].points[3][1] = -179.999_999;
         assert!(coordinated_centers(&[west, east], &movement).is_err());
     }
 

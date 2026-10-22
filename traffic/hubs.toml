@@ -1,201 +1,1060 @@
-# Local operator preferences. Weights need not sum to 100.
+# Local operator preferences, not market-share percentages.
+# The coordinates are the world airport position. The engine matches them against the
+# simulator's own identifier, which the installed navdata may randomise.
 version = 1
 
-[airport.YSSY]
-name = "Sydney"
-airlines = { QFA = 55, VOZ = 25, JST = 20, QFA-regional = 30, ANZ = 8, SIA = 5, UAE = 4 }
+[airport.BIKF]
+name = "Reykjavik Keflavik"
+airlines = { FI = 20, RYR = 20 }
+latitude = 63.98500
+longitude = -22.60560
 
-[airport.YMML]
-name = "Melbourne"
-airlines = { QFA = 55, VOZ = 25, JST = 20, QFA-regional = 20, SIA = 5, UAE = 5 }
+[airport.CYQB]
+name = "Quebec City Jean Lesage"
+airlines = { TS = 20 }
+latitude = 46.79110
+longitude = -71.39330
 
-[airport.YBBN]
-name = "Brisbane"
-airlines = { QFA = 45, VOZ = 40, JST = 20, QFA-regional = 35 }
+[airport.CYUL]
+name = "Montreal Trudeau"
+airlines = { AC = 30, TS = 40 }
+latitude = 45.46784
+longitude = -73.74229
 
-[airport.YPPH]
-name = "Perth"
-airlines = { QFA = 55, VOZ = 25, JST = 15, QFA-regional = 20, SIA = 8 }
+[airport.CYYZ]
+name = "Toronto Pearson"
+airlines = { AC = 20 }
+latitude = 43.67594
+longitude = -79.62942
 
-[airport.YADL]
-name = "Adelaide"
-airlines = { QFA = 45, VOZ = 30, JST = 20, QFA-regional = 20 }
+[airport.CZFA]
+name = "Faro Airport"
+airlines = { RYR = 30, VOE = 20 }
+latitude = 62.20750
+longitude = -133.37601
 
-[airport.YMHB]
-name = "Hobart"
-airlines = { QFA = 35, VOZ = 30, JST = 35 }
+[airport.DAAG]
+name = "Algiers Houari Boumediene"
+airlines = { DAH = 50, TOY = 20, VOE = 20 }
+latitude = 36.69389
+longitude = 3.21453
 
-[airport.YBCG]
-name = "Gold Coast"
-airlines = { QFA = 15, VOZ = 35, JST = 50 }
+[airport.DAAV]
+name = "Jijel"
+airlines = { DAH = 20 }
+latitude = 36.79413
+longitude = 5.87365
 
-[airport.YBCS]
-name = "Cairns"
-airlines = { QFA = 35, VOZ = 20, JST = 45, QFA-regional = 25 }
+[airport.DABB]
+name = "Annaba"
+airlines = { DAH = 20, TOY = 20 }
+latitude = 36.82678
+longitude = 7.81334
 
-[airport.NZAA]
-name = "Auckland"
-airlines = { ANZ = 65, ANZ-regional = 55, JST = 20, QFA = 15, SIA = 5 }
+[airport.DABC]
+name = "Constantine"
+airlines = { DAH = 40 }
+latitude = 36.27600
+longitude = 6.62039
 
-[airport.NZCH]
-name = "Christchurch"
-airlines = { ANZ = 55, ANZ-regional = 55, JST = 25, QFA = 20 }
+[airport.DABT]
+name = "Batna"
+airlines = { DAH = 20 }
+latitude = 35.75210
+longitude = 6.30859
 
-[airport.NZWN]
-name = "Wellington"
-airlines = { ANZ = 50, ANZ-regional = 70, JST = 20, QFA = 10 }
+[airport.DAON]
+name = "Tlemcen"
+airlines = { DAH = 20 }
+latitude = 35.01273
+longitude = -1.45712
 
-[airport.WSSS]
-name = "Singapore Changi"
-airlines = { SIA = 85, QFA = 10, CPA = 10, ANA = 10, UAE = 10 }
+[airport.DAOO]
+name = "Oran Es Senia"
+airlines = { DAH = 30, RYR = 20, TOY = 20, VOE = 20 }
+latitude = 35.62065
+longitude = -0.62249
 
-[airport.OMDB]
-name = "Dubai"
-airlines = { UAE = 90, QFA = 5, BAW = 5 }
+[airport.DTMB]
+name = "Monastir Habib Bourguiba International Airport"
+airlines = { NLR = 20, RYR = 30, TAR = 20, VOE = 20 }
+latitude = 35.75810
+longitude = 10.75470
 
-[airport.OTHH]
-name = "Doha"
-airlines = { QTR = 90, BAW = 10 }
+[airport.DTTA]
+name = "Tunis Carthage"
+airlines = { NLR = 50, RYR = 20, TAR = 40, TOY = 30 }
+latitude = 36.85100
+longitude = 10.22720
 
-[airport.VHHH]
-name = "Hong Kong"
-airlines = { CPA = 90, SIA = 15, ANA = 15, QFA = 10 }
+[airport.DTTJ]
+name = "Djerba Zarzis"
+airlines = { NLR = 30, TAR = 20, TOY = 20 }
+latitude = 33.87372
+longitude = 10.77730
 
-[airport.RJTT]
-name = "Tokyo Haneda"
-airlines = { ANA = 85, UAL = 10, DAL = 10 }
+[airport.EBBR]
+name = "Brussels"
+airlines = { EZY = 20, SNZ = 50, VOE = 20 }
+latitude = 50.90140
+longitude = 4.48444
 
-[airport.RJAA]
-name = "Tokyo Narita"
-airlines = { ANA = 75, UAL = 15, SIA = 10, FDX = 20 }
+[airport.EBCI]
+name = "Charleroi"
+airlines = { RYR = 30 }
+latitude = 50.46196
+longitude = 4.45956
+
+[airport.EDDB]
+name = "Berlin Brandenburg"
+airlines = { EW = 30, EZY = 20 }
+latitude = 52.36174
+longitude = 13.50234
+
+[airport.EDDF]
+name = "Frankfurt"
+airlines = { DHL = 20, DLH = 90, UAL = 15 }
+latitude = 50.02671
+longitude = 8.55835
+
+[airport.EDDH]
+name = "Hamburg"
+airlines = { EW = 20 }
+latitude = 53.63040
+longitude = 9.98823
+
+[airport.EDDK]
+name = "Cologne Bonn"
+airlines = { EW = 20, UPS = 40 }
+latitude = 50.86590
+longitude = 7.14274
+
+[airport.EDDL]
+name = "Dusseldorf"
+airlines = { EW = 40 }
+latitude = 51.28950
+longitude = 6.76678
+
+[airport.EDDM]
+name = "Munich"
+airlines = { DLH = 90, EW = 20, UAL = 10, VOE = 20 }
+latitude = 48.35380
+longitude = 11.78610
+
+[airport.EETN]
+name = "Tallinn"
+airlines = { BT = 20 }
+latitude = 59.41325
+longitude = 24.83264
+
+[airport.EFHK]
+name = "Helsinki Vantaa"
+airlines = { AY = 30 }
+latitude = 60.31836
+longitude = 24.96334
+
+[airport.EGBB]
+name = "Birmingham"
+airlines = { EZY = 40, RYR = 20, VOE = 30 }
+latitude = 52.45390
+longitude = -1.74803
+
+[airport.EGCC]
+name = "Manchester"
+airlines = { EZY = 20, RYR = 30 }
+latitude = 53.34938
+longitude = -2.27952
+
+[airport.EGHH]
+name = "Bournemouth Airport"
+airlines = { RYR = 20 }
+latitude = 50.78048
+longitude = -1.83958
+
+[airport.EGJB]
+name = "Guernsey Airport"
+airlines = { EZY = 20 }
+latitude = 49.43500
+longitude = -2.60197
+
+[airport.EGKK]
+name = "London Gatwick"
+airlines = { BAW = 55, EZY = 40 }
+latitude = 51.14874
+longitude = -0.18574
+
+[airport.EGLL]
+name = "London Heathrow"
+airlines = { AAL = 15, BAW = 90, DAL = 15, UAL = 15 }
+latitude = 51.47075
+longitude = -0.45991
+
+[airport.EGPH]
+name = "Edinburgh"
+airlines = { EZY = 20, RYR = 30 }
+latitude = 55.95014
+longitude = -3.37229
+
+[airport.EGSS]
+name = "London Stansted"
+airlines = { BAW = 20, RYR = 50 }
+latitude = 51.88500
+longitude = 0.23500
+
+[airport.EHAM]
+name = "Amsterdam Schiphol"
+airlines = { AFR = 20, DAL = 15, EZY = 20, KLC = 90, KLM = 90 }
+latitude = 52.30860
+longitude = 4.76389
+
+[airport.EHEH]
+name = "Eindhoven Airport"
+airlines = { EI = 20 }
+latitude = 51.45010
+longitude = 5.37453
+
+[airport.EIDW]
+name = "Dublin"
+airlines = { EI = 50, EZY = 20, RYR = 40, VOE = 30 }
+latitude = 53.42871
+longitude = -6.26212
+
+[airport.EKCH]
+name = "Copenhagen"
+airlines = { DY = 30, SK = 40, VOE = 30 }
+latitude = 55.61790
+longitude = 12.65600
+
+[airport.ELLX]
+name = "Luxembourg"
+airlines = { EZY = 20, LG = 20, VOE = 30 }
+latitude = 49.62685
+longitude = 6.21213
+
+[airport.ENBR]
+name = "Bergen"
+airlines = { DY = 20, RYR = 20 }
+latitude = 60.29340
+longitude = 5.21814
+
+[airport.ENGM]
+name = "Oslo Gardermoen"
+airlines = { DY = 30, SK = 30 }
+latitude = 60.19390
+longitude = 11.10040
+
+[airport.ENTO]
+name = "Sandefjord Torp"
+airlines = { DY = 20, WID = 20 }
+latitude = 59.18670
+longitude = 10.25860
+
+[airport.ENVA]
+name = "Trondheim"
+airlines = { DY = 20, RYR = 20 }
+latitude = 63.45780
+longitude = 10.92400
+
+[airport.EPKK]
+name = "Krakow"
+airlines = { RYR = 30, VOE = 20 }
+latitude = 50.07770
+longitude = 19.78480
+
+[airport.EPWA]
+name = "Warsaw Chopin"
+airlines = { LO = 30 }
+latitude = 52.16570
+longitude = 20.96710
+
+[airport.EPWR]
+name = "Wroclaw"
+airlines = { RYR = 20 }
+latitude = 51.10372
+longitude = 16.88210
+
+[airport.ESSA]
+name = "Stockholm Arlanda"
+airlines = { DY = 20, SK = 20 }
+latitude = 59.64849
+longitude = 17.92883
+
+[airport.EVRA]
+name = "Riga International Airport"
+airlines = { BT = 30 }
+latitude = 56.92075
+longitude = 23.97071
+
+[airport.EYVI]
+name = "Vilnius"
+airlines = { BT = 20 }
+latitude = 54.63410
+longitude = 25.28580
+
+[airport.FIMP]
+name = "Mauritius Ramgoolam"
+airlines = { CRS = 20 }
+latitude = -20.43020
+longitude = 57.68360
+
+[airport.FMCV]
+name = "Dzaoudzi Pamandzi"
+airlines = { CRS = 20 }
+latitude = -12.13105
+longitude = 44.43004
+
+[airport.FMEE]
+name = "Reunion Roland Garros"
+airlines = { CRS = 30 }
+latitude = -20.89009
+longitude = 55.51889
+
+[airport.GCFV]
+name = "Fuerteventura Airport"
+airlines = { VOE = 30 }
+latitude = 28.45270
+longitude = -13.86380
+
+[airport.GCLP]
+name = "Gran Canaria Airport"
+airlines = { VOE = 20 }
+latitude = 27.93190
+longitude = -15.38660
+
+[airport.GCTS]
+name = "Tenerife South Airport"
+airlines = { EZY = 20, RYR = 20, VOE = 30 }
+latitude = 28.04450
+longitude = -16.57250
+
+[airport.GMFF]
+name = "Fes Saiss"
+airlines = { ABY = 40, RYR = 20 }
+latitude = 33.92730
+longitude = -4.97796
+
+[airport.GMME]
+name = "Rabat Sale"
+airlines = { RAM = 20, RYR = 20 }
+latitude = 34.05150
+longitude = -6.75152
+
+[airport.GMMI]
+name = "Essaouira Mogador"
+airlines = { RYR = 20 }
+latitude = 31.39750
+longitude = -9.68167
+
+[airport.GMMN]
+name = "Casablanca Mohammed V"
+airlines = { FS = 20, RAM = 50 }
+latitude = 33.36750
+longitude = -7.58997
+
+[airport.GMMX]
+name = "Marrakech Menara"
+airlines = { EZY = 30, RAM = 30, RYR = 30, TOY = 20, VOE = 20 }
+latitude = 31.60481
+longitude = -8.03579
+
+[airport.GOBD]
+name = "Dakar Blaise Diagne"
+airlines = { TOY = 30 }
+latitude = 14.67088
+longitude = -17.07283
 
 [airport.HAAB]
 name = "Addis Ababa"
 airlines = { ETH = 90 }
+latitude = 8.97789
+longitude = 38.79930
 
-[airport.KLAX]
-name = "Los Angeles"
-airlines = { UAL = 30, DAL = 30, AAL = 30, SWA = 20, ASA = 20, SKW = 50, FDX = 15, UPS = 15 }
+[airport.HECA]
+name = "Cairo"
+airlines = { TOY = 20 }
+latitude = 30.11153
+longitude = 31.39669
 
-[airport.KSNA]
-name = "John Wayne"
-airlines = { SWA = 40, UAL = 20, AAL = 20, DAL = 10, ASA = 20, SKW = 35 }
+[airport.HEGN]
+name = "Hurghada International Airport"
+airlines = { TOY = 20 }
+latitude = 27.17678
+longitude = 33.79669
 
-[airport.KLGB]
-name = "Long Beach"
-airlines = { SWA = 80, DAL = 20 }
+[airport.KATL]
+name = "Atlanta Hartsfield Jackson"
+airlines = { DAL = 95, SWA = 20 }
+latitude = 33.63670
+longitude = -84.42810
 
-[airport.KSFO]
-name = "San Francisco"
-airlines = { UAL = 80, ASA = 25, SKW = 60, AAL = 10, DAL = 10 }
-
-[airport.KSEA]
-name = "Seattle Tacoma"
-airlines = { ASA = 80, DAL = 45, SKW = 25 }
-
-[airport.KPDX]
-name = "Portland"
-airlines = { ASA = 65, SKW = 40, SWA = 25 }
-
-[airport.KDEN]
-name = "Denver"
-airlines = { UAL = 70, SWA = 45, SKW = 50 }
-
-[airport.KORD]
-name = "Chicago O'Hare"
-airlines = { UAL = 65, AAL = 60, SKW = 70 }
-
-[airport.KMDW]
-name = "Chicago Midway"
-airlines = { SWA = 90 }
-
-[airport.KDFW]
-name = "Dallas Fort Worth"
-airlines = { AAL = 90, SKW = 30 }
+[airport.KBOS]
+name = "Boston Logan"
+airlines = { DAL = 20 }
+latitude = 42.36197
+longitude = -71.00790
 
 [airport.KDAL]
 name = "Dallas Love Field"
 airlines = { SWA = 90 }
+latitude = 32.84478
+longitude = -96.84765
 
-[airport.KATL]
-name = "Atlanta"
-airlines = { DAL = 95, SWA = 20 }
+[airport.KDEN]
+name = "Denver"
+airlines = { SKW = 50, SWA = 45, UAL = 70 }
+latitude = 39.86003
+longitude = -104.67379
 
-[airport.KJFK]
-name = "New York Kennedy"
-airlines = { DAL = 45, AAL = 40, BAW = 20 }
-
-[airport.KEWR]
-name = "Newark"
-airlines = { UAL = 95 }
-
-[airport.KIAH]
-name = "Houston Intercontinental"
-airlines = { UAL = 85, SKW = 45 }
-
-[airport.KHOU]
-name = "Houston Hobby"
-airlines = { SWA = 90 }
-
-[airport.KPHX]
-name = "Phoenix"
-airlines = { AAL = 55, SWA = 50, SKW = 40 }
-
-[airport.KSLC]
-name = "Salt Lake City"
-airlines = { DAL = 80, SKW = 70 }
-
-[airport.KMSP]
-name = "Minneapolis Saint Paul"
-airlines = { DAL = 80, SKW = 50 }
+[airport.KDFW]
+name = "Dallas Fort Worth"
+airlines = { AAL = 90, SKW = 30 }
+latitude = 32.89680
+longitude = -97.03800
 
 [airport.KDTW]
 name = "Detroit"
 airlines = { DAL = 85, SKW = 50 }
+latitude = 42.21377
+longitude = -83.35379
+
+[airport.KEWR]
+name = "Newark Liberty"
+airlines = { PWA = 20, UAL = 95 }
+latitude = 40.68940
+longitude = -74.17055
+
+[airport.KHOU]
+name = "Houston Hobby"
+airlines = { SWA = 90 }
+latitude = 29.64534
+longitude = -95.27681
+
+[airport.KIAD]
+name = "Washington Dulles"
+airlines = { UAL = 30 }
+latitude = 38.94450
+longitude = -77.45580
+
+[airport.KIAH]
+name = "Houston Intercontinental"
+airlines = { SKW = 45, UAL = 85 }
+latitude = 29.98440
+longitude = -95.34140
+
+[airport.KJFK]
+name = "New York Kennedy"
+airlines = { AAL = 40, BAW = 20, DAL = 45 }
+latitude = 40.63945
+longitude = -73.77932
+
+[airport.KLAX]
+name = "Los Angeles"
+airlines = { AAL = 30, ASA = 20, DAL = 30, FDX = 15, SKW = 50, SWA = 20, UAL = 30, UPS = 15 }
+latitude = 33.94250
+longitude = -118.40800
+
+[airport.KLGB]
+name = "Long Beach"
+airlines = { DAL = 20, SWA = 80 }
+latitude = 33.81652
+longitude = -118.14989
+
+[airport.KMDW]
+name = "Chicago Midway"
+airlines = { SWA = 90 }
+latitude = 41.78600
+longitude = -87.75240
+
+[airport.KMEM]
+name = "Memphis"
+airlines = { AAL = 15, DAL = 15, FDX = 100, SWA = 20 }
+latitude = 35.04384
+longitude = -89.97634
 
 [airport.KMIA]
 name = "Miami"
 airlines = { AAL = 85, FDX = 15, UPS = 15 }
+latitude = 25.79601
+longitude = -80.28975
 
-[airport.KMEM]
-name = "Memphis"
-airlines = { FDX = 100, AAL = 15, DAL = 15, SWA = 20 }
+[airport.KMSP]
+name = "Minneapolis Saint Paul"
+airlines = { DAL = 80, SKW = 50 }
+latitude = 44.88008
+longitude = -93.22174
+
+[airport.KORD]
+name = "Chicago O'Hare"
+airlines = { AAL = 60, SKW = 70, UAL = 65 }
+latitude = 41.97860
+longitude = -87.90480
+
+[airport.KPDX]
+name = "Portland"
+airlines = { ASA = 65, SKW = 40, SWA = 25 }
+latitude = 45.58870
+longitude = -122.59800
+
+[airport.KPHL]
+name = "Philadelphia"
+airlines = { AAL = 20 }
+latitude = 39.87190
+longitude = -75.24110
+
+[airport.KPHX]
+name = "Phoenix"
+airlines = { AAL = 55, SKW = 40, SWA = 50 }
+latitude = 33.43530
+longitude = -112.00590
 
 [airport.KSDF]
 name = "Louisville"
-airlines = { UPS = 100, AAL = 15, DAL = 15, SWA = 20 }
+airlines = { AAL = 15, DAL = 15, SWA = 20, UPS = 100 }
+latitude = 38.17060
+longitude = -85.73508
 
-[airport.PHNL]
-name = "Honolulu"
-airlines = { UAL = 25, DAL = 20, AAL = 20, ASA = 20, SWA = 20, ANA = 10 }
+[airport.KSEA]
+name = "Seattle Tacoma"
+airlines = { ASA = 80, DAL = 45, SKW = 25 }
+latitude = 47.44794
+longitude = -122.31028
 
-[airport.EGLL]
-name = "London Heathrow"
-airlines = { BAW = 90, UAL = 15, AAL = 15, DAL = 15 }
+[airport.KSFO]
+name = "San Francisco"
+airlines = { AAL = 10, ASA = 25, DAL = 10, SKW = 60, UAL = 80 }
+latitude = 37.61981
+longitude = -122.37482
 
-[airport.EGKK]
-name = "London Gatwick"
-airlines = { BAW = 55 }
+[airport.KSLC]
+name = "Salt Lake City"
+airlines = { DAL = 80, SKW = 70 }
+latitude = 40.78886
+longitude = -111.97987
 
-[airport.EDDF]
-name = "Frankfurt"
-airlines = { DLH = 90, UAL = 15 }
+[airport.KSNA]
+name = "John Wayne"
+airlines = { AAL = 20, ASA = 20, DAL = 10, SKW = 35, SWA = 40, UAL = 20 }
+latitude = 33.67506
+longitude = -117.86928
 
-[airport.EDDM]
-name = "Munich"
-airlines = { DLH = 90, UAL = 10 }
+[airport.LDDU]
+name = "Dubrovnik"
+airlines = { VOE = 30 }
+latitude = 42.56225
+longitude = 18.26554
 
-[airport.EHAM]
-name = "Amsterdam"
-airlines = { KLM = 90, KLC = 90, DAL = 15 }
+[airport.LDSP]
+name = "Split"
+airlines = { VOE = 20 }
+latitude = 43.53890
+longitude = 16.29800
+
+[airport.LEAL]
+name = "Alicante"
+airlines = { EZY = 20, RYR = 30, TOY = 20, VOE = 20 }
+latitude = 38.28220
+longitude = -0.55816
+
+[airport.LEBB]
+name = "Bilbao"
+airlines = { VOE = 30 }
+latitude = 43.30110
+longitude = -2.91061
+
+[airport.LEBL]
+name = "Barcelona El Prat"
+airlines = { EZY = 30, RYR = 20, VLG = 30, VOE = 30 }
+latitude = 41.29710
+longitude = 2.07846
+
+[airport.LEIB]
+name = "Ibiza"
+airlines = { EZY = 20, IBE = 20, RYR = 30 }
+latitude = 38.87290
+longitude = 1.37312
+
+[airport.LEMD]
+name = "Madrid Barajas"
+airlines = { EZY = 30, IBE = 50, RYR = 30, VOE = 40 }
+latitude = 40.49341
+longitude = -3.57225
+
+[airport.LEMH]
+name = "Menorca"
+airlines = { EZY = 20, RYR = 20 }
+latitude = 39.86260
+longitude = 4.21865
+
+[airport.LEPA]
+name = "Palma de Mallorca"
+airlines = { EZY = 30, IBE = 20, RYR = 30, TOY = 20, VOE = 40 }
+latitude = 39.55170
+longitude = 2.73881
+
+[airport.LEVC]
+name = "Valencia"
+airlines = { EZY = 20, RYR = 30, TOY = 20, VOE = 30 }
+latitude = 39.48916
+longitude = -0.48096
+
+[airport.LEZL]
+name = "Seville"
+airlines = { EZY = 20, RYR = 20, TOY = 20, VOE = 30 }
+latitude = 37.41800
+longitude = -5.89311
+
+[airport.LFBD]
+name = "Bordeaux Merignac"
+airlines = { AFR = 20, EZY = 30, VOE = 40 }
+latitude = 44.82865
+longitude = -0.71536
+
+[airport.LFBH]
+name = "La Rochelle"
+airlines = { RYR = 20 }
+latitude = 46.17920
+longitude = -1.19528
+
+[airport.LFBO]
+name = "Toulouse Blagnac"
+airlines = { A3 = 30, ABY = 20, AC = 20, AFR = 50, BAW = 20, CCM = 60, CRS = 20, DAH = 40, DHL = 20, DLH = 20, DY = 30, EI = 20, EZY = 100, FDX = 20, IBE = 20, KLM = 20, MAE = 20, NLR = 30, RAM = 30, RYR = 100, SNZ = 20, SWF = 30, SWR = 20, TAP = 20, TAR = 20, THY = 20, TJO = 50, TOY = 100, TS = 20, UAL = 20, UPS = 20, VOE = 100, WZZ = 20 }
+latitude = 43.62910
+longitude = 1.36382
+
+[airport.LFBZ]
+name = "Biarritz"
+airlines = { EZY = 20, TJO = 20, TOY = 20 }
+latitude = 43.46837
+longitude = -1.52322
+
+[airport.LFJL]
+name = "Nancy Essey"
+airlines = { EZY = 20 }
+latitude = 48.98210
+longitude = 6.25132
+
+[airport.LFKB]
+name = "Bastia Poretta"
+airlines = { ASL = 20, CCM = 40 }
+latitude = 42.55270
+longitude = 9.48373
+
+[airport.LFKC]
+name = "Calvi Sainte-Catherine"
+airlines = { CCM = 40 }
+latitude = 42.53042
+longitude = 8.79298
+
+[airport.LFKF]
+name = "Figari Sud Corse"
+airlines = { CCM = 40 }
+latitude = 41.50185
+longitude = 9.09709
+
+[airport.LFKJ]
+name = "Ajaccio Napoleon Bonaparte"
+airlines = { ASL = 20, CCM = 40 }
+latitude = 41.92360
+longitude = 8.80292
+
+[airport.LFLL]
+name = "Lyon Saint-Exupery"
+airlines = { AFR = 50, ASL = 20, DHL = 20, EZY = 30, MAE = 20, VOE = 20 }
+latitude = 45.72600
+longitude = 5.09014
+
+[airport.LFML]
+name = "Marseille Provence"
+airlines = { A3 = 30, ABY = 20, AFR = 40, ASL = 60, AUA = 20, AZA = 20, BAW = 20, CCM = 50, CRS = 40, DAH = 80, DLH = 30, EI = 20, EW = 20, EZY = 50, FS = 30, IBE = 20, KAL = 20, KLM = 20, LY = 20, NLR = 30, PCP = 20, RAM = 40, RYR = 100, SK = 20, SNZ = 20, SWR = 30, TAP = 20, TAR = 30, THY = 20, TJO = 30, TOY = 100, TS = 30, UAL = 20, UPS = 20, VOE = 100, VPC = 20 }
+latitude = 43.43809
+longitude = 5.21250
+
 [airport.LFMN]
-name = "Nice"
-airlines = { EZY = 45, AFR = 25, HOP = 10, CCM = 10, GA = 10 }
+name = "Nice Cote d'Azur"
+airlines = { A3 = 20, AAL = 30, ABY = 20, AC = 30, AFR = 40, ASL = 20, AY = 20, AZA = 20, BAW = 40, BT = 40, CCM = 60, DAH = 30, DAL = 40, DLH = 30, DY = 70, EI = 30, ETD = 20, EW = 70, EZY = 100, FI = 20, GA = 10, GEG = 20, GFA = 30, HOP = 10, IBE = 40, KLM = 20, KWI = 20, LG = 20, LO = 20, LY = 20, MEA = 20, MND = 20, NLR = 30, PCP = 20, PWA = 20, QTR = 20, RAM = 20, RYR = 30, SK = 40, SNZ = 20, SWR = 30, TAP = 20, TAR = 20, THY = 20, TJO = 20, TOY = 30, TS = 20, UAE = 20, UAL = 30, VLG = 20, VOE = 100, VPC = 20, WID = 20 }
+latitude = 43.65840
+longitude = 7.21587
 
-[airport.LIMC]
-name = "Milan Malpensa"
-airlines = { EZY = 45, DLH = 10, AFR = 10, GA = 10 }
+[airport.LFMT]
+name = "Montpellier Mediterranee"
+airlines = { EZY = 20 }
+latitude = 43.57620
+longitude = 3.96301
+
+[airport.LFNN]
+name = "Carcassonne"
+airlines = { EZY = 20 }
+latitude = 43.19417
+longitude = 3.05167
+
+[airport.LFOB]
+name = "Paris Beauvais"
+airlines = { TOY = 20, VOE = 20 }
+latitude = 49.45440
+longitude = 2.11278
 
 [airport.LFPG]
 name = "Paris Charles de Gaulle"
-airlines = { AFR = 65, HOP = 20, EZY = 5, GA = 2 }
+airlines = { AFR = 65, ASL = 30, DHL = 20, EZY = 20, FDX = 20, GA = 2, HOP = 20, SWF = 20, TAP = 20, UPS = 20 }
+latitude = 49.00896
+longitude = 2.55412
+
+[airport.LFPO]
+name = "Paris Orly"
+airlines = { AFR = 20, EZY = 30, TOY = 50 }
+latitude = 48.72950
+longitude = 2.35896
+
+[airport.LFQQ]
+name = "Lille Lesquin"
+airlines = { EZY = 20, RYR = 20, VOE = 30 }
+latitude = 50.56656
+longitude = 3.10243
+
+[airport.LFRB]
+name = "Brest Bretagne"
+airlines = { TOY = 30, VOE = 30 }
+latitude = 48.44790
+longitude = -4.41854
+
+[airport.LFRK]
+name = "Caen Carpiquet"
+airlines = { VOE = 40 }
+latitude = 49.17678
+longitude = -0.45488
+
+[airport.LFRN]
+name = "Rennes Bretagne"
+airlines = { ASL = 20, EZY = 20, TJO = 20, VOE = 40 }
+latitude = 48.06950
+longitude = -1.73479
+
+[airport.LFRS]
+name = "Nantes Atlantique"
+airlines = { AFR = 20, CCM = 20, EZY = 30, TJO = 20, TOY = 20, VOE = 30 }
+latitude = 47.15320
+longitude = -1.61073
+
+[airport.LFSB]
+name = "Basel Mulhouse"
+airlines = { EZY = 30 }
+latitude = 47.60068
+longitude = 7.52112
+
+[airport.LFST]
+name = "Strasbourg Entzheim"
+airlines = { EZY = 20, VOE = 40 }
+latitude = 48.53830
+longitude = 7.62823
+
+[airport.LGAV]
+name = "Athens"
+airlines = { A3 = 40, EZY = 20, RYR = 20, TOY = 20, VOE = 20 }
+latitude = 37.93640
+longitude = 23.94450
+
+[airport.LGIR]
+name = "Heraklion"
+airlines = { A3 = 30, TOY = 20, VOE = 30 }
+latitude = 35.33970
+longitude = 25.18030
+
+[airport.LGSA]
+name = "Chania International Airport"
+airlines = { RYR = 20 }
+latitude = 35.53121
+longitude = 24.15067
+
+[airport.LHBP]
+name = "Budapest"
+airlines = { RYR = 30 }
+latitude = 47.43018
+longitude = 19.26239
+
+[airport.LIBD]
+name = "Bari"
+airlines = { EZY = 20, RYR = 20 }
+latitude = 41.13890
+longitude = 16.76060
+
+[airport.LIEO]
+name = "Olbia"
+airlines = { VOE = 20 }
+latitude = 40.89895
+longitude = 9.51846
+
+[airport.LIMC]
+name = "Milan Malpensa"
+airlines = { AFR = 90, ASL = 30, AY = 20, AZA = 20, BAW = 20, BT = 20, DAH = 20, DHL = 30, DLH = 30, EI = 20, ETD = 20, EW = 30, EZY = 90, GA = 10, GFA = 20, IBE = 20, KLM = 20, LO = 20, LY = 20, NLR = 20, PCP = 20, QTR = 20, RAM = 20, RYR = 50, SK = 30, SNZ = 20, SWR = 20, TAP = 30, TAR = 20, THY = 20, TOY = 20, UAE = 20, UPS = 30, VLG = 30, VOE = 30 }
+latitude = 45.63060
+longitude = 8.72811
+
+[airport.LIPZ]
+name = "Venice Marco Polo"
+airlines = { EZY = 20, RYR = 20, VOE = 40 }
+latitude = 45.50530
+longitude = 12.35190
+
+[airport.LIRF]
+name = "Rome Fiumicino"
+airlines = { AZA = 40, CCM = 20, EZY = 20, RYR = 40, VLG = 20, VOE = 20 }
+latitude = 41.80453
+longitude = 12.25200
+
+[airport.LIRI]
+name = "Salerno Costa d'Amalfi Airport"
+airlines = { VOE = 20 }
+latitude = 40.62040
+longitude = 14.91130
+
+[airport.LIRN]
+name = "Naples"
+airlines = { EZY = 20, RYR = 30, VOE = 20 }
+latitude = 40.88600
+longitude = 14.29080
+
+[airport.LIRP]
+name = "Pisa"
+airlines = { RYR = 20, VOE = 20 }
+latitude = 43.68390
+longitude = 10.39270
+
+[airport.LKPR]
+name = "Prague"
+airlines = { EW = 20, EZY = 20, RYR = 20, TOY = 20, VOE = 20, WZZ = 20 }
+latitude = 50.10087
+longitude = 14.25991
+
+[airport.LLBG]
+name = "Tel Aviv Ben Gurion"
+airlines = { LY = 40, TOY = 30 }
+latitude = 32.01140
+longitude = 34.88670
+
+[airport.LNMC]
+name = "Monaco Heliport"
+airlines = { MND = 20 }
+latitude = 43.72580
+longitude = 7.41967
+
+[airport.LOWW]
+name = "Vienna"
+airlines = { AUA = 20, RYR = 20, VOE = 20 }
+latitude = 48.11030
+longitude = 16.56970
+
+[airport.LPMA]
+name = "Funchal Cristiano Ronaldo Airport"
+airlines = { TOY = 20 }
+latitude = 32.69781
+longitude = -16.77461
+
+[airport.LPPS]
+name = "Porto Airport"
+airlines = { RYR = 30 }
+latitude = 33.07340
+longitude = -16.35000
+
+[airport.LPPT]
+name = "Lisbon"
+airlines = { EZY = 20, RYR = 30, TAP = 50 }
+latitude = 38.78130
+longitude = -9.13592
+
+[airport.LROP]
+name = "Bucharest Otopeni"
+airlines = { RYR = 20, SWF = 20 }
+latitude = 44.57179
+longitude = 26.10328
+
+[airport.LSGG]
+name = "Geneva"
+airlines = { EZY = 30, SWR = 30 }
+latitude = 46.23810
+longitude = 6.10895
+
+[airport.LSZH]
+name = "Zurich"
+airlines = { SWR = 50 }
+latitude = 47.45806
+longitude = 8.54806
+
+[airport.LTAI]
+name = "Antalya Airport"
+airlines = { TOY = 20 }
+latitude = 36.89870
+longitude = 30.80050
+
+[airport.LTFJ]
+name = "Istanbul Sabiha Gokcen"
+airlines = { PCP = 40 }
+latitude = 40.89860
+longitude = 29.30920
+
+[airport.LTFM]
+name = "Istanbul"
+airlines = { THY = 50 }
+latitude = 41.27487
+longitude = 28.73214
+
+[airport.NZAA]
+name = "Auckland"
+airlines = { ANZ = 65, ANZ-regional = 55, JST = 20, QFA = 15, SIA = 5 }
+latitude = -37.01199
+longitude = 174.78633
+
+[airport.NZCH]
+name = "Christchurch"
+airlines = { ANZ = 55, ANZ-regional = 55, JST = 25, QFA = 20 }
+latitude = -43.48903
+longitude = 172.53206
+
+[airport.NZWN]
+name = "Wellington"
+airlines = { ANZ = 50, ANZ-regional = 70, JST = 20, QFA = 10 }
+latitude = -41.32684
+longitude = 174.80686
+
+[airport.OBBI]
+name = "Bahrain International Airport"
+airlines = { GFA = 20 }
+latitude = 26.26730
+longitude = 50.63764
+
+[airport.OEJN]
+name = "Jeddah King Abdulaziz International Airport"
+airlines = { TOY = 30, VPC = 20 }
+latitude = 21.68024
+longitude = 39.15744
+
+[airport.OEMA]
+name = "Medina Prince Mohammad"
+airlines = { TOY = 30, VPC = 20 }
+latitude = 24.55340
+longitude = 39.70510
+
+[airport.OKKK]
+name = "Kuwait International Airport"
+airlines = { KWI = 20 }
+latitude = 29.22449
+longitude = 47.96981
+
+[airport.OLBA]
+name = "Beirut Rafic Hariri International Airport"
+airlines = { MEA = 20, TOY = 20 }
+latitude = 33.81983
+longitude = 35.48744
+
+[airport.OMAA]
+name = "Abu Dhabi International Airport"
+airlines = { ETD = 30 }
+latitude = 24.44097
+longitude = 54.64924
+
+[airport.OMDB]
+name = "Dubai International"
+airlines = { BAW = 5, QFA = 5, UAE = 90 }
+latitude = 25.24979
+longitude = 55.37099
+
+[airport.OTHH]
+name = "Doha Hamad International Airport"
+airlines = { BAW = 10, QTR = 90 }
+latitude = 25.27306
+longitude = 51.60806
+
+[airport.PHNL]
+name = "Honolulu Daniel Inouye"
+airlines = { AAL = 20, ANA = 10, ASA = 20, DAL = 20, SWA = 20, UAL = 25 }
+latitude = 21.31839
+longitude = -157.92567
+
+[airport.RJAA]
+name = "Tokyo Narita"
+airlines = { ANA = 75, FDX = 20, SIA = 10, UAL = 15 }
+latitude = 35.76858
+longitude = 140.38871
+
+[airport.RJTT]
+name = "Tokyo Haneda"
+airlines = { ANA = 85, DAL = 10, UAL = 10 }
+latitude = 35.54968
+longitude = 139.78696
+
+[airport.RKSI]
+name = "Seoul Incheon"
+airlines = { KAL = 20 }
+latitude = 37.46910
+longitude = 126.45100
+
+[airport.UGTB]
+name = "Tbilisi"
+airlines = { GEG = 20 }
+latitude = 41.66920
+longitude = 44.95470
+
+[airport.VHHH]
+name = "Hong Kong"
+airlines = { ANA = 15, CPA = 90, QFA = 10, SIA = 15 }
+latitude = 22.31184
+longitude = 113.91486
+
+[airport.WSSS]
+name = "Singapore Changi"
+airlines = { ANA = 10, CPA = 10, QFA = 10, SIA = 85, UAE = 10 }
+latitude = 1.35019
+longitude = 103.99400
+
+[airport.YBBN]
+name = "Brisbane"
+airlines = { JST = 20, QFA = 45, QFA-regional = 35, VOZ = 40 }
+latitude = -27.38420
+longitude = 153.11700
+
+[airport.YBCG]
+name = "Gold Coast"
+airlines = { JST = 50, QFA = 15, VOZ = 35 }
+latitude = -28.16596
+longitude = 153.50664
+
+[airport.YBCS]
+name = "Cairns"
+airlines = { JST = 45, QFA = 35, QFA-regional = 25, VOZ = 20 }
+latitude = -16.87892
+longitude = 145.74948
+
+[airport.YMHB]
+name = "Hobart"
+airlines = { JST = 35, QFA = 35, VOZ = 30 }
+latitude = -42.83703
+longitude = 147.51302
+
+[airport.YMML]
+name = "Melbourne"
+airlines = { JST = 20, QFA = 55, QFA-regional = 20, SIA = 5, UAE = 5, VOZ = 25 }
+latitude = -37.67073
+longitude = 144.83790
+
+[airport.YPAD]
+name = "Adelaide"
+airlines = { JST = 20, QFA = 45, QFA-regional = 20, VOZ = 30 }
+latitude = -34.94751
+longitude = 138.53339
+
+[airport.YPPH]
+name = "Perth"
+airlines = { JST = 15, QFA = 55, QFA-regional = 20, SIA = 8, VOZ = 25 }
+latitude = -31.94030
+longitude = 115.96700
+
+[airport.YSSY]
+name = "Sydney"
+airlines = { ANZ = 8, JST = 20, QFA = 55, QFA-regional = 30, SIA = 5, UAE = 4, VOZ = 25 }
+latitude = -33.94610
+longitude = 151.17700
+
+[airport.ZSPD]
+name = "Shanghai Pudong"
+airlines = { FS = 20 }
+latitude = 31.14340
+longitude = 121.80500

@@ -54,6 +54,7 @@ impl Intent {
     }
 
     /// Validate physical proposals before interpreting their conversational context.
+    #[must_use]
     pub fn valid_controls(&self, profile: &CrewProfile, role: &str) -> bool {
         if role != "cabin" && self.cross_check {
             return false;
@@ -95,7 +96,8 @@ impl ReplyPolicy {
         if text.len() > 16384 {
             return Err("Reply policy is too large".into());
         }
-        let policy: Self = toml::from_str(&text).map_err(|error| error.to_string())?;
+        let policy: Self =
+            crate::configuration::from_str(&text).map_err(|error| error.to_string())?;
         if policy.version != 1 || policy.narration_reject.len() > 16 {
             return Err("Unsupported reply policy".into());
         }
@@ -105,6 +107,7 @@ impl ReplyPolicy {
         Ok(policy)
     }
     /// Keep role replies from issuing aircraft movement permissions.
+    #[must_use]
     pub fn narration_allowed(&self, text: &str) -> bool {
         self.narration_reject
             .iter()
@@ -113,6 +116,7 @@ impl ReplyPolicy {
 }
 
 /// Explicit mapped-control fallback when role conversations are disabled.
+#[must_use]
 pub fn parse(profile: &CrewProfile, role: &str, text: &str) -> Option<Intent> {
     let intent = Intent {
         actions: parse_many(profile, role, text)?

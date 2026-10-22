@@ -139,7 +139,7 @@ mod tests {
             latitude: 0.0042,
             longitude: 4.012,
             position_valid: true,
-            com1_khz: 121600,
+            com1_khz: 121_600,
             traffic: Some(vec![]),
             ..Default::default()
         };
@@ -158,7 +158,7 @@ mod tests {
             airport: "DEST".into(),
             name: "Arrival Ground".into(),
             service: "Ground".into(),
-            khz: 121600,
+            khz: 121_600,
             latitude: 0.004,
             longitude: 4.012,
             ..Default::default()

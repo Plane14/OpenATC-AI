@@ -1,6 +1,9 @@
 //! Engine snapshots and a bounded HTTP command queue.
 //! HTTPS requests are handled by the companion engine.
 
+// Layout tests compare exact fixture coordinates.
+#![allow(clippy::float_cmp)]
+
 use openatc_core::state::{State, Telemetry};
 use openatc_settings::Settings;
 use std::collections::{HashMap, VecDeque};
@@ -521,8 +524,8 @@ mod tests {
                     assert!(size > 0);
                     bytes.extend_from_slice(&buffer[..size]);
                     if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
-                        let head = std::str::from_utf8(&bytes[..end]).unwrap();
-                        let length = head
+                        let headers = std::str::from_utf8(&bytes[..end]).unwrap();
+                        let length = headers
                             .lines()
                             .filter_map(|line| line.split_once(':'))
                             .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
@@ -583,7 +586,7 @@ mod tests {
         assert_eq!(client.lock().delivered_revision, 0);
         accept_sample.store(true, Ordering::SeqCst);
         client.telemetry(Telemetry {
-            latitude: 33.938318,
+            latitude: 33.938_318,
             ..Default::default()
         });
         wait_for(&|| client.telemetry_error().is_none() && client.lock().delivered_revision == 2);
@@ -623,8 +626,8 @@ mod tests {
                     assert!(n > 0);
                     bytes.extend_from_slice(&buffer[..n]);
                     if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
-                        let head = std::str::from_utf8(&bytes[..end]).unwrap();
-                        let length = head
+                        let header_text = std::str::from_utf8(&bytes[..end]).unwrap();
+                        let length = header_text
                             .lines()
                             .filter_map(|l| l.split_once(':'))
                             .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))

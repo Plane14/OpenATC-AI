@@ -1,5 +1,15 @@
 //! Install a complete checked flight at the departure hold without granting movement.
+
+#![allow(clippy::default_trait_access)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+#[allow(unused_imports, clippy::wildcard_imports)]
 use super::*;
+use super::{Arc, BTreeMap, BTreeSet, EngineState, GeneratedTraffic, Instant, Runtime, radio};
 use openatc_core::stations::Station;
 use openatc_core::traffic::motion::{Route, Stage};
 
@@ -86,7 +96,10 @@ fn on_station(runtime: &Runtime, id: u32, frequency: Option<i32>, station: &Stat
     frequency == Some(station.khz)
         && runtime.controllers.get(&id).is_none_or(|current| {
             current.khz == station.khz
-                && current.name.trim().eq_ignore_ascii_case(station.name.trim())
+                && current
+                    .name
+                    .trim()
+                    .eq_ignore_ascii_case(station.name.trim())
         })
 }
 
@@ -105,6 +118,7 @@ fn sector_exchange(
             ("station", receiver.name.clone()),
         ];
         return Some(radio::Exchange {
+            speed: None,
             id: pose.id,
             segment: pose.segment,
             station: receiver,
@@ -152,6 +166,7 @@ fn sector_exchange(
         ),
     ];
     Some(radio::Exchange {
+        speed: None,
         id: pose.id,
         segment: pose.segment,
         station: sender.clone(),
@@ -182,6 +197,8 @@ pub(super) struct RunwayReport {
 
 #[derive(Clone)]
 pub(super) struct Prepared {
+    /// Conservative floor across the retained arrival restrictions; None refuses speed amendments.
+    pub spacing_floor: Option<f64>,
     pub route: Arc<Route>,
     pub airspeeds: BTreeMap<usize, openatc_core::traffic::trajectory::Airspeed>,
     pub recovery: BTreeMap<usize, Arc<Route>>,
@@ -266,6 +283,7 @@ impl Prepared {
                 .airborne_through = Some(end - first);
         }
         let result = Self {
+            spacing_floor: self.spacing_floor,
             route,
             // A resumed suffix inherits the amended target it was already flying to.
             amendment: self.amendment.clone(),
@@ -367,7 +385,7 @@ impl Prepared {
                     .clearances
                     .get(&index)
                     .ok_or_else(|| format!("No generated clearance for segment {index}"))?;
-                if !(118000..=136990).contains(&clearance.station.khz)
+                if !(118_000..=136_990).contains(&clearance.station.khz)
                     || clearance.instruction.trim().is_empty()
                     || clearance.instruction.len() > 4096
                     || clearance.readback.trim().is_empty()
@@ -378,7 +396,7 @@ impl Prepared {
                 let mut remaining = self.route.nominal_seconds(index, index).unwrap_or(0.0);
                 if clearance.coordinated_recovery.len() > 32
                     || clearance.coordinated_recovery.iter().any(|station| {
-                        !(118000..=136990).contains(&station.khz)
+                        !(118_000..=136_990).contains(&station.khz)
                             || station.coverage.is_empty()
                             || !(station.service == "Center"
                                 || station.services.iter().any(|service| service == "Center"))
@@ -394,7 +412,7 @@ impl Prepared {
                         || !transfer.remaining_seconds.is_finite()
                         || transfer.remaining_seconds <= 0.0
                         || transfer.remaining_seconds >= remaining
-                        || !(118000..=136990).contains(&transfer.station.khz)
+                        || !(118_000..=136_990).contains(&transfer.station.khz)
                         || transfer.station.coverage.is_empty()
                         || !(transfer.station.service == "Center"
                             || transfer
@@ -601,9 +619,7 @@ impl Prepared {
                 if clearance.amended_route.as_ref().is_some_and(|directive| {
                     directive != self.amendment.as_ref().expect("checked above")
                 }) {
-                    return Err(
-                        "Approach clearance announces a different amended target".into(),
-                    );
+                    return Err("Approach clearance announces a different amended target".into());
                 }
             }
             if !self
@@ -1407,7 +1423,8 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                     frame.target.com1_khz,
                     &clearance.station,
                 ) {
-                    let Some(old) = rejoin
+                    // Recovery may have changed the clearance chain; hand off from the current owner.
+                    let old = rejoin
                         .previous
                         .clearances
                         .values()
@@ -1415,7 +1432,9 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                         .find(|station| {
                             on_station(&state.generated, pose.id, frame.target.com1_khz, station)
                         })
-                    else {
+                        .cloned()
+                        .or_else(|| state.generated.controllers.get(&pose.id).cloned());
+                    let Some(old) = old else {
                         continue;
                     };
                     let slots = [
@@ -1427,6 +1446,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                         ),
                     ];
                     return Some(radio::Exchange {
+                        speed: None,
                         id: pose.id,
                         segment: 0,
                         station: old.clone(),
@@ -1448,6 +1468,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                     });
                 }
                 return Some(radio::Exchange {
+                    speed: None,
                     id: pose.id,
                     segment: 0,
                     station: clearance.station.clone(),
@@ -1494,6 +1515,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                         .reported_recoveries
                         .insert((pose.id, source));
                     return Some(radio::Exchange {
+                        speed: None,
                         id: pose.id,
                         segment: pose.segment,
                         station,
@@ -1550,6 +1572,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                 continue;
             };
             let exchange = radio::Exchange {
+                speed: None,
                 id: pose.id,
                 segment: pose.segment,
                 station,
@@ -1586,6 +1609,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
             if let Some(clearance) = prepared.clearances.get(&start) {
                 return Some(radio::hold_landing(
                     radio::Exchange {
+                        speed: None,
                         id: pose.id,
                         segment: start,
                         station: clearance.station.clone(),
@@ -1613,6 +1637,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
             let wake = state.generated.cancelled_takeoffs.remove(&pose.id).unwrap();
             return Some(radio::hold_takeoff(
                 radio::Exchange {
+                    speed: None,
                     id: pose.id,
                     segment: 1,
                     station: clearance.station.clone(),
@@ -1683,6 +1708,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                     continue;
                 }
                 let exchange = radio::Exchange {
+                    speed: None,
                     id: pose.id,
                     segment: pose.segment,
                     station: clearance.station.clone(),
@@ -1728,6 +1754,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                 ("callsign", frame.target.callsign.clone()),
             ];
             let exchange = radio::Exchange {
+                speed: None,
                 id: pose.id,
                 segment: index,
                 station: clearance.station.clone(),
@@ -1822,6 +1849,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                 if revoked || state.generated.reported_holds.insert((pose.id, index)) {
                     return Some(radio::hold_landing(
                         radio::Exchange {
+                            speed: None,
                             id: pose.id,
                             segment: index,
                             station: clearance.station.clone(),
@@ -1848,6 +1876,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                 if revoked || state.generated.reported_holds.insert((pose.id, index)) {
                     return Some(radio::hold_takeoff(
                         radio::Exchange {
+                            speed: None,
                             id: pose.id,
                             segment: index,
                             station: clearance.station.clone(),
@@ -1879,6 +1908,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
             {
                 if revoked || state.generated.reported_holds.insert((pose.id, index)) {
                     return Some(radio::hold_airborne(radio::Exchange {
+                        speed: None,
                         id: pose.id,
                         segment: index,
                         station: clearance.station.clone(),
@@ -1902,6 +1932,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                     .map(|report| report.runway.as_str());
                 return Some(radio::cancel_crossing(
                     radio::Exchange {
+                        speed: None,
                         id: pose.id,
                         segment: index,
                         station: clearance.station.clone(),
@@ -1947,6 +1978,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
             {
                 return Some(radio::cancel_crossing(
                     radio::Exchange {
+                        speed: None,
                         id: pose.id,
                         segment: index,
                         station: clearance.station.clone(),
@@ -2009,6 +2041,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
                 ),
             ];
             return Some(radio::Exchange {
+                speed: None,
                 id: pose.id,
                 segment: index,
                 station: old,
@@ -2041,6 +2074,7 @@ pub(super) fn exchange(state: &mut EngineState) -> Option<radio::Exchange> {
             continue;
         }
         return Some(radio::Exchange {
+            speed: None,
             id: pose.id,
             segment: index,
             station: clearance.station.clone(),
@@ -2069,7 +2103,7 @@ mod tests {
     fn point(east: f64, altitude: f64) -> Waypoint {
         Waypoint {
             latitude: 0.0,
-            longitude: east / 111320.0,
+            longitude: east / 111_320.0,
             altitude_feet: altitude,
         }
     }
@@ -2113,11 +2147,11 @@ mod tests {
                 if *stage != Stage::Turnaround {
                     let (service, khz) = match stage {
                         Stage::LineUp | Stage::Takeoff | Stage::Approach | Stage::Rollout => {
-                            ("Tower", 120950)
+                            ("Tower", 120_950)
                         }
-                        Stage::Climb | Stage::Descent => ("Approach", 124500),
-                        Stage::Cruise => ("Center", 118675),
-                        Stage::TaxiIn => ("Ground", 121705),
+                        Stage::Climb | Stage::Descent => ("Approach", 124_500),
+                        Stage::Cruise => ("Center", 118_675),
+                        Stage::TaxiIn => ("Ground", 121_705),
                         _ => unreachable!(),
                     };
                     let station = Station {
@@ -2148,9 +2182,9 @@ mod tests {
                 }
                 if !stage.on_ground() {
                     let mut north = end;
-                    north.latitude += 1000.0 / 111320.0;
+                    north.latitude += 1000.0 / 111_320.0;
                     let mut east = end;
-                    east.longitude += 1000.0 / 111320.0;
+                    east.longitude += 1000.0 / 111_320.0;
                     let mut corner = east;
                     corner.latitude = north.latitude;
                     recovery.insert(
@@ -2197,6 +2231,7 @@ mod tests {
             })
             .collect();
         let prepared = Prepared {
+            spacing_floor: None,
             amendment: None,
             airspeeds: BTreeMap::new(),
             route: Arc::new(Route::compile(segments, 4000.0, 4000.0).unwrap()),
@@ -2261,7 +2296,7 @@ mod tests {
             target: TrafficTarget {
                 id: 1,
                 callsign: "TEST123".into(),
-                com1_khz: Some(120950),
+                com1_khz: Some(120_950),
                 ..Default::default()
             },
             vertical_speed_fpm: 0.0,
@@ -2310,7 +2345,9 @@ mod tests {
                         < 1e-9
                 );
                 let body = frame.body_heading_degrees.unwrap();
-                if !pose.stage.on_ground() {
+                if pose.stage.on_ground() {
+                    assert!(openatc_core::navigation::turn(pose.heading, body).abs() < 1e-9);
+                } else {
                     let expected = openatc_core::traffic::air::heading_from_ground(
                         pose.knots,
                         pose.heading,
@@ -2321,8 +2358,6 @@ mod tests {
                     assert!(openatc_core::navigation::turn(expected, body).abs() < 1e-9);
                     assert!(openatc_core::navigation::turn(pose.heading, body).abs() > 1.0);
                     saw_airborne = true;
-                } else {
-                    assert!(openatc_core::navigation::turn(pose.heading, body).abs() < 1e-9);
                 }
             }
             if pose.complete && pose.stage == Stage::Turnaround {
@@ -2360,8 +2395,7 @@ mod tests {
         });
         install(&mut state.generated, 1, &prepared).unwrap();
         let all = super::super::observed_targets(&state.generated, &state.session.telemetry);
-        let external =
-            super::super::external_targets(&state.generated, &state.session.telemetry);
+        let external = super::super::external_targets(&state.generated, &state.session.telemetry);
         assert!(
             state.generated.crossing_blocked(1, 1, &all),
             "fixture must put the follower inside the runway protection envelope"
@@ -2513,6 +2547,7 @@ mod tests {
         state.generated.flights.insert(1, Arc::new(prepared));
         assert!(!state.generated.active_flights.contains(&1));
         state.generated.exchange = Some(radio::Exchange {
+            speed: None,
             id: 1,
             segment: 1,
             station: state.stations[0].clone(),
@@ -2575,6 +2610,7 @@ mod tests {
             .approved_orders
             .extend([(1, 3), (1, 4), (2, 0)]);
         state.generated.exchange = Some(radio::Exchange {
+            speed: None,
             id: 1,
             segment: 4,
             station: prepared.clearances[&4].station.clone(),
@@ -2663,6 +2699,7 @@ mod tests {
                 }
             }
             let prepared = Prepared {
+                spacing_floor: None,
                 amendment: None,
                 airspeeds: old
                     .airspeeds
@@ -2687,7 +2724,7 @@ mod tests {
             assert!(install(&mut state.generated, 1, &invalid).is_err());
             assert!(state.generated.active_flights.is_empty());
             let mut invalid = prepared.clone();
-            invalid.clearances.get_mut(&(slot + 1)).unwrap().station.khz = 123450;
+            invalid.clearances.get_mut(&(slot + 1)).unwrap().station.khz = 123_450;
             assert!(install(&mut state.generated, 1, &invalid).is_err());
             assert!(state.generated.active_flights.is_empty());
             install(&mut state.generated, 1, &prepared).unwrap();
@@ -2763,7 +2800,7 @@ mod tests {
             "Taxi permission cannot include parking completion"
         );
         invalid = prepared.clone();
-        invalid.clearances.get_mut(&8).unwrap().station.khz = 121950;
+        invalid.clearances.get_mut(&8).unwrap().station.khz = 121_950;
         assert!(
             invalid.validate().is_err(),
             "Taxi permission cannot bypass a controller change"
@@ -2870,7 +2907,7 @@ mod tests {
             id: 88,
             aircraft: "B77W".into(),
             callsign: "ARR88".into(),
-            longitude: 12700.0 / 111320.0,
+            longitude: 12700.0 / 111_320.0,
             track_degrees: 90.0,
             on_ground: true,
             ..Default::default()
@@ -3036,8 +3073,8 @@ mod tests {
             id: 88,
             aircraft: "A320".into(),
             callsign: "ARR88".into(),
-            latitude: 1500.0 / 111320.0,
-            longitude: 14750.0 / 111320.0,
+            latitude: 1500.0 / 111_320.0,
+            longitude: 14750.0 / 111_320.0,
             altitude_feet: 200.0,
             track_degrees: 180.0,
             ground_speed_knots: Some(120.0),
@@ -3145,8 +3182,8 @@ mod tests {
         let airport = state.generated.airport.as_ref().unwrap();
         let observed = openatc_core::state::Telemetry {
             aircraft_icao: "CUSTOM".into(),
-            latitude: 60.0 / 111320.0,
-            longitude: 12700.0 / 111320.0,
+            latitude: 60.0 / 111_320.0,
+            longitude: 12700.0 / 111_320.0,
             heading_degrees: 90.0,
             position_valid: true,
             on_ground: true,
@@ -3201,7 +3238,7 @@ mod tests {
             assert_eq!(pose.position, stopped);
         }
         assert!(!state.generated.reported_crossings.contains(&(1, 6)));
-        assert_eq!(state.generated.frames[0].target.com1_khz, Some(120950));
+        assert_eq!(state.generated.frames[0].target.com1_khz, Some(120_950));
         assert!(!state.generated.approved_orders.contains(&(1, 7)));
         Arc::make_mut(state.generated.airport.as_mut().unwrap()).runways[0]
             .second
@@ -3209,7 +3246,7 @@ mod tests {
         super::super::radio_tick(&mut state);
         assert!(state.generated.reported_crossings.contains(&(1, 6)));
         let exchange = state.generated.exchange.as_ref().unwrap();
-        assert_eq!(exchange.station.khz, 120950);
+        assert_eq!(exchange.station.khz, 120_950);
         assert!(!exchange.grant && exchange.tune_after.is_none());
     }
     #[test]
@@ -3293,8 +3330,9 @@ mod tests {
         }
         assert!(reached);
         state.settings.hear_traffic_radio = true;
-        state.session.telemetry.com1_khz = 120950;
+        state.session.telemetry.com1_khz = 120_950;
         state.generated.exchange = Some(radio::Exchange {
+            speed: None,
             id: 1,
             segment: 6,
             station: prepared.clearances[&6].station.clone(),
@@ -3304,7 +3342,7 @@ mod tests {
             due: Instant::now(),
             grant: true,
             tune_after: Some(Station {
-                khz: 118675,
+                khz: 118_675,
                 ..Default::default()
             }),
             sector_transfer: None,
@@ -3334,7 +3372,7 @@ mod tests {
         );
         assert!(state.generated.approved_orders.is_empty());
         assert!(state.generated.pending_checkins.is_empty());
-        assert_eq!(state.generated.frames[0].target.com1_khz, Some(120950));
+        assert_eq!(state.generated.frames[0].target.com1_khz, Some(120_950));
         assert!(state.generated.world.snapshot()[0].recovering);
     }
 
@@ -3424,8 +3462,8 @@ mod tests {
         }
         assert!(reached);
         state.settings.hear_traffic_radio = true;
-        state.session.telemetry.com1_khz = 118675;
-        state.generated.frames[0].target.com1_khz = Some(118675);
+        state.session.telemetry.com1_khz = 118_675;
+        state.generated.frames[0].target.com1_khz = Some(118_675);
         state.generated.approved_orders.insert((1, 4));
         state.generated.pending_checkins.insert((1, 4));
         super::super::radio_tick(&mut state);
@@ -3449,7 +3487,7 @@ mod tests {
             1
         );
         assert!(state.generated.rejoins.contains_key(&1));
-        assert_eq!(state.generated.frames[0].target.com1_khz, Some(118675));
+        assert_eq!(state.generated.frames[0].target.com1_khz, Some(118_675));
         assert!(state.generated.approved_orders.is_empty());
         assert!(state.generated.pending_checkins.is_empty());
         assert!(state.generated.world.snapshot()[0].recovering);
@@ -3526,6 +3564,7 @@ mod tests {
                 (false, "Stale readback".into()),
             ];
             state.generated.exchange = Some(radio::Exchange {
+                speed: None,
                 id: 1,
                 segment: 3,
                 station: prepared.clearances[&3].station.clone(),
@@ -3535,7 +3574,7 @@ mod tests {
                 due: Instant::now(),
                 grant: true,
                 tune_after: Some(Station {
-                    khz: 118675,
+                    khz: 118_675,
                     ..Default::default()
                 }),
                 sector_transfer: None,
@@ -3600,11 +3639,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)]
     fn crossing_airborne_traffic_withholds_takeoff_and_requires_a_fresh_readback_after_clearing() {
         for arrival_stage in 0..3 {
             let mut state = wake_fixture();
             state.settings.hear_traffic_radio = true;
-            state.session.telemetry.com1_khz = 120950;
+            state.session.telemetry.com1_khz = 120_950;
             let mut now = 30.0;
             let mut ready = false;
             for _ in 0..100 {
@@ -4078,7 +4118,7 @@ mod tests {
                 vec![]
             };
             if combined {
-                station.khz = 120950;
+                station.khz = 120_950;
             }
             state.stations.push(station.clone());
             install(&mut state.generated, 1, &prepared).unwrap();
@@ -4178,11 +4218,11 @@ mod tests {
         now += 15.0;
         state.generated.world.advance(now, false);
         let before = state.generated.world.snapshot()[0].position;
-        state.generated.frames[0].target.com1_khz = Some(124500);
-        state.session.telemetry.com1_khz = 124500;
+        state.generated.frames[0].target.com1_khz = Some(124_500);
+        state.session.telemetry.com1_khz = 124_500;
         state.settings.hear_traffic_radio = true;
         let onward = prepared.resume_after_limit(4).unwrap();
-        assert_eq!(onward.clearances[&0].station.khz, 120950);
+        assert_eq!(onward.clearances[&0].station.khz, 120_950);
         let mut broken = onward.clone();
         broken.recovery.clear();
         assert!(offer_rejoin(&mut state.generated, 1, broken).is_err());
@@ -4297,7 +4337,7 @@ mod tests {
         assert!(state.generated.world.snapshot()[0].awaiting_clearance);
         assert!(state.generated.flights.contains_key(&1));
         state.settings.hear_traffic_radio = true;
-        state.session.telemetry.com1_khz = 120950;
+        state.session.telemetry.com1_khz = 120_950;
         let mut report_text = None;
         let mut vacated_reports = 0;
         let mut seen = BTreeSet::new();
@@ -4318,7 +4358,7 @@ mod tests {
                 );
                 assert_eq!(
                     state.generated.frames[0].target.com1_khz,
-                    Some(120950),
+                    Some(120_950),
                     "Vacated report must precede Ground transfer"
                 );
                 assert!(
@@ -4367,10 +4407,10 @@ mod tests {
             pose.complete,
             "Generated flight did not reach parking: {pose:?}"
         );
-        assert!(frequencies.contains(&124500));
-        assert!(frequencies.contains(&118675));
-        assert!(frequencies.contains(&121705));
-        for station in [124500, 118675, 120950, 121705] {
+        assert!(frequencies.contains(&124_500));
+        assert!(frequencies.contains(&118_675));
+        assert!(frequencies.contains(&121_705));
+        for station in [124_500, 118_675, 120_950, 121_705] {
             assert!(
                 checkins.contains(&station),
                 "Missing generated check-in on {station}"

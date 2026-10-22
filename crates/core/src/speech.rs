@@ -246,8 +246,8 @@ pub fn load_speech_dir(dir: &Path) -> Result<SpeechPool, String> {
             continue;
         }
         let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let profile: SpeechRegion =
-            toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let profile: SpeechRegion = crate::configuration::from_str(&text)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         let folder = path
             .parent()
             .and_then(Path::file_name)
@@ -296,7 +296,8 @@ pub fn load_speech_dir(dir: &Path) -> Result<SpeechPool, String> {
         let text =
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let groups: BTreeMap<String, BTreeMap<String, SpeechEntry>> =
-            toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+            crate::configuration::from_str(&text)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
         let components: Vec<_> = path
             .strip_prefix(dir)
             .map_err(|e| e.to_string())?

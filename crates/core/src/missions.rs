@@ -47,7 +47,7 @@ pub struct Media {
 pub struct Event {
     /// Unique within the mission.
     pub id: String,
-    /// Phase name: parked, clearance, pushback, taxi, departure, cruise, arrival, approach, landed or taxi_in.
+    /// Phase name: parked, clearance, pushback, taxi, departure, cruise, arrival, approach, landed or `taxi_in`.
     pub phase: String,
     /// Unpaused seconds spent in the selected phase.
     pub delay_seconds: u32,
@@ -280,7 +280,7 @@ pub fn parse(text: &str) -> Result<Mission, String> {
     if text.len() > 256 * 1024 {
         return Err("Mission exceeds 256 KiB.".into());
     }
-    let mission: Mission = toml::from_str(text).map_err(|e| e.to_string())?;
+    let mission: Mission = crate::configuration::from_str(text).map_err(|e| e.to_string())?;
     mission.validate()?;
     Ok(mission)
 }

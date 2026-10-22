@@ -1,5 +1,14 @@
 //! A nominal runway slope from published threshold elevations, independent of airport maximum height.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+#[allow(unused_imports, clippy::wildcard_imports)]
 use super::*;
+use super::{Airport, Point, animation, position};
 use openatc_core::{
     arrival::Threshold,
     traffic::motion::{Segment, Stage, Waypoint},
@@ -157,7 +166,7 @@ impl Surface {
             return Err("Approach endpoint is not a usable threshold crossing".into());
         }
         let incoming = (-angle_degrees).to_radians().tan() / 0.3048 + self.slope;
-        let contact = handling.touchdown_sink_fpm / (ground_knots * 0.514444 * 60.0);
+        let contact = handling.touchdown_sink_fpm / (ground_knots * 0.514_444 * 60.0);
         if !incoming.is_finite() || incoming <= contact || contact <= 0.0 {
             return Err("Flare cannot reduce the planned sink rate".into());
         }

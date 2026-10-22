@@ -1,3 +1,4 @@
+#![allow(clippy::default_trait_access)]
 use super::*;
 
 fn prepared(aircraft: &str) -> EngineState {
@@ -10,7 +11,7 @@ fn prepared(aircraft: &str) -> EngineState {
     state.session.telemetry.position_valid = true;
     state.session.telemetry.radio_power = true;
     state.session.telemetry.altitude_feet = 10000.0;
-    state.session.telemetry.com1_khz = 123450;
+    state.session.telemetry.com1_khz = 123_450;
     state.traffic.pilots.insert(
         42,
         Pilot {
@@ -21,6 +22,7 @@ fn prepared(aircraft: &str) -> EngineState {
                 on_ground: false,
                 altitude_feet: 10000.0,
                 ground_speed_knots: Some(150.0),
+                com1_khz: Some(123450),
                 ..Default::default()
             },
             seen: Instant::now(),
@@ -80,6 +82,7 @@ async fn casual_chat_respects_settings_critical_phases_and_operational_replies()
         "clearance_pending",
         "handoff",
         "stale",
+        "frequency",
     ] {
         let mut state = prepared("AT76");
         match reason {
@@ -93,7 +96,7 @@ async fn casual_chat_respects_settings_critical_phases_and_operational_replies()
                 state.session.clearance = Some(openatc_core::state::Clearance {
                     acknowledged: false,
                     ..Default::default()
-                })
+                });
             }
             "handoff" => state.session.frequency_sequence = 1,
             "readback" => {
@@ -108,7 +111,10 @@ async fn casual_chat_respects_settings_critical_phases_and_operational_replies()
             }
             "stale" => {
                 state.traffic.pilots.get_mut(&42).unwrap().seen =
-                    Instant::now() - Duration::from_secs(31)
+                    Instant::now().checked_sub(Duration::from_secs(31)).unwrap();
+            }
+            "frequency" => {
+                state.traffic.pilots.get_mut(&42).unwrap().target.com1_khz = Some(122800);
             }
             _ => unreachable!(),
         }
@@ -141,13 +147,30 @@ async fn casual_chat_respects_settings_critical_phases_and_operational_replies()
 fn pilots_can_initiate_only_after_the_configured_quiet_interval() {
     let mut state = prepared("PA28");
     assert!(!conversation::initiate(&mut state));
+    state.initiative.chat_allowed = true;
+    state.settings.pilot_chat_chance_percent = 100;
+    state.traffic.last_chat = Some(
+        Instant::now()
+            .checked_sub(Duration::from_secs(301))
+            .unwrap(),
+    );
+    assert!(
+        !conversation::initiate(&mut state),
+        "no reason even at 100 percent"
+    );
+    let target = &state.traffic.pilots[&42].target;
+    state.sim_weather.insert("TEST".into(), (json!({"latitude":target.latitude, "longitude":target.longitude, "windKnots":25.0, "visibilityMeters":10000.0}), Instant::now()));
     state
         .traffic
         .policy
         .as_mut()
         .unwrap()
         .initiation_probability = 1.0;
-    state.traffic.last_chat = Some(Instant::now() - Duration::from_secs(301));
+    state.traffic.last_chat = Some(
+        Instant::now()
+            .checked_sub(Duration::from_secs(301))
+            .unwrap(),
+    );
     assert!(conversation::initiate(&mut state));
     assert!(
         state
@@ -159,7 +182,28 @@ fn pilots_can_initiate_only_after_the_configured_quiet_interval() {
             .contains(&state.session.plan.callsign)
     );
     assert!(!conversation::initiate(&mut state));
-    state.traffic.last_chat = Some(Instant::now() - Duration::from_secs(301));
+    state.traffic.last_chat = Some(
+        Instant::now()
+            .checked_sub(Duration::from_secs(301))
+            .unwrap(),
+    );
+    state.traffic.last_radio = None;
+    assert!(
+        !conversation::initiate(&mut state),
+        "the same reason is not another dice roll"
+    );
+    state.sim_weather.get_mut("TEST").unwrap().0["windKnots"] = json!(0.0);
+    assert!(!conversation::initiate(&mut state));
+    state.sim_weather.get_mut("TEST").unwrap().0["windKnots"] = json!(25.0);
+    assert!(
+        conversation::initiate(&mut state),
+        "a new weather concern is a new opportunity"
+    );
+    state.traffic.last_chat = Some(
+        Instant::now()
+            .checked_sub(Duration::from_secs(301))
+            .unwrap(),
+    );
     state.session.emergency_declared = true;
     assert!(!conversation::initiate(&mut state));
 }

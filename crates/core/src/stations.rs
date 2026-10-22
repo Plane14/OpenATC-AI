@@ -257,15 +257,6 @@ pub fn serves(service: &str, intent: &str) -> bool {
         }
         "cross_runway" | "vacated" => service == "Ground" || service == "Tower",
         "ready" | "backtrack" | "landing" => service == "Tower",
-        "checkin" => [
-            "Clearance",
-            "Ground",
-            "Tower",
-            "Approach",
-            "Departure",
-            "Center",
-        ]
-        .contains(&service),
         "resume_course" | "altitude" | "direct" | "descent" | "cancel_ifr" | "route"
         | "deviation" | "hold" | "speed" | "divert" => {
             ["Approach", "Departure", "Center"].contains(&service)
@@ -299,7 +290,7 @@ struct Combined {
 }
 /// Add capabilities only to a real published station; no synthetic frequencies.
 pub fn apply_combined(stations: &mut [Station], text: &str) -> Result<(), String> {
-    let file: ServiceFile = toml::from_str(text).map_err(|e| e.to_string())?;
+    let file: ServiceFile = crate::configuration::from_str(text).map_err(|e| e.to_string())?;
     for entry in file.combined {
         if entry.services.is_empty()
             || entry.services.iter().any(|s| {
@@ -350,6 +341,7 @@ pub struct Coverage {
 impl Coverage {
     /// Radio discovery uses horizontal coverage, not the controller's assigned
     /// altitude band. Airport aircraft can tune approach before entering it.
+    #[must_use]
     pub fn radio_distance_nm(&self, t: &Telemetry) -> f64 {
         if self.points.len() < 3 {
             return f64::INFINITY;
@@ -389,6 +381,7 @@ impl Coverage {
         distance
     }
     /// Whether telemetry lies inside the published horizontal and altitude bounds.
+    #[must_use]
     pub fn contains(&self, t: &Telemetry) -> bool {
         if self.points.len() < 3
             || !self.floor.is_finite()
@@ -487,11 +480,11 @@ mod coverage_tests {
         };
         assert!(west.contains(&point) && east.contains(&point));
         assert!(!west.contains(&Telemetry {
-            longitude: 0.000001,
+            longitude: 0.000_001,
             ..point.clone()
         }));
         assert!(!east.contains(&Telemetry {
-            longitude: -0.000001,
+            longitude: -0.000_001,
             ..point.clone()
         }));
         assert!(!east.contains(&Telemetry {
@@ -565,6 +558,9 @@ pub struct AirportMarker {
 }
 
 /// Index enabled airport scenery in priority order, including fields without radios.
+/// # Panics
+///
+/// Panics if an airport record is shorter than the documented field layout.
 pub fn map_airports(root: &str) -> Result<Vec<AirportMarker>, String> {
     use std::io::BufRead;
     let mut markers = Vec::new();
@@ -684,14 +680,14 @@ fn runway_footprint(fields: &[&str]) -> Option<Vec<[f64; 2]>> {
     {
         return None;
     }
-    let scale = ((a[0] + b[0]) * 0.5).to_radians().cos().abs().max(0.01);
+    let scale = f64::midpoint(a[0], b[0]).to_radians().cos().abs().max(0.01);
     let east = (b[1] - a[1]) * scale;
     let north = b[0] - a[0];
     let length = east.hypot(north);
     if length < 1e-8 {
         return None;
     }
-    let offset = width * 0.5 / 111320.0;
+    let offset = width * 0.5 / 111_320.0;
     let dlat = -east / length * offset;
     let dlon = north / length * offset / scale;
     Some(vec![

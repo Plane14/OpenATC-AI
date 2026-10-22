@@ -1,4 +1,6 @@
 //! Solve terminal and en-route crossings together before creating movement limits.
+
+#![allow(clippy::default_trait_access)]
 use openatc_core::traffic::{
     motion::{Segment, Stage, Waypoint},
     trajectory::{self, Envelope, Fix},
@@ -38,7 +40,7 @@ pub(super) struct Request<'a> {
 }
 
 /// Decode the selected fleet's actual SID, STAR and approach on the preparation worker.
-pub(super) fn resolve(input: Request<'_>) -> Result<Decoded, String> {
+pub(super) fn resolve(input: &Request<'_>) -> Result<Decoded, String> {
     use openatc_core::traffic::resolved::{self, Context};
     if !input.departure_weather.fresh() || !input.arrival_weather.fresh() {
         return Err("Terminal planning needs fresh weather at both airports".into());
@@ -119,22 +121,18 @@ pub(super) fn resolve(input: Request<'_>) -> Result<Decoded, String> {
     let entry = arrival.last().ok_or("Resolved arrival is empty")?.clone();
     // A manually terminated arrival never reaches the approach entry, so the approach is
     // decoded from its own published entry and the bridge is only flown under an amendment.
-    let amended_target = match &manual {
-        None => None,
-        Some(_) => {
-            let leg = input
-                .terminal
-                .approach
-                .first()
-                .ok_or("Approach has no published entry leg")?;
-            let position = openatc_core::traffic::coordinates::Points::runway(
-                leg,
-                input.destination,
-            )
+    let amended_target = if manual.is_none() {
+        None
+    } else {
+        let leg = input
+            .terminal
+            .approach
+            .first()
+            .ok_or("Approach has no published entry leg")?;
+        let position = openatc_core::traffic::coordinates::Points::runway(leg, input.destination)
             .or_else(|| input.points.resolve(leg, &input.destination.icao))
             .ok_or("Amended arrival has no resolvable approach entry fix")?;
-            Some((leg, position.coordinate))
-        }
+        Some((leg, position.coordinate))
     };
     let mut approach = resolved::boundary_crossings(
         Waypoint {
@@ -268,6 +266,7 @@ pub(super) struct Planner<'a> {
 impl Planner<'_> {
     /// Select only after the published crossing connects through landing and parking.
     /// A decodable approach alone is insufficient to consume a flight's candidate slot.
+    #[allow(clippy::float_cmp)]
     pub fn arrival(
         &self,
         candidates: &[super::routing::Terminal],
@@ -315,7 +314,7 @@ impl Planner<'_> {
             let terminal = &candidates[candidate];
             attempted += 1;
             let attempt = (|| {
-                let mut decoded = resolve(Request {
+                let mut decoded = resolve(&Request {
                     candidate,
                     terminal,
                     rotation: self.rotation,
@@ -353,7 +352,7 @@ impl Planner<'_> {
                     }) {
                     result.clone()?
                 } else {
-                    let result = super::landing::prepare(super::landing::Request {
+                    let result = super::landing::prepare(&super::landing::Request {
                         airport: self.destination,
                         surface: self.arrival_surface,
                         crossing: threshold,
@@ -509,6 +508,7 @@ impl Draft {
             enroute_checked: self.enroute_checked,
         })
     }
+    #[allow(dead_code)]
     pub fn enroute_checked(&self) -> bool {
         self.enroute_checked
     }
@@ -554,6 +554,7 @@ impl Draft {
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn compile(
     rotation: Waypoint,
     departure_heading: f64,
@@ -572,6 +573,7 @@ pub(super) fn compile(
     .protect(protected)
 }
 
+#[allow(dead_code)]
 pub(super) fn draft(
     rotation: Waypoint,
     departure_heading: f64,
@@ -756,8 +758,7 @@ pub(super) fn merge(previous: &mut Fix, next: &Fix) -> Result<(), String> {
         (Some(a), Some(b)) => {
             if (a.indicated_knots - b.indicated_knots).abs() > 1e-6 {
                 return Err(
-                    "Coincident flight sections change airspeed without a deceleration plan"
-                        .into(),
+                    "Coincident flight sections change airspeed without a deceleration plan".into(),
                 );
             }
         }
@@ -780,6 +781,7 @@ pub(super) fn merge(previous: &mut Fix, next: &Fix) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 
@@ -808,13 +810,13 @@ mod tests {
         // Each section is planned from its own airport sample, so the join almost never sees
         // identical weather. That is not a speed change and must not refuse the connection.
         let mut departure = crossing(1013.25, 250.0, 260.0);
-        let mut arrival = crossing(1010.0, 250.0, 258.0);
+        let arrival = crossing(1010.0, 250.0, 258.0);
         assert!(merge(&mut departure, &arrival).is_ok());
         assert_eq!(departure.minimum_feet, 2000.0);
         assert!(departure.airspeed.is_some());
         // A genuine speed change at the same point still needs an upstream deceleration plan.
         let mut departure = crossing(1013.25, 250.0, 260.0);
-        let mut faster = crossing(1010.0, 280.0, 290.0);
+        let faster = crossing(1010.0, 280.0, 290.0);
         assert!(
             merge(&mut departure, &faster)
                 .unwrap_err()
@@ -945,7 +947,6 @@ mod tests {
             enroute_to: Points::runway(&arrival, &destination).unwrap().coordinate,
             enroute_minimum_feet: 1000,
             departure_name: "TEST".into(),
-            departure_transition: String::new(),
             departure: vec![departure],
             arrival_name: "TEST".into(),
             arrival_transition: String::new(),
@@ -982,10 +983,10 @@ mod tests {
             arrival_floor_feet: floor,
         };
         assert!(
-            resolve(request(&aircraft, &terminal, destination.elevation_feet)).is_err(),
+            resolve(&request(&aircraft, &terminal, destination.elevation_feet)).is_err(),
             "Airport maximum elevation is above this runway's approach crossing"
         );
-        let decoded = resolve(request(&aircraft, &terminal, 0.0)).unwrap();
+        let decoded = resolve(&request(&aircraft, &terminal, 0.0)).unwrap();
         let expected = arrival_weather.atmosphere.geometric(4000.0, false).unwrap();
         assert_eq!(decoded.arrival.last().unwrap().maximum_feet, expected);
         assert_eq!(decoded.approach.first().unwrap().maximum_feet, expected);
@@ -1002,14 +1003,14 @@ mod tests {
         let mut too_low = aircraft.clone();
         too_low.ceiling = 500.0;
         assert!(
-            resolve(request(&too_low, &terminal, 0.0))
+            resolve(&request(&too_low, &terminal, 0.0))
                 .err()
                 .unwrap()
                 .contains("ceiling")
         );
         let mut unsupported = terminal.clone();
         unsupported.departure[0].terminator = "RF".into();
-        assert!(resolve(request(&aircraft, &unsupported, 0.0)).is_err());
+        assert!(resolve(&request(&aircraft, &unsupported, 0.0)).is_err());
     }
 
     fn inputs() -> (Waypoint, Vec<Section>, Envelope) {

@@ -267,3 +267,435 @@ home_prefixes = ["LF"]
 serves = ["LF", "LI", "EB"]
 # The historic pack's AT72 model is kept under its actual type.
 fleet = { AT72 = 70, A320 = 30 }
+
+[airline.A3]
+name = "Aegean Airlines"
+operator = "A3"
+callsign = "Aegean"
+category = "airline"
+home_prefixes = ["LG"]
+serves = []
+fleet = { A320 = 60, A21N = 40 }
+
+[airline.ABY]
+name = "Air Arabia"
+operator = "ABY"
+callsign = "Air Arabia"
+category = "airline"
+home_prefixes = ["OM"]
+serves = []
+fleet = { A320 = 80, A21N = 20 }
+
+[airline.AC]
+name = "Air Canada"
+operator = "AC"
+callsign = "Air Canada"
+category = "airline"
+home_prefixes = ["CY"]
+serves = []
+fleet = { A320 = 40, A333 = 30, B789 = 20 }
+
+[airline.ASL]
+name = "ASL Airlines France"
+operator = "ASF"
+callsign = "ASL France"
+category = "cargo"
+home_prefixes = ["LF"]
+serves = []
+fleet = { B738 = 60, AT72 = 40 }
+
+[airline.AUA]
+name = "Austrian Airlines"
+operator = "AUA"
+callsign = "Austrian"
+category = "airline"
+home_prefixes = ["LO"]
+serves = []
+fleet = { A320 = 40, A20N = 30, A333 = 30 }
+
+[airline.AY]
+name = "Finnair"
+operator = "AY"
+callsign = "Finnair"
+category = "airline"
+home_prefixes = ["FI"]
+serves = []
+fleet = { A320 = 50, A21N = 30, E190 = 20 }
+
+[airline.AZA]
+name = "ITA Airways"
+operator = "AZA"
+callsign = "ITA"
+category = "airline"
+home_prefixes = ["LI"]
+serves = []
+fleet = { A320 = 40, A21N = 30, A333 = 20 }
+
+[airline.BT]
+name = "airBaltic"
+operator = "BT"
+callsign = "airBaltic"
+category = "airline"
+home_prefixes = ["EV", "LV", "EE"]
+serves = []
+fleet = { A320 = 60, A21N = 40 }
+
+[airline.CRS]
+name = "Corsair"
+operator = "CRS"
+callsign = "Corsair"
+category = "airline"
+home_prefixes = ["LF"]
+serves = []
+fleet = { B744 = 40, A332 = 30, A333 = 30 }
+
+[airline.DAH]
+name = "Air Algerie"
+operator = "DAH"
+callsign = "Air Algerie"
+category = "airline"
+home_prefixes = ["DA"]
+serves = []
+fleet = { A332 = 40, B738 = 60 }
+
+[airline.DHL]
+name = "DHL Aviation"
+operator = "DHL"
+callsign = "DHL"
+category = "cargo"
+home_prefixes = ["DE"]
+serves = []
+fleet = { B744 = 30, A332 = 30, A306 = 20, B77L = 20 }
+
+[airline.DY]
+name = "Norwegian Air Shuttle"
+operator = "DY"
+callsign = "Norwegian"
+category = "airline"
+home_prefixes = ["NO"]
+serves = []
+fleet = { B738 = 90, A21N = 10 }
+
+[airline.EI]
+name = "Aer Lingus"
+operator = "EIN"
+callsign = "Aer Lingus"
+category = "airline"
+home_prefixes = ["EI"]
+serves = []
+fleet = { A320 = 70, A21N = 30 }
+
+[airline.ETD]
+name = "Etihad Airways"
+operator = "ETD"
+callsign = "Etihad"
+category = "airline"
+home_prefixes = ["OA"]
+serves = []
+fleet = { A359 = 50, A388 = 30, B77W = 20 }
+
+[airline.EW]
+name = "Eurowings"
+operator = "EW"
+callsign = "Eurowings"
+category = "airline"
+home_prefixes = ["DE"]
+serves = []
+fleet = { A320 = 60, A21N = 40 }
+
+[airline.FI]
+name = "Icelandair"
+operator = "FI"
+callsign = "Icelandair"
+category = "airline"
+home_prefixes = ["BI"]
+serves = []
+fleet = { B738 = 40, B752 = 30, A21N = 30 }
+
+[airline.FS]
+name = "Shanghai Airlines"
+operator = "FS"
+callsign = "Shanghai"
+category = "airline"
+home_prefixes = ["ZS"]
+serves = []
+fleet = { B738 = 50, A333 = 30 }
+
+[airline.GEG]
+name = "Georgian Airways"
+operator = "GEG"
+callsign = "Georgian"
+category = "airline"
+home_prefixes = ["GG"]
+serves = []
+fleet = { B738 = 50, A320 = 50 }
+
+[airline.GFA]
+name = "Gulf Air"
+operator = "GFA"
+callsign = "Gulf Air"
+category = "airline"
+home_prefixes = ["OB"]
+serves = []
+fleet = { A320 = 40, A21N = 30, B77W = 20 }
+
+[airline.IBE]
+name = "Iberia"
+operator = "IBE"
+callsign = "Iberia"
+category = "airline"
+home_prefixes = ["LE"]
+serves = []
+fleet = { A320 = 40, A321 = 20, A359 = 20, A21N = 20 }
+
+[airline.KAL]
+name = "Korean Air"
+operator = "KAL"
+callsign = "Korean Air"
+category = "airline"
+home_prefixes = ["RK"]
+serves = []
+fleet = { B77W = 60, A333 = 20, A359 = 20 }
+
+[airline.KWI]
+name = "Kuwait Airways"
+operator = "KWI"
+callsign = "Kuwait"
+category = "airline"
+home_prefixes = ["OK"]
+serves = []
+fleet = { A333 = 40, A320 = 40, A21N = 20 }
+
+[airline.LG]
+name = "Luxair"
+operator = "LG"
+callsign = "Luxair"
+category = "airline"
+home_prefixes = ["EL"]
+serves = []
+fleet = { A320 = 40, CRJ2 = 60 }
+
+[airline.LO]
+name = "LOT Polish Airlines"
+operator = "LO"
+callsign = "LOT"
+category = "airline"
+home_prefixes = ["EP"]
+serves = []
+fleet = { B738 = 50, A320 = 30, E190 = 20 }
+
+[airline.LY]
+name = "El Al"
+operator = "LY"
+callsign = "El Al"
+category = "airline"
+home_prefixes = ["LL"]
+serves = []
+fleet = { B738 = 60, A359 = 20, A20N = 20 }
+
+[airline.MAE]
+name = "Maersk Air Cargo"
+operator = "MAE"
+callsign = "Maersk Air"
+category = "cargo"
+home_prefixes = ["DK"]
+serves = []
+fleet = { B77L = 60, A332 = 40 }
+
+[airline.MEA]
+name = "Middle East Airlines"
+operator = "MEA"
+callsign = "Middle East"
+category = "airline"
+home_prefixes = ["OL"]
+serves = []
+fleet = { A320 = 50, A21N = 30, A333 = 20 }
+
+[airline.MND]
+name = "Monacair"
+operator = "MND"
+callsign = "Monacair"
+category = "regional"
+home_prefixes = ["MC"]
+serves = []
+fleet = { A320 = 40, CRJ2 = 60 }
+
+[airline.PCP]
+name = "Pegasus Airlines"
+operator = "PCP"
+callsign = "Pegasus"
+category = "airline"
+home_prefixes = ["LT"]
+serves = []
+fleet = { A320 = 60, B738 = 40 }
+
+[airline.PWA]
+name = "La Compagnie"
+operator = "PWA"
+callsign = "La Compagnie"
+category = "airline"
+home_prefixes = ["LF"]
+serves = []
+fleet = { B744 = 50, A332 = 50 }
+
+[airline.RAM]
+name = "Royal Air Maroc"
+operator = "RAM"
+callsign = "Royal Air Maroc"
+category = "airline"
+home_prefixes = ["MA"]
+serves = []
+fleet = { B738 = 70, B789 = 20, A21N = 10 }
+
+[airline.RYR]
+name = "Ryanair"
+operator = "RYR"
+callsign = "Ryanair"
+category = "airline"
+home_prefixes = ["EI"]
+serves = []
+fleet = { B738 = 90, B737 = 10 }
+
+[airline.SK]
+name = "Scandinavian Airlines"
+operator = "SK"
+callsign = "Scandinavian"
+category = "airline"
+home_prefixes = ["SE", "NO", "DK"]
+serves = []
+fleet = { A320 = 40, A21N = 40, CRJ9 = 20 }
+
+[airline.SWF]
+name = "Swiftair"
+operator = "SWF"
+callsign = "Swiftair"
+category = "cargo"
+home_prefixes = ["LE"]
+serves = []
+fleet = { B737 = 60, B738 = 40 }
+
+[airline.SWR]
+name = "Swiss International Air Lines"
+operator = "SWR"
+callsign = "Swiss"
+category = "airline"
+home_prefixes = ["LS"]
+serves = []
+fleet = { A320 = 40, A333 = 30, B77W = 20 }
+
+[airline.TAR]
+name = "Tunisair"
+operator = "TAR"
+callsign = "Tunisair"
+category = "airline"
+home_prefixes = ["DT"]
+serves = []
+fleet = { A320 = 60, B738 = 30, A21N = 10 }
+
+[airline.TAP]
+name = "TAP Air Portugal"
+operator = "TAP"
+callsign = "Air Portugal"
+category = "airline"
+home_prefixes = ["LP"]
+serves = []
+fleet = { A320 = 30, A321 = 20, A339 = 30, A21N = 20 }
+
+[airline.THY]
+name = "Turkish Airlines"
+operator = "THY"
+callsign = "Turkish"
+category = "airline"
+home_prefixes = ["LT"]
+serves = []
+fleet = { B738 = 40, A333 = 30, A359 = 20, B77W = 10 }
+
+[airline.TJO]
+name = "Twin Jet"
+operator = "TJO"
+callsign = "Twin Jet"
+category = "regional"
+home_prefixes = ["LF"]
+serves = []
+fleet = { AT72 = 60, E75L = 40 }
+
+[airline.TOY]
+name = "Transavia"
+operator = "TOY"
+callsign = "Transavia"
+category = "airline"
+home_prefixes = ["NL"]
+serves = []
+fleet = { B738 = 80, B737 = 20 }
+
+[airline.TS]
+name = "Air Transat"
+operator = "TS"
+callsign = "Air Transat"
+category = "airline"
+home_prefixes = ["CA"]
+serves = []
+fleet = { A333 = 40, A332 = 30, A20N = 30 }
+
+[airline.VLG]
+name = "Vueling"
+operator = "VLG"
+callsign = "Vueling"
+category = "airline"
+home_prefixes = ["LE"]
+serves = []
+fleet = { A320 = 60, A21N = 40 }
+
+[airline.VOE]
+name = "Volotea"
+operator = "VOE"
+callsign = "Volotea"
+category = "airline"
+home_prefixes = ["LF", "LE"]
+serves = []
+fleet = { A320 = 70, A319 = 30 }
+
+[airline.VPC]
+name = "Flynas"
+operator = "VPC"
+callsign = "Flynas"
+category = "airline"
+home_prefixes = ["OE"]
+serves = []
+fleet = { A320 = 100 }
+
+[airline.WID]
+name = "Wideroe"
+operator = "WID"
+callsign = "Wideroe"
+category = "regional"
+home_prefixes = ["NO"]
+serves = []
+fleet = { E190 = 60, E75L = 40 }
+
+[airline.WZZ]
+name = "Smartwings"
+operator = "WZZ"
+callsign = "Smartwings"
+category = "airline"
+home_prefixes = ["OK"]
+serves = []
+fleet = { B738 = 60, A320 = 40 }
+
+[airline.NLR]
+name = "Nouvelair"
+operator = "NLR"
+callsign = "Nouvelair"
+category = "airline"
+home_prefixes = ["DT"]
+serves = []
+fleet = { A320 = 100 }
+
+[airline.SNZ]
+name = "Brussels Airlines"
+operator = "SNZ"
+callsign = "Brussels"
+category = "airline"
+home_prefixes = ["EB"]
+serves = []
+fleet = { A320 = 60, A333 = 20, A20N = 20 }

@@ -1,4 +1,11 @@
 //! Round taxi corners only where the installed pavement supports the turn.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use crate::state::Point;
 
 /// A sampled surface path with a lower speed on curved portions.
@@ -11,6 +18,10 @@ pub struct Sample {
 }
 
 /// Preserve both clearance endpoints and reject turns that need missing pavement.
+/// # Panics
+///
+/// Panics if the clearance has no endpoints.
+#[allow(clippy::many_single_char_names)]
 pub fn rounded(
     points: &[Point],
     preferred_radius: f64,

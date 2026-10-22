@@ -38,6 +38,8 @@ pub struct Refs {
     pub pause: Option<Box<dyn Fn() -> i32>>,
     /// Simulator clock for traffic progress and wake intervals.
     pub simulation_seconds: Option<Box<dyn Fn() -> f64>>,
+    /// Simulator UTC clock, independent of wall-clock time.
+    pub zulu_seconds: Option<Box<dyn Fn() -> f64>>,
     /// Vertical speed feet per minute, if present.
     pub vertical_speed: Option<Box<dyn Fn() -> f64>>,
     /// Height above ground meters, if present.
@@ -147,6 +149,7 @@ pub fn find_refs(data: &mut xplane::data::DataApi, log: &mut Vec<String>) -> Ref
         ground: named_flag(data, log, "sim/flightmodel/failures/onground_any"),
         pause: named_flag(data, log, "sim/time/paused"),
         simulation_seconds: find_number(data, "sim/time/total_flight_time_sec"),
+        zulu_seconds: find_number(data, "sim/time/zulu_time_sec"),
         vertical_speed: find_number(data, "sim/flightmodel/position/vh_ind_fpm"),
         agl: find_number(data, "sim/flightmodel/position/y_agl"),
         com1: find_integer(data, "sim/cockpit2/radios/actuators/com1_frequency_hz_833"),
@@ -169,6 +172,7 @@ pub fn gather_callouts(refs: &Refs) -> openatc_core::state::Telemetry {
         vertical_speed_fpm: refs.vertical_speed.as_ref().map_or(0.0, |read| read()),
         height_agl_feet: refs.agl.as_ref().map_or(0.0, |read| read() * 3.280_839_895),
         simulation_seconds: optional_number(&refs.simulation_seconds, true),
+        zulu_seconds: optional_number(&refs.zulu_seconds, true).filter(|v| *v < 86400.0),
         ..Default::default()
     }
 }
@@ -201,6 +205,7 @@ pub fn gather(refs: &Refs) -> openatc_core::state::Telemetry {
         engines_running: refs.engines.as_ref().is_some_and(|read| read()),
         paused: flag(&refs.pause) != 0,
         simulation_seconds: optional_number(&refs.simulation_seconds, true),
+        zulu_seconds: optional_number(&refs.zulu_seconds, true).filter(|v| *v < 86400.0),
         vertical_speed_fpm: refs.vertical_speed.as_ref().map_or(0.0, |read| read()),
         height_agl_feet: refs.agl.as_ref().map_or(0.0, |read| read()) * 3.280_839_895,
         radio_power: true,
@@ -324,6 +329,7 @@ mod tests {
             agl: Some(Box::new(|| 3.0)),
             vertical_speed: Some(Box::new(|| 500.0)),
             indicated_speed: Some(Box::new(|| 150.0)),
+            zulu_seconds: Some(Box::new(|| 86399.5)),
             traffic: Some(Box::new(|| panic!("traffic must not be read by callouts"))),
             ..Default::default()
         };
@@ -332,6 +338,7 @@ mod tests {
         assert!(t.height_agl_feet > 9.8 && t.height_agl_feet < 9.9);
         assert_eq!(t.vertical_speed_fpm, 500.0);
         assert_eq!(t.indicated_speed_knots, Some(150.0));
+        assert_eq!(t.zulu_seconds, Some(86399.5));
         let missing = gather_callouts(&Refs::default());
         assert!(missing.on_ground);
         assert_eq!(missing.vertical_speed_fpm, 0.0);
@@ -370,6 +377,7 @@ mod tests {
             com2: Some(Box::new(|| 118700)),
             indicated_speed: Some(Box::new(|| -0.1)),
             simulation_seconds: Some(Box::new(|| -1.0)),
+            zulu_seconds: Some(Box::new(|| 86400.0)),
             track: Some(Box::new(|| f64::NAN)),
             magnetic_heading: Some(Box::new(|| f64::INFINITY)),
             agl: Some(Box::new(|| -0.12)),
@@ -381,6 +389,7 @@ mod tests {
         assert_eq!(sample.com2_khz, Some(118700));
         assert_eq!(sample.indicated_speed_knots, None);
         assert_eq!(sample.simulation_seconds, None);
+        assert_eq!(sample.zulu_seconds, None);
         assert_eq!(sample.ground_track_degrees, None);
         assert_eq!(sample.magnetic_heading_degrees, None);
         let mut state = openatc_core::state::State::default();

@@ -1,5 +1,18 @@
 //! Model-compatible airport pairs selected from installed controllers and airport scenery.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+#[allow(unused_imports, clippy::wildcard_imports)]
 use super::*;
+use super::{
+    Airport, Arc, BTreeMap, BTreeSet, Category, MAXIMUM_AIRCRAFT, Operations, Preparation, Scene,
+    airport, animation, environment, landing, policy, prepare_direction_with_terrain, routing,
+    runway,
+};
 
 #[derive(Clone)]
 pub(super) struct Pair {
@@ -53,7 +66,7 @@ fn published_pair(
     ]
     .map(
         |(origin, destination, departure_runway, arrival_runway, departures, arrivals)| {
-            routing::candidates(routing::Inputs {
+            routing::candidates(&routing::Inputs {
                 origin,
                 destination,
                 departure_runway,
@@ -78,7 +91,9 @@ fn distance(first: &Airport, second: &Airport) -> f64 {
 }
 
 fn compatible(input: &Preparation, first: &Airport, second: &Airport) -> [bool; 4] {
-    let (Some(origin), Some(destination)) = (port(first), port(second)) else {
+    let (Some(origin), Some(destination)) =
+        (port_published(input, first), port_published(input, second))
+    else {
         return [false; 4];
     };
     [
@@ -189,7 +204,10 @@ fn vacatable_runway(
         return preferred.to_owned();
     }
     let distance = distance(origin, destination);
-    let (Some(origin_port), Some(destination_port)) = (port(origin), port(destination)) else {
+    let (Some(origin_port), Some(destination_port)) = (
+        port_published(input, origin),
+        port_published(input, destination),
+    ) else {
         return preferred.to_owned();
     };
     let representatives = [
@@ -348,8 +366,52 @@ pub(super) fn endpoints(
     Ok((origin, destination, departure, arrival))
 }
 
+/// Reserve half the survey budget for configured network links, cycling requested
+/// categories, and keep the remaining slots for nearby fields. Eligibility is checked later.
+fn balanced_candidates(
+    nearby: Vec<String>,
+    links: &BTreeMap<String, BTreeSet<Category>>,
+    categories: &[Category],
+    limit: usize,
+) -> Vec<String> {
+    let mut chosen = Vec::new();
+    let mut seen = BTreeSet::new();
+    let linked_limit = limit / 2;
+    loop {
+        let before = chosen.len();
+        for category in categories {
+            if chosen.len() >= linked_limit {
+                break;
+            }
+            if let Some(id) = nearby.iter().find(|id| {
+                !seen.contains(*id)
+                    && links
+                        .get(*id)
+                        .is_some_and(|supported| supported.contains(category))
+            }) {
+                seen.insert(id.clone());
+                chosen.push(id.clone());
+            }
+        }
+        if chosen.len() == before || chosen.len() >= linked_limit {
+            break;
+        }
+    }
+    for id in nearby {
+        if chosen.len() >= limit {
+            break;
+        }
+        if seen.insert(id.clone()) {
+            chosen.push(id);
+        }
+    }
+    chosen
+}
+
 /// Discovery requests real airport weather before any additional flight is scheduled.
 pub(super) fn survey(input: &Preparation, key: String) -> Result<Plan, String> {
+    let trace = std::env::var_os("OPENATC_TRAFFIC_PROFILE").is_some();
+    let started = Instant::now();
     let (_, policy, _) = policy::load(&input.config)?;
     let origin = Arc::new(input.origin.clone());
     let destination = Arc::new(input.destination.clone());
@@ -403,7 +465,10 @@ pub(super) fn survey(input: &Preparation, key: String) -> Result<Plan, String> {
         let preference = input
             .profiles
             .hubs
-            .get(&station.airport)
+            .get(&super::published_code(
+                &input.airport_codes,
+                &station.airport,
+            ))
             .map_or(0u64, |hub| {
                 hub.airlines.values().map(|weight| u64::from(*weight)).sum()
             });
@@ -414,11 +479,73 @@ pub(super) fn survey(input: &Preparation, key: String) -> Result<Plan, String> {
     }
     let mut candidates = candidates.into_iter().collect::<Vec<_>>();
     candidates.sort_by(|a, b| a.1.0.total_cmp(&b.1.0).then_with(|| a.0.cmp(&b.0)));
+    let anchor_code = super::published_code(&input.airport_codes, &anchor.icao);
+    let mut categories = [
+        Category::Airline,
+        Category::Regional,
+        Category::Cargo,
+        Category::GeneralAviation,
+    ]
+    .into_iter()
+    .zip(input.counts)
+    .enumerate()
+    .filter_map(|(index, (category, count))| (count > 0).then_some((category, index)))
+    .collect::<Vec<_>>();
+    // Fill missing primary-pair categories first; this only orders discovery, not admission.
+    categories.sort_by_key(|(_, index)| {
+        plan.pairs[0]
+            .compatible
+            .iter()
+            .any(|direction| direction[*index])
+    });
+    let categories = categories
+        .into_iter()
+        .map(|(category, _)| category)
+        .collect::<Vec<_>>();
+    let mut published_links = BTreeMap::<String, BTreeSet<Category>>::new();
+    for route in input.profiles.routes.values().flatten() {
+        let endpoint = if route.origin == anchor_code {
+            &route.destination
+        } else if route.destination == anchor_code {
+            &route.origin
+        } else {
+            continue;
+        };
+        if let Some(operator) = input.profiles.airlines.get(&route.airline)
+            && categories.contains(&operator.category)
+        {
+            published_links
+                .entry(endpoint.clone())
+                .or_default()
+                .insert(operator.category);
+        }
+    }
+    let links = candidates
+        .iter()
+        .filter_map(|(id, _)| {
+            let code = super::published_code(&input.airport_codes, id);
+            published_links
+                .get(&code)
+                .map(|categories| (id.clone(), categories.clone()))
+        })
+        .collect();
+    let candidates = balanced_candidates(
+        candidates.into_iter().map(|(id, _)| id).collect(),
+        &links,
+        &categories,
+        policy.network_candidate_limit,
+    );
     let mora = openatc_core::navigation::Mora::load(&input.simulator_root);
     let mut one_way = Vec::new();
-    for (id, _) in candidates.into_iter().take(policy.network_candidate_limit) {
+    for id in candidates {
         if plan.airports.len() >= policy.network_airport_limit {
             break;
+        }
+        if trace {
+            eprintln!(
+                "Traffic preparation +{:.2}s: survey {id}",
+                started.elapsed().as_secs_f64()
+            );
         }
         let Ok(airport) = airport(&input.simulator_root, &id) else {
             continue;
@@ -504,6 +631,13 @@ pub(super) fn survey(input: &Preparation, key: String) -> Result<Plan, String> {
         plan.airports
             .insert(pair.destination.icao.clone(), pair.destination.clone());
         plan.pairs.push(pair);
+    }
+    if trace {
+        eprintln!(
+            "Traffic preparation: survey finished in {:.2}s, {} airport pairs",
+            started.elapsed().as_secs_f64(),
+            plan.pairs.len()
+        );
     }
     Ok(plan)
 }
@@ -605,6 +739,8 @@ fn ready_pairs(plan: &Plan, samples: &environment::Samples) -> (Vec<Pair>, BTree
 }
 
 pub(super) fn prepare(mut input: Preparation, plan: &Plan) -> Result<Scene, String> {
+    let trace = std::env::var_os("OPENATC_TRAFFIC_PROFILE").is_some();
+    let started = Instant::now();
     input.refresh_weather()?;
     let (pairs, missing) = ready_pairs(plan, &input.weather);
     if !missing.is_empty()
@@ -621,6 +757,9 @@ pub(super) fn prepare(mut input: Preparation, plan: &Plan) -> Result<Scene, Stri
     warnings.extend(missing.into_iter().map(|airport| {
         format!("{airport}: additional traffic route awaits fresh simulator weather")
     }));
+    // All directions in this worker share one scenery planner and its bounded tile cache.
+    let terrain = super::scenery::Terrain::new(std::path::Path::new(&input.simulator_root))
+        .map(std::cell::RefCell::new);
     let mut scene: Option<Scene> = None;
     for (pair, counts) in pairs.iter().zip(allocations) {
         if counts.iter().all(|count| *count == 0) {
@@ -633,8 +772,8 @@ pub(super) fn prepare(mut input: Preparation, plan: &Plan) -> Result<Scene, Stri
             let mut request = input.clone();
             request.origin = pair.origin.as_ref().clone();
             request.destination = pair.destination.as_ref().clone();
-            request.runway = pair.departure_runway.clone();
-            request.arrival_runway = pair.arrival_runway.clone();
+            request.runway.clone_from(&pair.departure_runway);
+            request.arrival_runway.clone_from(&pair.arrival_runway);
             if direction == 1 {
                 std::mem::swap(&mut request.origin, &mut request.destination);
                 std::mem::swap(&mut request.runway, &mut request.arrival_runway);
@@ -645,12 +784,18 @@ pub(super) fn prepare(mut input: Preparation, plan: &Plan) -> Result<Scene, Stri
             }
             let from = request.origin.icao.clone();
             let to = request.destination.icao.clone();
-            match prepare_direction(request) {
+            if trace {
+                eprintln!(
+                    "Traffic preparation +{:.2}s: routes {from}-{to}, counts {counts:?}",
+                    started.elapsed().as_secs_f64()
+                );
+            }
+            match prepare_direction_with_terrain(request, &terrain) {
                 Ok(next) => {
                     scene = Some(match scene {
                         Some(previous) => previous.merge(next)?,
                         None => next,
-                    })
+                    });
                 }
                 Err(error) => warnings.push(format!("{from}–{to}: {error}")),
             }
@@ -660,14 +805,54 @@ pub(super) fn prepare(mut input: Preparation, plan: &Plan) -> Result<Scene, Stri
         .ok_or_else(|| format!("No complete traffic airport pair: {}", warnings.join("; ")))?;
     scene.warnings.extend(plan.warnings.iter().cloned());
     scene.warnings.extend(warnings);
-    scene.seed_airborne();
+    scene.seed_airborne(input.own, input.seed_single_arrival);
     super::ctaf::prepare(&mut scene, &input);
+    if trace {
+        eprintln!(
+            "Traffic preparation: routes finished in {:.2}s",
+            started.elapsed().as_secs_f64()
+        );
+    }
     Ok(scene)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_balances_published_categories_with_nearby_fields() {
+        let nearby = ["NEAR", "NEXT", "THRD", "ALN1", "ALN2", "CGO1", "CGO2"]
+            .map(str::to_owned)
+            .to_vec();
+        let links = BTreeMap::from([
+            ("ALN1".into(), BTreeSet::from([Category::Airline])),
+            ("ALN2".into(), BTreeSet::from([Category::Airline])),
+            ("CGO1".into(), BTreeSet::from([Category::Cargo])),
+            ("CGO2".into(), BTreeSet::from([Category::Cargo])),
+        ]);
+        assert_eq!(
+            balanced_candidates(
+                nearby.clone(),
+                &links,
+                &[Category::Cargo, Category::Airline],
+                4
+            ),
+            ["CGO1", "ALN1", "NEAR", "NEXT"]
+        );
+        assert_eq!(
+            balanced_candidates(nearby.clone(), &links, &[Category::GeneralAviation], 4),
+            ["NEAR", "NEXT", "THRD", "ALN1"]
+        );
+        assert_eq!(
+            balanced_candidates(nearby.clone(), &links, &[Category::Cargo], 1),
+            ["NEAR"]
+        );
+        assert!(balanced_candidates(nearby.clone(), &links, &[Category::Cargo], 0).is_empty());
+        let all = balanced_candidates(nearby, &links, &[Category::Cargo, Category::Airline], 16);
+        assert_eq!(all.len(), 7);
+        assert_eq!(all.iter().collect::<BTreeSet<_>>().len(), all.len());
+    }
 
     #[test]
     fn unavailable_distant_weather_does_not_block_ready_local_pairs() {
@@ -706,7 +891,8 @@ mod tests {
         let (allocation, _) = allocate(&ready, [8, 0, 0, 0]);
         assert_eq!(allocation[0], [0; 4]);
         assert_eq!(allocation[1], [8, 0, 0, 0]);
-        samples.get_mut("HOME").unwrap().1 = Instant::now() - Duration::from_secs(46);
+        samples.get_mut("HOME").unwrap().1 =
+            Instant::now().checked_sub(Duration::from_secs(46)).unwrap();
         let (ready, _) = ready_pairs(&plan, &samples);
         assert!(ready.iter().all(|pair| pair.compatible == [[false; 4]; 2]));
     }

@@ -293,7 +293,9 @@ fn spawn_detached(binary: &Path) -> bool {
 
 /// Companion-engine log path in the user configuration directory.
 fn engine_log_path() -> String {
-    if let Some(dir) = std::env::var_os("OPENATC_CONFIG_DIR") {
+    if let Some(dir) =
+        std::env::var_os("OPENATC_AI_CONFIG_DIR").or_else(|| std::env::var_os("OPENATC_CONFIG_DIR"))
+    {
         return PathBuf::from(dir)
             .join("engine.log")
             .to_string_lossy()
@@ -302,19 +304,26 @@ fn engine_log_path() -> String {
     #[cfg(windows)]
     if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
         return PathBuf::from(dir)
-            .join("openatc/engine.log")
+            .join("openatc-ai/engine.log")
+            .to_string_lossy()
+            .into_owned();
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join("Library/Application Support/openatc-ai/engine.log")
             .to_string_lossy()
             .into_owned();
     }
     if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
         return PathBuf::from(dir)
-            .join("openatc/engine.log")
+            .join("openatc-ai/engine.log")
             .to_string_lossy()
             .into_owned();
     }
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home)
-            .join(".config/openatc/engine.log")
+            .join(".config/openatc-ai/engine.log")
             .to_string_lossy()
             .into_owned();
     }

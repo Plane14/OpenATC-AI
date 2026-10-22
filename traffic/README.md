@@ -41,3 +41,31 @@ Weights and movement envelopes are OpenATC simulation choices. Fleet families an
 Representative primary references: [Qantas fleet](https://www.qantas.com/en-us/onboard/fleet), [Singapore Airlines fleet](https://www.singaporeair.com/en_UK/us/flying-withus/our-story/our-fleet/), [SkyWest facts and partner hubs](https://www.skywest.com/about-skywest-airlines/facts/), [Virgin Australia fleet](https://www.virginaustralia.com/uk/en/travel-info/flying-with-us/our-fleet/), [Jetstar fleet](https://www.jetstar.com/sg/en/about-us/our-fleet), [Air New Zealand fleet](https://www.airnewzealand.com/fleet), [United facts](https://united.mediaroom.com/corporate-fact-sheet), [American fleet](https://www.aa.com/web/i18n/travel-info/experience/planes/planes.html), [British Airways facts](https://mediacentre.britishairways.com/factsheets), [Lufthansa fleet](https://investor-relations.lufthansagroup.com/en/corporate-facts/fleet.html), [FedEx structure](https://www.fedex.com/en-us/about/company-structure.html), [UPS air operations](https://about.ups.com/content/dam/upsstories/assets/fact-sheets/airlines-fact-sheets/AirOperationsFacts-03312025.pdf), [Cathay fleet](https://www.cathaypacific.com/cx/en_CA/flying-with-us/aircraft-and-fleet.html), [Qatar fleet](https://www.qatarairways.com/en-qa/fleet.html), [ANA fleet](https://cad.www.ana.co.jp/group/en/company/ana/scale/), [Ethiopian fleet](https://corporate.ethiopianairlines.com/AboutEthiopian/OurFleets).
 
 Historical model packs can lack newer aircraft and paint schemes. Selection may therefore contain fewer types than the profile lists. Do not add an unrelated model under a different type merely to fill a gap.
+
+## Published route graph
+
+`routes.toml` records the city pairs an operator actually flies. The pair is unordered, because
+a scheduled service normally runs both ways, and the weight is a relative frequency band inside
+the operator's own network, not a schedule and not a seat count:
+
+```toml
+[[route]]
+airline = "AFR"
+origin = "LFPG"
+destination = "LFMN"
+weight = 100
+```
+
+An operator with published routes is only selected for a pair it publishes, so the traffic at an
+airport is the traffic that airport really has. The loader refuses the whole file when a route
+names an unknown operator, an airport that no hub describes, equipment that no aircraft profile
+describes, or a pair that is listed twice.
+
+The airports are keyed by their published world identifier, and each hub carries the airport's
+position. The engine matches that position against the installed airport metadata, because an
+installed navdata cycle may not use the published identifier for every airport. The bundled
+hubs previously carried several wrong identifiers, for example Adelaide, Bastia, Seville and
+Bordeaux, which is why the hub preferences did not match the simulator.
+
+The world reference for the airports and their positions is the public-domain OurAirports table.
+The operator and aircraft data remains editable in `airlines.toml` and `aircraft.toml`.

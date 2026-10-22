@@ -88,6 +88,31 @@ impl Geometry {
     }
 }
 
+/// Zoom around the cursor instead of the canvas centre. Pan is in screen pixels and the map
+/// projection is linear in zoom, so this keeps the world point under the mouse stationary for
+/// both the flat taxi view and the tilted airports view.
+pub(crate) fn zoom_toward_cursor(
+    zoom: &mut f32,
+    pan: &mut [f32; 2],
+    centre: [f32; 2],
+    mouse: [f32; 2],
+    wheel: f32,
+) {
+    let old = *zoom;
+    let new = (old * 1.12f32.powf(wheel)).clamp(0.2, 18.0);
+    if (new - old).abs() < f32::EPSILON {
+        return;
+    }
+    let offset = [
+        mouse[0] - (centre[0] + pan[0]),
+        mouse[1] - (centre[1] + pan[1]),
+    ];
+    let factor = 1.0 - new / old;
+    pan[0] += offset[0] * factor;
+    pan[1] += offset[1] * factor;
+    *zoom = new;
+}
+
 /// Airport canvas: grid, runways, taxiways, approved route, stands, buildings,
 /// navaids, ownship, scale bar. `on_airports` selects the orbit behavior that
 /// only the Airports page gets.
@@ -116,7 +141,14 @@ pub fn airport_canvas(
     let input = ui.io();
     let hovered = ui.is_item_hovered();
     if hovered {
-        interface.zoom = (interface.zoom * 1.12f32.powf(input.mouse_wheel)).clamp(0.2, 18.0);
+        let centre = [cursor[0] + size[0] / 2.0, cursor[1] + size[1] / 2.0];
+        zoom_toward_cursor(
+            &mut interface.zoom,
+            &mut interface.pan,
+            centre,
+            input.mouse_pos,
+            input.mouse_wheel,
+        );
         if on_airports && interface.orbit_view && ui.is_mouse_dragging(imgui::MouseButton::Left) {
             interface.yaw += input.mouse_delta[0] * 0.008;
             interface.pitch = (interface.pitch + input.mouse_delta[1] * 0.008).clamp(0.2, 1.5);
@@ -1011,9 +1043,41 @@ mod beam_tests {
     use super::*;
     use openatc_core::airport::{Navaid, Runway};
     #[test]
+    fn zoom_keeps_the_world_point_under_the_cursor() {
+        let centre = [500.0, 400.0];
+        let mouse = [620.0, 330.0];
+        let mut zoom = 1.0;
+        let mut pan = [0.0, 0.0];
+        let world = [
+            (mouse[0] - centre[0] - pan[0]) / zoom,
+            (mouse[1] - centre[1] - pan[1]) / zoom,
+        ];
+        zoom_toward_cursor(&mut zoom, &mut pan, centre, mouse, 3.0);
+        assert!(zoom > 1.0);
+        let screen = [
+            centre[0] + pan[0] + world[0] * zoom,
+            centre[1] + pan[1] + world[1] * zoom,
+        ];
+        assert!((screen[0] - mouse[0]).abs() < 1e-3);
+        assert!((screen[1] - mouse[1]).abs() < 1e-3);
+
+        let world = [
+            (mouse[0] - centre[0] - pan[0]) / zoom,
+            (mouse[1] - centre[1] - pan[1]) / zoom,
+        ];
+        zoom_toward_cursor(&mut zoom, &mut pan, centre, mouse, -2.0);
+        let screen = [
+            centre[0] + pan[0] + world[0] * zoom,
+            centre[1] + pan[1] + world[1] * zoom,
+        ];
+        assert!((screen[0] - mouse[0]).abs() < 1e-3);
+        assert!((screen[1] - mouse[1]).abs() < 1e-3);
+    }
+
+    #[test]
     fn traffic_radio_details_preserve_channel_and_unknown_state() {
-        assert_eq!(traffic_frequency(Some(121705)), "121.705 MHz");
-        assert_eq!(traffic_frequency(Some(118025)), "118.025 MHz");
+        assert_eq!(traffic_frequency(Some(121_705)), "121.705 MHz");
+        assert_eq!(traffic_frequency(Some(118_025)), "118.025 MHz");
         assert_eq!(traffic_frequency(None), "Unavailable");
         assert_eq!(traffic_frequency(Some(0)), "Unavailable");
     }

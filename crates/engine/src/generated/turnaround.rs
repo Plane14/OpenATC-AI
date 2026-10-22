@@ -4,7 +4,20 @@
 //! reuses the ordinary surface, departure, airborne and arrival planners for the reverse
 //! direction, keeps the stand until the aircraft moves, then continues through the same
 //! controller, readback, runway, wake and corridor-protection gates as any other flight.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+#[allow(unused_imports, clippy::wildcard_imports)]
 use super::*;
+use super::{
+    Airport, Arc, BTreeMap, BTreeSet, GroundPlan, Runtime, Shared, airborne, assembly, controller,
+    departure, finish_job, flight, ground_route, next_job, planning_observations, routing, runway,
+    scenery,
+};
 use openatc_core::parking::TrafficPreference;
 use openatc_core::traffic::motion::Stage;
 use openatc_core::traffic::procedures::Catalogue;
@@ -172,7 +185,7 @@ pub(super) fn plan(
         destination_surface.as_ref(),
         policy,
     )?;
-    let candidates = routing::candidates(routing::Inputs {
+    let candidates = routing::candidates(&routing::Inputs {
         origin: input.destination.as_ref(),
         destination: input.origin.as_ref(),
         departure_runway: &input.destination_runway,
@@ -488,7 +501,7 @@ mod tests {
     fn point(east: f64, altitude: f64) -> Waypoint {
         Waypoint {
             latitude: 0.0,
-            longitude: east / 111320.0,
+            longitude: east / 111_320.0,
             altitude_feet: altitude,
         }
     }
@@ -685,11 +698,11 @@ mod tests {
                 if *stage != Stage::Turnaround {
                     let (service, khz) = match stage {
                         Stage::LineUp | Stage::Takeoff | Stage::Approach | Stage::Rollout => {
-                            ("Tower", 120950)
+                            ("Tower", 120_950)
                         }
-                        Stage::Climb | Stage::Descent => ("Approach", 124500),
-                        Stage::Cruise => ("Center", 118675),
-                        Stage::TaxiIn => ("Ground", 121705),
+                        Stage::Climb | Stage::Descent => ("Approach", 124_500),
+                        Stage::Cruise => ("Center", 118_675),
+                        Stage::TaxiIn => ("Ground", 121_705),
                         _ => unreachable!(),
                     };
                     clearances.insert(
@@ -712,9 +725,9 @@ mod tests {
                 }
                 if !stage.on_ground() {
                     let mut north = end;
-                    north.latitude += 1000.0 / 111320.0;
+                    north.latitude += 1000.0 / 111_320.0;
                     let mut east = end;
-                    east.longitude += 1000.0 / 111320.0;
+                    east.longitude += 1000.0 / 111_320.0;
                     let mut corner = east;
                     corner.latitude = north.latitude;
                     recovery.insert(
@@ -761,6 +774,7 @@ mod tests {
             })
             .collect();
         Prepared {
+            spacing_floor: None,
             amendment: None,
             airspeeds: BTreeMap::new(),
             route: Arc::new(Route::compile(segments, 4000.0, 4000.0).unwrap()),

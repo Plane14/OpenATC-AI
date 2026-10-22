@@ -1,4 +1,12 @@
 //! Two-step developer jumps keep old telemetry from advancing the new checkpoint.
+
+#![allow(clippy::default_trait_access)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use crate::{EngineState, Shared};
 use axum::{
     Json,
@@ -135,7 +143,8 @@ pub async fn finish(State(shared): State<Shared>, Json(body): Json<Value>) -> Re
     state.flow.announce_approach = matches!(target.phase, openatc_core::state::PhaseCode::Arrival);
     state.flow.monitor.next_fix = target.next_fix;
     state.flow.monitor.checked_fix = target.next_fix.saturating_sub(1);
-    state.flow.monitor.route = state.session.clearance.as_ref().unwrap().route.clone();
+    let route = state.session.clearance.as_ref().unwrap().route.clone();
+    state.flow.monitor.route = route;
     state.parking = Default::default();
     state.initiative = Default::default();
     state.traffic = Default::default();
@@ -178,7 +187,7 @@ mod tests {
         state.pending_copilot_reply = Some(crate::routes::PreparedReply {
             generation: 0,
             sequence: 1,
-            frequency: 121705,
+            frequency: 121_705,
             request: Default::default(),
         });
         state.crew.pushback = Some(openatc_core::crew::PushbackRequest {
@@ -216,7 +225,7 @@ mod tests {
             readback_speed: None,
             acknowledged: true,
             sequence: 1,
-            frequency_khz: 118675,
+            frequency_khz: 118_675,
         });
         state.session.plan.fixes = (0..3)
             .map(|i| RouteFix {

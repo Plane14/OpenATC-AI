@@ -43,6 +43,50 @@ pub enum Delivery {
     Urgent,
 }
 
+/// How flight numbers are spoken in callsigns.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CallsignNumbers {
+    /// Australia/FAA group form: 160 is "one sixty", 1300 is "thirteen hundred".
+    Group,
+    /// Digit-by-digit: 160 is "one six zero". This is the default.
+    #[default]
+    Digits,
+}
+
+/// How often the generated traffic is drawn.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TrafficRate {
+    /// Draw on every simulator frame.
+    #[default]
+    EveryFrame,
+    /// Draw on every n-th simulator frame.
+    EveryFrames(u8),
+    /// Draw at a target rate in hertz.
+    Hertz(u8),
+}
+
+impl TrafficRate {
+    /// The draw interval in seconds, or zero when the rate is frame based.
+    #[must_use]
+    pub fn interval(self) -> f32 {
+        match self {
+            Self::EveryFrame | Self::EveryFrames(_) => 0.0,
+            Self::Hertz(hertz) => 1.0 / f32::from(hertz.clamp(5, 60)),
+        }
+    }
+    /// The number of frames between draws, or zero when the rate is time based.
+    #[must_use]
+    pub fn frames(self) -> u32 {
+        match self {
+            Self::EveryFrame => 1,
+            Self::EveryFrames(frames) => u32::from(frames.clamp(1, 30)),
+            Self::Hertz(_) => 0,
+        }
+    }
+}
+
 /// Frequency-congestion simulation level.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -127,16 +171,30 @@ pub struct Settings {
     pub cpu_workers: u8,
     /// Offer optional en-route shortcuts; restriction checks still apply.
     pub atc_shortcut_offers: bool,
-    /// Minimum quiet-flight interval between optional offers.
-    pub atc_offer_interval_minutes: u8,
-    /// Let OpenATC set the native simulator AI count; other providers keep ownership.
+    /// Percent chance of offering an eligible shortcut.
+    pub atc_shortcut_chance_percent: u8,
+    /// Allow new discretionary arrival holds; existing clearances and safety checks remain active.
+    pub player_traffic_holding: bool,
+    /// Let `OpenATC` set the native simulator AI count; other providers keep ownership.
     pub manage_native_traffic: bool,
-    /// Suppress X-Plane AI while OpenATC is connected; other plugins retain ownership.
+    /// Suppress `X-Plane` AI while `OpenATC` is connected; other plugins retain ownership.
     pub suppress_native_traffic: bool,
+    /// Mute the simulator's own radio audio while `OpenATC` is connected. Turn this off when
+    /// another plugin, such as a pushback helper, speaks through the radio channel.
+    pub mute_native_radio: bool,
     /// Native AI aircraft excluding ownship, limited to nineteen SDK slots.
     pub native_traffic_count: u8,
-    /// Enable OpenATC's lightweight generated model instances.
+    /// Enable `OpenATC`'s lightweight generated model instances.
     pub generated_traffic: bool,
+    /// How often the generated traffic is drawn. A higher rate moves the traffic more smoothly
+    /// and costs more of the simulator's frame time.
+    pub traffic_rate: TrafficRate,
+    /// Add a local pattern aircraft and departures when the network released little traffic.
+    pub local_pattern_traffic: bool,
+    /// Start the first released flight on approach instead of at its stand.
+    pub start_first_flight_on_approach: bool,
+    /// Publish a small protected scene while the full traffic scene is prepared.
+    pub preview_traffic: bool,
     /// Active mainline-airline budget.
     pub airline_traffic: u8,
     /// Active regional/turboprop budget.
@@ -155,8 +213,14 @@ pub struct Settings {
     pub pilot_chat_humour: bool,
     /// Let nearby simulated pilots initiate a quiet-flight conversation.
     pub pilots_call_me: bool,
+    /// Percent chance of a pilot call after checking weather, phase and radio availability.
+    pub pilot_chat_chance_percent: u8,
     /// Numeric `SimBrief` pilot ID for OFP import.
     pub simbrief_id: String,
+    /// Default pilot callsign used when a flight plan does not provide one.
+    pub callsign: String,
+    /// Spoken style for flight numbers in callsigns.
+    pub callsign_numbers: CallsignNumbers,
     /// X-Plane installation folder override; empty means auto-detect.
     pub simulator_root: String,
     #[serde(default = "http_origin")]
@@ -385,11 +449,17 @@ impl Default for Settings {
         Self {
             cpu_workers: 0,
             atc_shortcut_offers: false,
-            atc_offer_interval_minutes: 10,
+            atc_shortcut_chance_percent: 2,
+            player_traffic_holding: true,
             manage_native_traffic: false,
             suppress_native_traffic: true,
+            mute_native_radio: true,
             native_traffic_count: 4,
             generated_traffic: false,
+            traffic_rate: TrafficRate::EveryFrame,
+            local_pattern_traffic: false,
+            start_first_flight_on_approach: false,
+            preview_traffic: true,
             airline_traffic: 8,
             regional_traffic: 4,
             cargo_traffic: 2,
@@ -399,8 +469,11 @@ impl Default for Settings {
             informal_pilot_chat: false,
             pilot_chat_humour: false,
             pilots_call_me: false,
+            pilot_chat_chance_percent: 2,
             // Services.
             simbrief_id: String::new(),
+            callsign: "VH-BIL".to_owned(),
+            callsign_numbers: CallsignNumbers::Digits,
             simulator_root: String::new(),
             ai_url: http_origin(),
             ai_model: "qwen2.5-7b".to_owned(),
@@ -543,14 +616,25 @@ impl Settings {
             let height = i64::from(top) - i64::from(bottom);
             if ![left, top, right, bottom]
                 .iter()
-                .all(|value| (-100000..=100000).contains(value))
+                .all(|value| (-100_000..=100_000).contains(value))
                 || !(442..=4800).contains(&width)
                 || !(153..=3200).contains(&height)
             {
-                return Err(ValidationError::OutOfRange("window bounds", width as f32));
+                #[allow(clippy::cast_precision_loss)]
+                let label = width as f32;
+                return Err(ValidationError::OutOfRange("window bounds", label));
             }
         }
 
+        let callsign = self.callsign.trim();
+        if !callsign.is_empty()
+            && (callsign.len() > 30
+                || !callsign
+                    .bytes()
+                    .all(|value| value.is_ascii_alphanumeric() || value == b'-' || value == b' '))
+        {
+            return Err(ValidationError::BadCallsign);
+        }
         if self.cpu_workers > 16 {
             return Err(ValidationError::OutOfRange(
                 "CPU workers",
@@ -578,10 +662,16 @@ impl Settings {
                 f32::from(generated_count),
             ));
         }
-        if !(2..=60).contains(&self.atc_offer_interval_minutes) {
+        if self.atc_shortcut_chance_percent > 100 {
             return Err(ValidationError::OutOfRange(
-                "ATC offer interval",
-                f32::from(self.atc_offer_interval_minutes),
+                "ATC shortcut chance",
+                f32::from(self.atc_shortcut_chance_percent),
+            ));
+        }
+        if self.pilot_chat_chance_percent > 100 {
+            return Err(ValidationError::OutOfRange(
+                "pilot chat chance",
+                f32::from(self.pilot_chat_chance_percent),
             ));
         }
         for url in [&self.ai_url, &self.stt_url, &self.tts_url] {
@@ -691,10 +781,41 @@ pub enum ValidationError {
     /// Crew dataref is not a dataref name.
     #[error("Crew datarefs must be dataref names: {0}")]
     BadRef(String),
+    /// Default callsign has unsupported characters or is too long.
+    #[error(
+        "Default callsign must be 30 characters or fewer using letters, digits, spaces or hyphens."
+    )]
+    BadCallsign,
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn default_callsign_validation_rejects_bad_identities() {
+        let mut settings = super::Settings::default();
+        assert!(settings.validate().is_ok());
+        settings.callsign = "VH/BIL".into();
+        assert!(settings.validate().is_err());
+        settings.callsign = "X".repeat(31);
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn default_callsign_is_configured_and_round_trips() {
+        let defaults = super::Settings::default();
+        assert_eq!(defaults.callsign, "VH-BIL");
+        let text = serde_json::to_string(&defaults).unwrap();
+        let parsed: super::Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed.callsign, "VH-BIL");
+        let custom = super::Settings {
+            callsign: "QFA123".into(),
+            ..defaults
+        };
+        let text = serde_json::to_string(&custom).unwrap();
+        let parsed: super::Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed.callsign, "QFA123");
+    }
+
     use super::*;
 
     #[test]
@@ -785,7 +906,7 @@ mod tests {
         assert!(settings.copilot_button);
         assert!(!settings.show_com2);
         assert!(settings.atis_voice.is_empty());
-        assert_eq!(settings.atis_speed, 1.0);
+        assert!((settings.atis_speed - 1.0).abs() < f32::EPSILON);
         assert!(settings.atis_electronic);
         let com2: Settings = serde_json::from_str(r#"{"showCom2":true}"#).unwrap();
         assert!(com2.show_com2);
@@ -874,17 +995,22 @@ mod tests {
 mod layout_tests {
     #[test]
     fn layout_survives_settings_round_trip_and_old_settings_keep_defaults() {
-        let mut settings = super::Settings::default();
-        settings.window_bounds = Some([150, 1000, 1110, 240]);
-        settings.transcript_fraction = 0.4;
+        let mut settings = super::Settings {
+            window_bounds: Some([150, 1000, 1110, 240]),
+            transcript_fraction: 0.4,
+            player_traffic_holding: false,
+            ..super::Settings::default()
+        };
         settings.validate().unwrap();
         let restored: super::Settings =
             serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert_eq!(restored.window_bounds, settings.window_bounds);
-        assert_eq!(restored.transcript_fraction, 0.4);
+        assert!(!restored.player_traffic_holding);
+        assert!((restored.transcript_fraction - 0.4).abs() < f32::EPSILON);
         let old: super::Settings = serde_json::from_str("{}").unwrap();
+        assert!(old.player_traffic_holding);
         assert_eq!(old.window_bounds, None);
-        assert_eq!(old.transcript_fraction, 0.57);
+        assert!((old.transcript_fraction - 0.57).abs() < f32::EPSILON);
         // Native minimum dimensions scale down with the supported 85% UI scale.
         settings.ui_scale = 0.85;
         settings.window_bounds = Some([30, 1000, 472, 847]);
@@ -893,5 +1019,16 @@ mod layout_tests {
         assert!(settings.validate().is_err());
         settings.transcript_fraction = f32::NAN;
         assert!(settings.validate().is_err());
+    }
+    #[test]
+    fn missing_draw_rate_uses_frames_and_saved_hertz_is_preserved() {
+        use super::{Settings, TrafficRate};
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.traffic_rate, TrafficRate::EveryFrame);
+        let settings: Settings = serde_json::from_str(r#"{"trafficRate":{"hertz":20}}"#).unwrap();
+        assert_eq!(settings.traffic_rate, TrafficRate::Hertz(20));
+        let saved = serde_json::to_string(&settings).unwrap();
+        let restored: Settings = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.traffic_rate, TrafficRate::Hertz(20));
     }
 }

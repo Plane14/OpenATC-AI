@@ -41,3 +41,18 @@ The maintained SDK binding patch generates only XPLM/XP functions, excluding Win
 ## macOS compatibility drawing
 
 The Rust OpenGL 2.1 drawing path follows the fixed-pipeline approach of Dear ImGui’s [OpenGL 2 backend at v1.89.2](https://github.com/ocornut/imgui/blob/v1.89.2/backends/imgui_impl_opengl2.cpp), with per-command vertex offsets and saved host/client/matrix state. Its MIT notice is retained in `assets/licenses/imgui-opengl2-LICENSE.txt`. OpenGL function bindings are generated during the build by the pinned `gl_generator` crate; generated bindings stay in build output. The compatibility renderer is implemented in Rust.
+
+## Rebuildable scenery cache
+
+The companion engine uses rusqlite 0.40.2 (MIT) with bundled SQLite and postcard
+1.1.3 (MIT or Apache-2.0) for the local compiled-scenery cache. The SQLite Rust
+bindings retain their MIT notice in `assets/licenses/libsqlite3-sys-LICENSE.txt`.
+Their notices are
+retained in `assets/licenses/rusqlite-LICENSE.txt` and
+`assets/licenses/postcard-LICENSE-MIT.txt` / `postcard-LICENSE-APACHE.txt`. SQLite
+is public-domain software. The cache contains derived data from the user's own
+installed scenery; it is local, rebuildable and is not distributed with OpenATC.
+
+The companion engine also uses the same SQLite/rusqlite, postcard and SHA-256
+dependencies for its rebuildable parsed-TOML setup cache. Editable configuration
+remains authoritative; this cache does not include copied aeronautical publications.

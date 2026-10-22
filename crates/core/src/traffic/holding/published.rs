@@ -86,7 +86,7 @@ impl Catalogue {
         let mut terminated = false;
         for (index, line) in reader.lines().enumerate() {
             let line = line.map_err(|error| error.to_string())?;
-            if index >= 200000 || line.len() > 4096 {
+            if index >= 200_000 || line.len() > 4096 {
                 return Err("Holding file exceeds record limits".into());
             }
             let line = line.trim();
@@ -223,6 +223,7 @@ impl Catalogue {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     #[test]

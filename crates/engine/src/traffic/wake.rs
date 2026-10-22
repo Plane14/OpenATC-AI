@@ -19,6 +19,9 @@ struct Liftoff {
     runway: String,
     heading: f64,
     category: Option<char>,
+    aircraft: String,
+    callsign: String,
+    distance_pending: bool,
     at: f64,
 }
 
@@ -36,6 +39,7 @@ pub(super) struct Monitor {
     previous: BTreeMap<u32, TrafficTarget>,
     departures: VecDeque<Liftoff>,
     arrival: Option<ArrivalWake>,
+    unresolved_heavy: bool,
 }
 
 impl Monitor {
@@ -48,13 +52,17 @@ impl Monitor {
         latitude: f64,
         longitude: f64,
     ) -> f64 {
-        if !wake::applies(&airport.icao) {
+        if !wake::supported(&airport.icao) {
             return 0.0;
+        }
+        let heavy_distance = airport.icao.starts_with('Y')
+            && openatc_core::traffic::profiles::aircraft(aircraft).is_some_and(|a| a.wake == 'H');
+        if heavy_distance && self.unresolved_heavy {
+            return 1.0;
         }
         let Some(position) = runway_position(airport, runway, latitude, longitude) else {
             return 240.0;
         };
-        let follower = wake::category(aircraft);
         self.departures
             .iter()
             .filter(|event| {
@@ -63,18 +71,37 @@ impl Monitor {
                     && wake::related_runways(airport, &event.runway, runway, event.category)
             })
             .map(|event| {
+                if heavy_distance && event.distance_pending {
+                    let separated = self
+                        .previous
+                        .get(&event.id)
+                        .filter(|t| {
+                            !t.on_ground
+                                && t.aircraft == event.aircraft
+                                && t.callsign == event.callsign
+                                && openatc_core::traffic::advisory::valid(t)
+                        })
+                        .and_then(|t| runway_position(airport, runway, t.latitude, t.longitude))
+                        .is_some_and(|lead| lead.0 - position.0 >= 4.0 * 1852.0);
+                    if !separated {
+                        return 1.0;
+                    }
+                }
                 let kind = if openatc_core::navigation::turn(event.heading, position.3).abs() > 90.0
                 {
                     Departure::Opposite
-                } else if position.0 > 152.4 {
+                } else if position.0
+                    > if airport.icao.starts_with('Y') {
+                        150.0
+                    } else {
+                        152.4
+                    }
+                {
                     Departure::Intersection
                 } else {
                     Departure::FullLength
                 };
-                let required = event
-                    .category
-                    .zip(follower)
-                    .and_then(|(a, b)| wake::departure_seconds(a, b, kind))
+                let required = wake::departure_for(&airport.icao, &event.aircraft, aircraft, kind)
                     .unwrap_or(240);
                 (f64::from(required) - (self.elapsed - event.at)).max(0.0)
             })
@@ -88,7 +115,7 @@ impl Monitor {
         runway: &str,
         delta: f64,
     ) -> bool {
-        let Some(airport) = airport.filter(|a| wake::applies(&a.icao)) else {
+        let Some(airport) = airport.filter(|a| wake::supported(&a.icao)) else {
             self.arrival = None;
             return false;
         };
@@ -152,9 +179,7 @@ impl Monitor {
             {
                 continue;
             }
-            let required_nm = wake::category(&target.aircraft)
-                .zip(wake::category(&t.aircraft_icao))
-                .and_then(|(lead, follow)| wake::approach_nm(lead, follow))
+            let required_nm = wake::arrival_for(&airport.icao, &target.aircraft, &t.aircraft_icao)
                 .unwrap_or(10.0);
             if required_nm == 0.0 {
                 continue;
@@ -209,7 +234,7 @@ pub(super) fn observe(state: &mut EngineState) {
     }
     monitor
         .departures
-        .retain(|d| monitor.elapsed - d.at < 240.0);
+        .retain(|d| d.distance_pending || monitor.elapsed - d.at < 240.0);
     if t.paused || !t.position_valid {
         return;
     }
@@ -262,7 +287,7 @@ pub(super) fn observe(state: &mut EngineState) {
                 .chain(state.arrival_airport.iter())
                 .chain(state.generated.airport.iter().map(AsRef::as_ref))
                 .chain(state.generated.destination.iter().map(AsRef::as_ref))
-                .filter(|a| wake::applies(&a.icao))
+                .filter(|a| wake::supported(&a.icao))
             {
                 if let Some((runway, heading)) = airport.runways.iter().find_map(|r| {
                     let p =
@@ -290,6 +315,11 @@ pub(super) fn observe(state: &mut EngineState) {
                         runway,
                         heading,
                         category: wake::category(&target.aircraft),
+                        aircraft: target.aircraft.clone(),
+                        callsign: target.callsign.clone(),
+                        distance_pending: airport.icao.starts_with('Y')
+                            && openatc_core::traffic::profiles::aircraft(&target.aircraft)
+                                .is_some_and(|a| a.wake == 'H'),
                         at: monitor.elapsed,
                     });
                     break;
@@ -297,11 +327,36 @@ pub(super) fn observe(state: &mut EngineState) {
             }
         }
         monitor.previous = targets.map(|p| (p.id, p.clone())).collect();
+        for event in monitor.departures.iter_mut().filter(|e| e.distance_pending) {
+            let airport = state
+                .airport
+                .iter()
+                .chain(state.arrival_airport.iter())
+                .chain(state.generated.airport.iter().map(AsRef::as_ref))
+                .chain(state.generated.destination.iter().map(AsRef::as_ref))
+                .find(|a| a.icao == event.airport);
+            if let (Some(airport), Some(target)) = (airport, monitor.previous.get(&event.id))
+                && target.aircraft == event.aircraft
+                && target.callsign == event.callsign
+                && !target.on_ground
+                && openatc_core::traffic::advisory::valid(target)
+                && runway_position(airport, &event.runway, target.latitude, target.longitude)
+                    .is_some_and(|p| {
+                        p.0 > p.2 + 5.0 * 1852.0 || p.0 < -5.0 * 1852.0 || p.1.abs() > 5.0 * 1852.0
+                    })
+            {
+                event.distance_pending = false;
+            }
+        }
     } else {
         monitor.previous.clear();
     }
     while monitor.departures.len() > 64 {
-        monitor.departures.pop_front();
+        // Bounded history must not turn lost distance-only wake evidence into permission.
+        monitor.unresolved_heavy |= monitor
+            .departures
+            .pop_front()
+            .is_some_and(|e| e.distance_pending);
     }
     if !t.on_ground {
         return;
@@ -328,6 +383,7 @@ pub(super) fn observe(state: &mut EngineState) {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     use openatc_core::{
@@ -437,7 +493,7 @@ mod tests {
                 id: 2,
                 callsign: "TEST2".into(),
                 aircraft: "A320".into(),
-                latitude: 500.0 / 111320.0,
+                latitude: 500.0 / 111_320.0,
                 longitude: -0.0001,
                 track_degrees: 90.0,
                 on_ground: false,
@@ -453,61 +509,92 @@ mod tests {
             !s.session.arrival_wake_conflict,
             "Physical pavement start is not the landing threshold"
         );
-        s.session.telemetry.traffic.as_mut().unwrap()[0].longitude = 510.0 / 111320.0;
+        s.session.telemetry.traffic.as_mut().unwrap()[0].longitude = 510.0 / 111_320.0;
         s.session.telemetry.simulation_seconds = Some(7.0);
         observe(&mut s);
         assert!(s.session.arrival_wake_conflict);
     }
     #[test]
     fn observed_heavy_departure_delays_takeoff_and_pause_does_not_age_wake() {
-        let mut s = crate::test_state();
-        s.session.plan.departure = "KTEST".into();
-        s.session.plan.runway = "09".into();
-        s.airport = Some(Airport {
-            icao: "KTEST".into(),
-            runways: vec![Runway {
-                first_name: "09".into(),
-                second_name: "27".into(),
-                width: 45.0,
-                second: Point {
-                    east: 3000.0,
+        for airport in ["KTEST", "YSSY"] {
+            let mut s = crate::test_state();
+            s.session.plan.departure = airport.into();
+            s.session.plan.runway = "09".into();
+            s.airport = Some(Airport {
+                icao: airport.into(),
+                runways: vec![Runway {
+                    first_name: "09".into(),
+                    second_name: "27".into(),
+                    width: 45.0,
+                    second: Point {
+                        east: 3000.0,
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        });
-        let target = TrafficTarget {
-            id: 42,
-            callsign: "TEST42".into(),
-            aircraft: "B77W".into(),
-            longitude: 0.01,
-            track_degrees: 90.0,
-            on_ground: true,
-            ..Default::default()
-        };
-        s.session.telemetry = Telemetry {
-            aircraft_icao: "A320".into(),
-            position_valid: true,
-            simulation_seconds: Some(10.0),
-            traffic: Some(vec![target]),
-            ..Default::default()
-        };
-        observe(&mut s);
-        s.session.telemetry.simulation_seconds = Some(11.0);
-        s.session.telemetry.traffic.as_mut().unwrap()[0].on_ground = false;
-        observe(&mut s);
-        assert_eq!(s.session.departure_wake_seconds, 120.0);
-        s.session.telemetry.paused = true;
-        s.session.telemetry.simulation_seconds = Some(200.0);
-        observe(&mut s);
-        s.session.telemetry.paused = false;
-        observe(&mut s);
-        assert_eq!(s.session.departure_wake_seconds, 120.0);
-        for i in 1..=12 {
-            s.session.telemetry.simulation_seconds = Some(200.0 + f64::from(i) * 10.0);
+            });
+            let target = TrafficTarget {
+                id: 42,
+                callsign: "TEST42".into(),
+                aircraft: "B77W".into(),
+                longitude: 0.01,
+                track_degrees: 90.0,
+                on_ground: true,
+                ..Default::default()
+            };
+            s.session.telemetry = Telemetry {
+                aircraft_icao: "A320".into(),
+                position_valid: true,
+                simulation_seconds: Some(10.0),
+                traffic: Some(vec![target]),
+                ..Default::default()
+            };
             observe(&mut s);
+            s.session.telemetry.simulation_seconds = Some(11.0);
+            s.session.telemetry.traffic.as_mut().unwrap()[0].on_ground = false;
+            observe(&mut s);
+            assert_eq!(s.session.departure_wake_seconds, 120.0);
+            s.session.telemetry.paused = true;
+            s.session.telemetry.simulation_seconds = Some(200.0);
+            observe(&mut s);
+            s.session.telemetry.paused = false;
+            observe(&mut s);
+            assert_eq!(s.session.departure_wake_seconds, 120.0);
+            for i in 1..=12 {
+                s.session.telemetry.simulation_seconds = Some(200.0 + f64::from(i) * 10.0);
+                observe(&mut s);
+            }
+            assert_eq!(s.session.departure_wake_seconds, 0.0);
+            if airport == "YSSY" {
+                s.session.telemetry.aircraft_icao = "B744".into();
+                s.session.telemetry.simulation_seconds = Some(330.0);
+                observe(&mut s);
+                assert!(
+                    s.session.departure_wake_seconds > 0.0,
+                    "heavy-heavy is distance-only"
+                );
+                s.session.telemetry.traffic = Some(vec![]);
+                for i in 1..=30 {
+                    s.session.telemetry.simulation_seconds = Some(330.0 + f64::from(i) * 10.0);
+                    observe(&mut s);
+                }
+                assert!(
+                    s.session.departure_wake_seconds > 0.0,
+                    "missing leader cannot satisfy distance"
+                );
+                s.session.telemetry.traffic = Some(vec![TrafficTarget {
+                    id: 42,
+                    callsign: "TEST42".into(),
+                    aircraft: "B77W".into(),
+                    longitude: 4.5 / 60.0,
+                    track_degrees: 90.0,
+                    on_ground: false,
+                    ..Default::default()
+                }]);
+                observe(&mut s);
+                assert_eq!(s.session.departure_wake_seconds, 0.0);
+            }
         }
-        assert_eq!(s.session.departure_wake_seconds, 0.0);
     }
 }

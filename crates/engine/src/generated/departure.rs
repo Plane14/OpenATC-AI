@@ -1,5 +1,14 @@
 //! Protected runway entry and a profile-specific roll, before any airborne grant is considered.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+#[allow(unused_imports, clippy::wildcard_imports)]
 use super::*;
+use super::{Airport, BTreeSet, Operations, Point, animation, cells, position};
 use openatc_core::traffic::motion::{Segment, Stage, Waypoint};
 
 #[derive(Clone)]
@@ -41,6 +50,45 @@ pub(super) fn plan(
     surface: &super::runway::Surface,
     policy: &Operations,
 ) -> Result<Surface, String> {
+    match plan_entry(
+        airport,
+        runway_name,
+        hold,
+        aircraft,
+        handling,
+        weather,
+        surface,
+        policy,
+        false,
+    ) {
+        Ok(surface) => Ok(surface),
+        Err(first) => plan_entry(
+            airport,
+            runway_name,
+            hold,
+            aircraft,
+            handling,
+            weather,
+            surface,
+            policy,
+            true,
+        )
+        .map_err(|second| format!("{first}; full-length retry: {second}")),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_entry(
+    airport: &Airport,
+    runway_name: &str,
+    hold: Waypoint,
+    aircraft: &openatc_core::traffic::profiles::Aircraft,
+    handling: &animation::Handling,
+    weather: &super::environment::Environment,
+    surface: &super::runway::Surface,
+    policy: &Operations,
+    full_length: bool,
+) -> Result<Surface, String> {
     if !surface.matches(airport, runway_name) {
         return Err("Departure surface belongs to another runway".into());
     }
@@ -69,11 +117,12 @@ pub(super) fn plan(
         on_ground: true,
         ..Default::default()
     };
-    let route = openatc_core::airport::calculate_runway_taxi_route(
+    let route = openatc_core::airport::calculate_runway_taxi_route_with(
         airport,
         &telemetry,
         runway_name,
         aircraft.parking_size(),
+        full_length,
     )?;
     if route.points.len() < 2 {
         return Err("No verified runway entry path".into());
@@ -85,11 +134,11 @@ pub(super) fn plan(
     let aligned = entry_along + (handling.taxi_turn_radius_meters * 2.0).max(aircraft.length * 2.0);
     let remaining = length - aligned;
     let roll_at = |knots: f64| {
-        let speed = knots * 0.514444;
+        let speed = knots * 0.514_444;
         let rotation_time = (handling.rotation_pitch_degrees / handling.pitch_rate_degrees_sec
             - 0.1 * knots / handling.acceleration_knots_sec)
             .max(0.0);
-        speed.powi(2) / (2.0 * handling.acceleration_knots_sec * 0.514444) + speed * rotation_time
+        speed.powi(2) / (2.0 * handling.acceleration_knots_sec * 0.514_444) + speed * rotation_time
     };
     let mut rotation_ground_knots = weather.runway_speed(
         airport,
@@ -117,7 +166,10 @@ pub(super) fn plan(
         || remaining < aircraft.runway
         || roll + aircraft.length >= remaining
     {
-        return Err("Remaining runway cannot support the planned departure roll".into());
+        return Err(format!(
+            "Remaining runway cannot support the planned departure roll (entry {entry_along:.0} m, aligned {aligned:.0} m, remaining {remaining:.0} m, need {:.0} m, roll {roll:.0} m)",
+            aircraft.runway
+        ));
     }
     let point = |along| Point {
         east: start.east + u[0] * along,
@@ -140,9 +192,14 @@ pub(super) fn plan(
             .collect(),
         ..Default::default()
     };
+    let refused = std::cell::Cell::new(None);
     let supported = |point| {
-        openatc_core::airport::on_pavement(airport, point)
-            && !openatc_core::airport::within_runway(&other, &point)
+        let ok = openatc_core::airport::on_pavement(airport, point)
+            && !openatc_core::airport::within_runway(&other, &point);
+        if !ok {
+            refused.set(Some(point));
+        }
+        ok
     };
     let rounded = openatc_core::traffic::surface::rounded(
         &points,
@@ -150,23 +207,51 @@ pub(super) fn plan(
         handling.wheelbase_meters / handling.maximum_steering_degrees.to_radians().tan(),
         policy.surface_sample_meters,
         supported,
-    )?;
-    if rounded.windows(2).any(|pair| {
+    )
+    .map_err(|error| {
+        if let Some(point) = refused.get() {
+            let coordinate = position(airport, point);
+            format!("{error} at {:.7}, {:.7}", coordinate[0], coordinate[1])
+        } else {
+            error
+        }
+    })?;
+    let failure = rounded.windows(2).find_map(|pair| {
         let from = pair[0].point;
         let to = pair[1].point;
         let count = ((to.east - from.east).hypot(to.north - from.north)
             / policy.surface_sample_meters)
             .ceil()
             .max(1.0) as usize;
-        (0..=count).any(|index| {
-            !supported(Point {
+        (0..=count)
+            .map(|index| Point {
                 east: from.east + (to.east - from.east) * index as f64 / count as f64,
                 north: from.north + (to.north - from.north) * index as f64 / count as f64,
                 height: 0.0,
             })
-        })
-    }) {
-        return Err("Runway entry connector lacks verified pavement".into());
+            .find(|point| !supported(*point))
+    });
+    if let Some(point) = failure {
+        let coordinate = position(airport, point);
+        let blocking = other.runways.iter().find(|runway| {
+            openatc_core::airport::within_runway(
+                &openatc_core::airport::Airport {
+                    runways: vec![(*runway).clone()],
+                    ..Default::default()
+                },
+                &point,
+            )
+        });
+        if let Some(runway) = blocking {
+            return Err(format!(
+                "Runway entry connector enters the {}/{} protected strip at {:.7}, {:.7}",
+                runway.first_name, runway.second_name, coordinate[0], coordinate[1]
+            ));
+        }
+        return Err(format!(
+            "Runway entry connector lacks verified pavement at {:.7}, {:.7}",
+            coordinate[0], coordinate[1]
+        ));
     }
     let waypoint = |point| {
         let coordinate = position(airport, point);

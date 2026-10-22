@@ -1,4 +1,11 @@
 //! Relative motion for traffic calls. These thresholds trigger advice, not separation clearance.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use crate::state::{Telemetry, TrafficTarget};
 
 /// Current relative position and the closest predicted horizontal encounter.
@@ -27,7 +34,7 @@ pub struct Encounter {
 pub fn valid(target: &TrafficTarget) -> bool {
     (-90.0..=90.0).contains(&target.latitude)
         && (-180.0..=180.0).contains(&target.longitude)
-        && (-2000.0..=100000.0).contains(&target.altitude_feet)
+        && (-2000.0..=100_000.0).contains(&target.altitude_feet)
         && target.track_degrees.is_finite()
         && target
             .ground_speed_knots
@@ -141,6 +148,7 @@ impl Encounter {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     fn own() -> Telemetry {

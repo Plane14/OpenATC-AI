@@ -47,7 +47,8 @@ impl SocialMemory {
                     });
                 let sentence = source[start..end].trim();
                 if sentence.chars().count() <= 240 {
-                    evidence = sentence.to_owned();
+                    evidence.clear();
+                    evidence.push_str(sentence);
                 }
             }
             quotes.retain(|previous| previous != &evidence);

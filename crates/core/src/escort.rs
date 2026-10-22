@@ -49,8 +49,8 @@ impl Escort {
             || self.airport != route.airport
             || self.points.is_empty();
         if changed {
-            let same_origin = self.latitude == route.reference_latitude
-                && self.longitude == route.reference_longitude
+            let same_origin = (self.latitude - route.reference_latitude).abs() <= f64::EPSILON
+                && (self.longitude - route.reference_longitude).abs() <= f64::EPSILON
                 && self.airport == route.airport;
             self.points.clone_from(&route.points);
             self.lengths.clear();

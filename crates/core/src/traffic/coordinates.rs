@@ -79,6 +79,7 @@ pub struct Points {
 }
 impl Points {
     /// Resolve a runway fix against the installed landing threshold, including displacement.
+    #[must_use]
     pub fn runway(leg: &Leg, airport: &crate::airport::Airport) -> Option<Position> {
         if leg.section != "P" || leg.subsection != "G" {
             return None;
@@ -104,15 +105,16 @@ impl Points {
         let north = start.north + (end.north - start.north) * displacement / length;
         Some(Position {
             coordinate: [
-                airport.reference_latitude + north / 111320.0,
+                airport.reference_latitude + north / 111_320.0,
                 airport.reference_longitude
-                    + east / (111320.0 * airport.reference_latitude.to_radians().cos()),
+                    + east / (111_320.0 * airport.reference_latitude.to_radians().cos()),
             ],
             elevation_feet: Some(airport.elevation_feet),
             magnetic_variation_degrees: None,
         })
     }
     /// Collect both terminal airports before scanning global navdata once.
+    #[must_use]
     pub fn requested(catalogues: &[(&str, &Catalogue)]) -> Self {
         let wanted: BTreeSet<Key> = catalogues
             .iter()
@@ -139,10 +141,12 @@ impl Points {
         }
     }
     /// A missing or ambiguous identifier cannot authorize a generated leg.
+    #[must_use]
     pub fn resolve(&self, leg: &Leg, airport: &str) -> Option<Position> {
         self.found.get(&key(leg, airport)?).copied().flatten()
     }
     /// A recommended VOR can retain its published slaved variation instead of using today's field model.
+    #[must_use]
     pub fn course_variation(&self, leg: &Leg, airport: &str) -> Option<f64> {
         let recommended = leg.recommended.as_ref().and_then(|reference| {
             reference_key(
@@ -272,7 +276,7 @@ impl Points {
             }
             for (index, line) in BufReader::new(file).lines().enumerate() {
                 let line = line.map_err(|error| error.to_string())?;
-                if index > 500000 || line.len() > 4096 {
+                if index > 500_000 || line.len() > 4096 {
                     return Err("Navigation file exceeds record limits".into());
                 }
                 if index < 4
@@ -318,6 +322,7 @@ impl Points {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     #[test]
@@ -345,7 +350,7 @@ mod tests {
             .find(|leg| leg.terminator == "HM")
             .unwrap();
         let station = points.resolve(hold, "LIMC").unwrap();
-        assert!((station.coordinate[0] - 45.645972222).abs() < 0.00001);
+        assert!((station.coordinate[0] - 45.645_972_222).abs() < 0.00001);
         assert!(station.magnetic_variation_degrees.is_some());
         let clearance = super::super::holding::Clearance {
             turn_rate_degrees_sec: 3.0,

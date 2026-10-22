@@ -1,7 +1,7 @@
 //! Lightweight instances. All SDK entry points run on the simulator thread.
 use openatc_core::state::GeneratedTraffic;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     ffi::{CString, c_void},
     sync::{
         Arc, Mutex,
@@ -60,23 +60,222 @@ struct Terrain {
     normal: [f64; 3],
     coordinate: [f64; 2],
 }
-/// Owns only OpenATC's objects, never another provider's instances.
+/// A missing/stale probe retains the SDK-converted local height, never an MSL value.
+fn ground_pose(
+    local: [f64; 3],
+    ground: Option<&Terrain>,
+    heading: f64,
+    pitch: f64,
+    roll: f64,
+) -> (f64, f64, f64) {
+    let [x, y, z] = local;
+    let Some(ground) = ground.filter(|ground| (ground.x - x).hypot(ground.z - z) <= 25.0) else {
+        return (y, pitch, roll);
+    };
+    let height = ground.y
+        - (ground.normal[0] * (x - ground.x) + ground.normal[2] * (z - ground.z))
+            / ground.normal[1];
+    let radians = heading.to_radians();
+    let slope = |x: f64, z: f64| -(ground.normal[0] * x + ground.normal[2] * z) / ground.normal[1];
+    (
+        height,
+        pitch + slope(radians.sin(), -radians.cos()).atan().to_degrees(),
+        -slope(radians.cos(), radians.sin()).atan().to_degrees(),
+    )
+}
+
+/// Interpolate only between received poses; never extrapolate past a cleared stop.
+fn blended(previous: &GeneratedTraffic, frame: &mut GeneratedTraffic, amount: f64) {
+    let body = frame
+        .body_heading_degrees
+        .unwrap_or(frame.target.track_degrees);
+    let mix = |from: f64, to: f64| from + (to - from) * amount;
+    frame.target.latitude = mix(previous.target.latitude, frame.target.latitude);
+    let longitude = ((frame.target.longitude - previous.target.longitude + 540.0) % 360.0) - 180.0;
+    frame.target.longitude =
+        ((previous.target.longitude + longitude * amount + 540.0) % 360.0) - 180.0;
+    frame.target.altitude_feet = mix(previous.target.altitude_feet, frame.target.altitude_feet);
+    let heading =
+        ((frame.target.track_degrees - previous.target.track_degrees + 540.0) % 360.0) - 180.0;
+    frame.target.track_degrees = (previous.target.track_degrees + heading * amount + 360.0) % 360.0;
+    let old_body = previous
+        .body_heading_degrees
+        .unwrap_or(previous.target.track_degrees);
+    frame.body_heading_degrees = Some(
+        (old_body + openatc_core::navigation::turn(old_body, body) * amount).rem_euclid(360.0),
+    );
+    frame.animation.pitch = mix(previous.animation.pitch, frame.animation.pitch);
+    frame.animation.bank = mix(previous.animation.bank, frame.animation.bank);
+    frame.animation.gear = mix(previous.animation.gear, frame.animation.gear);
+    frame.animation.flaps = mix(previous.animation.flaps, frame.animation.flaps);
+}
+
+/// A short playout buffer absorbs the engine/HTTP cadence without advancing aircraft beyond
+/// the newest authorised sample. Arrival instants share the renderer's monotonic clock; source
+/// simulator time and session generation detect resets and duplicate HTTP replies.
+#[derive(Default)]
+struct Timeline {
+    samples: VecDeque<(std::time::Instant, Vec<GeneratedTraffic>)>,
+    stamp: Option<(u64, f64)>,
+    paused: bool,
+    rendered: Vec<GeneratedTraffic>,
+}
+impl Timeline {
+    const DELAY: std::time::Duration = std::time::Duration::from_millis(750);
+
+    fn receive(
+        &mut self,
+        frames: &[GeneratedTraffic],
+        stamp: Option<(u64, f64)>,
+        paused: bool,
+        now: std::time::Instant,
+    ) {
+        let same = self.samples.back().is_some_and(|(_, old)| old == frames);
+        if same && stamp == self.stamp && paused == self.paused {
+            return;
+        }
+        let resumed = self.paused && !paused;
+        let reset = match (self.stamp, stamp) {
+            (Some((epoch, time)), Some((next_epoch, next_time))) => {
+                epoch != next_epoch || !(0.0..=30.0).contains(&(next_time - time))
+            }
+            _ => false,
+        };
+        if reset || frames.is_empty() {
+            self.samples.clear();
+            self.rendered.clear();
+        } else if self.paused && !paused {
+            self.samples.clear();
+            if !self.rendered.is_empty() {
+                self.samples.push_back((
+                    now.checked_sub(Self::DELAY).unwrap_or(now),
+                    self.rendered.clone(),
+                ));
+            }
+        }
+        self.paused = paused;
+        // Equal source times can carry a clearance/visibility change; replace that sample
+        // without shifting its clock. Unchanged positions at a later time are real stops.
+        if !resumed && stamp.is_some() && stamp == self.stamp && !self.samples.is_empty() {
+            self.samples.back_mut().unwrap().1 = frames.iter().take(63).cloned().collect();
+        } else {
+            self.samples
+                .push_back((now, frames.iter().take(63).cloned().collect()));
+        }
+        self.stamp = stamp;
+        while self.samples.len() > 8 {
+            self.samples.pop_front();
+        }
+    }
+
+    fn sample(&mut self, now: std::time::Instant) -> &[GeneratedTraffic] {
+        let Some((_, latest)) = self.samples.back() else {
+            return &self.rendered;
+        };
+        if self.paused && !self.rendered.is_empty() {
+            self.rendered.retain(|frame| {
+                latest
+                    .iter()
+                    .any(|new| new.target.id == frame.target.id && new.model == frame.model)
+            });
+            return &self.rendered;
+        }
+        let at = now.checked_sub(Self::DELAY).unwrap_or(now);
+        while self.samples.len() > 2 && self.samples[1].0 <= at {
+            self.samples.pop_front();
+        }
+        let (start, left) = &self.samples[0];
+        let (end, right) = self.samples.get(1).unwrap_or(&self.samples[0]);
+        let span = end.saturating_duration_since(*start).as_secs_f64();
+        let amount = if span > 0.0 {
+            (at.saturating_duration_since(*start).as_secs_f64() / span).min(1.0)
+        } else {
+            1.0
+        };
+        self.rendered = self
+            .samples
+            .back()
+            .unwrap()
+            .1
+            .iter()
+            .map(|latest| {
+                let Some(to) = right.iter().find(|frame| {
+                    frame.target.id == latest.target.id && frame.model == latest.model
+                }) else {
+                    return latest.clone();
+                };
+                let Some(from) = left
+                    .iter()
+                    .find(|frame| frame.target.id == to.target.id && frame.model == to.model)
+                else {
+                    return to.clone();
+                };
+                let mut frame = to.clone();
+                // A scene relocation is not a trajectory to fly across the airport.
+                let displacement = openatc_core::ops::distance_nm(
+                    from.target.latitude,
+                    from.target.longitude,
+                    to.target.latitude,
+                    to.target.longitude,
+                );
+                let max_distance = if from.target.on_ground && to.target.on_ground {
+                    0.03
+                } else {
+                    1.0
+                };
+                if displacement <= max_distance {
+                    blended(from, &mut frame, amount);
+                    if amount < 1.0 {
+                        frame.target.on_ground = from.target.on_ground;
+                    }
+                    frame.animation.propeller_angle = (from.animation.propeller_angle
+                        + from.animation.propeller_rpm * 6.0 * span * amount)
+                        .rem_euclid(360.0);
+                }
+                frame
+            })
+            .collect();
+        &self.rendered
+    }
+}
+
+/// The gate counts simulator callbacks, including when TCAS requires every frame.
+#[derive(Default)]
+struct DrawClock {
+    skipped: u32,
+    last: Option<std::time::Instant>,
+}
+impl DrawClock {
+    fn ready(&mut self, rate: openatc_settings::TrafficRate, now: std::time::Instant) -> bool {
+        self.skipped += 1;
+        let due = self.last.is_none()
+            || if rate.frames() > 0 {
+                self.skipped >= rate.frames()
+            } else {
+                self.last
+                    .is_some_and(|last| now.duration_since(last).as_secs_f32() >= rate.interval())
+            };
+        if due {
+            self.last = Some(now);
+            self.skipped = 0;
+        }
+        due
+    }
+}
+
 pub struct Renderer {
     assets: BTreeMap<std::path::PathBuf, Asset>,
     aircraft: BTreeMap<u32, Drawn>,
     channels: Vec<(CString, openatc_core::traffic::animation::Channel)>,
     owned_refs: Vec<usize>,
-    snapshots: Vec<GeneratedTraffic>,
-    previous: BTreeMap<u32, GeneratedTraffic>,
-    received: std::time::Instant,
+    timeline: Timeline,
     root: std::path::PathBuf,
     source_root: std::path::PathBuf,
+    root_checked: bool,
     probe: usize,
     mappings: BTreeMap<String, openatc_core::traffic::animation::Channel>,
-    paused: bool,
-    rendered: Vec<GeneratedTraffic>,
     probe_cursor: u32,
-    last_draw: std::time::Instant,
+    draw_clock: DrawClock,
 }
 impl Default for Renderer {
     fn default() -> Self {
@@ -85,17 +284,14 @@ impl Default for Renderer {
             aircraft: BTreeMap::new(),
             channels: Vec::new(),
             owned_refs: Vec::new(),
-            snapshots: Vec::new(),
-            previous: BTreeMap::new(),
-            received: std::time::Instant::now(),
+            timeline: Timeline::default(),
             root: std::path::PathBuf::new(),
             source_root: std::path::PathBuf::new(),
+            root_checked: false,
             probe: 0,
             mappings: BTreeMap::new(),
-            paused: false,
-            rendered: Vec::new(),
             probe_cursor: 0,
-            last_draw: std::time::Instant::now(),
+            draw_clock: DrawClock::default(),
         }
     }
 }
@@ -107,86 +303,27 @@ impl Renderer {
         root: &std::path::Path,
         mappings: &BTreeMap<String, openatc_core::traffic::animation::Channel>,
         paused: bool,
+        stamp: Option<(u64, f64)>,
     ) {
         if self.source_root != root || self.mappings != *mappings {
             *self = Self::default();
             self.source_root = root.to_path_buf();
             self.mappings.clone_from(mappings);
         }
-        if frames == self.snapshots && paused == self.paused {
-            return;
-        }
-        self.paused = paused;
-        self.previous = self
-            .rendered
-            .iter()
-            .cloned()
-            .map(|frame| (frame.target.id, frame))
-            .collect();
-        self.snapshots = frames.iter().take(63).cloned().collect();
-        for frame in &mut self.snapshots {
-            if let Some(previous) = self.previous.get(&frame.target.id)
-                && previous.model == frame.model
-            {
-                frame.model = previous.model.clone();
-            }
-        }
-        self.received = std::time::Instant::now();
-        if !frames.is_empty() && self.root.as_os_str().is_empty() {
+        self.timeline
+            .receive(frames, stamp, paused, std::time::Instant::now());
+        if !frames.is_empty() && !self.root_checked {
+            self.root_checked = true;
             self.root = root.canonicalize().unwrap_or_default();
         }
     }
     /// Interpolate snapshots without inventing progress beyond a clearance limit.
-    pub fn step(&mut self) {
-        if self.last_draw.elapsed().as_secs_f64() < 0.05 {
+    pub fn step(&mut self, rate: openatc_settings::TrafficRate) {
+        let now = std::time::Instant::now();
+        if !self.draw_clock.ready(rate, now) {
             return;
         }
-        self.last_draw = std::time::Instant::now();
-        let elapsed = self.received.elapsed().as_secs_f64().min(0.5);
-        let amount = (elapsed / 0.5).clamp(0.0, 1.0);
-        let mut frames = self.snapshots.clone();
-        for frame in &mut frames {
-            frame.animation.propeller_angle = (frame.animation.propeller_angle
-                + frame.animation.propeller_rpm * 6.0 * elapsed)
-                .rem_euclid(360.0);
-            if let Some(previous) = self
-                .previous
-                .get(&frame.target.id)
-                .filter(|old| old.model.id == frame.model.id)
-            {
-                let mix = |from: f64, to: f64| from + (to - from) * amount;
-                frame.target.latitude = mix(previous.target.latitude, frame.target.latitude);
-                let longitude =
-                    ((frame.target.longitude - previous.target.longitude + 540.0) % 360.0) - 180.0;
-                frame.target.longitude =
-                    ((previous.target.longitude + longitude * amount + 540.0) % 360.0) - 180.0;
-                frame.target.altitude_feet =
-                    mix(previous.target.altitude_feet, frame.target.altitude_feet);
-                let heading =
-                    ((frame.target.track_degrees - previous.target.track_degrees + 540.0) % 360.0)
-                        - 180.0;
-                frame.target.track_degrees =
-                    (previous.target.track_degrees + heading * amount + 360.0) % 360.0;
-                let body = frame
-                    .body_heading_degrees
-                    .unwrap_or(frame.target.track_degrees);
-                let old_body = previous
-                    .body_heading_degrees
-                    .unwrap_or(previous.target.track_degrees);
-                frame.body_heading_degrees = Some(
-                    (old_body + openatc_core::navigation::turn(old_body, body) * amount)
-                        .rem_euclid(360.0),
-                );
-                frame.animation.pitch = mix(previous.animation.pitch, frame.animation.pitch);
-                frame.animation.bank = mix(previous.animation.bank, frame.animation.bank);
-                frame.animation.gear = mix(previous.animation.gear, frame.animation.gear);
-                frame.animation.flaps = mix(previous.animation.flaps, frame.animation.flaps);
-            }
-        }
-        if self.paused && !self.rendered.is_empty() && !self.snapshots.is_empty() {
-            frames.clone_from(&self.rendered);
-        }
-        self.rendered.clone_from(&frames);
+        let frames = self.timeline.sample(now).to_vec();
         let root = self.root.clone();
         if !root.as_os_str().is_empty() || frames.is_empty() {
             self.update(&frames, &root);
@@ -194,10 +331,14 @@ impl Renderer {
     }
     /// Use a faster lightweight render loop only while generated traffic exists.
     pub fn active(&self) -> bool {
-        !self.snapshots.is_empty() || !self.aircraft.is_empty()
+        self.timeline
+            .samples
+            .back()
+            .is_some_and(|(_, frames)| !frames.is_empty())
+            || !self.aircraft.is_empty()
     }
     pub fn frames(&self) -> &[GeneratedTraffic] {
-        &self.rendered
+        &self.timeline.rendered
     }
     /// Begin at most one object load per update; existing instances remain usable.
     pub fn update(&mut self, frames: &[GeneratedTraffic], root: &std::path::Path) {
@@ -429,25 +570,15 @@ impl Renderer {
                         }
                     }
                 }
-                let Some(ground) = &drawn.terrain else {
-                    for instance in drawn.instances.drain(..) {
-                        unsafe { xp::XPLMDestroyInstance(instance as xp::XPLMInstanceRef) };
-                    }
-                    continue;
-                };
-                if (ground.x - x).hypot(ground.z - z) > 25.0 {
-                    self.retire(frame.target.id);
-                    continue;
+                if drawn
+                    .terrain
+                    .as_ref()
+                    .is_some_and(|ground| (ground.x - x).hypot(ground.z - z) > 25.0)
+                {
+                    drawn.terrain = None;
                 }
-                y = ground.y
-                    - (ground.normal[0] * (x - ground.x) + ground.normal[2] * (z - ground.z))
-                        / ground.normal[1];
-                let radians = body_heading.to_radians();
-                let slope = |x: f64, z: f64| {
-                    -(ground.normal[0] * x + ground.normal[2] * z) / ground.normal[1]
-                };
-                pitch += slope(radians.sin(), -radians.cos()).atan().to_degrees();
-                roll = -slope(radians.cos(), radians.sin()).atan().to_degrees();
+                (y, pitch, roll) =
+                    ground_pose([x, y, z], drawn.terrain.as_ref(), body_heading, pitch, roll);
             }
             if drawn.instances.is_empty() {
                 for object in objects {
@@ -521,5 +652,188 @@ impl Drop for Renderer {
         for reference in self.owned_refs.drain(..) {
             unsafe { xp::XPLMUnregisterDataAccessor(reference as xp::XPLMDataRef) };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openatc_core::state::TrafficTarget;
+    use openatc_core::traffic::animation::Animation;
+    use openatc_core::traffic::csl::Model;
+
+    fn frame(latitude: f64, track: f64) -> GeneratedTraffic {
+        GeneratedTraffic {
+            vertical_speed_fpm: 0.0,
+            body_heading_degrees: Some(track),
+            target: TrafficTarget {
+                id: 1,
+                callsign: "TEST".into(),
+                latitude,
+                longitude: 0.0,
+                altitude_feet: 1000.0,
+                track_degrees: track,
+                ..Default::default()
+            },
+            model: Arc::new(Model {
+                id: "test".into(),
+                objects: Vec::new(),
+                vertical_offset: None,
+                matches: Vec::new(),
+            }),
+            animation: Animation::default(),
+        }
+    }
+
+    #[test]
+    fn the_drawn_position_follows_the_clock_between_two_snapshots() {
+        let previous = frame(10.0, 0.0);
+        let current = frame(11.0, 90.0);
+        let mut drawn = current.clone();
+        blended(&previous, &mut drawn, 0.0);
+        assert!((drawn.target.latitude - 10.0).abs() < 1e-9);
+        assert!((drawn.target.track_degrees - 0.0).abs() < 1e-9);
+        let mut drawn = current.clone();
+        blended(&previous, &mut drawn, 0.5);
+        assert!((drawn.target.latitude - 10.5).abs() < 1e-9);
+        assert!((drawn.target.track_degrees - 45.0).abs() < 1e-9);
+        let mut drawn = current.clone();
+        blended(&previous, &mut drawn, 1.0);
+        assert!((drawn.target.latitude - 11.0).abs() < 1e-9);
+        assert!((drawn.target.track_degrees - 90.0).abs() < 1e-9);
+    }
+    #[test]
+    fn buffer_moves_each_frame_and_never_overshoots_a_stop() {
+        let start = std::time::Instant::now();
+        let mut timeline = Timeline::default();
+        for tick in 0..8 {
+            let t = f64::from(tick) * 0.5;
+            let position = t.min(2.0) * 0.001;
+            let now = start + std::time::Duration::from_secs_f64(t);
+            timeline.receive(&[frame(position, 0.0)], Some((1, t)), false, now);
+            for sub in 0..10 {
+                let wall = t + f64::from(sub) * 0.05;
+                let drawn = timeline.sample(start + std::time::Duration::from_secs_f64(wall));
+                let expected = (wall - 0.75).clamp(0.0, 2.0) * 0.001;
+                assert!(
+                    (drawn[0].target.latitude - expected).abs() < 1e-9,
+                    "wall={wall}"
+                );
+            }
+        }
+        assert!(
+            (timeline.sample(start + std::time::Duration::from_secs(20))[0]
+                .target
+                .latitude
+                - 0.002)
+                .abs()
+                < 1e-9
+        );
+    }
+
+    #[test]
+    fn jitter_pause_reset_removal_and_model_changes_do_not_extrapolate() {
+        let start = std::time::Instant::now();
+        let mut timeline = Timeline::default();
+        let at = |seconds| start + std::time::Duration::from_secs_f64(seconds);
+        for (wall, sim) in [(0.0, 0.0), (0.6, 0.5), (1.05, 1.0)] {
+            timeline.receive(&[frame(sim * 0.001, 0.0)], Some((1, sim)), false, at(wall));
+        }
+        let before = timeline.sample(at(1.1))[0].target.latitude;
+        timeline.receive(&[frame(0.001, 0.0)], Some((1, 1.0)), true, at(1.2));
+        assert_eq!(timeline.sample(at(10.0))[0].target.latitude, before);
+        timeline.receive(&[frame(0.001, 0.0)], Some((1, 1.0)), false, at(10.0));
+        assert!((timeline.sample(at(10.0))[0].target.latitude - before).abs() < 1e-9);
+        timeline.receive(&[frame(0.0, 0.0)], Some((2, 0.0)), false, at(11.0));
+        assert_eq!(timeline.sample(at(11.0))[0].target.latitude, 0.0);
+        let mut replacement = frame(0.002, 0.0);
+        Arc::make_mut(&mut replacement.model).id = "replacement".into();
+        timeline.receive(&[replacement], Some((2, 0.5)), false, at(11.5));
+        assert_eq!(timeline.sample(at(11.6))[0].target.latitude, 0.002);
+        timeline.receive(&[], Some((2, 1.0)), true, at(12.0));
+        assert!(timeline.sample(at(12.0)).is_empty());
+    }
+
+    #[test]
+    fn body_heading_without_override_is_interpolated_once_across_north() {
+        let mut previous = frame(0.0, 350.0);
+        let mut current = frame(0.0, 10.0);
+        previous.body_heading_degrees = None;
+        current.body_heading_degrees = None;
+        blended(&previous, &mut current, 0.5);
+        assert_eq!(current.body_heading_degrees, Some(0.0));
+        assert_eq!(current.target.track_degrees, 0.0);
+    }
+
+    #[test]
+    fn frame_rate_gate_counts_callbacks_even_with_tcas_running() {
+        let mut clock = DrawClock::default();
+        let start = std::time::Instant::now();
+        let draws: Vec<_> = (0..10)
+            .filter(|frame| {
+                clock.ready(
+                    openatc_settings::TrafficRate::EveryFrames(3),
+                    start + std::time::Duration::from_millis(frame * 16),
+                )
+            })
+            .collect();
+        assert_eq!(draws, [0, 3, 6, 9]);
+    }
+
+    #[test]
+    fn probe_failure_keeps_the_converted_local_altitude() {
+        let local = [100.0, -23.0, 200.0];
+        assert_eq!(ground_pose(local, None, 90.0, 1.0, 2.0), (-23.0, 1.0, 2.0));
+        let ground = Terrain {
+            x: 100.0,
+            y: -20.0,
+            z: 200.0,
+            normal: [0.0, 1.0, 0.0],
+            coordinate: [45.0, 5.0],
+        };
+        assert_eq!(
+            ground_pose(local, Some(&ground), 90.0, 1.0, 2.0),
+            (-20.0, 1.0, 0.0)
+        );
+        assert_eq!(
+            ground_pose([200.0, -23.0, 200.0], Some(&ground), 90.0, 1.0, 2.0),
+            (-23.0, 1.0, 2.0)
+        );
+    }
+    #[test]
+    fn hertz_gate_throttles_even_when_callbacks_are_faster() {
+        let mut clock = DrawClock::default();
+        let start = std::time::Instant::now();
+        let draws: Vec<_> = (0..10)
+            .filter(|tick| {
+                clock.ready(
+                    openatc_settings::TrafficRate::Hertz(10),
+                    start + std::time::Duration::from_millis(tick * 50),
+                )
+            })
+            .collect();
+        assert_eq!(draws, [0, 2, 4, 6, 8]);
+    }
+    #[test]
+    fn ground_relocation_is_not_drawn_as_a_taxi_route() {
+        let start = std::time::Instant::now();
+        let mut timeline = Timeline::default();
+        let mut old = frame(0.0, 0.0);
+        old.target.on_ground = true;
+        let mut new = frame(0.005, 0.0);
+        new.target.on_ground = true;
+        timeline.receive(&[old], Some((1, 0.0)), false, start);
+        timeline.receive(
+            &[new],
+            Some((1, 0.5)),
+            false,
+            start + std::time::Duration::from_millis(500),
+        );
+        assert_eq!(
+            timeline.sample(start + std::time::Duration::from_secs(1))[0]
+                .target
+                .latitude,
+            0.005
+        );
     }
 }

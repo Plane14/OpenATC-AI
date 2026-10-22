@@ -1,4 +1,11 @@
 //! Crew requests become bounded aircraft-profile actions, confirmed by the plugin.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use crate::{Shared, routes::snapshot};
 use axum::{
     Json,
@@ -312,7 +319,7 @@ fn queue(s: &mut crate::EngineState, role: &str, id: &str, value: f64, response:
         || t.paused
         || (c.ground_only && (!t.on_ground || t.ground_speed_knots > 0.5))
         || (c.airborne_only && t.on_ground)
-        || (id == "gear" && value == c.off && t.on_ground)
+        || (id == "gear" && (value - c.off).abs() <= f64::EPSILON && t.on_ground)
         || s.crew
             .observed_at
             .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3))
@@ -529,6 +536,7 @@ fn flight_situation(state: &crate::EngineState) -> &str {
     state.prompts.guidance.get(key)
 }
 
+#[allow(clippy::items_after_statements)]
 async fn converse(shared: &Shared, role: &str, request: &str, points: &[String]) -> Option<String> {
     let state = shared.read().await;
     let role_prompt = match role {
@@ -651,7 +659,7 @@ async fn converse(shared: &Shared, role: &str, request: &str, points: &[String])
     } else {
         points.join(" ")
     };
-    let mut prompt = format!("{instructions}\n{}", facts);
+    let mut prompt = format!("{instructions}\n{facts}");
     while crate::llm::prompt_fits_history(
         &client,
         &settings.ai_url,
@@ -701,7 +709,7 @@ async fn converse(shared: &Shared, role: &str, request: &str, points: &[String])
         } else {
             return None;
         }
-        prompt = format!("{instructions}\n{}", facts);
+        prompt = format!("{instructions}\n{facts}");
     }
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -754,7 +762,7 @@ async fn converse(shared: &Shared, role: &str, request: &str, points: &[String])
             }
         };
         if std::env::var_os("OPENATC_ACTOR_TRACE").is_some() {
-            eprintln!("Crew dialogue: {:?}", candidate);
+            eprintln!("Crew dialogue: {candidate:?}");
         }
         if !humour_allowed {
             candidate.joke.clear();
@@ -843,6 +851,7 @@ async fn converse(shared: &Shared, role: &str, request: &str, points: &[String])
     Some(reply)
 }
 
+#[allow(clippy::items_after_statements)]
 async fn conversation_points(shared: &Shared, role: &str, request: &str) -> Option<Vec<String>> {
     let state = shared.read().await;
     let prompt = state
@@ -1120,7 +1129,9 @@ fn batch_reply(_s: &mut crate::EngineState, batch: Batch) -> String {
                 &[("first", rest.join(", ")), ("last", last.clone())],
             )
         };
-        text = if !batch.held_reply.trim().is_empty() {
+        text = if batch.held_reply.trim().is_empty() {
+            say("crew_batch_complete", &[("items", items)])
+        } else {
             say(
                 "crew_batch_with_conversation",
                 &[
@@ -1128,8 +1139,6 @@ fn batch_reply(_s: &mut crate::EngineState, batch: Batch) -> String {
                     ("reply", batch.held_reply),
                 ],
             )
-        } else {
-            say("crew_batch_complete", &[("items", items)])
         };
         if !text.ends_with(['.', '?', '!']) {
             text.push('.');
@@ -1342,7 +1351,8 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                 if !unique
                     .iter()
                     .any(|previous: &openatc_core::crew::request::ControlAction| {
-                        previous.control == action.control && previous.value == action.value
+                        previous.control == action.control
+                            && (previous.value - action.value).abs() <= f64::EPSILON
                     })
                 {
                     unique.push(action);
@@ -1357,7 +1367,7 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         });
 
         if std::env::var_os("OPENATC_ACTOR_TRACE").is_some() {
-            eprintln!("Crew interpretation: {:?}", intent);
+            eprintln!("Crew interpretation: {intent:?}");
         }
         let intent = intent.filter(|intent| {
             intent.conversation_points.len() <= 16
@@ -1395,7 +1405,7 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
             {
                 Ok(mut controls) => {
                     if std::env::var_os("OPENATC_ACTOR_TRACE").is_some() {
-                        eprintln!("Crew control targets: {:?}", controls);
+                        eprintln!("Crew control targets: {controls:?}");
                     }
                     controls.actions.extend(
                         std::mem::take(&mut controls.control_targets)
@@ -1416,7 +1426,8 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                             action.value,
                         ) && !candidates.iter().any(
                             |previous: &&openatc_core::crew::request::ControlAction| {
-                                previous.control == action.control && previous.value == action.value
+                                previous.control == action.control
+                                    && (previous.value - action.value).abs() <= f64::EPSILON
                             },
                         ) {
                             candidates.push(action);
@@ -1427,9 +1438,11 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                         .iter()
                         .filter(|action| {
                             intent.actions.iter().any(|proposal| {
-                                proposal.control == action.control && proposal.value == action.value
+                                proposal.control == action.control
+                                    && (proposal.value - action.value).abs() <= f64::EPSILON
                             }) && controls.actions.iter().any(|proposal| {
-                                proposal.control == action.control && proposal.value == action.value
+                                proposal.control == action.control
+                                    && (proposal.value - action.value).abs() <= f64::EPSILON
                             })
                         })
                         .copied()
@@ -1438,7 +1451,8 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                         .iter()
                         .filter(|action| {
                             !agreed.iter().any(|agreed| {
-                                agreed.control == action.control && agreed.value == action.value
+                                agreed.control == action.control
+                                    && (agreed.value - action.value).abs() <= f64::EPSILON
                             })
                         })
                         .copied()
@@ -1456,12 +1470,11 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                     if !disputed.is_empty() || check_disputed {
                         let mut targets=disputed.iter().enumerate().map(|(index,action)|{
                             let control=&profile.controls[&action.control];
-                            let meaning=control.states.iter().find(|(_,value)|(**value-action.value).abs()<0.001)
-                                .map(|(state,_)|state.clone()).unwrap_or_else(||{
-                                    if action.value==control.off {say("crew_state_off",&[])}
-                                    else if action.value==control.on {say("crew_state_on",&[])}
+                            let meaning=control.states.iter().find(|(_,value)|(**value-action.value).abs()<0.001).map_or_else(||{
+                                    if (action.value - control.off).abs() <= f64::EPSILON {say("crew_state_off",&[])}
+                                    else if (action.value - control.on).abs() <= f64::EPSILON {say("crew_state_on",&[])}
                                     else {format!("{}",action.value)}
-                                });
+                                }, |(state,_)|state.clone());
                             (format!("candidate_{index}"),json!({"control":action.control,
                                 "proposedOperation":format!("{}: {}",control.label,meaning),"value":action.value,
                                 "instructions":control.instructions}))
@@ -1842,16 +1855,18 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                 .states
                 .iter()
                 .find(|(_, n)| (**n - value).abs() < 0.01)
-                .map(|(name, _)| say(&format!("crew_state_{name}"), &[]))
-                .unwrap_or_else(|| {
-                    if value == c.off {
-                        say("crew_state_off", &[])
-                    } else if value == c.on {
-                        say("crew_state_on", &[])
-                    } else {
-                        say("crew_state_value", &[("value", format!("{value:.0}"))])
-                    }
-                });
+                .map_or_else(
+                    || {
+                        if (value - c.off).abs() <= f64::EPSILON {
+                            say("crew_state_off", &[])
+                        } else if (value - c.on).abs() <= f64::EPSILON {
+                            say("crew_state_on", &[])
+                        } else {
+                            say("crew_state_value", &[("value", format!("{value:.0}"))])
+                        }
+                    },
+                    |(name, _)| say(&format!("crew_state_{name}"), &[]),
+                );
             reply(
                 &mut s,
                 role,
@@ -1916,16 +1931,18 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                 c.states
                     .iter()
                     .find(|(_, v)| (**v - value).abs() < 0.01)
-                    .map(|(name, _)| say(&format!("crew_state_{name}"), &[]))
-                    .unwrap_or_else(|| {
-                        if value == c.off {
-                            say("crew_state_off", &[])
-                        } else if value == c.on {
-                            say("crew_state_on", &[])
-                        } else {
-                            say("crew_state_value", &[("value", format!("{value:.0}"))])
-                        }
-                    })
+                    .map_or_else(
+                        || {
+                            if (value - c.off).abs() <= f64::EPSILON {
+                                say("crew_state_off", &[])
+                            } else if (value - c.on).abs() <= f64::EPSILON {
+                                say("crew_state_on", &[])
+                            } else {
+                                say("crew_state_value", &[("value", format!("{value:.0}"))])
+                            }
+                        },
+                        |(name, _)| say(&format!("crew_state_{name}"), &[]),
+                    )
             };
             let ok = queue(&mut s, role, &id, value, state);
             if !ok {
@@ -1965,6 +1982,7 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod narration_tests {
     #[test]
     fn partial_control_failure_does_not_discard_held_conversation() {
@@ -2023,6 +2041,7 @@ mod narration_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod conversation_routing_tests {
     use super::*;
     use axum::{Router, routing::post};
@@ -3072,6 +3091,7 @@ mod conversation_routing_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod callout_log_tests {
     use super::*;
     #[tokio::test]

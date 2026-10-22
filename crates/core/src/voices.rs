@@ -16,6 +16,7 @@ pub struct Voice {
 }
 
 /// Identify known voice languages when the provider returns names only.
+#[must_use]
 pub fn language(id: &str) -> &'static str {
     match id.as_bytes() {
         [b'a', b'f' | b'm', b'_', ..] => "English (US)",
@@ -33,6 +34,9 @@ pub fn language(id: &str) -> &'static str {
 }
 
 /// Accept string rosters and provider voice records with language metadata.
+/// # Panics
+///
+/// Panics if a voice identifier contains an underscore without a prefix.
 pub fn parse(body: &serde_json::Value) -> Result<Vec<Voice>, String> {
     let list = body
         .get("voices")
@@ -68,19 +72,21 @@ pub fn parse(body: &serde_json::Value) -> Result<Vec<Voice>, String> {
             name: entry
                 .get("name")
                 .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    if super::voices::language(id) != "Unknown" && id.contains('_') {
-                        let name = id.split_once('_').unwrap().1;
-                        let mut chars = name.chars();
-                        chars
-                            .next()
-                            .map(|c| format!("{}{}", c.to_uppercase(), chars.as_str()))
-                            .unwrap_or_else(|| id.into())
-                    } else {
-                        id.into()
-                    }
-                }),
+                .map_or_else(
+                    || {
+                        if super::voices::language(id) != "Unknown" && id.contains('_') {
+                            let name = id.split_once('_').unwrap().1;
+                            let mut chars = name.chars();
+                            chars.next().map_or_else(
+                                || id.into(),
+                                |c| format!("{}{}", c.to_uppercase(), chars.as_str()),
+                            )
+                        } else {
+                            id.into()
+                        }
+                    },
+                    str::to_owned,
+                ),
             language,
             english,
         });

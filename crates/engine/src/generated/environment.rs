@@ -1,5 +1,7 @@
 //! Airport observations retained with their age for generated route planning.
+#[allow(unused_imports, clippy::wildcard_imports)]
 use super::*;
+use super::{Airport, Arc, BTreeMap, Duration, Instant};
 use openatc_core::traffic::air::Atmosphere;
 
 pub(super) type Samples = BTreeMap<String, (serde_json::Value, Instant)>;
@@ -111,7 +113,7 @@ impl Environment {
     }
     pub fn fresh(&self) -> bool {
         if let Some((observations, airport, expected)) = &self.live {
-            return observations.read().ok().is_some_and(|samples| {
+            return observations.read().is_ok_and(|samples| {
                 samples.get(airport).is_some_and(|(sample, observed)| {
                     observed.elapsed() < Duration::from_secs(45)
                         && sample["airport"].as_str() == Some(airport.as_str())
@@ -152,7 +154,7 @@ mod tests {
             &observations,
             &sample.0,
         );
-        weather.observed = Instant::now() - Duration::from_secs(90);
+        weather.observed = Instant::now().checked_sub(Duration::from_secs(90)).unwrap();
         assert!(!weather.fresh());
         observations
             .write()
@@ -169,7 +171,7 @@ mod tests {
             );
         }
         let mut stale = sample.clone();
-        stale.1 = Instant::now() - Duration::from_secs(46);
+        stale.1 = Instant::now().checked_sub(Duration::from_secs(46)).unwrap();
         observations.write().unwrap().insert("TEST".into(), stale);
         assert!(!weather.fresh());
         let mut wrong_airport = sample.clone();
@@ -221,7 +223,7 @@ mod tests {
                 .unwrap();
             assert!((tail - head - 40.0).abs() < 1e-6);
             assert!(
-                (head + tail) / 2.0 > indicated,
+                f64::midpoint(head, tail) > indicated,
                 "Density must change TAS at this warm elevated airport"
             );
         }
@@ -231,10 +233,11 @@ mod tests {
             "Density conversion must use the runway height, not the airport maximum"
         );
         assert!(weather.runway_speed(&airport, "99", 150.0, 5000.0).is_err());
-        weather.observed = Instant::now() - Duration::from_secs(46);
+        weather.observed = Instant::now().checked_sub(Duration::from_secs(46)).unwrap();
         assert!(weather.runway_speed(&airport, "04", 150.0, 5000.0).is_err());
     }
     #[test]
+    #[allow(clippy::float_cmp)]
     fn planner_requires_current_weather_at_the_correct_airport() {
         let airport = Airport {
             icao: "TEST".into(),
@@ -257,7 +260,7 @@ mod tests {
         sample.0["latitude"] = serde_json::json!(44.0);
         assert!(Environment::from_sample(&airport, &sample).is_err());
         sample.0["latitude"] = serde_json::json!(43.0);
-        sample.1 = Instant::now() - Duration::from_secs(46);
+        sample.1 = Instant::now().checked_sub(Duration::from_secs(46)).unwrap();
         assert!(Environment::from_sample(&airport, &sample).is_err());
         sample.1 = Instant::now();
         sample

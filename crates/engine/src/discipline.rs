@@ -1,4 +1,6 @@
 //! Optional reminders based on observed aircraft state, independent of request parsing.
+
+#![allow(clippy::default_trait_access)]
 use crate::EngineState;
 use openatc_core::{
     airport::{Runway, airport_point},
@@ -8,6 +10,7 @@ use openatc_core::{
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Monitor {
     previous_ground: Option<bool>,
     departure_seen: bool,
@@ -575,7 +578,7 @@ mod tests {
         s.session.plan.runway = "09".into();
         s.session.plan.callsign = "TEST1".into();
         s.session.phase = PhaseCode::Taxi;
-        s.session.telemetry.com1_khz = 121900;
+        s.session.telemetry.com1_khz = 121_900;
         s.session.telemetry.position_valid = true;
         s.session.telemetry.latitude = 0.001;
         s.session.telemetry.longitude = 0.005;
@@ -588,7 +591,7 @@ mod tests {
             airport: "TEST".into(),
             service: "Ground".into(),
             name: "Test Ground".into(),
-            khz: 121900,
+            khz: 121_900,
             ..Default::default()
         }];
         s.airport = Some(Airport {
@@ -620,7 +623,7 @@ mod tests {
             &|p| std::fs::read_to_string(p).map_err(|e| e.to_string()),
         )
         .unwrap();
-        for (latitude, longitude) in [(43.652675, 7.205204), (43.655753, 7.202489)] {
+        for (latitude, longitude) in [(43.652_675, 7.205_204), (43.655_753, 7.202_489)] {
             let point = airport_point(&airport, latitude, longitude);
             for runway in &airport.runways {
                 let dx = runway.second.east - runway.first.east;
@@ -669,8 +672,8 @@ mod tests {
         s.session.plan.departure = "LFMN".into();
         s.session.plan.runway = "04R".into();
         s.session.phase = PhaseCode::Pushback;
-        s.session.telemetry.latitude = 43.652675;
-        s.session.telemetry.longitude = 7.205204;
+        s.session.telemetry.latitude = 43.652_675;
+        s.session.telemetry.longitude = 7.205_204;
         s.session.telemetry.on_ground = true;
         let request = openatc_core::state::Request {
             intent: "taxi".into(),
@@ -876,23 +879,23 @@ mod tests {
         let mut state = taxi_state();
         state.session.phase = PhaseCode::Taxi;
         state.session.telemetry.longitude = 0.0;
-        state.session.telemetry.latitude = 300.0 / 111320.0;
+        state.session.telemetry.latitude = 300.0 / 111_320.0;
         let mut movement = TaxiMovement::default();
         movement.observe(&state);
         state.session.telemetry.ground_speed_knots = 5.0;
         for north in [280.0, 250.0, 150.0, 70.0] {
-            state.session.telemetry.latitude = north / 111320.0;
+            state.session.telemetry.latitude = north / 111_320.0;
             movement.observe(&state);
             assert!(off_route(&state));
             assert!(movement.joining_route(&state));
         }
-        state.session.telemetry.longitude = 100.0 / 111320.0;
+        state.session.telemetry.longitude = 100.0 / 111_320.0;
         assert!(!movement.joining_route(&state));
         state.session.telemetry.longitude = 0.0;
-        state.session.telemetry.latitude = 30.0 / 111320.0;
+        state.session.telemetry.latitude = 30.0 / 111_320.0;
         movement.observe(&state);
         assert!(movement.joined_route);
-        state.session.telemetry.latitude = 150.0 / 111320.0;
+        state.session.telemetry.latitude = 150.0 / 111_320.0;
         assert!(off_route(&state));
         assert!(!movement.joining_route(&state));
     }
@@ -1061,7 +1064,7 @@ mod tests {
         request.text = "yes, cross runway 09".into();
         assert_eq!(assistance_answer(&s, &request), None);
         request.text = "yes".into();
-        s.session.telemetry.com1_khz = 118700;
+        s.session.telemetry.com1_khz = 118_700;
         assert_eq!(assistance_answer(&s, &request), None);
         s.session.telemetry.com1_khz = station.khz;
         s.session.taxi_clearance.pending_readback = true;

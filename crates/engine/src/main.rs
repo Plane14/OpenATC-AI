@@ -1,6 +1,9 @@
 //! Companion engine for controller state, local HTTP requests and AI/STT/TTS services.
 
+#![allow(clippy::default_trait_access)]
+
 mod cabin;
+mod config_cache;
 mod context;
 mod crew;
 mod debug_jump;
@@ -17,6 +20,7 @@ mod missions;
 mod parking;
 mod radio;
 mod routes;
+mod setup;
 mod squawk;
 mod support;
 mod surface;
@@ -143,6 +147,22 @@ pub struct EngineState {
 pub type Shared = Arc<RwLock<EngineState>>;
 
 impl EngineState {
+    /// Use the configured callsign only while the plan has none of its own.
+    pub(crate) fn apply_settings_callsign(&mut self) {
+        if self.session.clearance.is_some() || !self.session.plan.callsign.trim().is_empty() {
+            return;
+        }
+        let callsign = self.settings.callsign.trim();
+        if callsign.is_empty() {
+            return;
+        }
+        self.session.plan.callsign = callsign.to_ascii_uppercase();
+        if self.session.plan.registration.trim().is_empty() {
+            let callsign = self.session.plan.callsign.clone();
+            self.session.plan.registration.clone_from(&callsign);
+        }
+    }
+
     fn prompts_text(&self, attendant: bool) -> String {
         if attendant {
             self.prompts.cabin.clone()
@@ -160,22 +180,125 @@ impl EngineState {
     }
 }
 
-/// Resolve the config dir: env override, then XDG, then home fallback.
+/// The product directory name, used for every directory `OpenATC AI` owns.
+const PRODUCT_DIR: &str = "openatc-ai";
+
+/// Resolve the config dir: env override, then the platform convention, then a fallback.
 fn config_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("OPENATC_CONFIG_DIR") {
+    if let Some(dir) =
+        std::env::var_os("OPENATC_AI_CONFIG_DIR").or_else(|| std::env::var_os("OPENATC_CONFIG_DIR"))
+    {
         return PathBuf::from(dir);
     }
     #[cfg(windows)]
     if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(dir).join("openatc");
+        return PathBuf::from(dir).join(PRODUCT_DIR);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join("Library/Application Support")
+            .join(PRODUCT_DIR);
     }
     if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(dir).join("openatc");
+        return PathBuf::from(dir).join(PRODUCT_DIR);
     }
     if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".config/openatc");
+        return PathBuf::from(home).join(".config").join(PRODUCT_DIR);
     }
-    PathBuf::from("openatc-config")
+    PathBuf::from(format!("{PRODUCT_DIR}-config"))
+}
+
+/// Resolve the data dir: env override, then the platform convention, then a fallback.
+///
+/// The data dir holds the models, the backups and the rebuildable scenery index.
+#[allow(dead_code)] // Used by the scenery index.
+fn data_dir() -> PathBuf {
+    if let Some(dir) =
+        std::env::var_os("OPENATC_AI_DATA_DIR").or_else(|| std::env::var_os("OPENATC_DATA_DIR"))
+    {
+        return PathBuf::from(dir);
+    }
+    #[cfg(windows)]
+    if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(dir).join(PRODUCT_DIR);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join("Library/Application Support")
+            .join(PRODUCT_DIR);
+    }
+    if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(dir).join(PRODUCT_DIR);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".local/share").join(PRODUCT_DIR);
+    }
+    PathBuf::from(format!("{PRODUCT_DIR}-data"))
+}
+
+/// The directory used before the product namespace was unified.
+fn legacy_config_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
+        return Some(PathBuf::from(dir).join("openatc"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return Some(PathBuf::from(home).join(".config/openatc"));
+    }
+    None
+}
+
+/// Copy one file, keeping the destination when it already exists.
+fn copy_file(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    if to.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(from, to)?;
+    Ok(())
+}
+
+/// Copy a directory tree, keeping existing destination files.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            copy_file(&entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Move an installation from the old product directory to the current one.
+///
+/// The old directory is left in place as a backup, and only the files the new directory does
+/// not have are copied, so a reinstall never overwrites newer settings.
+fn migrate_legacy_config(config: &std::path::Path) -> Option<std::path::PathBuf> {
+    if config.exists() {
+        return None;
+    }
+    let legacy = legacy_config_dir()?;
+    if !legacy.is_dir() {
+        return None;
+    }
+    match copy_tree(&legacy, config) {
+        Ok(()) => Some(legacy),
+        Err(error) => {
+            eprintln!(
+                "openatc-ai: could not migrate {}: {error}",
+                legacy.display()
+            );
+            None
+        }
+    }
 }
 
 /// Load settings.json when present, otherwise start from defaults.
@@ -301,28 +424,106 @@ async fn main() {
         .and_then(|path| path.parent().map(PathBuf::from))
         .unwrap_or_default();
     let config_dir = config_dir();
-    for path in [
-        exe_dir.join("../intents.toml"),
-        config_dir.join("intents.toml"),
-    ] {
-        if path.is_file()
-            && let Err(error) = openatc_core::catalog::activate(&path)
-        {
-            eprintln!("Intent catalogue rejected: {error}");
-        }
+    if let Some(legacy) = migrate_legacy_config(&config_dir) {
+        eprintln!(
+            "openatc-ai: migrated settings from {} to {}",
+            legacy.display(),
+            config_dir.display()
+        );
     }
-    let mut settings = load_settings(&config_dir);
-    if settings.validate().is_err() {
-        eprintln!("Settings invalid, starting from defaults");
-        settings = Settings::default();
-    }
-    if let Ok(url) = std::env::var("OPENATC_AI_URL") {
-        settings.ai_url = url;
-        settings.ai_enabled = true;
-    }
-    if let Ok(model) = std::env::var("OPENATC_AI_MODEL") {
-        settings.ai_model = model;
-    }
+    let (settings, prompts, regions_path, regions, speech_source, pronunciation, speech, cabin) =
+        tokio::task::spawn_blocking({
+            let config_dir = config_dir.clone();
+            let exe_dir = exe_dir.clone();
+            move || {
+                config_cache::on_worker(|| {
+                    config_cache::initialize();
+                    setup::initial(&config_dir, &exe_dir);
+                    for path in [
+                        exe_dir.join("../intents.toml"),
+                        config_dir.join("intents.toml"),
+                    ] {
+                        if path.is_file()
+                            && let Err(error) = openatc_core::catalog::activate(&path)
+                        {
+                            eprintln!("Intent catalogue rejected: {error}");
+                        }
+                    }
+                    let mut settings = load_settings(&config_dir);
+                    if settings.validate().is_err() {
+                        eprintln!("Settings invalid, starting from defaults");
+                        settings = Settings::default();
+                    }
+                    if let Ok(url) = std::env::var("OPENATC_AI_URL") {
+                        settings.ai_url = url;
+                        settings.ai_enabled = true;
+                    }
+                    if let Ok(model) = std::env::var("OPENATC_AI_MODEL") {
+                        settings.ai_model = model;
+                    }
+                    let prompts = match support::load_prompts(&config_dir, &exe_dir) {
+                        Ok(prompts) => prompts,
+                        Err(error) => {
+                            eprintln!("Role prompt catalogue rejected: {error}");
+                            std::process::exit(1);
+                        }
+                    };
+                    let regions_path = support::resolve_regions_file(&config_dir, &exe_dir);
+                    let regions = if regions_path.is_empty() {
+                        BTreeMap::new()
+                    } else {
+                        load_regions(std::path::Path::new(&regions_path)).unwrap_or_default()
+                    };
+                    let speech_source = support::resolve_speech_dir(&config_dir, &exe_dir);
+                    let pronunciation =
+                        Arc::new(support::load_pronunciation(&config_dir, &speech_source));
+                    eprintln!(
+                        "Speech library: {speech_source}; phrase variety: {}",
+                        settings.llm_phrase_variety
+                    );
+                    if !speech_source.is_empty()
+                        && let Err(error) = openatc_core::dialogue::load(
+                            &std::path::Path::new(&speech_source).join("runtime/responses.toml"),
+                        )
+                    {
+                        eprintln!("Operational speech rejected: {error}");
+                        std::process::exit(1);
+                    }
+                    let speech = if speech_source.is_empty() {
+                        openatc_core::speech::SpeechPool::default()
+                    } else {
+                        match openatc_core::speech::load_speech_dir(std::path::Path::new(
+                            &speech_source,
+                        )) {
+                            Ok(pool) => pool,
+                            Err(error) => {
+                                eprintln!("Speech library rejected: {error}");
+                                openatc_core::speech::SpeechPool::default()
+                            }
+                        }
+                    };
+                    let cabin = match cabin::Cabin::load(&config_dir, &exe_dir) {
+                        Ok(cabin) => cabin,
+                        Err(error) => {
+                            eprintln!("Cabin policy rejected: {error}");
+                            std::process::exit(1);
+                        }
+                    };
+                    (
+                        settings,
+                        prompts,
+                        regions_path,
+                        regions,
+                        speech_source,
+                        pronunciation,
+                        speech,
+                        cabin,
+                    )
+                })
+            }
+        })
+        .await
+        .expect("setup worker");
     let mut controllers = Controllers::default();
     let controllers_path = config_dir.join("controllers.json");
     if let Ok(text) = std::fs::read_to_string(&controllers_path)
@@ -330,57 +531,12 @@ async fn main() {
     {
         controllers = saved;
     }
-    let prompts = match support::load_prompts(&config_dir, &exe_dir) {
-        Ok(prompts) => prompts,
-        Err(error) => {
-            eprintln!("Role prompt catalogue rejected: {error}");
-            std::process::exit(1);
-        }
-    };
-    let regions_path = support::resolve_regions_file(&config_dir, &exe_dir);
-    let regions = if regions_path.is_empty() {
-        BTreeMap::new()
-    } else {
-        load_regions(std::path::Path::new(&regions_path)).unwrap_or_default()
-    };
-    let speech_source = support::resolve_speech_dir(&config_dir, &exe_dir);
-    let pronunciation = Arc::new(support::load_pronunciation(&config_dir, &speech_source));
-    eprintln!(
-        "Speech library: {speech_source}; phrase variety: {}",
-        settings.llm_phrase_variety
-    );
-    if !speech_source.is_empty()
-        && let Err(error) = openatc_core::dialogue::load(
-            &std::path::Path::new(&speech_source).join("runtime/responses.toml"),
-        )
-    {
-        eprintln!("Operational speech rejected: {error}");
-        std::process::exit(1);
-    }
-    let speech = if speech_source.is_empty() {
-        openatc_core::speech::SpeechPool::default()
-    } else {
-        match openatc_core::speech::load_speech_dir(std::path::Path::new(&speech_source)) {
-            Ok(pool) => pool,
-            Err(error) => {
-                eprintln!("Speech library rejected: {error}");
-                openatc_core::speech::SpeechPool::default()
-            }
-        }
-    };
-    let cabin = match cabin::Cabin::load(&config_dir, &exe_dir) {
-        Ok(cabin) => cabin,
-        Err(error) => {
-            eprintln!("Cabin policy rejected: {error}");
-            std::process::exit(1);
-        }
-    };
     let workers = Arc::new(workers::Workers::new(settings.cpu_workers));
     let traffic_profiles = traffic_profiles::Store::default();
     if let Err(error) = traffic_profiles.get(&config_dir, &workers, false).await {
         eprintln!("Traffic profiles rejected: {error}");
     }
-    let shared: Shared = Arc::new(RwLock::new(EngineState {
+    let mut engine = EngineState {
         workers,
         model_installer: Default::default(),
         station_index_lock: Default::default(),
@@ -429,12 +585,16 @@ async fn main() {
         exe_dir,
         expectations: Vec::new(),
         client: reqwest::Client::new(),
-    }));
+    };
+    engine.apply_settings_callsign();
+    let shared: Shared = Arc::new(RwLock::new(engine));
     let weather = shared.clone();
     tokio::spawn(async move { weather_loop(weather).await });
     let lifetime = Arc::new(lifecycle::PluginSession::new(plugin_parent));
     let app = axum::Router::new()
         .route("/health", get(routes::health))
+        .route("/setup/status", post(setup::status))
+        .route("/setup/rebuild", post(setup::rerun))
         .route("/voice-health", get(routes::voice_health))
         .route("/speech/voices", post(routes::post_voices))
         .route("/debug/map", post(radio::debug_map))
@@ -447,6 +607,14 @@ async fn main() {
         .route("/missions/choose", post(missions::choose))
         .route("/traffic/talk", post(traffic::talk))
         .route("/traffic/profiles", post(traffic_profiles::inspect))
+        .route(
+            "/traffic/scenery/status",
+            post(generated::scenery::cache::status),
+        )
+        .route(
+            "/traffic/scenery/clear",
+            post(generated::scenery::cache::clear),
+        )
         .route("/traffic/models/status", post(traffic_models::status))
         .route("/traffic/models/index", post(traffic_models::index))
         .route("/traffic/models/install", post(traffic_models::install))
@@ -507,7 +675,11 @@ fn test_state() -> EngineState {
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    EngineState {
+    let settings = Settings {
+        preview_traffic: false,
+        ..Default::default()
+    };
+    let mut state = EngineState {
         workers: Arc::new(workers::Workers::new(1)),
         model_installer: Default::default(),
         station_index_lock: Default::default(),
@@ -527,7 +699,7 @@ fn test_state() -> EngineState {
         crew: crew::CrewSession::default(),
         flow: flight::FlightFlow::default(),
         session: State::default(),
-        settings: Settings::default(),
+        settings,
         stations: Vec::new(),
         voices: Vec::new(),
         voices_source: String::new(),
@@ -556,5 +728,26 @@ fn test_state() -> EngineState {
         config_dir,
         expectations: Vec::new(),
         client: reqwest::Client::new(),
+    };
+    state.apply_settings_callsign();
+    state
+}
+
+#[cfg(test)]
+mod callsign_tests {
+    use super::*;
+
+    #[test]
+    fn settings_callsign_fills_an_empty_plan_but_not_a_filed_one() {
+        let mut state = test_state();
+        state.settings.callsign = "VH-ABC".into();
+        state.session.plan.callsign.clear();
+        state.session.plan.registration.clear();
+        state.apply_settings_callsign();
+        assert_eq!(state.session.plan.callsign, "VH-ABC");
+        assert_eq!(state.session.plan.registration, "VH-ABC");
+        state.session.plan.callsign = "QFA123".into();
+        state.apply_settings_callsign();
+        assert_eq!(state.session.plan.callsign, "QFA123");
     }
 }

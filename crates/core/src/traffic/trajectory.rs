@@ -1,4 +1,11 @@
 //! Bounded airborne geometry and crossing levels prepared on planning workers.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use super::{
     curves,
     motion::Waypoint,
@@ -109,16 +116,19 @@ pub struct Draft {
 }
 impl Draft {
     /// Retain solved virtual intercept positions without releasing movement samples.
+    #[must_use]
     pub fn crossings(&self) -> &[Fix] {
         &self.crossings
     }
     /// Whether a late entry lies on the first leg ahead of its start; no samples or authority are released.
+    #[must_use]
     pub fn first_leg_join(&self, coordinate: [f64; 2], tolerance_nm: f64) -> bool {
         self.legs
             .first()
             .is_some_and(|leg| forward_join_index(&leg.points, coordinate, tolerance_nm).is_some())
     }
     /// Planning diagnostics; this does not make movement samples available.
+    #[must_use]
     pub fn leg_count(&self) -> usize {
         self.legs.len()
     }
@@ -147,6 +157,7 @@ impl Draft {
     }
 
     /// Endpoint heights used to construct clearances before releasing movement geometry.
+    #[must_use]
     pub fn level_span(&self, index: usize) -> Option<(f64, f64)> {
         let leg = self.legs.get(index)?;
         Some((
@@ -157,6 +168,9 @@ impl Draft {
 
     /// Add clearance limits on the already solved path without releasing its movement samples.
     /// The caller selects assignable levels; original endpoint restrictions remain intact.
+    /// # Panics
+    ///
+    /// Panics if the trajectory has no samples.
     pub fn split_limits(
         self,
         maximum_seconds: f64,
@@ -227,9 +241,14 @@ impl Draft {
                             && *value >= early.min(late) - 1e-6
                             && *value <= early.max(late) + 1e-6
                     })
-                    .ok_or(
-                        "No assignable intermediate level within the clearance duration budget",
-                    )?;
+                    .ok_or_else(|| {
+                        format!(
+                            "No assignable intermediate level within the clearance duration budget (leg {index}, {:.0}..{:.0} ft, preferred {:.0} ft)",
+                            early.min(late),
+                            early.max(late),
+                            late
+                        )
+                    })?;
                 let (time, point) = if (early - late).abs() < 1e-7 {
                     (latest, at(latest))
                 } else {
@@ -309,12 +328,16 @@ impl Draft {
         self,
         protected: impl Fn(Waypoint, Waypoint) -> bool,
     ) -> Result<Vec<Leg>, String> {
-        if self.legs.iter().any(|leg| {
-            leg.points
-                .windows(2)
-                .any(|pair| !protected(pair[0], pair[1]))
-        }) {
-            return Err("Generated airborne path lacks verified corridor protection".into());
+        if let Some(pair) = self
+            .legs
+            .iter()
+            .flat_map(|leg| leg.points.windows(2))
+            .find(|pair| !protected(pair[0], pair[1]))
+        {
+            return Err(format!(
+                "Generated airborne path lacks verified corridor protection near {:.5}/{:.5} to {:.5}/{:.5}",
+                pair[0].latitude, pair[0].longitude, pair[1].latitude, pair[1].longitude
+            ));
         }
         Ok(self.legs)
     }
@@ -462,6 +485,7 @@ pub fn draft_selected(
 }
 
 /// Locate a point on this leg without returning to its start or skipping to a later leg.
+#[must_use]
 pub fn forward_join_index(
     points: &[Waypoint],
     coordinate: [f64; 2],
@@ -543,7 +567,7 @@ fn compile_selected(
         || !(5.0..=30.0).contains(&envelope.bank_degrees)
         || !(0.5..=3.0).contains(&envelope.turn_rate_degrees_sec)
         || !(10.0..=250.0).contains(&envelope.spacing_meters)
-        || !(0.0..=100000.0).contains(&envelope.maximum_detour_meters)
+        || !(0.0..=100_000.0).contains(&envelope.maximum_detour_meters)
         || ![start.latitude, start.longitude, start.altitude_feet]
             .iter()
             .all(|v| v.is_finite())
@@ -555,14 +579,14 @@ fn compile_selected(
     let origin = [start.latitude, start.longitude];
     let projection = |coordinate: [f64; 2]| Point {
         east: crate::navigation::turn(origin[1], coordinate[1])
-            * 111320.0
+            * 111_320.0
             * origin[0].to_radians().cos(),
-        north: (coordinate[0] - origin[0]) * 111320.0,
+        north: (coordinate[0] - origin[0]) * 111_320.0,
         height: 0.0,
     };
     let geographic = |point: Point, altitude_feet: f64| Waypoint {
-        latitude: origin[0] + point.north / 111320.0,
-        longitude: (origin[1] + point.east / (111320.0 * origin[0].to_radians().cos()) + 180.0)
+        latitude: origin[0] + point.north / 111_320.0,
+        longitude: (origin[1] + point.east / (111_320.0 * origin[0].to_radians().cos()) + 180.0)
             .rem_euclid(360.0)
             - 180.0,
         altitude_feet,
@@ -831,6 +855,7 @@ fn intercept_curve(
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 
@@ -1006,8 +1031,8 @@ mod tests {
         };
         let geographic = |east, north| {
             [
-                start.latitude + north / 111320.0,
-                start.longitude + east / (111320.0 * start.latitude.to_radians().cos()),
+                start.latitude + north / 111_320.0,
+                start.longitude + east / (111_320.0 * start.latitude.to_radians().cos()),
             ]
         };
         let u = [146.0f64.to_radians().sin(), 146.0f64.to_radians().cos()];

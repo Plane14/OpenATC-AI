@@ -1,4 +1,11 @@
 //! A level racetrack already aligned at its fix; entry and exit still need clearances.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 use super::motion::{Segment, Stage, Waypoint};
 pub mod published;
 
@@ -67,12 +74,13 @@ impl EntryDraft {
 }
 impl Draft {
     /// Compare a cleared pattern with already protected movement without releasing its samples.
+    #[must_use]
     pub fn matches(&self, segment: &Segment) -> bool {
         segment.stage == self.segment.stage
             && segment.points == self.segment.points
-            && segment.knots == self.segment.knots
+            && (segment.knots - self.segment.knots).abs() <= f64::EPSILON
             && segment.resources == self.segment.resources
-            && segment.dwell_seconds == self.segment.dwell_seconds
+            && (segment.dwell_seconds - self.segment.dwell_seconds).abs() <= f64::EPSILON
     }
 
     /// No movement segment is returned if any part of the racetrack is unprotected.
@@ -95,6 +103,9 @@ impl Draft {
 impl Pattern {
     /// Preserve a small incoming course difference by joining the outbound leg on the first circuit.
     /// Other sectors need a separately planned parallel or teardrop entry.
+    /// # Panics
+    ///
+    /// Panics if the holding pattern has fewer points than the join index.
     pub fn direct_entry(&self, incoming: f64) -> Result<Option<EntryDraft>, String> {
         let hold = self.draft()?.segment;
         if !incoming.is_finite() {
@@ -107,7 +118,7 @@ impl Pattern {
         if difference > 30.0 {
             return Err("Holding requires a separate parallel or teardrop entry".into());
         }
-        let speed = self.ground_knots * 0.514444;
+        let speed = self.ground_knots * 0.514_444;
         let radius = (speed.powi(2) / (9.80665 * self.bank_degrees.to_radians().tan()))
             .max(speed / self.turn_rate_degrees_sec.to_radians());
         let turns = (std::f64::consts::PI * radius / speed).ceil().max(90.0) as usize;
@@ -249,6 +260,9 @@ impl Pattern {
         self.draft()?.protect(protected)
     }
     /// Prepare bounded geometry without releasing it as a movement segment.
+    /// # Panics
+    ///
+    /// Panics if the holding geometry produces an empty sample list.
     pub fn draft(&self) -> Result<Draft, String> {
         if !(-90.0..=90.0).contains(&self.fix.latitude)
             || !(-180.0..=180.0).contains(&self.fix.longitude)
@@ -261,7 +275,7 @@ impl Pattern {
         {
             return Err("Invalid holding speed, level or geometry".into());
         }
-        let speed = self.ground_knots * 0.514444;
+        let speed = self.ground_knots * 0.514_444;
         let radius = (speed.powi(2) / (9.80665 * self.bank_degrees.to_radians().tan()))
             .max(speed / self.turn_rate_degrees_sec.to_radians());
         let heading = self.inbound_degrees.to_radians();
@@ -349,6 +363,7 @@ impl Pattern {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     #[test]
@@ -469,8 +484,8 @@ mod tests {
     fn level_racetrack_keeps_turns_continuous_and_rejects_unprotected_paths() {
         let pattern = Pattern {
             fix: Waypoint {
-                latitude: 45.645972,
-                longitude: 9.021583,
+                latitude: 45.645_972,
+                longitude: 9.021_583,
                 altitude_feet: 6000.0,
             },
             inbound_degrees: 136.0,

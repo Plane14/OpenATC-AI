@@ -1,0 +1,2757 @@
+# Published operator city pairs, keyed by the world airport code.
+# A pair is unordered and the weight is a relative frequency band, not a schedule.
+version = 1
+
+[[route]]
+airline = "A3"
+origin = "LFBO"
+destination = "LGAV"
+weight = 8
+
+[[route]]
+airline = "A3"
+origin = "LFBO"
+destination = "LGIR"
+weight = 8
+
+[[route]]
+airline = "A3"
+origin = "LFML"
+destination = "LGAV"
+weight = 8
+
+[[route]]
+airline = "A3"
+origin = "LFML"
+destination = "LGIR"
+weight = 8
+
+[[route]]
+airline = "A3"
+origin = "LFMN"
+destination = "LGAV"
+weight = 20
+
+[[route]]
+airline = "AAL"
+origin = "LFMN"
+destination = "KJFK"
+weight = 8
+
+[[route]]
+airline = "AAL"
+origin = "LFMN"
+destination = "KPHL"
+weight = 8
+
+[[route]]
+airline = "ABY"
+origin = "LFBO"
+destination = "GMFF"
+weight = 20
+
+[[route]]
+airline = "ABY"
+origin = "LFML"
+destination = "GMFF"
+weight = 20
+
+[[route]]
+airline = "ABY"
+origin = "LFMN"
+destination = "GMFF"
+weight = 20
+
+[[route]]
+airline = "AC"
+origin = "LFBO"
+destination = "CYUL"
+weight = 8
+
+[[route]]
+airline = "AC"
+origin = "LFMN"
+destination = "CYUL"
+weight = 8
+
+[[route]]
+airline = "AC"
+origin = "LFMN"
+destination = "CYYZ"
+weight = 8
+
+[[route]]
+airline = "AFR"
+origin = "LFBO"
+destination = "EHAM"
+weight = 40
+
+[[route]]
+airline = "AFR"
+origin = "LFBO"
+destination = "LFLL"
+weight = 40
+
+[[route]]
+airline = "AFR"
+origin = "LFBO"
+destination = "LFPG"
+weight = 100
+
+[[route]]
+airline = "AFR"
+origin = "LFML"
+destination = "LFLL"
+weight = 40
+
+[[route]]
+airline = "AFR"
+origin = "LFML"
+destination = "LFPG"
+weight = 100
+
+[[route]]
+airline = "AFR"
+origin = "LFMN"
+destination = "LFLL"
+weight = 40
+
+[[route]]
+airline = "AFR"
+origin = "LFMN"
+destination = "LFPG"
+weight = 100
+
+[[route]]
+airline = "AFR"
+origin = "LIMC"
+destination = "LFBD"
+weight = 20
+
+[[route]]
+airline = "AFR"
+origin = "LIMC"
+destination = "LFBO"
+weight = 20
+
+[[route]]
+airline = "AFR"
+origin = "LIMC"
+destination = "LFLL"
+weight = 70
+
+[[route]]
+airline = "AFR"
+origin = "LIMC"
+destination = "LFML"
+weight = 20
+
+[[route]]
+airline = "AFR"
+origin = "LIMC"
+destination = "LFMN"
+weight = 40
+
+[[route]]
+airline = "AFR"
+origin = "LIMC"
+destination = "LFPG"
+weight = 100
+
+[[route]]
+airline = "AFR"
+origin = "LIMC"
+destination = "LFPO"
+weight = 70
+
+[[route]]
+airline = "AFR"
+origin = "LIMC"
+destination = "LFRS"
+weight = 20
+
+[[route]]
+airline = "ASL"
+origin = "LFML"
+destination = "LFKB"
+weight = 20
+
+[[route]]
+airline = "ASL"
+origin = "LFML"
+destination = "LFKJ"
+weight = 20
+
+[[route]]
+airline = "ASL"
+origin = "LFML"
+destination = "LFMN"
+weight = 20
+
+[[route]]
+airline = "ASL"
+origin = "LFML"
+destination = "LFPG"
+weight = 40
+
+[[route]]
+airline = "ASL"
+origin = "LFML"
+destination = "LFRN"
+weight = 20
+
+[[route]]
+airline = "ASL"
+origin = "LIMC"
+destination = "LFLL"
+weight = 20
+
+[[route]]
+airline = "ASL"
+origin = "LIMC"
+destination = "LFPG"
+weight = 20
+
+[[route]]
+airline = "AUA"
+origin = "LFML"
+destination = "LOWW"
+weight = 20
+
+[[route]]
+airline = "AY"
+origin = "LFMN"
+destination = "EFHK"
+weight = 20
+
+[[route]]
+airline = "AY"
+origin = "LIMC"
+destination = "EFHK"
+weight = 20
+
+[[route]]
+airline = "AZA"
+origin = "LFML"
+destination = "LIRF"
+weight = 8
+
+[[route]]
+airline = "AZA"
+origin = "LFMN"
+destination = "LIRF"
+weight = 20
+
+[[route]]
+airline = "AZA"
+origin = "LIMC"
+destination = "LIRF"
+weight = 40
+
+[[route]]
+airline = "BAW"
+origin = "LFBO"
+destination = "EGLL"
+weight = 40
+
+[[route]]
+airline = "BAW"
+origin = "LFML"
+destination = "EGLL"
+weight = 40
+
+[[route]]
+airline = "BAW"
+origin = "LFMN"
+destination = "EGKK"
+weight = 8
+
+[[route]]
+airline = "BAW"
+origin = "LFMN"
+destination = "EGLL"
+weight = 40
+
+[[route]]
+airline = "BAW"
+origin = "LFMN"
+destination = "EGSS"
+weight = 8
+
+[[route]]
+airline = "BAW"
+origin = "LIMC"
+destination = "EGLL"
+weight = 20
+
+[[route]]
+airline = "BT"
+origin = "LFMN"
+destination = "EETN"
+weight = 8
+
+[[route]]
+airline = "BT"
+origin = "LFMN"
+destination = "EVRA"
+weight = 20
+
+[[route]]
+airline = "BT"
+origin = "LFMN"
+destination = "EYVI"
+weight = 8
+
+[[route]]
+airline = "BT"
+origin = "LIMC"
+destination = "EVRA"
+weight = 20
+
+[[route]]
+airline = "CCM"
+origin = "LFBO"
+destination = "LFKB"
+weight = 70
+
+[[route]]
+airline = "CCM"
+origin = "LFBO"
+destination = "LFKC"
+weight = 40
+
+[[route]]
+airline = "CCM"
+origin = "LFBO"
+destination = "LFKF"
+weight = 40
+
+[[route]]
+airline = "CCM"
+origin = "LFBO"
+destination = "LFKJ"
+weight = 70
+
+[[route]]
+airline = "CCM"
+origin = "LFBO"
+destination = "LFRS"
+weight = 20
+
+[[route]]
+airline = "CCM"
+origin = "LFML"
+destination = "LFKB"
+weight = 70
+
+[[route]]
+airline = "CCM"
+origin = "LFML"
+destination = "LFKC"
+weight = 40
+
+[[route]]
+airline = "CCM"
+origin = "LFML"
+destination = "LFKF"
+weight = 40
+
+[[route]]
+airline = "CCM"
+origin = "LFML"
+destination = "LFKJ"
+weight = 70
+
+[[route]]
+airline = "CCM"
+origin = "LFMN"
+destination = "LFKB"
+weight = 70
+
+[[route]]
+airline = "CCM"
+origin = "LFMN"
+destination = "LFKC"
+weight = 40
+
+[[route]]
+airline = "CCM"
+origin = "LFMN"
+destination = "LFKF"
+weight = 40
+
+[[route]]
+airline = "CCM"
+origin = "LFMN"
+destination = "LFKJ"
+weight = 70
+
+[[route]]
+airline = "CCM"
+origin = "LFMN"
+destination = "LIRF"
+weight = 8
+
+[[route]]
+airline = "CRS"
+origin = "LFBO"
+destination = "FMEE"
+weight = 8
+
+[[route]]
+airline = "CRS"
+origin = "LFML"
+destination = "FIMP"
+weight = 8
+
+[[route]]
+airline = "CRS"
+origin = "LFML"
+destination = "FMCV"
+weight = 8
+
+[[route]]
+airline = "CRS"
+origin = "LFML"
+destination = "FMEE"
+weight = 8
+
+[[route]]
+airline = "DAH"
+origin = "LFBO"
+destination = "DAAG"
+weight = 40
+
+[[route]]
+airline = "DAH"
+origin = "LFBO"
+destination = "DABC"
+weight = 20
+
+[[route]]
+airline = "DAH"
+origin = "LFBO"
+destination = "DAOO"
+weight = 20
+
+[[route]]
+airline = "DAH"
+origin = "LFML"
+destination = "DAAG"
+weight = 40
+
+[[route]]
+airline = "DAH"
+origin = "LFML"
+destination = "DAAV"
+weight = 20
+
+[[route]]
+airline = "DAH"
+origin = "LFML"
+destination = "DABB"
+weight = 20
+
+[[route]]
+airline = "DAH"
+origin = "LFML"
+destination = "DABC"
+weight = 20
+
+[[route]]
+airline = "DAH"
+origin = "LFML"
+destination = "DABT"
+weight = 20
+
+[[route]]
+airline = "DAH"
+origin = "LFML"
+destination = "DAON"
+weight = 8
+
+[[route]]
+airline = "DAH"
+origin = "LFML"
+destination = "DAOO"
+weight = 40
+
+[[route]]
+airline = "DAH"
+origin = "LFMN"
+destination = "DAAG"
+weight = 20
+
+[[route]]
+airline = "DAH"
+origin = "LFMN"
+destination = "DABC"
+weight = 8
+
+[[route]]
+airline = "DAH"
+origin = "LIMC"
+destination = "DAAG"
+weight = 20
+
+[[route]]
+airline = "DAL"
+origin = "LFMN"
+destination = "KATL"
+weight = 8
+
+[[route]]
+airline = "DAL"
+origin = "LFMN"
+destination = "KBOS"
+weight = 8
+
+[[route]]
+airline = "DAL"
+origin = "LFMN"
+destination = "KJFK"
+weight = 8
+
+[[route]]
+airline = "DHL"
+origin = "LFBO"
+destination = "LFLL"
+weight = 20
+
+[[route]]
+airline = "DHL"
+origin = "LIMC"
+destination = "EDDF"
+weight = 40
+
+[[route]]
+airline = "DHL"
+origin = "LIMC"
+destination = "LFPG"
+weight = 20
+
+[[route]]
+airline = "DLH"
+origin = "LFBO"
+destination = "EDDM"
+weight = 40
+
+[[route]]
+airline = "DLH"
+origin = "LFML"
+destination = "EDDF"
+weight = 40
+
+[[route]]
+airline = "DLH"
+origin = "LFML"
+destination = "EDDM"
+weight = 40
+
+[[route]]
+airline = "DLH"
+origin = "LFMN"
+destination = "EDDF"
+weight = 40
+
+[[route]]
+airline = "DLH"
+origin = "LFMN"
+destination = "EDDM"
+weight = 40
+
+[[route]]
+airline = "DLH"
+origin = "LIMC"
+destination = "EDDF"
+weight = 20
+
+[[route]]
+airline = "DLH"
+origin = "LIMC"
+destination = "EDDM"
+weight = 20
+
+[[route]]
+airline = "DY"
+origin = "LFBO"
+destination = "EKCH"
+weight = 8
+
+[[route]]
+airline = "DY"
+origin = "LFBO"
+destination = "ENGM"
+weight = 8
+
+[[route]]
+airline = "DY"
+origin = "LFMN"
+destination = "EKCH"
+weight = 20
+
+[[route]]
+airline = "DY"
+origin = "LFMN"
+destination = "ENBR"
+weight = 8
+
+[[route]]
+airline = "DY"
+origin = "LFMN"
+destination = "ENGM"
+weight = 20
+
+[[route]]
+airline = "DY"
+origin = "LFMN"
+destination = "ENTO"
+weight = 8
+
+[[route]]
+airline = "DY"
+origin = "LFMN"
+destination = "ENVA"
+weight = 8
+
+[[route]]
+airline = "DY"
+origin = "LFMN"
+destination = "ESSA"
+weight = 20
+
+[[route]]
+airline = "EI"
+origin = "LFBO"
+destination = "EIDW"
+weight = 40
+
+[[route]]
+airline = "EI"
+origin = "LFML"
+destination = "EIDW"
+weight = 8
+
+[[route]]
+airline = "EI"
+origin = "LFMN"
+destination = "EHEH"
+weight = 8
+
+[[route]]
+airline = "EI"
+origin = "LFMN"
+destination = "EIDW"
+weight = 20
+
+[[route]]
+airline = "EI"
+origin = "LIMC"
+destination = "EIDW"
+weight = 20
+
+[[route]]
+airline = "ETD"
+origin = "LFMN"
+destination = "OMAA"
+weight = 8
+
+[[route]]
+airline = "ETD"
+origin = "LIMC"
+destination = "OMAA"
+weight = 20
+
+[[route]]
+airline = "EW"
+origin = "LFML"
+destination = "EDDL"
+weight = 8
+
+[[route]]
+airline = "EW"
+origin = "LFMN"
+destination = "EDDB"
+weight = 20
+
+[[route]]
+airline = "EW"
+origin = "LFMN"
+destination = "EDDH"
+weight = 8
+
+[[route]]
+airline = "EW"
+origin = "LFMN"
+destination = "EDDK"
+weight = 20
+
+[[route]]
+airline = "EW"
+origin = "LFMN"
+destination = "EDDL"
+weight = 20
+
+[[route]]
+airline = "EW"
+origin = "LFMN"
+destination = "EDDM"
+weight = 8
+
+[[route]]
+airline = "EW"
+origin = "LFMN"
+destination = "LKPR"
+weight = 8
+
+[[route]]
+airline = "EW"
+origin = "LIMC"
+destination = "EDDB"
+weight = 20
+
+[[route]]
+airline = "EW"
+origin = "LIMC"
+destination = "EDDL"
+weight = 20
+
+[[route]]
+airline = "EZY"
+origin = "LFBO"
+destination = "EGBB"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFBO"
+destination = "EGKK"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFBO"
+destination = "GMMX"
+weight = 20
+
+[[route]]
+airline = "EZY"
+origin = "LFBO"
+destination = "LEPA"
+weight = 8
+
+[[route]]
+airline = "EZY"
+origin = "LFBO"
+destination = "LFLL"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFBO"
+destination = "LFMN"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFBO"
+destination = "LFPO"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFBO"
+destination = "LFRS"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFBO"
+destination = "LFSB"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFBO"
+destination = "LIMC"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFBO"
+destination = "LSGG"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFML"
+destination = "EGBB"
+weight = 8
+
+[[route]]
+airline = "EZY"
+origin = "LFML"
+destination = "EGKK"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFML"
+destination = "LFBD"
+weight = 20
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "EBBR"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "EDDB"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "EGBB"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "EGCC"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "EGJB"
+weight = 20
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "EGKK"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "EGPH"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "EHAM"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "EIDW"
+weight = 20
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "ELLX"
+weight = 8
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "GCTS"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "GMMX"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LEAL"
+weight = 8
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LEBL"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LEIB"
+weight = 8
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LEMD"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LEMH"
+weight = 8
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LEPA"
+weight = 8
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LEVC"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LEZL"
+weight = 8
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LFBD"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LFBZ"
+weight = 8
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LFJL"
+weight = 8
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LFMT"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LFNN"
+weight = 8
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LFQQ"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LFRN"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LFRS"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LFSB"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LFST"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LGAV"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LIBD"
+weight = 8
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LIPZ"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LIRF"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LIRN"
+weight = 8
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LKPR"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LPPT"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LFMN"
+destination = "LSGG"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LIMC"
+destination = "LEBL"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LIMC"
+destination = "LEMD"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LIMC"
+destination = "LFLL"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LIMC"
+destination = "LFML"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LIMC"
+destination = "LFMN"
+weight = 40
+
+[[route]]
+airline = "EZY"
+origin = "LIMC"
+destination = "LFPG"
+weight = 100
+
+[[route]]
+airline = "EZY"
+origin = "LIMC"
+destination = "LFPO"
+weight = 40
+
+[[route]]
+airline = "FDX"
+origin = "LFBO"
+destination = "LFPG"
+weight = 40
+
+[[route]]
+airline = "FI"
+origin = "LFMN"
+destination = "BIKF"
+weight = 8
+
+[[route]]
+airline = "FS"
+origin = "LFML"
+destination = "GMMN"
+weight = 8
+
+[[route]]
+airline = "FS"
+origin = "LFML"
+destination = "ZSPD"
+weight = 8
+
+[[route]]
+airline = "GEG"
+origin = "LFMN"
+destination = "UGTB"
+weight = 8
+
+[[route]]
+airline = "GFA"
+origin = "LFMN"
+destination = "LIMC"
+weight = 8
+
+[[route]]
+airline = "GFA"
+origin = "LFMN"
+destination = "OBBI"
+weight = 8
+
+[[route]]
+airline = "IBE"
+origin = "LFBO"
+destination = "LEMD"
+weight = 40
+
+[[route]]
+airline = "IBE"
+origin = "LFML"
+destination = "LEMD"
+weight = 20
+
+[[route]]
+airline = "IBE"
+origin = "LFMN"
+destination = "LEIB"
+weight = 8
+
+[[route]]
+airline = "IBE"
+origin = "LFMN"
+destination = "LEMD"
+weight = 20
+
+[[route]]
+airline = "IBE"
+origin = "LFMN"
+destination = "LEPA"
+weight = 8
+
+[[route]]
+airline = "IBE"
+origin = "LIMC"
+destination = "LEMD"
+weight = 20
+
+[[route]]
+airline = "KAL"
+origin = "LFML"
+destination = "RKSI"
+weight = 8
+
+[[route]]
+airline = "KLM"
+origin = "LFBO"
+destination = "EHAM"
+weight = 40
+
+[[route]]
+airline = "KLM"
+origin = "LFML"
+destination = "EHAM"
+weight = 40
+
+[[route]]
+airline = "KLM"
+origin = "LFMN"
+destination = "EHAM"
+weight = 40
+
+[[route]]
+airline = "KLM"
+origin = "LIMC"
+destination = "EHAM"
+weight = 20
+
+[[route]]
+airline = "KWI"
+origin = "LFMN"
+destination = "OKKK"
+weight = 8
+
+[[route]]
+airline = "LG"
+origin = "LFMN"
+destination = "ELLX"
+weight = 20
+
+[[route]]
+airline = "LO"
+origin = "LFMN"
+destination = "EPWA"
+weight = 20
+
+[[route]]
+airline = "LO"
+origin = "LIMC"
+destination = "EPWA"
+weight = 20
+
+[[route]]
+airline = "LY"
+origin = "LFML"
+destination = "LLBG"
+weight = 8
+
+[[route]]
+airline = "LY"
+origin = "LFMN"
+destination = "LLBG"
+weight = 8
+
+[[route]]
+airline = "LY"
+origin = "LIMC"
+destination = "LLBG"
+weight = 20
+
+[[route]]
+airline = "MAE"
+origin = "LFBO"
+destination = "LFLL"
+weight = 20
+
+[[route]]
+airline = "MEA"
+origin = "LFMN"
+destination = "OLBA"
+weight = 8
+
+[[route]]
+airline = "MND"
+origin = "LFMN"
+destination = "LNMC"
+weight = 8
+
+[[route]]
+airline = "NLR"
+origin = "LFBO"
+destination = "DTTA"
+weight = 20
+
+[[route]]
+airline = "NLR"
+origin = "LFBO"
+destination = "DTTJ"
+weight = 20
+
+[[route]]
+airline = "NLR"
+origin = "LFML"
+destination = "DTTA"
+weight = 20
+
+[[route]]
+airline = "NLR"
+origin = "LFML"
+destination = "DTTJ"
+weight = 20
+
+[[route]]
+airline = "NLR"
+origin = "LFMN"
+destination = "DTMB"
+weight = 8
+
+[[route]]
+airline = "NLR"
+origin = "LFMN"
+destination = "DTTA"
+weight = 20
+
+[[route]]
+airline = "NLR"
+origin = "LIMC"
+destination = "DTTA"
+weight = 20
+
+[[route]]
+airline = "PCP"
+origin = "LFML"
+destination = "LTFJ"
+weight = 8
+
+[[route]]
+airline = "PCP"
+origin = "LFMN"
+destination = "LTFJ"
+weight = 20
+
+[[route]]
+airline = "PCP"
+origin = "LIMC"
+destination = "LTFJ"
+weight = 20
+
+[[route]]
+airline = "PWA"
+origin = "LFMN"
+destination = "KEWR"
+weight = 8
+
+[[route]]
+airline = "QTR"
+origin = "LFMN"
+destination = "OTHH"
+weight = 20
+
+[[route]]
+airline = "QTR"
+origin = "LIMC"
+destination = "OTHH"
+weight = 20
+
+[[route]]
+airline = "RAM"
+origin = "LFBO"
+destination = "GMMN"
+weight = 40
+
+[[route]]
+airline = "RAM"
+origin = "LFBO"
+destination = "GMMX"
+weight = 40
+
+[[route]]
+airline = "RAM"
+origin = "LFML"
+destination = "GMME"
+weight = 20
+
+[[route]]
+airline = "RAM"
+origin = "LFML"
+destination = "GMMN"
+weight = 40
+
+[[route]]
+airline = "RAM"
+origin = "LFML"
+destination = "GMMX"
+weight = 40
+
+[[route]]
+airline = "RAM"
+origin = "LFMN"
+destination = "GMMN"
+weight = 20
+
+[[route]]
+airline = "RAM"
+origin = "LIMC"
+destination = "GMMN"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "CZFA"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "DAOO"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "DTMB"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "EBCI"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "EGBB"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "EGCC"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "EGPH"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "EGSS"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "EIDW"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "EPKK"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "GMFF"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "GMMX"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "LEAL"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "LEIB"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "LEMH"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "LEPA"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "LEVC"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "LHBP"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "LIBD"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "LIPZ"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "LIRF"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "LIRN"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "LPPS"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFBO"
+destination = "LPPT"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "BIKF"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "CZFA"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "DTMB"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "DTTA"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "EBCI"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "EGCC"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "EGHH"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "EGPH"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "EGSS"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "EIDW"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "ENBR"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "ENVA"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "EPKK"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "EPWR"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "GCTS"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "GMME"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "GMMI"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "GMMX"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LEAL"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LEIB"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LEMD"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LEPA"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LEVC"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LEZL"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LFBH"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LFQQ"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LGAV"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LGSA"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LHBP"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LIRF"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LIRN"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LIRP"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LKPR"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LOWW"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LPPS"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LPPT"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFML"
+destination = "LROP"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LFMN"
+destination = "EGSS"
+weight = 8
+
+[[route]]
+airline = "RYR"
+origin = "LFMN"
+destination = "EIDW"
+weight = 20
+
+[[route]]
+airline = "RYR"
+origin = "LIMC"
+destination = "EGSS"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LIMC"
+destination = "LEBL"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LIMC"
+destination = "LEMD"
+weight = 40
+
+[[route]]
+airline = "RYR"
+origin = "LIMC"
+destination = "LIRF"
+weight = 40
+
+[[route]]
+airline = "SK"
+origin = "LFML"
+destination = "EKCH"
+weight = 8
+
+[[route]]
+airline = "SK"
+origin = "LFMN"
+destination = "EKCH"
+weight = 8
+
+[[route]]
+airline = "SK"
+origin = "LFMN"
+destination = "ENGM"
+weight = 8
+
+[[route]]
+airline = "SK"
+origin = "LFMN"
+destination = "ESSA"
+weight = 8
+
+[[route]]
+airline = "SK"
+origin = "LIMC"
+destination = "EKCH"
+weight = 20
+
+[[route]]
+airline = "SK"
+origin = "LIMC"
+destination = "ENGM"
+weight = 20
+
+[[route]]
+airline = "SNZ"
+origin = "LFBO"
+destination = "EBBR"
+weight = 20
+
+[[route]]
+airline = "SNZ"
+origin = "LFML"
+destination = "EBBR"
+weight = 20
+
+[[route]]
+airline = "SNZ"
+origin = "LFMN"
+destination = "EBBR"
+weight = 20
+
+[[route]]
+airline = "SNZ"
+origin = "LIMC"
+destination = "EBBR"
+weight = 20
+
+[[route]]
+airline = "SWF"
+origin = "LFBO"
+destination = "LFPG"
+weight = 40
+
+[[route]]
+airline = "SWF"
+origin = "LFBO"
+destination = "LROP"
+weight = 20
+
+[[route]]
+airline = "SWR"
+origin = "LFBO"
+destination = "LSZH"
+weight = 8
+
+[[route]]
+airline = "SWR"
+origin = "LFML"
+destination = "LSGG"
+weight = 20
+
+[[route]]
+airline = "SWR"
+origin = "LFML"
+destination = "LSZH"
+weight = 20
+
+[[route]]
+airline = "SWR"
+origin = "LFMN"
+destination = "LSGG"
+weight = 20
+
+[[route]]
+airline = "SWR"
+origin = "LFMN"
+destination = "LSZH"
+weight = 20
+
+[[route]]
+airline = "SWR"
+origin = "LIMC"
+destination = "LSZH"
+weight = 20
+
+[[route]]
+airline = "TAP"
+origin = "LFBO"
+destination = "LPPT"
+weight = 20
+
+[[route]]
+airline = "TAP"
+origin = "LFML"
+destination = "LPPT"
+weight = 20
+
+[[route]]
+airline = "TAP"
+origin = "LFMN"
+destination = "LPPT"
+weight = 20
+
+[[route]]
+airline = "TAP"
+origin = "LIMC"
+destination = "LFPG"
+weight = 20
+
+[[route]]
+airline = "TAP"
+origin = "LIMC"
+destination = "LPPT"
+weight = 20
+
+[[route]]
+airline = "TAR"
+origin = "LFBO"
+destination = "DTTA"
+weight = 20
+
+[[route]]
+airline = "TAR"
+origin = "LFML"
+destination = "DTTA"
+weight = 20
+
+[[route]]
+airline = "TAR"
+origin = "LFML"
+destination = "DTTJ"
+weight = 20
+
+[[route]]
+airline = "TAR"
+origin = "LFMN"
+destination = "DTMB"
+weight = 8
+
+[[route]]
+airline = "TAR"
+origin = "LIMC"
+destination = "DTTA"
+weight = 20
+
+[[route]]
+airline = "THY"
+origin = "LFBO"
+destination = "LTFM"
+weight = 20
+
+[[route]]
+airline = "THY"
+origin = "LFML"
+destination = "LTFM"
+weight = 20
+
+[[route]]
+airline = "THY"
+origin = "LFMN"
+destination = "LTFM"
+weight = 20
+
+[[route]]
+airline = "THY"
+origin = "LIMC"
+destination = "LTFM"
+weight = 20
+
+[[route]]
+airline = "TJO"
+origin = "LFBO"
+destination = "LFML"
+weight = 40
+
+[[route]]
+airline = "TJO"
+origin = "LFBO"
+destination = "LFMN"
+weight = 40
+
+[[route]]
+airline = "TJO"
+origin = "LFBO"
+destination = "LFRN"
+weight = 40
+
+[[route]]
+airline = "TJO"
+origin = "LFBO"
+destination = "LFRS"
+weight = 40
+
+[[route]]
+airline = "TJO"
+origin = "LFML"
+destination = "LFBZ"
+weight = 8
+
+[[route]]
+airline = "TOY"
+origin = "LFBO"
+destination = "DAAG"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFBO"
+destination = "DAOO"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFBO"
+destination = "GMMX"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFBO"
+destination = "GOBD"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFBO"
+destination = "LEAL"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFBO"
+destination = "LFOB"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFBO"
+destination = "LFPO"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFBO"
+destination = "LFRB"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFBO"
+destination = "LLBG"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFBO"
+destination = "OEJN"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFBO"
+destination = "OEMA"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "DABB"
+weight = 8
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "DTTA"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "DTTJ"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "GOBD"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "HECA"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "HEGN"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "LEPA"
+weight = 8
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "LEVC"
+weight = 8
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "LEZL"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "LFBZ"
+weight = 8
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "LFPO"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "LFRB"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "LFRS"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "LGAV"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "LGIR"
+weight = 8
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "LKPR"
+weight = 8
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "LLBG"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "LPMA"
+weight = 8
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "LTAI"
+weight = 8
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "OEJN"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "OEMA"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFML"
+destination = "OLBA"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LFMN"
+destination = "DTTA"
+weight = 8
+
+[[route]]
+airline = "TOY"
+origin = "LFMN"
+destination = "LFPO"
+weight = 20
+
+[[route]]
+airline = "TOY"
+origin = "LIMC"
+destination = "LFPO"
+weight = 20
+
+[[route]]
+airline = "TS"
+origin = "LFBO"
+destination = "CYUL"
+weight = 8
+
+[[route]]
+airline = "TS"
+origin = "LFML"
+destination = "CYQB"
+weight = 8
+
+[[route]]
+airline = "TS"
+origin = "LFML"
+destination = "CYUL"
+weight = 8
+
+[[route]]
+airline = "TS"
+origin = "LFMN"
+destination = "CYUL"
+weight = 8
+
+[[route]]
+airline = "UAE"
+origin = "LFMN"
+destination = "OMDB"
+weight = 20
+
+[[route]]
+airline = "UAE"
+origin = "LIMC"
+destination = "OMDB"
+weight = 20
+
+[[route]]
+airline = "UAL"
+origin = "LFBO"
+destination = "KIAD"
+weight = 8
+
+[[route]]
+airline = "UAL"
+origin = "LFML"
+destination = "KEWR"
+weight = 8
+
+[[route]]
+airline = "UAL"
+origin = "LFMN"
+destination = "KEWR"
+weight = 8
+
+[[route]]
+airline = "UAL"
+origin = "LFMN"
+destination = "KIAD"
+weight = 8
+
+[[route]]
+airline = "UPS"
+origin = "LFBO"
+destination = "EDDK"
+weight = 20
+
+[[route]]
+airline = "UPS"
+origin = "LFML"
+destination = "EDDK"
+weight = 20
+
+[[route]]
+airline = "UPS"
+origin = "LIMC"
+destination = "EDDK"
+weight = 40
+
+[[route]]
+airline = "UPS"
+origin = "LIMC"
+destination = "LFPG"
+weight = 20
+
+[[route]]
+airline = "VLG"
+origin = "LFMN"
+destination = "LEBL"
+weight = 20
+
+[[route]]
+airline = "VLG"
+origin = "LIMC"
+destination = "LEBL"
+weight = 20
+
+[[route]]
+airline = "VLG"
+origin = "LIMC"
+destination = "LIRF"
+weight = 20
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "CZFA"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "DTMB"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "EDDM"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "EGBB"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "ELLX"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "EPKK"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "GCFV"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "GCLP"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "GCTS"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "LDSP"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "LEBB"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "LEMD"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "LEPA"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "LFQQ"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "LFRK"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "LFRN"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "LFRS"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "LFST"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "LIEO"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "LIPZ"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "LIRI"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "LIRP"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFBO"
+destination = "LKPR"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "DAAG"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "DAOO"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "EGBB"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "EIDW"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "EKCH"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "ELLX"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "GCFV"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "GMMX"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LDDU"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LEBB"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LEBL"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LEMD"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LEPA"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LEVC"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LEZL"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LFBD"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LFRB"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LFRK"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LFRN"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LFST"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LGAV"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LGIR"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LIPZ"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LIRF"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LIRN"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFML"
+destination = "LOWW"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "EBBR"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "EIDW"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "EKCH"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "GCTS"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LDDU"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LEAL"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LEBL"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LEMD"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LEPA"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LEVC"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LEZL"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LFBD"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LFOB"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LFQQ"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LFRB"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LFRK"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LFRN"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LFRS"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LFST"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LGIR"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LFMN"
+destination = "LIPZ"
+weight = 8
+
+[[route]]
+airline = "VOE"
+origin = "LIMC"
+destination = "LFBD"
+weight = 20
+
+[[route]]
+airline = "VOE"
+origin = "LIMC"
+destination = "LFLL"
+weight = 20
+
+[[route]]
+airline = "VPC"
+origin = "LFML"
+destination = "OEJN"
+weight = 8
+
+[[route]]
+airline = "VPC"
+origin = "LFMN"
+destination = "OEMA"
+weight = 8
+
+[[route]]
+airline = "WID"
+origin = "LFMN"
+destination = "ENTO"
+weight = 8
+
+[[route]]
+airline = "WZZ"
+origin = "LFBO"
+destination = "LKPR"
+weight = 20
