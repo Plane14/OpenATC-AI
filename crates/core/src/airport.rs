@@ -1972,6 +1972,21 @@ fn runway_projection(point: Point, first: Point, second: Point) -> Point {
 fn segment_distance(point: Point, first: Point, second: Point) -> f64 {
     flat_distance(&point, &runway_projection(point, first, second))
 }
+
+/// Whether a local point lies on published taxiway pavement, within `margin` metres.
+#[must_use]
+pub fn on_taxiway(airport: &Airport, point: &Point, margin: f64) -> bool {
+    let margin = margin.max(0.0);
+    airport.edges.iter().any(|edge| {
+        let Some(first) = airport.nodes.iter().find(|node| node.id == edge.first) else {
+            return false;
+        };
+        let Some(second) = airport.nodes.iter().find(|node| node.id == edge.second) else {
+            return false;
+        };
+        segment_distance(*point, first.point, second.point) <= margin
+    })
+}
 /// A separately authorized runway taxi route. Painted taxiway geometry is preferred;
 /// an apron connector is accepted only where installed pavement reaches the runway.
 /// No other runway, gap in pavement, or remote painted hold may be crossed.

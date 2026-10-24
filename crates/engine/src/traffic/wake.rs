@@ -19,6 +19,7 @@ struct Liftoff {
     runway: String,
     heading: f64,
     category: Option<char>,
+    wake_category: Option<u8>,
     aircraft: String,
     callsign: String,
     distance_pending: bool,
@@ -61,7 +62,7 @@ impl Monitor {
             return 1.0;
         }
         let Some(position) = runway_position(airport, runway, latitude, longitude) else {
-            return 240.0;
+            return 0.0;
         };
         self.departures
             .iter()
@@ -101,8 +102,17 @@ impl Monitor {
                 } else {
                     Departure::FullLength
                 };
-                let required = wake::departure_for(&airport.icao, &event.aircraft, aircraft, kind)
-                    .unwrap_or(240);
+                // Unknown pairs do not invent a wake hold. The published table is leader-based:
+                // a heavier follower behind a lighter leader needs no extra interval.
+                let required = wake::departure_for_wake(
+                    &airport.icao,
+                    &event.aircraft,
+                    event.wake_category,
+                    aircraft,
+                    None,
+                    kind,
+                )
+                .unwrap_or(0);
                 (f64::from(required) - (self.elapsed - event.at)).max(0.0)
             })
             .fold(0.0, f64::max)
@@ -179,8 +189,14 @@ impl Monitor {
             {
                 continue;
             }
-            let required_nm = wake::arrival_for(&airport.icao, &target.aircraft, &t.aircraft_icao)
-                .unwrap_or(10.0);
+            let required_nm = wake::arrival_for_wake(
+                &airport.icao,
+                &target.aircraft,
+                target.wake_category,
+                &t.aircraft_icao,
+                t.wake_category,
+            )
+            .unwrap_or(10.0);
             if required_nm == 0.0 {
                 continue;
             }
@@ -315,6 +331,7 @@ pub(super) fn observe(state: &mut EngineState) {
                         runway,
                         heading,
                         category: wake::category(&target.aircraft),
+                        wake_category: target.wake_category,
                         aircraft: target.aircraft.clone(),
                         callsign: target.callsign.clone(),
                         distance_pending: airport.icao.starts_with('Y')

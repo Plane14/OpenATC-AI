@@ -289,7 +289,13 @@ impl Animation {
         self.bank = approach(self.bank, bank, h.bank_rate_degrees_sec);
         self.pitch = approach(self.pitch, pitch, h.pitch_rate_degrees_sec);
         let gear = input.fixed_gear || ground || input.stage == Stage::Approach;
-        self.gear = approach(self.gear, f64::from(gear), 1.0 / h.gear_seconds);
+        // A generated aircraft that spawns on the ground has its gear down. Lerping from the
+        // default would show it taxiing gear-up for several seconds.
+        self.gear = if ground {
+            1.0
+        } else {
+            approach(self.gear, f64::from(gear), 1.0 / h.gear_seconds)
+        };
         let flaps = match input.stage {
             Stage::LineUp | Stage::Takeoff | Stage::MissedApproach => h.takeoff_flaps,
             Stage::Approach => h.landing_flaps,

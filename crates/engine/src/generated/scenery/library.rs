@@ -17,6 +17,7 @@ pub(super) struct Library {
     resources_cache: RefCell<ResourceCache>,
     solid_cache: RefCell<BTreeMap<String, Option<bool>>>,
     string_cache: RefCell<StringCache>,
+    ground_reach_cache: RefCell<BTreeMap<(PathBuf, String), Option<f64>>>,
     forest_cache: RefCell<BTreeMap<(PathBuf, String), Option<f64>>>,
 }
 
@@ -31,6 +32,7 @@ impl Default for Library {
             resources_cache: RefCell::new(BTreeMap::new()),
             solid_cache: RefCell::new(BTreeMap::new()),
             string_cache: RefCell::new(BTreeMap::new()),
+            ground_reach_cache: RefCell::new(BTreeMap::new()),
             forest_cache: RefCell::new(BTreeMap::new()),
         }
     }
@@ -461,6 +463,89 @@ impl Library {
     /// string itself only describes where the catalogue is repeated, so the height of the
     /// resulting obstacle is the tallest thing it can place. A reference that cannot be resolved
     /// makes the whole string unresolved rather than being treated as flat ground.
+    /// Bound the distance between an annotation and its tile's ground point.
+    /// SHARE_Y can refer to another tile, so those definitions retain the area-wide bound.
+    pub fn autogen_ground_reach(&self, pack: &Path, name: &str) -> Option<f64> {
+        let key = (pack.to_path_buf(), name.to_owned());
+        if let Some(value) = self.ground_reach_cache.borrow().get(&key) {
+            return *value;
+        }
+        let result = (|| {
+            let mut maximum = 0.0_f64;
+            for path in self.resources(pack, name).ok()? {
+                let mut text = String::new();
+                super::cache::open_file(&path)
+                    .ok()?
+                    .take(16 * 1024 * 1024 + 1)
+                    .read_to_string(&mut text)
+                    .ok()?;
+                if text.len() > 16 * 1024 * 1024 {
+                    return None;
+                }
+                let mut scale = None;
+                let mut width = None;
+                let mut height = None;
+                let mut tiles = 0;
+                let mut tile = None;
+                for line in text.lines() {
+                    let fields: Vec<_> = line.split('#').next()?.split_whitespace().collect();
+                    let number = |index: usize| {
+                        fields
+                            .get(index)?
+                            .parse::<f64>()
+                            .ok()
+                            .filter(|n| n.is_finite())
+                    };
+                    match fields.first().copied() {
+                        Some("SHARE_Y") => return None,
+                        Some("GROUND_PT") => {
+                            let [left, bottom, right, top]: [f64; 4] = tile?;
+                            if !(left..=right).contains(&number(1)?)
+                                || !(bottom..=top).contains(&number(2)?)
+                            {
+                                return None;
+                            }
+                        }
+                        Some("TEXTURE_SCALE") => scale = Some([number(1)?, number(2)?]),
+                        Some("TEXTURE_WIDTH") => width = Some(number(1)?),
+                        Some("TEXTURE_HEIGHT") => height = Some(number(1)?),
+                        Some("TILE") => {
+                            let scale: [f64; 2] = scale?;
+                            let width: f64 = width?;
+                            if scale.iter().any(|n| *n <= 0.0) || width <= 0.0 {
+                                return None;
+                            }
+                            let sx = width / scale[0];
+                            let sy = height.map_or(sx, |height| height / scale[1]);
+                            if sy <= 0.0 {
+                                return None;
+                            }
+                            let bounds = [number(1)?, number(2)?, number(3)?, number(4)?];
+                            if bounds[0] > bounds[2] || bounds[1] > bounds[3] {
+                                return None;
+                            }
+                            tile = Some(bounds);
+                            let diagonal = ((number(3)? - number(1)?) * sx)
+                                .hypot((number(4)? - number(2)?) * sy);
+                            if !(0.0..=5000.0).contains(&diagonal) {
+                                return None;
+                            }
+                            maximum = maximum.max(diagonal);
+                            tiles += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                if tiles == 0 {
+                    return None;
+                }
+            }
+            (maximum > 0.0).then_some(maximum)
+        })();
+        self.ground_reach_cache.borrow_mut().insert(key, result);
+        result
+    }
+
     pub fn string_height(
         &self,
         pack: &Path,
@@ -802,6 +887,20 @@ mod tests {
             )));
         }
         assert!(!paved_definition("A\n850\nLINE_PAINT\nSURFACE concrete\n"));
+    }
+
+    #[test]
+    fn autogen_ground_references_are_bounded_by_the_tile_not_the_whole_area() {
+        let root =
+            std::env::temp_dir().join(format!("openatc-ground-reach-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let text = "A\n1000\nAG_STRING\nTEXTURE_SCALE 2048 1024\nTEXTURE_WIDTH 256\nTEXTURE_HEIGHT 128\nTILE 0 0 240 320\nGROUND_PT 30 40\n";
+        std::fs::write(root.join("local.ags"), text).unwrap();
+        std::fs::write(root.join("shared.ags"), format!("{text}SHARE_Y\n")).unwrap();
+        let library = Library::default();
+        assert_eq!(library.autogen_ground_reach(&root, "local.ags"), Some(50.0));
+        assert_eq!(library.autogen_ground_reach(&root, "shared.ags"), None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

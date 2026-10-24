@@ -457,7 +457,7 @@ fn draw_map(
         );
     }
     if interface.taxi_traffic_visible {
-        for target in state.telemetry.traffic.iter().flatten().take(126) {
+        for target in crate::traffic::targets(state).take(126) {
             if !target.latitude.is_finite()
                 || !target.longitude.is_finite()
                 || !target.track_degrees.is_finite()
@@ -478,6 +478,35 @@ fn draw_map(
                 continue;
             }
             draw_traffic(ui, draw, screen, target);
+        }
+    }
+    if interface.settings.show_traffic_holding_points {
+        // Where each ground aircraft's next hold lies: before a crossing or at the departure
+        // runway. Drawn separately from the aircraft so a wrong holding point is visible
+        // rather than implied by the aircraft's stopped position.
+        for point in state.generated_holding_points.values().take(126) {
+            let [latitude, longitude] = *point;
+            if !latitude.is_finite() || !longitude.is_finite() {
+                continue;
+            }
+            let point = airport_point(airport, latitude, longitude);
+            if point.east.hypot(point.north) > 100_000.0 {
+                continue;
+            }
+            let screen = project(&point);
+            if screen[0] < canvas.cursor[0]
+                || screen[1] < canvas.cursor[1]
+                || screen[0] > canvas.cursor[0] + canvas.size[0]
+                || screen[1] > canvas.cursor[1] + canvas.size[1]
+            {
+                continue;
+            }
+            draw.add_circle(screen, 10.0, rgba(255, 192, 87, 235))
+                .thickness(2.0)
+                .build();
+            draw.add_circle(screen, 3.0, rgba(255, 192, 87, 255))
+                .filled(true)
+                .build();
         }
     }
     draw_ownship(ui, draw, interface, state, airport, canvas.cursor, &project);

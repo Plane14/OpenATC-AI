@@ -76,6 +76,51 @@ pub async fn post_telemetry(
             return bad_request(&error);
         }
         crate::radio::observe_atis_tuning(&mut state, previous_receivers, was_powered);
+        // Re-plan once when the player becomes airborne, so the traffic is seeded on the
+        // procedure they are actually flying: one aircraft ahead and one behind, rather than
+        // only the surface traffic prepared while they were at the gate.
+        let departed = state.session.has_departed;
+        state
+            .generated
+            .request_airborne_reseed(telemetry.on_ground, departed);
+        // Resolve the local airport from the position the simulator already sends. Without this
+        // the engine only learned the airport from the interface's per-frame update, so traffic
+        // did not start until the window was opened.
+        if state.airport.is_none()
+            && telemetry.position_valid
+            && !state.settings.simulator_root.is_empty()
+        {
+            let own = [telemetry.latitude, telemetry.longitude];
+            let nearest = state
+                .stations
+                .iter()
+                .filter(|station| {
+                    station.service == "Tower"
+                        || station.services.iter().any(|service| service == "Tower")
+                })
+                .min_by(|left, right| {
+                    let distance = |station: &openatc_core::stations::Station| {
+                        openatc_core::arrival::distance_nm(
+                            own,
+                            [station.latitude, station.longitude],
+                        )
+                    };
+                    distance(left).total_cmp(&distance(right))
+                })
+                .map(|station| station.airport.clone());
+            if let Some(icao) = nearest {
+                let root = state.settings.simulator_root.clone();
+                let exists = |path: &str| std::path::Path::new(path).exists();
+                let read =
+                    |path: &str| std::fs::read_to_string(path).map_err(|error| error.to_string());
+                if let Ok(airport) =
+                    openatc_core::airport::load_airport_from_simulator(&root, &icao, &exists, &read)
+                {
+                    eprintln!("OpenATC engine: local airport resolved from telemetry: {icao}");
+                    state.airport = Some(airport);
+                }
+            }
+        }
         let channel = state.session.control_frequency().unwrap_or(0);
         if state
             .pending_copilot_reply

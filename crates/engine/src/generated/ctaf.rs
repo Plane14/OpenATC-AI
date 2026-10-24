@@ -28,10 +28,10 @@ use std::time::{Duration, Instant};
 const MAXIMUM_ADVISORY_AIRCRAFT: usize = 2;
 
 /// Identity range reserved for advisory traffic, clear of the generated fleet.
-const ADVISORY_ID_BASE: u32 = 0x0e00_0000;
+const ADVISORY_ID_BASE: u32 = 0x00d0_0000;
 
 /// Identity range reserved for Tower-controlled local traffic.
-const LOCAL_ID_BASE: u32 = 0x0e10_0000;
+const LOCAL_ID_BASE: u32 = 0x00d1_0000;
 
 /// Whether an identity belongs to the local Tower traffic layer.
 pub(super) fn is_local(id: u32) -> bool {
@@ -1182,7 +1182,7 @@ fn controlled_text(plan: &Plan, leg: &str) -> String {
 
 /// Speak the advisories made by the aircraft that are established on a leg.
 pub(super) fn announce(state: &mut EngineState) {
-    if state.generated.advisories.is_empty() {
+    if state.generated.advisories.is_empty() || state.generated.simulation_job.is_some() {
         return;
     }
     let poses = state.generated.world.snapshot();
@@ -1406,6 +1406,11 @@ mod tests {
             reserved_surface_corridors: BTreeSet::new(),
             reserved_stands: BTreeSet::new(),
             epoch: 1,
+            seed: 1,
+            startup_cast: false,
+            taxi_target: 4,
+            force_runway: false,
+            force_arrival_runway: false,
             runway: String::new(),
             arrival_runway: String::new(),
             config: std::path::PathBuf::new(),
@@ -1413,6 +1418,8 @@ mod tests {
             weather_observations: None,
             local_pattern_traffic: false,
             seed_single_arrival: false,
+            player_airborne: false,
+            minimum_airborne_spawn_nm: 0.0,
             airport_codes: BTreeMap::new(),
         }
     }
@@ -1445,7 +1452,7 @@ mod tests {
         let pattern = Pattern::straight_in(&airport, "09", "TEST", field.clone()).unwrap();
         let circuit = pattern.circuit().clone();
         let plan = Plan {
-            id: 0x0e10_0001,
+            id: 0x00d1_0001,
             callsign: "TEST".into(),
             field,
             pattern: Arc::new(pattern),
@@ -1644,7 +1651,7 @@ mod tests {
             );
             let frame = local_frame(
                 &input,
-                0x0e10_0001,
+                0x00d1_0001,
                 &callsign,
                 &airline,
                 &kind,
@@ -1684,7 +1691,7 @@ mod tests {
         let mut airport = openatc_core::airport::demo_airport();
         airport.icao = "KCTF".into();
         let input = preparation(vec![station("KCTF", "CTAF", 122_900, 35.0)]);
-        let (mut plan, _, _) = plan(&input, &airport, 7, 0x0e10_0001, false, false).unwrap();
+        let (mut plan, _, _) = plan(&input, &airport, 7, 0x00d1_0001, false, false).unwrap();
         plan.controlled = true;
         plan.cleared = false;
         plan.runway = "09".into();
@@ -1733,8 +1740,8 @@ mod tests {
         let mut airport = openatc_core::airport::demo_airport();
         airport.icao = "KCTF".into();
         let input = preparation(vec![station("KCTF", "CTAF", 122_900, 35.0)]);
-        let (plan, frame, kind) = plan(&input, &airport, 7, 0x0e00_0001, false, false).unwrap();
-        assert_eq!(frame.target.id, 0x0e00_0001);
+        let (plan, frame, kind) = plan(&input, &airport, 7, 0x00d0_0001, false, false).unwrap();
+        assert_eq!(frame.target.id, 0x00d0_0001);
         assert_eq!(frame.target.com1_khz, Some(122_900));
         assert!(!frame.target.on_ground);
         assert!(!frame.target.callsign.is_empty());
@@ -1759,7 +1766,7 @@ mod tests {
             .world
             .snapshot()
             .into_iter()
-            .find(|pose| pose.id == 0x0e00_0001)
+            .find(|pose| pose.id == 0x00d0_0001)
             .unwrap();
         assert!(pose.knots > 0.0);
         assert_eq!(pose.stage, openatc_core::traffic::motion::Stage::Descent);
@@ -1771,7 +1778,7 @@ mod tests {
         let mut airport = openatc_core::airport::demo_airport();
         airport.icao = "KCTF".into();
         let input = preparation(vec![station("KCTF", "CTAF", 122_900, 35.0)]);
-        let (plan, _, _) = plan(&input, &airport, 7, 0x0e00_0003, false, false).unwrap();
+        let (plan, _, _) = plan(&input, &airport, 7, 0x00d0_0003, false, false).unwrap();
         let mut runtime = Runtime::default();
         let generation = runtime.world.generation();
         assert!(
@@ -1837,7 +1844,7 @@ mod tests {
         let mut airport = openatc_core::airport::demo_airport();
         airport.icao = "KCTF".into();
         let input = preparation(vec![station("KCTF", "CTAF", 122_900, 35.0)]);
-        let (plan, _, _) = plan(&input, &airport, 11, 0x0e00_0004, true, false).unwrap();
+        let (plan, _, _) = plan(&input, &airport, 11, 0x00d0_0004, true, false).unwrap();
         assert!(plan.straight_in);
         assert!(plan.pattern.is_straight_in());
         let mut runtime = Runtime::default();
@@ -1877,7 +1884,7 @@ mod tests {
         let mut airport = openatc_core::airport::demo_airport();
         airport.icao = "KCTF".into();
         let input = preparation(vec![station("KCTF", "CTAF", 122_900, 35.0)]);
-        let (plan, _, _) = plan(&input, &airport, 13, 0x0e00_0005, false, true).unwrap();
+        let (plan, _, _) = plan(&input, &airport, 13, 0x00d0_0005, false, true).unwrap();
         assert!(plan.departure);
         assert!(plan.pattern.is_departure());
         let mut runtime = Runtime::default();
@@ -1912,6 +1919,53 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn completed_advisory_metadata_is_published_with_the_movement_sample() {
+        let mut airport = openatc_core::airport::demo_airport();
+        airport.icao = "KCTF".into();
+        let input = preparation(vec![station("KCTF", "CTAF", 122_900, 35.0)]);
+        let (plan, frame, _) = plan(&input, &airport, 13, 0x00d0_0005, false, true).unwrap();
+        let id = plan.id;
+        let mut state = crate::test_state();
+        state.settings.generated_traffic = true;
+        state.generated.epoch = Some(state.session_generation);
+        state.generated.policy = Some(policy());
+        state.generated.airport = Some(Arc::new(airport));
+        assert!(
+            state
+                .generated
+                .world
+                .insert_advisory(0, id, plan.route(), 0)
+        );
+        state.generated.advisories.insert(id, plan);
+        state.generated.frames.push(frame);
+        state.generated.simulation_job = Some(1);
+        announce(&mut state);
+        assert!(state.generated.advisories[&id].announced.is_empty());
+        state.generated.simulation_job = None;
+        for second in 0..=600 {
+            advance(&mut state.generated, &BTreeSet::new());
+            state.generated.world.advance(f64::from(second), false);
+            if state.generated.world.snapshot()[0].complete {
+                break;
+            }
+        }
+        assert!(state.generated.world.snapshot()[0].complete);
+        state.session.telemetry.simulation_seconds = Some(601.0);
+        let shared = Arc::new(tokio::sync::RwLock::new(state));
+        super::super::simulate(shared.clone()).await;
+        let state = shared.read().await;
+        assert!(!state.generated.advisories.contains_key(&id));
+        assert!(
+            !state
+                .generated
+                .frames
+                .iter()
+                .any(|frame| frame.target.id == id)
+        );
+        assert!(state.generated.world.current_segment(id).is_none());
+    }
+
     #[test]
     fn a_cross_country_plan_carries_both_fields_and_is_removed_after_landing() {
         let mut origin = openatc_core::airport::demo_airport();
@@ -1932,7 +1986,7 @@ mod tests {
             &destination,
             &destination_runway,
             17,
-            0x0e00_0006,
+            0x00d0_0006,
         )
         .unwrap();
         assert!(plan.cross.is_some());
@@ -1993,7 +2047,7 @@ mod tests {
             &destination,
             &destination_runway,
             17,
-            0x0e00_0007,
+            0x00d0_0007,
         )
         .unwrap();
         let landing = plan
@@ -2049,7 +2103,7 @@ mod tests {
         let mut airport = openatc_core::airport::demo_airport();
         airport.icao = "KCTF".into();
         let input = preparation(vec![station("KCTF", "CTAF", 122_900, 35.0)]);
-        let (plan, _, _) = plan(&input, &airport, 7, 0x0e00_0002, false, false).unwrap();
+        let (plan, _, _) = plan(&input, &airport, 7, 0x00d0_0002, false, false).unwrap();
         let mut runtime = Runtime::default();
         let generation = runtime.world.generation();
         assert!(

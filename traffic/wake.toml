@@ -1,0 +1,113 @@
+# Wake turbulence and runway-relationship policy.
+# Edit these tables to change regional procedures without rebuilding.
+# Categories are matched to the aircraft profile's `cwt` or `wake` field.
+# departure rows: leader category, columns: follower category,
+# each cell is [full_length, intersection, opposite_direction] seconds.
+# arrival rows: leader category, columns: follower category, nautical miles.
+version = 1
+
+[runways]
+# Parallel runways at or above this separation are independent for surface occupancy.
+parallel_independent_m = 760.0
+# Wake protection applies to parallel runways closer than this.
+parallel_wake_m = 760.0
+# Runway headings within this angle are treated as related crossing paths.
+crossing_degrees = 12.0
+
+[regions.faa]
+label = "FAA CWT"
+prefixes = ["K", "PA", "PF", "PH", "PO", "PP"]
+category = "cwt"
+categories = ["A", "B", "C", "D", "E", "F", "G", "H", "I"]
+lua_w_small_behind_heavy = false
+max_lua_w_seconds = 90
+parallel_wake_m = 762.0
+parallel_independent_m = 762.0
+arrival = [
+  [0, 5, 6, 6, 7, 7, 7, 8, 8],
+  [0, 3, 4, 4, 5, 5, 5, 5, 6],
+  [0, 0, 0, 0, 3.5, 3.5, 3.5, 5, 6],
+  [0, 3, 4, 4, 5, 5, 5, 6, 6],
+  [0, 0, 0, 0, 0, 0, 0, 0, 4],
+  [0, 0, 0, 0, 0, 0, 0, 0, 4],
+  [0, 0, 0, 0, 0, 0, 0, 0, 0],
+  [0, 0, 0, 0, 0, 0, 0, 0, 0],
+  [0, 0, 0, 0, 0, 0, 0, 0, 0]
+]
+departure = [
+  [[0, 0, 0], [180, 240, 240], [180, 240, 240], [180, 240, 240], [180, 240, 240], [180, 240, 240], [180, 240, 240], [180, 240, 240], [180, 240, 240]],
+  [[0, 0, 0], [120, 180, 180], [120, 180, 180], [120, 180, 180], [120, 180, 180], [120, 180, 180], [120, 180, 180], [120, 180, 180], [120, 180, 180]],
+  [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [120, 180, 180], [120, 180, 180], [120, 180, 180], [120, 180, 180], [120, 180, 180]],
+  [[0, 0, 0], [120, 180, 180], [120, 180, 180], [120, 180, 180], [120, 180, 180], [120, 180, 180], [120, 180, 180], [120, 180, 180], [120, 180, 180]],
+  [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [120, 180, 180]],
+  [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 180, 0]],
+  [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
+  [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
+  [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]]
+]
+
+[regions.icao]
+label = "ICAO Doc 4444"
+prefixes = []
+category = "wake"
+categories = ["J", "H", "M", "L"]
+lua_w_small_behind_heavy = true
+max_lua_w_seconds = 90
+parallel_wake_m = 100.0
+parallel_independent_m = 100.0
+arrival = [
+  [0, 6, 7, 8],
+  [0, 4, 5, 6],
+  [0, 0, 0, 5],
+  [0, 0, 0, 0]
+]
+departure = [
+  [[0, 0, 0], [120, 180, 180], [120, 180, 180], [180, 240, 240]],
+  [[0, 0, 0], [120, 180, 180], [120, 180, 180], [180, 240, 240]],
+  [[0, 0, 0], [0, 0, 0], [0, 0, 0], [120, 180, 180]],
+  [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]]
+]
+
+[regions.recat_eu]
+label = "EUROCONTROL RECAT-EU (4-class mapping)"
+prefixes = []
+category = "wake"
+categories = ["J", "H", "M", "L"]
+lua_w_small_behind_heavy = true
+max_lua_w_seconds = 90
+parallel_wake_m = 100.0
+parallel_independent_m = 100.0
+arrival = [
+  [0, 6, 7, 8],
+  [0, 4, 5, 6],
+  [0, 0, 0, 5],
+  [0, 0, 0, 0]
+]
+departure = [
+  [[0, 0, 0], [120, 180, 180], [120, 180, 180], [180, 240, 240]],
+  [[0, 0, 0], [120, 180, 180], [120, 180, 180], [180, 240, 240]],
+  [[0, 0, 0], [0, 0, 0], [0, 0, 0], [120, 180, 120]],
+  [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]]
+]
+
+[regions.mats]
+label = "Australian MATS"
+prefixes = ["Y"]
+category = "wake"
+categories = ["J", "H", "M", "L"]
+lua_w_small_behind_heavy = true
+max_lua_w_seconds = 90
+parallel_wake_m = 760.0
+parallel_independent_m = 760.0
+arrival = [
+  [0, 6, 7, 8],
+  [0, 4, 5, 6],
+  [0, 0, 0, 5],
+  [0, 0, 0, 0]
+]
+departure = [
+  [[0, 0, 0], [180, 240, 180], [180, 240, 180], [180, 240, 180]],
+  [[0, 0, 0], [0, 0, 0], [120, 180, 120], [120, 180, 120]],
+  [[0, 0, 0], [0, 0, 0], [0, 0, 0], [120, 180, 120]],
+  [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]]
+]

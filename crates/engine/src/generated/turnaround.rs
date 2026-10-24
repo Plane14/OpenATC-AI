@@ -1,4 +1,4 @@
-//! One onward departure from a completed arrival's own stand.
+//! Onward departures from each completed arrival's own stand.
 //!
 //! The arrival dwell ends with the aircraft parked and every resource retained. A turnaround
 //! reuses the ordinary surface, departure, airborne and arrival planners for the reverse
@@ -43,12 +43,41 @@ pub(super) struct Input {
 }
 
 /// A separately planned return flight and the surface movement that reaches its holding point.
+#[derive(Clone)]
 pub(super) struct Plan {
     pub ground: GroundPlan,
     pub prepared: flight::Prepared,
     pub stand: String,
     pub stand_cells: BTreeSet<String>,
     pub corridors: BTreeSet<String>,
+}
+
+#[derive(Clone)]
+pub(super) struct Pending {
+    id: u32,
+    result: Result<Arc<Plan>, String>,
+    key: String,
+    epoch: u64,
+}
+
+pub(super) fn publish_pending(state: &mut EngineState) {
+    if state.generated.simulation_job.is_some() {
+        return;
+    }
+    let Some(pending) = state.generated.turnaround_pending.take() else {
+        return;
+    };
+    state.generated.turnaround_target = None;
+    if state.session_generation == pending.epoch
+        && state.generated.key == pending.key
+        && state.settings.generated_traffic
+    {
+        settle(
+            &mut state.generated,
+            pending.id,
+            pending.result.map(|plan| (*plan).clone()),
+        );
+    }
 }
 
 /// The next parked aircraft that has not already been offered a turnaround.
@@ -296,7 +325,7 @@ pub(super) fn install(runtime: &mut Runtime, id: u32, plan: Plan) -> Result<(), 
     if !pose.complete || pose.stage != Stage::Turnaround {
         return Err("Turnaround aircraft has not completed its arrival dwell".into());
     }
-    let input = runtime
+    let mut input = runtime
         .turnaround_inputs
         .get(&id)
         .cloned()
@@ -417,10 +446,21 @@ pub(super) fn install(runtime: &mut Runtime, id: u32, plan: Plan) -> Result<(), 
     if !input.arrival_stand.is_empty() {
         runtime.reserved_stands.remove(&input.arrival_stand);
     }
-    runtime.reserved_stands.insert(plan.stand);
+    runtime.reserved_stands.insert(plan.stand.clone());
     Arc::make_mut(&mut runtime.occupied_stand_cells).extend(plan.stand_cells);
     Arc::make_mut(&mut runtime.surface_corridors).extend(plan.corridors);
     runtime.turnarounds_attempted.insert(id);
+    // The next turnaround starts where this return leg will park.
+    std::mem::swap(&mut input.origin, &mut input.destination);
+    std::mem::swap(&mut input.origin_runway, &mut input.destination_runway);
+    std::mem::swap(&mut input.origin_surface, &mut input.destination_surface);
+    std::mem::swap(
+        &mut input.departure_procedures,
+        &mut input.arrival_procedures,
+    );
+    input.arrival_stand = plan.stand;
+    Arc::make_mut(&mut runtime.turnaround_inputs).insert(id, input);
+    super::population::reservations(runtime);
     Ok(())
 }
 
@@ -455,6 +495,7 @@ pub(super) async fn prepare(shared: Shared) {
         if !state.settings.generated_traffic
             || state.generated.epoch != Some(state.session_generation)
             || state.generated.turnaround_job.is_some()
+            || state.generated.turnaround_pending.is_some()
             || state.generated.simulation_job.is_some()
             || state.generated.preparation_job.is_some()
         {
@@ -478,7 +519,7 @@ pub(super) async fn prepare(shared: Shared) {
     };
     let result = workers.run(move || plan(&runtime, id, &telemetry)).await;
     let mut state = shared.write().await;
-    let target = state.generated.turnaround_target.take();
+    let target = state.generated.turnaround_target;
     if !finish_job(&mut state.generated.turnaround_job, job) || target != Some(id) {
         return;
     }
@@ -486,9 +527,16 @@ pub(super) async fn prepare(shared: Shared) {
         || state.generated.key != key
         || !state.settings.generated_traffic
     {
+        state.generated.turnaround_target = None;
         return;
     }
-    settle(&mut state.generated, id, result.unwrap_or_else(Err));
+    state.generated.turnaround_pending = Some(Pending {
+        id,
+        result: result.unwrap_or_else(Err).map(Arc::new),
+        key,
+        epoch,
+    });
+    publish_pending(&mut state);
 }
 
 #[cfg(test)]
@@ -519,6 +567,8 @@ mod tests {
     /// A route ending at a stand, with the stand cells still owned by the aircraft.
     fn parked_runtime() -> (EngineState, Arc<Route>) {
         let mut state = crate::test_state();
+        state.stations =
+            openatc_core::stations::from_airport(&openatc_core::airport::demo_airport());
         state.settings.generated_traffic = true;
         state.settings.hear_traffic_radio = false;
         state.session.telemetry.traffic = Some(vec![]);
@@ -828,6 +878,10 @@ mod tests {
         assert!(state.generated.flights.contains_key(&1));
         assert!(state.generated.reserved_stands.contains("Gate 1"));
         assert!(!state.generated.reserved_stands.contains("Gate 2"));
+        let onward = &state.generated.turnaround_inputs[&1];
+        assert_eq!(onward.arrival_stand, "Gate 1");
+        // Planning another aircraft's return must not stop this departure or its radio.
+        state.generated.turnaround_job = Some(999);
 
         let mut cleared = false;
         let mut moving = false;
@@ -912,7 +966,11 @@ mod tests {
             "a refused turnaround may hold only the stand it physically occupies"
         );
         assert!(state.generated.reserved_stands.contains("Gate 2"));
-        assert!(scene_settled(&state.generated.world));
+        assert!(
+            state.generated.world.snapshot().iter().all(
+                |pose| pose.complete || matches!(pose.stage, Stage::Parked | Stage::Turnaround)
+            )
+        );
         assert!(eligible(&state.generated).is_none());
     }
 

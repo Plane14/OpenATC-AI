@@ -380,6 +380,7 @@ pub async fn session_reset(AxumState(state): AxumState<Shared>) -> Json<Value> {
 fn reset_flight(state: &mut crate::EngineState) {
     state.debug_jump = None;
     state.session_generation = state.session_generation.wrapping_add(1);
+    state.traffic_seed = crate::traffic_seed();
     state.pending_copilot_reply = None;
     state.generated = Default::default();
     let telemetry = state.session.telemetry.clone();
@@ -711,11 +712,11 @@ pub async fn post_airport_load(
     Json(serde_json::to_value(&loaded).unwrap_or(Value::Null)).into_response()
 }
 
-/// Start the apron and the production preparation as soon as the departure airport or plan is
-/// known, instead of waiting for the first telemetry frame.
+/// Start controlled traffic preparation as soon as the departure airport or plan is known,
+/// instead of waiting for the first telemetry frame. Every actor comes from a complete flight
+/// plan; parked visual previews must never occupy a stand or taxi route.
 fn start_generated(shared: Shared) {
     tokio::spawn(async move {
-        crate::generated::prepare_apron(shared.clone()).await;
         crate::generated::prepare(shared).await;
     });
 }

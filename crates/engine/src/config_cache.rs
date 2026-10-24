@@ -14,6 +14,7 @@ const MAX_SOURCE: usize = 32 * 1024 * 1024;
 const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
 const MAX_STORED: i64 = 128 * 1024 * 1024;
 const TABLE: &str = "CREATE TABLE documents (digest BLOB PRIMARY KEY, payload BLOB NOT NULL, checksum BLOB NOT NULL, used INTEGER NOT NULL); CREATE INDEX document_lru ON documents(used);";
+const SETUP_TABLE: &str = "CREATE TABLE IF NOT EXISTS setup (id INTEGER PRIMARY KEY CHECK(id=1), complete INTEGER NOT NULL); INSERT OR IGNORE INTO setup VALUES(1,0);";
 static CACHE: OnceLock<Cache> = OnceLock::new();
 thread_local! {static WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };}
 /// Opt in only on bounded CPU workers or the single pre-HTTP startup worker.
@@ -36,6 +37,7 @@ pub(crate) struct Status {
     pub misses: u64,
     pub writes: u64,
     pub error: String,
+    pub setup_complete: bool,
 }
 static STATUS: OnceLock<Mutex<Status>> = OnceLock::new();
 fn update(f: impl FnOnce(&mut Status)) {
@@ -111,6 +113,9 @@ impl Cache {
         connection
             .busy_timeout(Duration::from_millis(250))
             .map_err(|e| e.to_string())?;
+        connection
+            .execute_batch(SETUP_TABLE)
+            .map_err(|e| e.to_string())?;
         connection.execute_batch("PRAGMA page_size=4096; PRAGMA max_page_count=65536; PRAGMA cache_size=-4096; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS generation (id INTEGER PRIMARY KEY CHECK(id=1), epoch INTEGER NOT NULL); INSERT OR IGNORE INTO generation VALUES(1,0);").map_err(|e|e.to_string())?;
         connection
             .execute_batch(
@@ -122,6 +127,7 @@ impl Cache {
         update(|s| {
             s.path = path.display().to_string();
             s.error.clear();
+            s.setup_complete = false;
         });
         Ok(Self {
             connection: Mutex::new(connection),
@@ -249,14 +255,33 @@ impl Cache {
         tx.execute("INSERT INTO generation VALUES(1,?1)", [next])
             .map_err(|e| e.to_string())?;
         tx.execute_batch(TABLE).map_err(|e| e.to_string())?;
+        tx.execute_batch("DROP TABLE IF EXISTS setup;")
+            .map_err(|e| e.to_string())?;
+        tx.execute_batch(SETUP_TABLE).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         update(|s| {
             s.hits = 0;
             s.misses = 0;
             s.writes = 0;
             s.error.clear();
+            s.setup_complete = false;
         });
         Ok(())
+    }
+    pub fn setup_complete(&self) -> Result<bool, String> {
+        self.connection
+            .lock()
+            .map_err(|e| e.to_string())?
+            .query_row("SELECT complete FROM setup WHERE id=1", [], |r| r.get(0))
+            .map_err(|e| e.to_string())
+    }
+    pub fn finish_setup(&self) -> Result<(), String> {
+        self.connection
+            .lock()
+            .map_err(|e| e.to_string())?
+            .execute("UPDATE setup SET complete=1 WHERE id=1", [])
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -264,6 +289,8 @@ pub fn initialize() {
     let path = crate::data_dir().join("setup-cache/toml-v1.sqlite3");
     match Cache::open(&path) {
         Ok(cache) => {
+            let complete = cache.setup_complete().unwrap_or(false);
+            update(|s| s.setup_complete = complete);
             let _ = CACHE.set(cache);
             openatc_core::configuration::install_parser(parse);
         }
@@ -283,6 +310,17 @@ pub fn parse(text: &str) -> Result<toml::Value, toml::de::Error> {
 }
 pub fn available() -> bool {
     CACHE.get().is_some()
+}
+pub fn setup_complete() -> bool {
+    status().setup_complete
+}
+pub fn finish_setup() -> Result<(), String> {
+    CACHE
+        .get()
+        .ok_or("TOML cache unavailable")?
+        .finish_setup()?;
+    update(|s| s.setup_complete = true);
+    Ok(())
 }
 pub fn rebuild() -> Result<(), String> {
     if !available() {
@@ -317,10 +355,13 @@ mod tests {
 
         let path = temporary();
         let cache = Cache::open(&path).unwrap();
+        assert!(!cache.setup_complete().unwrap());
+        cache.finish_setup().unwrap();
         let source = "value = 10\ntime = 1979-05-27T07:32:00Z\nfloat = inf";
         let expected = cache.parse(source).unwrap();
         drop(cache);
         let cache = Cache::open(&path).unwrap();
+        assert!(cache.setup_complete().unwrap());
         assert_eq!(expected, cache.parse(source).unwrap());
         assert_eq!(
             cache.parse("value=11").unwrap()["value"].as_integer(),
@@ -336,6 +377,7 @@ mod tests {
             .unwrap();
         assert_eq!(expected, cache.parse(source).unwrap());
         cache.rebuild().unwrap();
+        assert!(!cache.setup_complete().unwrap());
         cache.write(&digest, epoch, expected.clone()).unwrap();
         assert!(cache.read(&digest).unwrap().1.is_none());
         assert_eq!(expected, cache.parse(source).unwrap());

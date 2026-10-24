@@ -103,6 +103,8 @@ pub struct Interface {
     pub(crate) setup_status: serde_json::Value,
     pub(crate) setup_checked: f64,
     pub(crate) setup_pending: bool,
+    pub(crate) setup_overlay: bool,
+    pub(crate) setup_seen_run: u64,
     pub(crate) traffic_message: String,
     /// Quick request just sent; blocks a double-click until the state catches up.
     pub(crate) pending_request: Option<(String, std::time::Instant)>,
@@ -407,6 +409,8 @@ impl Interface {
             setup_status: serde_json::Value::Null,
             setup_checked: -1.0,
             setup_pending: false,
+            setup_overlay: false,
+            setup_seen_run: 0,
             traffic_message: String::new(),
             pending_request: None,
             model_install_status: serde_json::Value::Null,
@@ -1774,6 +1778,7 @@ impl Interface {
             return;
         }
         let editing = !self.message.is_empty()
+            || self.setup_overlay
             || !self.modal_intent.is_empty()
             || self.show_voice_popup
             || ui.is_any_item_active();
@@ -1822,6 +1827,10 @@ impl Interface {
     pub fn draw(&mut self, ui: &imgui::Ui) -> WindowActions {
         self.window_actions.restore_bounds = self.pending_window_bounds.take();
         let _theme = crate::theme::apply(ui, self.settings.light_theme);
+        crate::setup::poll(ui, self);
+        if self.setup_overlay && self.compact {
+            self.expand();
+        }
         self.update_visibility(ui);
         let mut state = self.engine.state();
         if self.page == 10 && !self.settings.show_com2 {
@@ -1871,10 +1880,12 @@ impl Interface {
                 let _page_background = ui.push_style_color(imgui::StyleColor::ChildBg, [0.0; 4]);
                 ui.child_window("##page")
                     .size([0.0, (ui.content_region_avail()[1] - 24.0).max(1.0)])
-                    .scroll_bar(!matches!(self.page, 0 | 10))
+                    .scroll_bar(self.setup_overlay || !matches!(self.page, 0 | 10))
                     .build(|| {
                         if self.confirm_reset || self.reset_pending {
                             self.draw_reset_confirmation(ui);
+                        } else if self.setup_overlay {
+                            crate::setup::overlay(ui, self);
                         } else {
                             self.draw_body(ui, &state);
                         }

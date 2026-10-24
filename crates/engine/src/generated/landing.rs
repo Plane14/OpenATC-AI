@@ -392,7 +392,25 @@ fn plan_select(
                 let previous = nodes[&visited[visited.len() - 2]];
                 let clear = clear_of_runways(airport, previous, point, aircraft);
                 if clear {
-                    candidates.push((at, visited.iter().map(|id| nodes[id]).collect::<Vec<_>>()));
+                    let path = visited.iter().map(|id| nodes[id]).collect::<Vec<_>>();
+                    // Prefer the exit with the shortest total roll plus taxi distance to a
+                    // compatible stand. The earliest exit is not always on the gate side.
+                    let exit_point = *path.last().unwrap();
+                    let stand_distance = airport
+                        .parking
+                        .iter()
+                        .filter(|stand| openatc_core::parking::moving_supports(stand, aircraft))
+                        .map(|stand| {
+                            (stand.point.east - exit_point.east)
+                                .hypot(stand.point.north - exit_point.north)
+                        })
+                        .fold(f64::INFINITY, f64::min);
+                    let score = if stand_distance.is_finite() {
+                        at + stand_distance
+                    } else {
+                        at
+                    };
+                    candidates.push((score, at, path));
                     break;
                 }
                 if visited.len() >= 8 {
@@ -422,10 +440,10 @@ fn plan_select(
             }
         }
     }
-    candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
+    candidates.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.total_cmp(&right.1)));
     let candidate_count = candidates.len();
     let mut rejected = [0; 4];
-    for (at, path) in candidates.into_iter().take(32) {
+    for (_score, at, path) in candidates.into_iter().take(32) {
         let turn_start = Point {
             east: start.east + (at - radius * 2.0) * unit[0],
             north: start.north + (at - radius * 2.0) * unit[1],

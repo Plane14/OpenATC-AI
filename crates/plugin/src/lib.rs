@@ -61,6 +61,7 @@ struct Shared {
     enabled: bool,
     ground_arrows: taxi::GroundGuidance,
     holding_marker: taxi::GroundGuidance,
+    traffic_holding: taxi::GroundGuidance,
     follow_me: follow_me::FollowMe,
     debug_cancel_pending: bool,
     debug_air_pending: Option<(&'static str, std::time::Instant)>,
@@ -699,6 +700,7 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     }
     let ground_enabled = interface.settings.show_ground_taxi_arrows;
     let holding_enabled = interface.settings.show_holding_point;
+    let traffic_holding_enabled = interface.settings.show_traffic_holding_points;
     let follow_me_enabled = interface.settings.show_follow_me;
     let native_enabled = interface.settings.manage_native_traffic;
     let suppress_native =
@@ -739,6 +741,9 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     }
     locked.ground_arrows.update(ground_enabled, &state);
     locked.holding_marker.update(holding_enabled, &state);
+    locked
+        .traffic_holding
+        .update(traffic_holding_enabled, &state);
     locked.follow_me.update(follow_me_enabled, &state);
     if state.generated_traffic.is_empty() {
         locked.tcas.receive(&[]);
@@ -771,6 +776,7 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
         locked.last_ap_seq = 0;
         locked.ground_arrows = taxi::GroundGuidance::new();
         locked.holding_marker = taxi::GroundGuidance::new_holding_marker();
+        locked.traffic_holding = taxi::GroundGuidance::new_traffic_holding();
         locked.follow_me = follow_me::FollowMe::new();
         locked.arrival_sampler = arrival::TerrainSampler::new();
         locked.weather_sampler = weather::Sampler::default();
@@ -846,6 +852,7 @@ impl Plugin for OpenAtc {
             enabled: false,
             ground_arrows: taxi::GroundGuidance::new(),
             holding_marker: taxi::GroundGuidance::new_holding_marker(),
+            traffic_holding: taxi::GroundGuidance::new_traffic_holding(),
             follow_me: follow_me::FollowMe::new(),
             debug_cancel_pending: false,
             debug_air_pending: None,
@@ -991,7 +998,13 @@ impl Plugin for OpenAtc {
                     ..
                 } = &mut *shared;
                 if tcas.active() {
-                    tcas.receive(generated_traffic.frames());
+                    // Do not release the whole override just because the renderer is between
+                    // playout samples. Movement snapshots arrive every half second; an empty
+                    // interpolation frame must leave the existing targets in place.
+                    let frames = generated_traffic.frames();
+                    if !frames.is_empty() {
+                        tcas.receive(frames);
+                    }
                     tcas.refresh();
                 }
                 if shared.tcas.active() {
@@ -1111,6 +1124,7 @@ impl Plugin for OpenAtc {
         shared.native_traffic = traffic::NativeTraffic::default();
         shared.ground_arrows = taxi::GroundGuidance::new();
         shared.holding_marker = taxi::GroundGuidance::new_holding_marker();
+        shared.traffic_holding = taxi::GroundGuidance::new_traffic_holding();
         shared.follow_me = follow_me::FollowMe::new();
         shared.arrival_sampler = arrival::TerrainSampler::new();
         shared.weather_sampler = weather::Sampler::default();

@@ -251,7 +251,7 @@ OpenATC brings the controller and crew into the same flight. Request your IFR cl
 
 These are implemented paths, not a claim of complete worldwide ATC coverage. Automated checks exercise important transitions and failure cases. Full aircraft-specific flight testing, separation, procedure interpretation and native platform acceptance remain ongoing; see [Validation](docs/VALIDATION.md) and [Remaining work](docs/ROADMAP.md).
 
-Further work includes random mixed traffic, lightweight Bluebell rendering, wider wake sequencing and arrival holding. The [roadmap](docs/ROADMAP.md) distinguishes these plans from implemented features.
+Further work includes random mixed traffic, lightweight Bluebell rendering, remaining arrival sequencing and holding. The [roadmap](docs/ROADMAP.md) distinguishes these plans from implemented features.
 
 ## AI server, voices and GPU selection
 
@@ -570,6 +570,15 @@ demand. Editable files, settings, plans, logs and active flights are preserved.
 Restart the plugin after completion to reload every active policy; this button
 does not change an existing flight's clearances or restart its traffic.
 
+A setup panel opens automatically for the first configuration import and whenever
+**Re-setup** is pressed. It shows the current file, completed/total file count,
+errors and the result. **Continue in background** keeps the plugin available during
+the scan; **Show setup progress** reopens the panel. Traffic preparation and scenery
+cache progress appear below it. Their completion time depends on the installed
+scenery, so they show stages and tile counts rather than an estimated percentage.
+Use Re-setup after updating TOML files to rebuild their parsed cache from the edited
+sources. The panel reports when a plugin restart is needed to apply every policy.
+
 The TOML cache retains up to 128 MiB of parsed payloads/8,192 entries, with a
 256 MiB SQLite page limit and 32 MiB source-file limit. A damaged or unavailable
 cache falls back to source parsing. Setup scans are bounded and report oversized
@@ -590,7 +599,7 @@ visits can reuse the compiled data. A ready cache does not guarantee that every
 flight passes the route, weather, terrain, obstacle and clearance checks.
 
 The companion engine stores its rebuildable SQLite cache in
-`scenery-index/scenery-v2.sqlite3` under the platform data directory: normally
+`scenery-index/scenery-v5.sqlite3` under the platform data directory: normally
 `~/.local/share/openatc-ai` on Linux, `%LOCALAPPDATA%/openatc-ai` on Windows, or
 `~/Library/Application Support/openatc-ai` on macOS. `OPENATC_AI_DATA_DIR` overrides
 the data directory; `OPENATC_SCENERY_CACHE_DIR` selects an isolated cache directory.
@@ -600,14 +609,16 @@ are transactional and checksummed; a cache failure falls back to scenery parsing
 Entries are limited to 256 MiB, stored payloads to 1.5 GiB and the SQLite database
 to 2 GiB, plus temporary transaction space. Planning retains at most 24 tile stacks
 and 512 MiB per planner; this is not a limit on the entire engine's peak memory.
+Unused tile stacks can leave RAM and be reloaded from SQLite. This avoids repeating
+the scenery scan when the in-memory cache fills; the first visit still needs parsing.
 Use **Scenery cache details → Clear scenery index** to rebuild it on demand.
 Settings, flight plans and active flights are retained.
 
-Version 2 rebuilds derived scenery after correcting vegetation-area elevation
-bounds. Candidate terrain triangles are clipped to the area's bounding rectangle
-and known object reach; interior ridges remain protected. A nearby triangle's
-vertices outside that rectangle no longer raise the whole vegetation area. Route
-refusals now include both endpoints, heights and the aircraft envelope for diagnosis.
+Version 5 joins the published autogen contour pieces into boundaries and holes,
+retains object overhang and uses local terrain bounds for autogen tiles whose
+ground-reference reach is known. Interior ridges and building/tree heights remain
+protected. Shared or unresolved ground references retain the conservative area bound.
+Route refusals include both endpoints, heights and the aircraft envelope for diagnosis.
 
 **Traffic update rate** offers Every frame, Every N frames and Hertz. The default
 is now Every frame; saved explicit choices are retained. A short 750 ms sample
@@ -617,21 +628,56 @@ past a clearance limit. The delay affects displayed generated traffic and TCAS;
 controller decisions continue to use current engine positions. Visual smoothness,
 takeoff/landing and frame-time acceptance still require an X-Plane check.
 
-The current installed-scenery replay prepares six nominal flights across Nice,
-Milan and Toulouse. One passes production protection and completes taxi-out,
-takeoff, landing and parking; five still fail conservative scenery checks. With a
-newly rebuilt version 2 cache, preparation took 59.44 seconds and the full replay
-65.46 seconds. Full mixed traffic and native visual/audio/frame-time acceptance
-remain open. See [validation](docs/VALIDATION.md) for the test scope and timings.
+Generated aircraft use X-Plane's instance renderer and a separate TCAS publisher.
+TCAS receives only populated slots, with unique nonzero 24-bit identities before
+their positions. Ownship stays in slot zero. Targets refresh every frame; airborne
+traffic reports altitude even with its engine stopped. OpenATC yields TCAS ownership
+to another traffic provider and waits for availability before retrying. These are
+the requirements of the [TCAS override API](https://developer.x-plane.com/article/overriding-tcas-and-providing-traffic-information/)
+and [X-Plane 12.4.1 TCAS II guidance](https://developer.x-plane.com/article/tcas-resolution-advisories-and-plugin-traffic/).
+
+Generated traffic starts with a mixture of nearby approaches, airborne routes and
+surface activity when enough protected routes are available. The fast apron first
+places aircraft at real stands. They stay parked until a complete departure is ready,
+so an aircraft without an onward route cannot block the runway queue. Startup taxi
+traffic comes from fully prepared flights. Connecting a departure preserves the
+aircraft's identity, position and existing taxi route; the front of a compatible
+taxi queue receives its onward route first. Once a flight is ready, gate preparation
+takes 5–20 simulated seconds before the normal clearance and readback. Planning,
+occupied taxiways, runway traffic and wake can extend the wait.
+
+Additional flights join the live movement world without resetting its clock or
+clearances. Replacements respect the category sliders and the 63-aircraft cap.
+After startup, airborne replacements enter in the outer half of the display area
+(20–40 NM with the supplied policy). Distant traffic must remain beyond the outer
+boundary for 60 simulated seconds, be moving away, be inaudible and have no route
+returning to the player's area before its slot is recycled. Active runway movements,
+holds, recovery routes and radio exchanges are retained. Turnarounds are planned in
+the background while other aircraft continue moving.
+
+Installed-data tests and native simulator acceptance are recorded separately in
+[validation](docs/VALIDATION.md). Mixed cargo/GA coverage and native visibility,
+audio, smoothness and frame times remain acceptance requirements.
+
+In `traffic/airlines.toml`, `route_policy = "listed"` keeps an operator's listed
+route catalogue exclusive when present. FedEx and UPS use `"hub_spokes"` to also
+model connections through their configured hubs; a partial European route sample
+therefore does not suppress their US hub traffic. These spokes are simulated
+network choices, not published schedules. All model, airport, route and protection
+checks still apply.
+
+Fleet selection checks the runway chosen for the current flow before weighting
+eligible aircraft; an unused longer parallel runway does not qualify a heavier
+aircraft. GA can use its separately prepared departure candidates. Full landing,
+braking, taxi, stand and scenery checks still determine whether a flight is released.
 
 Discovery divides its survey budget between configured operator links and nearby
 fields, considering requested traffic categories separately. A worker shares one
 scenery planner across airport directions to avoid repeating static checks.
 
 Scene publication keeps render/radio identities and movement ownership aligned:
-a rejected or hidden aircraft no longer retains a live stand reservation. Surface
-previews keep their parked actors. This does not establish full production flight
-or simulator acceptance; conservative planning exclusions still need review.
+a rejected or hidden aircraft no longer retains a live stand reservation. Moving apron aircraft retain their routes, reservations and radio progress during
+publication. Conservative planning exclusions still need review.
 
 The active acceptance queue includes complete generated VFR/CTAF flights, wake
 warning/wait/release, mixed-speed arrivals and eventual landing. Source now includes
@@ -689,7 +735,7 @@ and the expected time is never permission to leave. This is a restricted direct-
 implementation; general published/parallel/teardrop entry, vectors and full native
 flight acceptance remain open.
 
-- **Wake protection** uses FAA consolidated categories for represented US airports and a separate Australian MATS ICAO-category table for Australian airports. Other regions are not assigned guessed minima by these new checks.
+- **Wake protection** uses editable tables in `traffic/wake.toml` for FAA CWT, ICAO Doc 4444, EUROCONTROL RECAT-EU and Australian MATS. The **Wake separation** setting selects a table or `auto`, which uses FAA at US airports, MATS at Australian airports and ICAO elsewhere. Aircraft category comes from the simulator when reported, then from the aircraft profile.
 - Observed departures can produce a **Hold for wake turbulence** instruction, with different intervals for full-length, intersection and opposite-direction departures and qualifying close parallel runways.
 - Timing uses simulator flight time, stops while paused and does not expire instantly after a clock jump.
 - Starting the interval at observed liftoff is conservative; no pilot waiver is assumed.
@@ -734,31 +780,42 @@ Copilot playback and acceptance are separate steps. Repeated preparation request
 - The pool starts on demand, its waiting queue holds at most twice the worker count, and an overloaded request returns a retryable error instead of blocking the simulator.
 - Changes apply when the companion engine restarts. `/health` reports the active `cpuWorkers` value.
 - SDK calls remain on the simulator thread.
+
+### Traffic lifecycle
+
+- **Traffic lifecycle** in Traffic settings controls how many aircraft are moving on the ground and how long an airport stays active after you leave.
+- **Taxiing aircraft** sets a minimum and maximum, 4 and 6 by default. When traffic is full the engine rolls one target in that range for the session. Pushback and taxi-out count; the runway queue does not.
+- **Airliner, turboprop and light-aircraft circuit radii** default to 30, 20 and 10 NM. Inside the radius, ground, approach and departing traffic stays alive. Beyond it, those slots are recycled into airborne traffic around you.
+- Landed arrivals taxi to their stand, pause briefly, then despawn and recycle the slot to another arrival on final. Generated traffic does not leave parked rows; static scenery provides those.
+- Gate departures are transient. They request IFR clearance from Delivery, then start and push back on Ground, then request taxi. They are not kept parked.
+- The runway is fixed to the ATIS flow. Reciprocal runway ends are not selected for generated traffic just to improve the mix.
+- **Wake separation** in Traffic settings selects `auto`, `icao`, `recat_eu`, `faa_cwt` or `mats`. The tables and runway-relationship thresholds are in `traffic/wake.toml`; aircraft category comes from the simulator when reported, then from the aircraft profile. A wake interval produces **line up and wait**, not hold short; a landing on one parallel runway does not block a departure on the other.
+- A takeoff clearance names the flight's own SID and initial level. It does not read latitude, longitude or a full hold procedure; a hold is issued separately only when needed.
+- Hold short is reserved for actual runway occupancy, a crossing or a blocked holding point. Line up and wait is used when the runway is available but the wake interval is still running.
 - The experimental generated-traffic simulation also uses this pool, with at most one simulation job outstanding and complete snapshots published to the plugin.
 - The preparation worker now decodes bounded aircraft-specific SID/STAR/approach inputs from the actual nominal rotation point and fresh endpoint weather, preserving restrictions, IAS and selected-runway threshold heights.
 - Missing or incompatible inputs are reported without granting flight.
-- These constraints still need protected trajectory, performance, recovery and landing assembly before they become flyable routes.
-- The preparation worker retains runway-compatible terminal candidates with published recovery legs and known enroute MORA floors; `terminal_candidate_limit` in `traffic/operations.toml` bounds retention.
-- Full generated flight operations remain under development.
+- The preparation worker assembles the complete protected route, recovery and landing before publishing a flight. Runway-compatible terminal candidates, published recovery legs and enroute MORA floors are retained within `terminal_candidate_limit` in `traffic/operations.toml`.
+- Generated traffic is installed and exercised at installed airports; native simulator visibility, audio and performance acceptance remain separate checks.
 
 The controller consumer can now queue a complete onward flight from a recovery hold after its pilot readback. The aircraft finishes its current circuit and leaves at the holding fix; the new plan takes effect there, with separate landing and taxi permissions. Incomplete recovery sets and incompatible joins are refused. A simulation-clock change cancels a queued exit while preserving the hold. The integrated consumer regression reaches parking after rejoin; this does not establish production route generation or native simulator acceptance.
 
 Generated flight clearances now accept published Departure controllers for climb and explicit combined station duties for their supported phases. A queued recovery-hold exit is tied to its original flight: removing the active flight, removing its aircraft frame or replacing its plan cancels the pending exit and leaves the current holding circuit intact. Focused controller tests follow both dedicated Departure and combined Tower/Departure cases through parking, and check stale-exit cancellation through another holding circuit.
 
-- Generated departures now consult the existing observed wake monitor before a takeoff grant and before the roll.
-- In the supported US wake-policy region, a heavier native, generated or player departure can delay a smaller follower; explicit aircraft categories and runway relationships determine the interval.
+- Generated departures consult the observed wake monitor before a takeoff grant and before the roll.
+- A heavier native, generated or player departure can delay a smaller follower; the active regional table and runway relationship determine the interval.
 - Player liftoffs are observed alongside traffic liftoffs, including at the generated scene's airports.
 - A conflict during readback cancels the grant.
 - A later conflict withdraws an accepted but unstarted roll and its initial climb authority, queues the cancellation until the radio is free, and requires a fresh clearance after the interval expires.
 - Hold and cancellation wording is editable in `speech/runtime/responses.toml`.
-- This is not worldwide wake-policy coverage or native simulator acceptance.
+- The bundled tables are starting policies and remain editable; native simulator acceptance is separate.
 
 - **Airline, hub and aircraft preferences** are editable in `traffic/airlines.toml`, `traffic/hubs.toml` and `traffic/aircraft.toml`.
 - The starter set has 29 operating/private fleet profiles, 50 airport preferences and 47 aircraft envelopes spanning piston aircraft through freighters.
 - Weights are approximate simulation preferences, not market shares or real schedules.
 - The selector checks both endpoints, home-region affinity, runway/parking capacity, range and compatible installed CSL models.
 - Traffic can reload and validate personal overrides, retaining the last valid set after an invalid edit.
-- These are data/selection foundations; the generated moving fleet remains unfinished.
+- The generated moving fleet uses these profiles; native simulator acceptance remains separate.
 - See [profile editing and sources](traffic/README.md).
 
 - **Advisory traffic at untowered fields** flies a right-hand visual circuit at any field that publishes a CTAF or UNICOM frequency and no Tower service.
@@ -1135,11 +1192,12 @@ Unknown levels, unsupported joins or unprotected paths are refused. These are
 nominal simulation envelopes, not certified aircraft holding performance.
 
 The static apron can publish before full-flight planning and retain its identities
-when the full scene arrives. Ground-only routes have their own taxi/radio loop.
+when the full scene arrives. A parked aircraft waits for a complete departure before
+joining the taxi/radio loop.
 A separate local Tower layer can add a repeating GA circuit and prepared departures
 when the network releases little traffic; it uses published frequencies, spoken
-clearances, readbacks and the same scenery checks. Its spare departure pool is
-finite, so continuous replenishment remains unfinished.
+clearances, readbacks and the same scenery checks. Its local spare departure pool is finite; the network population worker supplies
+additional complete flights as slots become available.
 
 Untowered traffic requires a published CTAF/UNICOM frequency and no Tower service.
 It announces its position and intentions without issuing controller clearances.

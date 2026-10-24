@@ -37,13 +37,11 @@ impl Region {
                 // MATS 10.6.4.1. Applying the Medium->Light floor to every Medium
                 // is conservative where the model catalogue has no verified MTOW.
                 let wake: f64 = match (leader.wake, follower.wake) {
-                    ('J', 'H') => 6.0,
+                    ('J', 'H') | ('H', 'L') => 6.0,
                     ('J', 'M') => 7.0,
                     ('J', 'L') => 8.0,
                     ('H', 'H') => 4.0,
-                    ('H', 'M') => 5.0,
-                    ('H', 'L') => 6.0,
-                    ('M', 'L') => 5.0,
+                    ('H', 'M') | ('M', 'L') => 5.0,
                     (a, b) if "JHML".contains(a) && "JHML".contains(b) => 0.0,
                     _ => return None,
                 };

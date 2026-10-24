@@ -281,7 +281,7 @@ pub fn update_flight_phase(state: &mut State, telemetry: &Telemetry) -> Result<(
             f64::NEG_INFINITY,
             f64::INFINITY,
         ),
-        ("zuluSeconds", telemetry.zulu_seconds, 0.0, 86399.999999),
+        ("zuluSeconds", telemetry.zulu_seconds, 0.0, 86_399.999_999),
         (
             "simulationSeconds",
             telemetry.simulation_seconds,

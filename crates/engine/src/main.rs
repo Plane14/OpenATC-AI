@@ -42,6 +42,24 @@ use tokio::sync::RwLock;
 /// Product version.
 pub const VERSION: &str = "0.2.1";
 
+/// A fresh, non-zero seed for one generated-traffic session.
+///
+/// The engine deliberately does not reproduce yesterday's airport on every launch. The seed is
+/// logged with the first traffic status so an unusual scene can still be reproduced when needed.
+pub(crate) fn traffic_seed() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos() as u64);
+    let seed = nanos
+        ^ u64::from(std::process::id()).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ COUNTER
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_mul(0xD1B5_4A32_D192_ED03);
+    if seed == 0 { 1 } else { seed }
+}
+
 /// Everything the engine owns: session state plus configuration.
 pub struct EngineState {
     /// Generated scene preparation and future movement state.
@@ -70,6 +88,9 @@ pub struct EngineState {
     pub request_memory: memory::RequestMemory,
     /// Invalidates work started before a new-flight reset.
     pub session_generation: u64,
+    /// Seed for the generated traffic cast. A new value each engine start keeps the airport
+    /// from opening with exactly the same flights, stands and procedures.
+    pub traffic_seed: u64,
     /// Prepared developer checkpoint awaiting native positioning.
     pub debug_jump: Option<debug_jump::Pending>,
     /// Prepared crew radio exchange and its owning flight generation.
@@ -438,7 +459,6 @@ async fn main() {
             move || {
                 config_cache::on_worker(|| {
                     config_cache::initialize();
-                    setup::initial(&config_dir, &exe_dir);
                     for path in [
                         exe_dir.join("../intents.toml"),
                         config_dir.join("intents.toml"),
@@ -532,6 +552,16 @@ async fn main() {
         controllers = saved;
     }
     let workers = Arc::new(workers::Workers::new(settings.cpu_workers));
+    let wake_text = [
+        config_dir.join("traffic/wake.toml"),
+        exe_dir.join("traffic/wake.toml"),
+    ]
+    .into_iter()
+    .find_map(|path| std::fs::read_to_string(path).ok())
+    .unwrap_or_else(|| include_str!("../../../traffic/wake.toml").to_owned());
+    if let Err(error) = openatc_core::traffic::wake_policy::load(&wake_text) {
+        eprintln!("Wake policy rejected: {error}");
+    }
     let traffic_profiles = traffic_profiles::Store::default();
     if let Err(error) = traffic_profiles.get(&config_dir, &workers, false).await {
         eprintln!("Traffic profiles rejected: {error}");
@@ -550,6 +580,7 @@ async fn main() {
         traffic_profiles,
         generated: Default::default(),
         session_generation: 0,
+        traffic_seed: traffic_seed(),
         debug_jump: None,
         pending_copilot_reply: None,
         phrase_history: radio::PhraseHistory::load(&config_dir),
@@ -588,6 +619,7 @@ async fn main() {
     };
     engine.apply_settings_callsign();
     let shared: Shared = Arc::new(RwLock::new(engine));
+    setup::start_initial(&shared).await;
     let weather = shared.clone();
     tokio::spawn(async move { weather_loop(weather).await });
     let lifetime = Arc::new(lifecycle::PluginSession::new(plugin_parent));
@@ -676,7 +708,6 @@ fn test_state() -> EngineState {
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let settings = Settings {
-        preview_traffic: false,
         ..Default::default()
     };
     let mut state = EngineState {
@@ -693,6 +724,7 @@ fn test_state() -> EngineState {
         traffic_profiles: Default::default(),
         generated: Default::default(),
         session_generation: 0,
+        traffic_seed: traffic_seed(),
         debug_jump: None,
         pending_copilot_reply: None,
         phrase_history: radio::PhraseHistory::load(&config_dir),

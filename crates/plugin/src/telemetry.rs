@@ -9,6 +9,10 @@ use xplane::data::{ArrayRead, DataRead};
 pub struct Refs {
     /// Type code supplied by the currently loaded aircraft.
     pub aircraft_icao: Option<Box<dyn Fn() -> String>>,
+    /// Simulator wake category for the ownship: 0 light, 1 medium, 2 heavy, 3 super.
+    pub wake_category: Option<Box<dyn Fn() -> i32>>,
+    /// Simulator wingspan for the ownship, metres.
+    pub wingspan_meters: Option<Box<dyn Fn() -> f64>>,
     pub traffic: Option<Box<dyn Fn() -> Vec<openatc_core::state::TrafficTarget>>>,
     /// Latitude degrees.
     pub latitude: Option<Box<dyn Fn() -> f64>>,
@@ -117,6 +121,26 @@ pub fn find_refs(data: &mut xplane::data::DataApi, log: &mut Vec<String>) -> Ref
                         .to_owned()
                 }) as Box<dyn Fn() -> String>
             }),
+        wake_category: data
+            .find::<[i32], _>("sim/cockpit2/tcas/targets/wake/wake_cat")
+            .ok()
+            .map(|found| {
+                Box::new(move || {
+                    let mut value = [0; 1];
+                    found.get(&mut value);
+                    value[0]
+                }) as Box<dyn Fn() -> i32>
+            }),
+        wingspan_meters: data
+            .find::<[f32], _>("sim/cockpit2/tcas/targets/wake/wing_span_m")
+            .ok()
+            .map(|found| {
+                Box::new(move || {
+                    let mut value = [0.0; 1];
+                    found.get(&mut value);
+                    f64::from(value[0])
+                }) as Box<dyn Fn() -> f64>
+            }),
         transponder_code: find_integer(data, "sim/cockpit2/radios/actuators/transponder_code"),
         transponder_mode: find_integer(data, "sim/cockpit2/radios/actuators/transponder_mode"),
         indicated_speed: find_number(data, "sim/cockpit2/gauges/indicators/airspeed_kts_pilot"),
@@ -187,7 +211,17 @@ pub fn gather(refs: &Refs) -> openatc_core::state::Telemetry {
             .aircraft_icao
             .as_ref()
             .map_or_else(String::new, |read| read()),
-        wingspan_meters: None,
+        wingspan_meters: refs
+            .wingspan_meters
+            .as_ref()
+            .map(|read| read())
+            .filter(|span| span.is_finite() && (1.0..=150.0).contains(span)),
+        wake_category: refs
+            .wake_category
+            .as_ref()
+            .map(|read| read())
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| *value <= 3),
         traffic: refs.traffic.as_ref().map(|read| read()),
         radio_busy: false,
         radio_sequence_seen: None,
@@ -257,6 +291,12 @@ fn traffic_reader(
     let aircraft_types = data
         .find::<[u8], _>("sim/cockpit2/tcas/targets/icao_type")
         .ok();
+    let wake_categories = data
+        .find::<[i32], _>("sim/cockpit2/tcas/targets/wake/wake_cat")
+        .ok();
+    let wing_spans = data
+        .find::<[f32], _>("sim/cockpit2/tcas/targets/wake/wing_span_m")
+        .ok();
     let vx = data
         .find::<[f32], _>("sim/cockpit2/tcas/targets/position/vx")
         .ok();
@@ -275,6 +315,13 @@ fn traffic_reader(
             ids.get(&mut types);
         }
         let (mut east, mut north) = ([0.0; 64], [0.0; 64]);
+        let (mut wake_values, mut wing_values) = ([0; 64], [0.0; 64]);
+        if let Some(values) = &wake_categories {
+            values.get(&mut wake_values);
+        }
+        if let Some(values) = &wing_spans {
+            values.get(&mut wing_values);
+        }
         let speed_available = vx
             .as_ref()
             .zip(vz.as_ref())
@@ -299,15 +346,27 @@ fn traffic_reader(
         .into_iter()
         .min()
         .unwrap_or(0);
+        let mut seen = std::collections::BTreeSet::new();
+        if let Some(own) = crate::tcas::mode_s_identity(id_values[0]) {
+            seen.insert(own);
+        }
         (1..len)
-            .filter(|i| id_values[*i] != 0)
-            .map(|i| openatc_core::state::TrafficTarget {
-                id: id_values[i] as u32,
+            .filter_map(|i| {
+                let id = crate::tcas::mode_s_identity(id_values[i])?;
+                seen.insert(id).then_some((i, id))
+            })
+            .map(|(i, id)| openatc_core::state::TrafficTarget {
+                id,
                 callsign: code(&flights[i * 8..i * 8 + 8]),
                 aircraft: code(&types[i * 8..i * 8 + 8]),
                 ground_speed_knots: (i < speed_available)
                     .then(|| f64::from(east[i].hypot(north[i])) * 1.943_844_492),
-                wingspan_meters: None,
+                wingspan_meters: (wing_values[i].is_finite()
+                    && (1.0..=150.0).contains(&wing_values[i]))
+                .then_some(f64::from(wing_values[i])),
+                wake_category: u8::try_from(wake_values[i])
+                    .ok()
+                    .filter(|value| *value <= 3),
                 latitude: f64::from(lat_values[i]),
                 longitude: f64::from(lon_values[i]),
                 altitude_feet: f64::from(ele_values[i]) * 3.280_839_895,

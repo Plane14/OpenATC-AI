@@ -17,69 +17,91 @@ pub fn category(aircraft: &str) -> Option<char> {
     super::profiles::aircraft(aircraft)?.cwt
 }
 
-/// Apply these rules only within the represented US procedure region.
+/// Whether this airport uses the FAA CWT procedure region.
 #[must_use]
 pub fn applies(airport: &str) -> bool {
     airport.starts_with('K')
         || ["PA", "PF", "PH", "PO", "PP"]
             .iter()
-            .any(|p| airport.starts_with(p))
+            .any(|prefix| airport.starts_with(prefix))
 }
 
-/// Reviewed procedure regions, including Australia's separate ICAO-category rules.
+/// Every airport has a policy region, with ICAO as the fallback.
 #[must_use]
-pub fn supported(airport: &str) -> bool {
-    applies(airport) || airport.len() == 4 && airport.starts_with('Y')
+pub fn supported(_airport: &str) -> bool {
+    true
 }
 
-/// Wake-only arrival distance. No visual waiver or reduced runway standard is inferred.
+/// Wake-only arrival distance from the active regional table.
 #[must_use]
 pub fn arrival_for(airport: &str, leader: &str, follower: &str) -> Option<f64> {
-    if applies(airport) {
-        return approach_nm(category(leader)?, category(follower)?);
-    }
-    if !supported(airport) {
-        return None;
-    }
-    let a = super::profiles::aircraft(leader)?.wake;
-    let b = super::profiles::aircraft(follower)?.wake;
-    Some(match (a, b) {
-        ('J', 'H') => 6.0,
-        ('J', 'M') => 7.0,
-        ('J', 'L') => 8.0,
-        ('H', 'H') => 4.0,
-        ('H', 'M') => 5.0,
-        ('H', 'L') => 6.0,
-        // No verified MTOW catalogue: conservatively protect all Medium->Light pairs.
-        ('M', 'L') => 5.0,
-        (a, b) if "JHML".contains(a) && "JHML".contains(b) => 0.0,
-        _ => return None,
+    arrival_for_wake(airport, leader, None, follower, None)
+}
+
+/// Wake-only arrival distance using a simulator wake category when available.
+#[must_use]
+pub fn arrival_for_wake(
+    airport: &str,
+    leader: &str,
+    leader_wake: Option<u8>,
+    follower: &str,
+    follower_wake: Option<u8>,
+) -> Option<f64> {
+    super::wake_policy::read(|policy| {
+        policy.arrival(airport, leader, leader_wake, follower, follower_wake)
     })
 }
 
-/// Regional departure delay. Australian intermediate departures use their own table.
+/// Regional departure delay from the active table.
 #[must_use]
 pub fn departure_for(airport: &str, leader: &str, follower: &str, kind: Departure) -> Option<u16> {
-    if applies(airport) {
-        return departure_seconds(category(leader)?, category(follower)?, kind);
-    }
-    if !supported(airport) {
-        return None;
-    }
-    let a = super::profiles::aircraft(leader)?.wake;
-    let b = super::profiles::aircraft(follower)?.wake;
-    let seconds = match (a, b, kind) {
-        ('J', 'H' | 'M' | 'L', Departure::Intersection) => 240,
-        ('J', 'H', Departure::FullLength) => 120,
-        ('J', 'H' | 'M' | 'L', _) => 180,
-        ('H', 'M' | 'L', Departure::Intersection) | ('M', 'L', Departure::Intersection) => 180,
-        ('H', 'M' | 'L', _) | ('M', 'L', _) => 120,
-        // Heavy->Heavy is distance-only in MATS, checked by the live observer.
-        ('H', 'H', _) => 0,
-        (a, b, _) if "JHML".contains(a) && "JHML".contains(b) => 0,
-        _ => return None,
-    };
-    Some(seconds)
+    departure_for_wake(airport, leader, None, follower, None, kind)
+}
+
+/// Regional departure delay using simulator wake categories when available.
+#[must_use]
+pub fn departure_for_wake(
+    airport: &str,
+    leader: &str,
+    leader_wake: Option<u8>,
+    follower: &str,
+    follower_wake: Option<u8>,
+    kind: Departure,
+) -> Option<u16> {
+    super::wake_policy::read(|policy| {
+        policy.departure(
+            airport,
+            leader,
+            leader_wake,
+            follower,
+            follower_wake,
+            match kind {
+                Departure::FullLength => 0,
+                Departure::Intersection => 1,
+                Departure::Opposite => 2,
+            },
+        )
+    })
+}
+
+/// Whether the region allows a short aircraft to line up behind a super/heavy.
+#[must_use]
+pub fn lua_w_allowed(
+    airport: &str,
+    leader: &str,
+    leader_wake: Option<u8>,
+    follower: &str,
+    follower_wake: Option<u8>,
+) -> bool {
+    super::wake_policy::read(|policy| {
+        policy.lua_w_allowed(airport, leader, leader_wake, follower, follower_wake)
+    })
+}
+
+/// Published maximum time an aircraft should sit in line-up-and-wait without new instructions.
+#[must_use]
+pub fn max_lua_w_seconds(airport: &str) -> u16 {
+    super::wake_policy::read(|policy| policy.max_lua_w_seconds(airport))
 }
 
 /// Required departure interval. The observer may use liftoff as a conservative timing origin.
@@ -116,7 +138,7 @@ pub fn related_runways(
     airport: &crate::airport::Airport,
     leader: &str,
     follower: &str,
-    category: Option<char>,
+    _category: Option<char>,
 ) -> bool {
     let find = |name: &str| {
         airport
@@ -137,22 +159,22 @@ pub fn related_runways(
     }
     let (ax, an) = (a.second.east - a.first.east, a.second.north - a.first.north);
     let angle = crate::navigation::turn(dx.atan2(dn).to_degrees(), ax.atan2(an).to_degrees()).abs();
-    if angle.min((180.0 - angle).abs()) > 10.0 {
+    let (crossing, limit) = super::wake_policy::read(|policy| {
+        let region = policy.region(&airport.icao);
+        (
+            policy.runways().crossing_degrees,
+            region
+                .parallel_wake_m
+                .unwrap_or(policy.runways().parallel_wake_m),
+        )
+    });
+    if angle.min((180.0 - angle).abs()) > crossing {
         return false;
     }
     let cross = |p: crate::state::Point| {
         ((p.east - b.first.east) * dn - (p.north - b.first.north) * dx) / length
     };
     let distance = cross(a.first).abs().max(cross(a.second).abs());
-    let limit = if airport.icao.starts_with('Y') {
-        760.0
-    } else {
-        match category {
-            Some('E') => 213.36,
-            Some('F'..='I') => 0.0,
-            _ => 762.0,
-        }
-    };
     distance < limit
 }
 
@@ -235,16 +257,23 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            icao: "YSSY".into(),
             ..Default::default()
         };
         assert!(related_runways(&airport, "09L", "09R", Some('B')));
         assert!(related_runways(&airport, "27R", "09R", Some('B')));
-        assert!(!related_runways(&airport, "09L", "09R", Some('E')));
-        assert!(!related_runways(&airport, "09L", "09R", Some('F')));
+        assert!(related_runways(&airport, "09L", "09R", Some('E')));
         assert!(related_runways(&airport, "09L", "27R", Some('F')));
         airport.runways[1].first.north = 800.0;
         airport.runways[1].second.north = 800.0;
         assert!(!related_runways(&airport, "09L", "09R", Some('B')));
+        airport.icao = "LFMN".into();
+        airport.runways[1].first.north = 230.0;
+        airport.runways[1].second.north = 230.0;
+        assert!(
+            !related_runways(&airport, "09L", "09R", Some('B')),
+            "LFMN 04L/04R are independent for surface operations"
+        );
     }
     #[test]
     fn approach_category_and_icao_weight_are_not_cwt_categories() {
@@ -283,6 +312,18 @@ mod tests {
         assert_eq!(approach_nm('?', 'I'), None);
     }
     #[test]
+    fn a_heavier_follower_behind_a_lighter_leader_needs_no_wake_interval() {
+        assert_eq!(
+            departure_for("YSSY", "B738", "B77W", Departure::FullLength),
+            Some(0)
+        );
+        assert_eq!(
+            departure_for("YSSY", "B77W", "B738", Departure::FullLength),
+            Some(120)
+        );
+    }
+
+    #[test]
     fn australian_tables_do_not_reuse_us_cwt_or_infer_medium_mtow() {
         assert_eq!(arrival_for("YSSY", "B77W", "C172"), Some(6.0));
         assert_eq!(arrival_for("YSSY", "A388", "B77W"), Some(6.0));
@@ -303,7 +344,7 @@ mod tests {
             departure_for("YSSY", "B77W", "B744", Departure::FullLength),
             Some(0)
         );
-        assert_eq!(arrival_for("LFMN", "B77W", "C172"), None);
+        assert_eq!(arrival_for("LFMN", "B77W", "C172"), Some(6.0));
         assert_eq!(
             departure_for("YSSY", "UNKNOWN", "C172", Departure::FullLength),
             None

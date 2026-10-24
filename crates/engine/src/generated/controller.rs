@@ -72,7 +72,7 @@ pub(super) struct Context<'a> {
 }
 
 fn role(station: &Station, service: &str) -> bool {
-    station.service == service || station.services.iter().any(|value| value == service)
+    openatc_core::stations::has_role(station, service)
 }
 
 pub(super) fn covers_recovery(station: &Station, route: &Route) -> bool {
@@ -665,10 +665,10 @@ fn contract(station: Station, instruction: String, readback: String) -> Clearanc
 
 /// Add the same contingent limit to every movement covered by a single clearance.
 pub(super) fn holding_contracts(
-    route: &Route,
-    requirements: &[Fix],
+    _route: &Route,
+    _requirements: &[Fix],
     holds: &BTreeMap<usize, super::recovery::LimitHold>,
-    context: &Context<'_>,
+    _context: &Context<'_>,
     contracts: &mut BTreeMap<usize, Clearance>,
 ) -> Result<(), String> {
     let mut scope: BTreeMap<usize, usize> = holds.keys().map(|index| (*index, *index)).collect();
@@ -694,73 +694,12 @@ pub(super) fn holding_contracts(
         let hold = holds
             .get(&boundary)
             .ok_or("Contingent holding scope is incomplete")?;
-        let segment = route
-            .segment(boundary)
-            .ok_or("Holding boundary is missing")?;
-        let fix = requirements
-            .get(boundary.checked_sub(2).ok_or("Holding index is invalid")?)
-            .ok_or("Holding instruction has no pressure reference")?;
-        let (airport, weather) = if segment.stage == Stage::Descent {
-            (context.destination, context.arrival_weather)
-        } else {
-            (context.origin, context.departure_weather)
-        };
-        let course = (hold.inbound_true_degrees - weather.variation)
-            .rem_euclid(360.0)
-            .round() as i32;
-        let slots = [
-            (
-                "latitude",
-                format!(
-                    "{:.5} degrees {}",
-                    hold.position.latitude.abs(),
-                    if hold.position.latitude < 0.0 {
-                        "south"
-                    } else {
-                        "north"
-                    }
-                ),
-            ),
-            (
-                "longitude",
-                format!(
-                    "{:.5} degrees {}",
-                    hold.position.longitude.abs(),
-                    if hold.position.longitude < 0.0 {
-                        "west"
-                    } else {
-                        "east"
-                    }
-                ),
-            ),
-            (
-                "course",
-                format!(
-                    "{:03}",
-                    if course == 0 || course == 360 {
-                        360
-                    } else {
-                        course
-                    }
-                ),
-            ),
-            ("altitude", level(fix, hold.position, context, airport)?),
-            ("speed", format!("{:.0}", hold.indicated_knots)),
-            ("seconds", format!("{:.0}", hold.leg_seconds)),
-        ];
+        // Keep the published limit in the clearance data for the movement and controller.
+        // Keep the published limit in the clearance data for the movement and controller.
+        // Do not read coordinates or a full hold procedure in a routine take-off clearance.
         let clearance = contracts
             .get_mut(&index)
             .ok_or("Holding instruction has no controller contract")?;
-        clearance.instruction = format!(
-            "{} {}",
-            clearance.instruction,
-            say("generated_limit_holding", &slots)
-        );
-        clearance.readback = format!(
-            "{} {}",
-            clearance.readback,
-            say("generated_limit_holding_readback", &slots)
-        );
         clearance.holding = Some(hold.clone());
     }
     Ok(())

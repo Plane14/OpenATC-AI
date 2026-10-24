@@ -2,9 +2,8 @@
 version = 1
 # Includes filed endpoints when available; other pairs need compatible fleets and fresh simulator weather.
 network_airport_limit = 4
-# Concurrent controller-managed flights. Keep this at one until multi-flight
-# rejoin scheduling is complete.
-sequenced_flight_limit = 1
+# Concurrent controller-managed flights. Other prepared flights wait at their stands.
+sequenced_flight_limit = 16
 network_candidate_limit = 16
 network_radius_nm = 750.0
 flight_clearance_lead_seconds = 120.0
@@ -14,8 +13,8 @@ contingency_holding_maximum_ias = 200.0
 pushback_knots = 3.0
 pushback_radius_scale = 0.6
 pushback_max_meters = 250.0
-preparation_seconds_min = 30.0
-preparation_seconds_max = 90.0
+preparation_seconds_min = 5.0
+preparation_seconds_max = 20.0
 surface_sample_meters = 5.0
 surface_segment_meters = 25.0
 conflict_cell_meters = 50.0

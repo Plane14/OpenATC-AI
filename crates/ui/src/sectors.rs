@@ -402,7 +402,7 @@ pub fn page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
             }
         }
         if interface.map_traffic_visible {
-            for target in t.traffic.iter().flatten().take(126) {
+            for target in crate::traffic::targets(state).take(126) {
                 if !target.latitude.is_finite()
                     || !target.longitude.is_finite()
                     || !target.track_degrees.is_finite()

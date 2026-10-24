@@ -247,7 +247,7 @@ pub fn serves(service: &str, intent: &str) -> bool {
         "traffic_sighted" | "traffic_not_sighted" => {
             ["Tower", "Departure", "Approach", "Center"].contains(&service)
         }
-        "clearance" => service == "Clearance",
+        "clearance" => service == "Clearance" || service == "Delivery",
         "departure_runway" => ["Clearance", "Ground", "Tower"].contains(&service),
         "arrival_runway" | "change_approach" => {
             ["Approach", "Departure", "Center", "Tower"].contains(&service)
@@ -325,6 +325,52 @@ pub fn apply_combined(stations: &mut [Station], text: &str) -> Result<(), String
 #[must_use]
 pub fn station_serves(station: &Station, intent: &str) -> bool {
     serves(&station.service, intent) || station.services.iter().any(|s| serves(s, intent))
+}
+
+/// Whether a station holds one literal controller role, including configured combined duties.
+#[must_use]
+pub fn has_role(station: &Station, role: &str) -> bool {
+    station.service == role || station.services.iter().any(|service| service == role)
+}
+
+/// Select the published station that provides `intent` at `airport`.
+///
+/// The aircraft's tuned frequency wins when it has the capability. Otherwise the nearest
+/// published station is used. Pilot routing and generated traffic share this resolver so a
+/// combined service, a renamed Delivery facility or a second Ground frequency cannot select
+/// different stations on the two paths.
+#[must_use]
+pub fn station_for_intent<'a>(
+    stations: &'a [Station],
+    airport: &str,
+    intent: &str,
+    tuned_khz: Option<i32>,
+    position: [f64; 2],
+) -> Option<&'a Station> {
+    let mut candidates = stations
+        .iter()
+        .filter(|station| station.airport == airport && station_serves(station, intent))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return None;
+    }
+    if let Some(khz) = tuned_khz
+        && let Some(station) = candidates.iter().find(|station| station.khz == khz)
+    {
+        return Some(station);
+    }
+    candidates.sort_by(|left, right| {
+        distance_nm(position[0], position[1], left.latitude, left.longitude)
+            .total_cmp(&distance_nm(
+                position[0],
+                position[1],
+                right.latitude,
+                right.longitude,
+            ))
+            .then_with(|| left.khz.cmp(&right.khz))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    candidates.first().copied()
 }
 
 /// Published controller volume. Longitude is unwrapped around the aircraft.
@@ -437,7 +483,7 @@ pub fn assign_airport_capabilities(stations: &mut [Station]) {
     let mut roles = std::collections::BTreeMap::<String, (bool, bool)>::new();
     for station in stations.iter() {
         let entry = roles.entry(station.airport.clone()).or_default();
-        entry.0 |= station.service == "Clearance";
+        entry.0 |= station.service == "Clearance" || station.service == "Delivery";
         entry.1 |= station.service == "Ground";
     }
     for station in stations {
@@ -788,5 +834,54 @@ mod ownership_tests {
         assert_eq!(occupied_airport(&fields, &t).unwrap().id, "FIELD");
         t.on_ground = false;
         assert!(occupied_airport(&fields, &t).is_none());
+    }
+}
+
+#[cfg(test)]
+mod station_selection_tests {
+    use super::*;
+    fn station(service: &str, khz: i32, latitude: f64) -> Station {
+        Station {
+            airport: "TEST".into(),
+            name: format!("{service} {khz}"),
+            service: service.into(),
+            khz,
+            latitude,
+            longitude: 0.0,
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn a_combined_ground_duty_is_found_on_the_tower_station() {
+        let mut tower = station("Tower", 118_700, 0.0);
+        tower.services.push("Ground".into());
+        let stations = [tower];
+        let found = station_for_intent(&stations, "TEST", "taxi", None, [0.0, 0.0]).unwrap();
+        assert_eq!(found.khz, 118_700);
+        assert_eq!(found.service, "Tower");
+    }
+    #[test]
+    fn the_tuned_frequency_wins_over_a_nearer_station() {
+        let stations = [
+            station("Ground", 121_700, 0.0),
+            station("Ground", 121_900, 0.5),
+        ];
+        let found =
+            station_for_intent(&stations, "TEST", "taxi", Some(121_900), [0.0, 0.0]).unwrap();
+        assert_eq!(found.khz, 121_900);
+    }
+    #[test]
+    fn delivery_is_a_clearance_service() {
+        let mut delivery = station("Delivery", 121_900, 0.0);
+        delivery.name = "Test Delivery".into();
+        let stations = [delivery];
+        let found = station_for_intent(&stations, "TEST", "clearance", None, [0.0, 0.0]).unwrap();
+        assert_eq!(found.khz, 121_900);
+    }
+    #[test]
+    fn no_ground_station_does_not_fall_back_to_tower() {
+        let stations = [station("Tower", 118_700, 0.0)];
+        assert!(station_for_intent(&stations, "TEST", "taxi", None, [0.0, 0.0]).is_none());
+        assert!(station_for_intent(&stations, "TEST", "clearance", None, [0.0, 0.0]).is_none());
     }
 }

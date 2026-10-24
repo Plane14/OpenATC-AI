@@ -26,6 +26,10 @@ const GRID: usize = 128;
 /// Unresolved objects have no geometry. Keep the gate closed while their anchor is within this
 /// distance of the corridor; beyond it, even a large object cannot reach the aircraft envelope.
 const UNRESOLVED_OBJECT_REACH_METERS: f64 = 5_000.0;
+/// Coarse cells across one tile for the obstacle placements.
+const OBSTACLE_GRID: usize = 64;
+/// The largest aircraft envelope the obstacle check accepts.
+const MAXIMUM_ENVELOPE_METERS: f64 = 100.0;
 
 type TileKey = (i32, i32);
 type TileStack = Result<Vec<Arc<Tile>>, String>;
@@ -48,7 +52,10 @@ impl Terrain {
     pub fn new(root: &Path) -> Result<Self, String> {
         cache::begin();
         let path = root.join("Custom Scenery/scenery_packs.ini");
-        cache::observe(&path);
+        // The enabled pack list is part of the cache key, so the file's own timestamp is not a
+        // dependency. Touching the ini (an installer rewrite, for example) must not throw away
+        // every compiled tile and make the next preparation re-parse the whole scenery.
+
         let mut packs = Vec::new();
         if path.is_file() {
             if path.metadata().map_err(|e| e.to_string())?.len() > 1024 * 1024 {
@@ -216,7 +223,11 @@ impl Terrain {
     }
 
     fn tile(&mut self, latitude: i32, longitude: i32) -> Result<&[Arc<Tile>], String> {
-        const BUDGET: usize = 512 * 1024 * 1024;
+        // The retained set has to hold one preparation's working set, which is several dozen
+        // tiles for a pair of airports. A smaller cap makes the engine evict a tile and read it
+        // back for every corridor, which turns a preparation into minutes of repeated parsing.
+        const BUDGET: usize = 1024 * 1024 * 1024;
+        const MAXIMUM_TILES: usize = 128;
         let key = (latitude, longitude);
         self.clock += 1;
         self.touched.insert(key, self.clock);
@@ -287,6 +298,7 @@ impl Terrain {
                     for tile in &mut tiles {
                         tile.resolve_networks(bounds, &triangles, &bins);
                         tile.resolve_strings(bounds, &triangles, &bins);
+                        tile.index_obstacles();
                     }
                     tiles[base_index].triangles = triangles;
                     tiles[base_index].bins = bins;
@@ -303,7 +315,9 @@ impl Terrain {
                 .map_or(0, |tiles| tiles.iter().map(|tile| tile.bytes()).sum());
             // Evict only unborrowed stacks. Persistent copies make revisiting a tile cheap;
             // the per-job retained-memory cap and all physical clearance checks remain intact.
-            while self.tiles.len() >= 24 || self.retained_bytes.saturating_add(bytes) > BUDGET {
+            while self.tiles.len() >= MAXIMUM_TILES
+                || self.retained_bytes.saturating_add(bytes) > BUDGET
+            {
                 let oldest = self
                     .tiles
                     .iter()
@@ -324,7 +338,7 @@ impl Terrain {
                 }
                 self.touched.remove(&oldest);
             }
-            if self.tiles.len() >= 24
+            if self.tiles.len() >= MAXIMUM_TILES
                 || bytes > BUDGET
                 || self.retained_bytes.saturating_add(bytes) > BUDGET
             {
@@ -342,7 +356,6 @@ impl Terrain {
             .map(Vec::as_slice)
             .map_err(Clone::clone)
     }
-
     /// Terrain-only result; callers must separately resolve obstacles and controller authority.
     pub fn terrain_clear(
         &mut self,
@@ -528,7 +541,19 @@ impl Terrain {
             };
             for tile in &stack {
                 self.obstacle_seen |= tile.unresolved_object_near(from, to, radius);
-                for obstacle in &tile.obstacles {
+                // The cell index keeps the walk to the obstacles the corridor can reach. A tile
+                // holds tens of thousands of obstacles, and the corridor only passes a few cells
+                // of them.
+                let mut candidates = Vec::new();
+                for cell in tile.obstacle_cells(from, to) {
+                    candidates.extend_from_slice(&tile.obstacle_bins[cell]);
+                }
+                candidates.sort_unstable();
+                candidates.dedup();
+                for index in candidates {
+                    let Some(obstacle) = tile.obstacles.get(index as usize) else {
+                        continue;
+                    };
                     let placement = &obstacle.placement;
                     // Skip obstacles that cannot reach the corridor. This keeps a dense tile
                     // of small objects from being walked for every route segment.
@@ -566,10 +591,44 @@ impl Terrain {
                             .height
                             .map_or(ground, |height| height.max(ground + height))
                     };
-                    if !obstacle.clear(from, to, anchor, radius) {
+                    let local_top = obstacle.local_ground.and_then(|(height, reach)| {
+                        let offset = [from, to]
+                            .into_iter()
+                            .map(|point| {
+                                openatc_core::arrival::distance_nm(
+                                    [point.latitude, point.longitude],
+                                    placement.coordinate,
+                                ) * 1852.0
+                            })
+                            .fold(0.0_f64, f64::max);
+                        let padding = radius + reach + 5.0 + offset * 0.02;
+                        let latitude = padding / 111_320.0;
+                        let longitude = latitude / from.latitude.to_radians().cos().max(0.01);
+                        let area = [
+                            from.longitude.min(to.longitude) - longitude,
+                            from.longitude.max(to.longitude) + longitude,
+                            from.latitude.min(to.latitude) - latitude,
+                            from.latitude.max(to.latitude) + latitude,
+                        ];
+                        // A cross-tile ground reference keeps the precomputed conservative bound.
+                        stack
+                            .iter()
+                            .filter(|layer| {
+                                area[0] >= layer.bounds[0]
+                                    && area[1] <= layer.bounds[1]
+                                    && area[2] >= layer.bounds[2]
+                                    && area[3] <= layer.bounds[3]
+                            })
+                            .filter_map(|layer| {
+                                mesh_maximum(layer.bounds, &layer.triangles, &layer.bins, area)
+                            })
+                            .reduce(f64::max)
+                            .map(|ground| ground + height)
+                    });
+                    if !obstacle.clear_at_top(from, to, anchor, radius, local_top) {
                         if std::env::var_os("OPENATC_TRAFFIC_PROFILE").is_some() {
                             eprintln!(
-                                "Traffic obstacle refusal: {}, placement {:?}, height {:?}, AGL {}, ground {:.1} m, anchor {:.1} m, radius {:.1} m, geometry {:?}",
+                                "Traffic obstacle refusal: {}, placement {:?}, height {:?}, AGL {}, ground {:.1} m, anchor {:.1} m, radius {:.1} m, footprint {}, local top {:?}, geometry {:?}",
                                 placement.resource,
                                 placement.coordinate,
                                 placement.height,
@@ -577,6 +636,8 @@ impl Terrain {
                                 ground,
                                 anchor,
                                 obstacle.radius,
+                                obstacle.footprint.is_some(),
+                                local_top,
                                 obstacle.geometry.bounds().first()
                             );
                         }
@@ -737,6 +798,8 @@ struct Placement {
 /// placement coordinate. Outer windings are solid and alternate with clear holes.
 #[derive(Serialize, Deserialize)]
 struct Footprint {
+    /// Object overhang beyond the placement polygon.
+    reach: f64,
     /// Every winding, in the published order. Nesting depth decides whether a winding is ground
     /// or a hole, so the ordinary even-odd rule applies to a point.
     rings: Vec<Vec<[f64; 2]>>,
@@ -744,6 +807,49 @@ struct Footprint {
     bounds: [f64; 4],
 }
 impl Footprint {
+    /// AGS contours are directed polylines. Tile-spawning contours come first, so their
+    /// storage order does not identify complete outer boundaries or holes.
+    fn autogen(contours: &[Vec<[f64; 2]>], origin: [f64; 2], scale: f64) -> Option<Self> {
+        let key = |point: [f64; 2]| point.map(f64::to_bits);
+        let mut starts = BTreeMap::new();
+        for (index, contour) in contours.iter().enumerate() {
+            if contour.len() < 2
+                || contour.iter().flatten().any(|value| !value.is_finite())
+                || starts.insert(key(contour[0]), index).is_some()
+            {
+                return None;
+            }
+        }
+        let mut visited = BTreeSet::new();
+        let mut rings = Vec::new();
+        for first in 0..contours.len() {
+            if visited.contains(&first) {
+                continue;
+            }
+            let mut ring = contours[first].clone();
+            visited.insert(first);
+            while key(*ring.last()?) != key(ring[0]) {
+                let next = *starts.get(&key(*ring.last()?))?;
+                if !visited.insert(next) {
+                    return None;
+                }
+                ring.extend_from_slice(&contours[next][1..]);
+            }
+            rings.push(ring);
+        }
+        let area = |ring: &Vec<[f64; 2]>| {
+            ring.windows(2)
+                .map(|pair| {
+                    (pair[0][1] - origin[1]) * (pair[1][0] - origin[0])
+                        - (pair[1][1] - origin[1]) * (pair[0][0] - origin[0])
+                })
+                .sum::<f64>()
+                .abs()
+        };
+        rings.sort_by(|a, b| area(b).total_cmp(&area(a)));
+        Self::new(&rings, origin, scale).ok().flatten()
+    }
+
     /// Convert and validate a published forest footprint.
     ///
     /// The first non-empty winding is the outer boundary; later windings nest inside it and
@@ -837,6 +943,7 @@ impl Footprint {
             }
         }
         Ok(Some(Self {
+            reach: 0.0,
             rings: valid.into_iter().map(|(points, _)| points).collect(),
             bounds,
         }))
@@ -1078,6 +1185,8 @@ impl Geometry {
 
 #[derive(Serialize, Deserialize)]
 struct Obstacle {
+    /// Object height and maximum distance to its independent tile ground reference.
+    local_ground: Option<(f64, f64)>,
     placement: Placement,
     geometry: Geometry,
     /// Forests are checked against their published polygon instead of its bounding box.
@@ -1088,7 +1197,18 @@ struct Obstacle {
     radius: f64,
 }
 impl Obstacle {
+    #[cfg(test)]
     fn clear(&self, from: Waypoint, to: Waypoint, anchor: f64, radius: f64) -> bool {
+        self.clear_at_top(from, to, anchor, radius, None)
+    }
+    fn clear_at_top(
+        &self,
+        from: Waypoint,
+        to: Waypoint,
+        anchor: f64,
+        radius: f64,
+        local_top: Option<f64>,
+    ) -> bool {
         let (sin, cos) = self.placement.heading.to_radians().sin_cos();
         let local = |point: Waypoint| {
             let east = (point.longitude - self.placement.coordinate[1])
@@ -1109,12 +1229,14 @@ impl Obstacle {
             let Some(bounds) = self.geometry.bounds().first() else {
                 return true;
             };
-            let Some((low, high)) = footprint.blocked([a[0], a[2]], [b[0], b[2]], padding) else {
+            let Some((low, high)) =
+                footprint.blocked([a[0], a[2]], [b[0], b[2]], padding + footprint.reach)
+            else {
                 return true;
             };
             let first = a[1] + (b[1] - a[1]) * low;
             let last = a[1] + (b[1] - a[1]) * high;
-            return first.min(last) > anchor + f64::from(bounds.high[1]);
+            return first.min(last) > local_top.unwrap_or(anchor + f64::from(bounds.high[1]));
         }
         self.geometry.bounds().iter().all(|bounds| {
             let mut low: f64 = 0.0;
@@ -1136,7 +1258,7 @@ impl Obstacle {
             }
             low > high
                 || (a[1] + (b[1] - a[1]) * low).min(a[1] + (b[1] - a[1]) * high)
-                    > anchor + f64::from(bounds.high[1])
+                    > local_top.unwrap_or(anchor + f64::from(bounds.high[1]))
         })
     }
 }
@@ -1215,14 +1337,21 @@ fn facade_obstacle_in(facade: dsf::Facade, bounds: Option<[f64; 4]>) -> Result<O
     }
     low[1] = 0.0;
     high[1] = facade.height_meters;
-    // A forest fills the area its windings enclose, so the real footprint is carried through
-    // instead of covering every point inside its bounding box. Facades retain the box.
+    // A facade or a forest fills the area its windings enclose, so the real footprint is carried
+    // through instead of covering every point inside its bounding box. A building that stands
+    // beside a runway is then clear of the runway itself, while a building on it still refuses
+    // the corridor. Windings that cannot be validated keep the box, which reports an obstruction
+    // rather than clearing one.
     let footprint = if facade.forest {
         Footprint::new(&facade.rings, origin, scale)?.map(Arc::new)
     } else {
-        None
+        Footprint::new(&facade.rings, origin, scale)
+            .ok()
+            .flatten()
+            .map(Arc::new)
     };
     Ok(Obstacle {
+        local_ground: None,
         placement: Placement {
             resource: facade.resource,
             coordinate: origin,
@@ -1331,6 +1460,7 @@ fn bridge_obstacle(points: &[[f64; 3]], height_meters: f64) -> Result<Obstacle, 
     low[1] = 0.0;
     high[1] = height_meters;
     Ok(Obstacle {
+        local_ground: None,
         placement: Placement {
             resource: Arc::<str>::from("network"),
             coordinate: [origin[0], origin[1]],
@@ -1606,6 +1736,9 @@ pub(super) struct Tile {
     objects: Vec<Placement>,
     #[serde(with = "cache::obstacles")]
     obstacles: Vec<Obstacle>,
+    /// Obstacle indices by coarse cell, so a corridor check examines nearby obstacles only.
+    #[serde(skip)]
+    obstacle_bins: Vec<Vec<u32>>,
     draped_resources: BTreeSet<Arc<str>>,
     polygons: Vec<DrapedPolygon>,
     facades: Vec<dsf::Facade>,
@@ -1756,19 +1889,7 @@ impl Tile {
     fn resolve_strings(&mut self, bounds: [f64; 4], triangles: &[[Vertex; 3]], bins: &[Vec<u32>]) {
         let mut created = Vec::new();
         let mut unknown = false;
-        let mut autogen_points = 0usize;
-        let mut plain_points = 0usize;
-        let mut autogen_strings = 0usize;
-        let mut plain_strings = 0usize;
         for string in std::mem::take(&mut self.strings) {
-            let points: usize = string.rings.iter().map(Vec::len).sum();
-            if string.autogen {
-                autogen_points += points;
-                autogen_strings += 1;
-            } else {
-                plain_points += points;
-                plain_strings += 1;
-            }
             if string.autogen {
                 // An autogen area is filled with scattered objects, so the whole area is an
                 // obstacle. Modelling only its boundary as a line of objects both cost a box
@@ -1824,11 +1945,15 @@ impl Tile {
                 // The area is kept as a real winding when it is well formed. A winding that
                 // cannot be classified falls back to its bounding box, which reports an
                 // obstruction everywhere the area is drawn rather than clearing it.
-                let footprint = Footprint::new(&string.rings, anchor, scale)
-                    .ok()
-                    .flatten()
-                    .map(Arc::new);
+                let footprint =
+                    Footprint::autogen(&string.rings, anchor, scale).map(|mut footprint| {
+                        footprint.reach = reach;
+                        Arc::new(footprint)
+                    });
                 created.push(Obstacle {
+                    local_ground: string
+                        .ground_reach_meters
+                        .map(|ground_reach| (string.height_meters, ground_reach + reach)),
                     placement: Placement {
                         resource: string.resource.clone(),
                         coordinate: anchor,
@@ -1918,6 +2043,7 @@ impl Tile {
                             continue;
                         }
                         created.push(Obstacle {
+                            local_ground: None,
                             placement: Placement {
                                 resource: string.resource.clone(),
                                 coordinate: anchor,
@@ -1948,10 +2074,6 @@ impl Tile {
                 }
             }
         }
-        eprintln!(
-            "Generated traffic scenery: strings resolved: {autogen_strings} autogen with {autogen_points} points, {plain_strings} plain with {plain_points} points, {} obstacles",
-            created.len()
-        );
         self.obstacles.append(&mut created);
         self.unresolved_obstacles |= unknown;
         if unknown {
@@ -2024,6 +2146,7 @@ impl Tile {
                         autogen: false,
                         height_meters: placed.height_meters,
                         reach_meters: 0.0,
+                        ground_reach_meters: None,
                     });
                     continue;
                 }
@@ -2053,6 +2176,14 @@ impl Tile {
                 Some((height, reach)) => {
                     string.height_meters = height;
                     string.reach_meters = reach;
+                    string.ground_reach_meters = string
+                        .autogen
+                        .then(|| {
+                            library.and_then(|library| {
+                                library.autogen_ground_reach(pack, &string.resource)
+                            })
+                        })
+                        .flatten();
                     retained_strings.push(string);
                 }
                 None => {
@@ -2122,6 +2253,7 @@ impl Tile {
             }
             match loaded.get(&placement.resource) {
                 Some(Ok(geometry)) => tile.obstacles.push(Obstacle {
+                    local_ground: None,
                     placement: placement.clone(),
                     geometry: Geometry::Many(geometry.clone()),
                     footprint: None,
@@ -2147,6 +2279,68 @@ impl Tile {
         // Network chains are resolved against the mesh stack once the tile is placed in it: an
         // airport overlay publishes roads without any physical mesh of its own.
         Ok(tile)
+    }
+
+    /// Index the obstacle placements into coarse cells.
+    ///
+    /// An obstacle is listed in every cell its own extent can reach, so a corridor that passes
+    /// close to the placement finds it even when the obstacle covers several cells. The index is
+    /// rebuilt after a tile is read, so it costs a pass over the obstacles and no stored bytes.
+    fn index_obstacles(&mut self) {
+        self.obstacle_bins = vec![Vec::new(); OBSTACLE_GRID * OBSTACLE_GRID];
+        for (index, obstacle) in self.obstacles.iter().enumerate() {
+            let coordinate = obstacle.placement.coordinate;
+            let reach = (obstacle.radius + MAXIMUM_ENVELOPE_METERS) / 111_320.0;
+            let low = self.obstacle_cell(coordinate);
+            let high = self.obstacle_cell([
+                coordinate[0] + reach,
+                coordinate[1] + reach / coordinate[0].to_radians().cos().max(0.01),
+            ]);
+            for y in low[1]..=high[1] {
+                for x in low[0]..=high[0] {
+                    self.obstacle_bins[y * OBSTACLE_GRID + x].push(index as u32);
+                }
+            }
+        }
+    }
+
+    /// The cell that holds a coordinate, clamped to the tile.
+    fn obstacle_cell(&self, coordinate: [f64; 2]) -> [usize; 2] {
+        let bin = |value: f64, low: f64, high: f64| {
+            ((value - low) / (high - low) * OBSTACLE_GRID as f64)
+                .floor()
+                .clamp(0.0, (OBSTACLE_GRID - 1) as f64) as usize
+        };
+        [
+            bin(coordinate[1], self.bounds[0], self.bounds[1]),
+            bin(coordinate[0], self.bounds[2], self.bounds[3]),
+        ]
+    }
+
+    /// The cells a corridor crosses, so a check examines the nearby obstacles only.
+    ///
+    /// The walk follows the segment itself rather than its bounding box, and every sample is
+    /// clamped into the tile, so an obstacle whose placement lies near a tile edge is still
+    /// found when the corridor leaves the tile.
+    fn obstacle_cells(&self, from: Waypoint, to: Waypoint) -> Vec<usize> {
+        let distance = openatc_core::arrival::distance_nm(
+            [from.latitude, from.longitude],
+            [to.latitude, to.longitude],
+        ) * 1852.0;
+        let steps = ((distance / 400.0).ceil() as usize).clamp(1, 8192);
+        let mut cells = Vec::new();
+        for step in 0..=steps {
+            let fraction = step as f64 / steps as f64;
+            let coordinate = [
+                from.latitude + (to.latitude - from.latitude) * fraction,
+                from.longitude + (to.longitude - from.longitude) * fraction,
+            ];
+            let cell = self.obstacle_cell(coordinate);
+            cells.push(cell[1] * OBSTACLE_GRID + cell[0]);
+        }
+        cells.sort_unstable();
+        cells.dedup();
+        cells
     }
 
     fn index(&mut self) -> Result<(), String> {
@@ -3767,6 +3961,32 @@ mod tests {
     }
 
     #[test]
+    fn autogen_joins_interleaved_contours_and_preserves_holes() {
+        let contours = vec![
+            vec![[0.0, 0.0], [0.0, 1.0]],
+            vec![[0.3, 0.3], [0.7, 0.3], [0.7, 0.7]],
+            vec![[1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+            vec![[0.7, 0.7], [0.3, 0.7], [0.3, 0.3]],
+            vec![[0.0, 1.0], [1.0, 1.0]],
+        ];
+        let footprint = Footprint::autogen(&contours, [0.0, 0.0], 111_320.0).unwrap();
+        assert!(
+            footprint
+                .blocked([11_132.0, -11_132.0], [22_264.0, -22_264.0], 1.0)
+                .is_some()
+        );
+        assert!(
+            footprint
+                .blocked([44_528.0, -44_528.0], [66_792.0, -66_792.0], 1.0)
+                .is_none()
+        );
+        assert!(Footprint::autogen(&contours[..4], [0.0, 0.0], 111_320.0).is_none());
+        let mut ambiguous = contours.clone();
+        ambiguous.push(contours[0].clone());
+        assert!(Footprint::autogen(&ambiguous, [0.0, 0.0], 111_320.0).is_none());
+    }
+
+    #[test]
     fn autogen_top_covers_an_interior_ridge_above_its_anchor() {
         let mut tile = dsf::parse(&mesh_tile(0, 0, 0.0, false, false)).unwrap();
         let vertex = |longitude, latitude, meters| Vertex {
@@ -3795,6 +4015,7 @@ mod tests {
             autogen: true,
             height_meters: 20.0,
             reach_meters: 0.0,
+            ground_reach_meters: Some(50.0),
         });
         tile.strings.push(dsf::StringPolygon {
             resource: "beside-ridge.ags".into(),
@@ -3802,6 +4023,7 @@ mod tests {
             autogen: true,
             height_meters: 20.0,
             reach_meters: 0.0,
+            ground_reach_meters: None,
         });
         let triangles = std::mem::take(&mut tile.triangles);
         let bins = std::mem::take(&mut tile.bins);
@@ -3833,6 +4055,34 @@ mod tests {
         assert!(!beside.clear(beside_point(25.0), beside_point(25.0), 10.0, 1.0));
         assert!(beside.clear(beside_point(40.0), beside_point(40.0), 10.0, 1.0));
         assert!(obstacle.radius > 100_000.0);
+        tile.triangles = triangles;
+        tile.bins = bins;
+        let root = std::env::temp_dir().join(format!(
+            "openatc-autogen-local-ground-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut terrain = Terrain::new(&root).unwrap();
+        terrain.tiles.insert((0, 0), Ok(vec![Arc::new(tile)]));
+        assert!(
+            terrain
+                .obstacles_clear(beside_point(40.0), beside_point(40.0), 1.0)
+                .unwrap(),
+            "The distant ridge must not raise locally grounded trees"
+        );
+        assert!(
+            !terrain
+                .obstacles_clear(beside_point(25.0), beside_point(25.0), 1.0)
+                .unwrap(),
+            "The nearby trees still occupy their full height"
+        );
+        assert!(
+            !terrain
+                .obstacles_clear(point(115.0), point(115.0), 1.0)
+                .unwrap(),
+            "Local terrain under the trees still includes the ridge"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3851,6 +4101,7 @@ mod tests {
             unresolved_objects_overflow: false,
             objects: Vec::new(),
             obstacles: Vec::new(),
+            obstacle_bins: Vec::new(),
             draped_resources: BTreeSet::new(),
             polygons: Vec::new(),
             facades: Vec::new(),

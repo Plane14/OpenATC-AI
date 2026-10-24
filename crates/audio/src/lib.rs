@@ -79,6 +79,10 @@ struct Capture {
     full: bool,
 }
 
+/// Live master level shared with the audio callback. The callback reads it every block, so a
+/// volume change also affects the utterance that is already playing.
+static LIVE_MASTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3F4C_CCCD);
+
 /// Shared playback state read by the audio callback.
 struct Playback {
     frames: Vec<f32>,
@@ -297,7 +301,18 @@ impl Speech {
         if let Ok(mut capture) = self.capture.lock() {
             capture.gain = self.gain;
         }
+        let previous = self.master_volume;
         self.master_volume = volume.clamp(0.0, 1.0);
+        LIVE_MASTER.store(
+            self.master_volume.to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        if (previous - self.master_volume).abs() > f32::EPSILON {
+            eprintln!(
+                "OpenATC audio: master level set to {:.2}",
+                self.master_volume
+            );
+        }
         if input != self.input_key && !self.recording {
             input.clone_into(&mut self.input_key);
         }
@@ -920,9 +935,15 @@ unsafe extern "C" fn render_callback(ud: *mut c_void, out: *mut c_float, frames:
     let frames = usize::try_from(frames).unwrap_or(0);
     let dest = unsafe { std::slice::from_raw_parts_mut(out, frames * 2) };
     if let Ok(mut locked) = playback.lock() {
+        let master = f32::from_bits(LIVE_MASTER.load(std::sync::atomic::Ordering::Relaxed));
+        static REPORTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+        if REPORTED.swap(master.to_bits(), std::sync::atomic::Ordering::Relaxed) != master.to_bits()
+        {
+            eprintln!("OpenATC audio: playing at master level {master:.2}");
+        }
         for sample in dest {
             *sample = if locked.position < locked.frames.len() {
-                let value = locked.frames[locked.position] * locked.volume;
+                let value = locked.frames[locked.position] * locked.volume * master;
                 locked.position += 1;
                 value
             } else {

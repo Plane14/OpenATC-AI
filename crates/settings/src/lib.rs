@@ -67,6 +67,19 @@ pub enum TrafficRate {
     Hertz(u8),
 }
 
+/// Generated-traffic diagnostics written to the engine log.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrafficLog {
+    /// Silent.
+    Off,
+    /// Publication, phase changes, gate counts and every refusal.
+    #[default]
+    Summary,
+    /// Per-aircraft decisions, routes and clearance state.
+    Detail,
+}
+
 impl TrafficRate {
     /// The draw interval in seconds, or zero when the rate is frame based.
     #[must_use]
@@ -189,12 +202,12 @@ pub struct Settings {
     /// How often the generated traffic is drawn. A higher rate moves the traffic more smoothly
     /// and costs more of the simulator's frame time.
     pub traffic_rate: TrafficRate,
+    /// Generated-traffic diagnostics in the engine log.
+    pub traffic_log: TrafficLog,
     /// Add a local pattern aircraft and departures when the network released little traffic.
     pub local_pattern_traffic: bool,
     /// Start the first released flight on approach instead of at its stand.
     pub start_first_flight_on_approach: bool,
-    /// Publish a small protected scene while the full traffic scene is prepared.
-    pub preview_traffic: bool,
     /// Active mainline-airline budget.
     pub airline_traffic: u8,
     /// Active regional/turboprop budget.
@@ -203,6 +216,18 @@ pub struct Settings {
     pub cargo_traffic: u8,
     /// Active private/GA budget.
     pub ga_traffic: u8,
+    /// Minimum generated aircraft moving on the ground when traffic is full.
+    pub traffic_taxi_min: u8,
+    /// Maximum generated aircraft moving on the ground when traffic is full.
+    pub traffic_taxi_max: u8,
+    /// Keep an airport alive this far from an airliner flying a local circuit.
+    pub traffic_circuit_jet_nm: f64,
+    /// Keep an airport alive this far from a turboprop flying a local circuit.
+    pub traffic_circuit_turboprop_nm: f64,
+    /// Keep an airport alive this far from a light aircraft flying a local circuit.
+    pub traffic_circuit_ga_nm: f64,
+    /// Wake-separation table: auto, icao, recat_eu, faa_cwt or mats.
+    pub wake_standard: String,
     /// Speak simulated pilot reports based on observed local traffic movements.
     pub hear_traffic_radio: bool,
     /// Allow conversations with simulated pilots for identified traffic.
@@ -393,6 +418,9 @@ pub struct Settings {
     pub show_ground_taxi_arrows: bool,
     /// Highlight the authorised holding point on the map and simulator ground.
     pub show_holding_point: bool,
+    /// Debug: ring each generated aircraft's next hold, before a crossing or at the
+    /// departure runway.
+    pub show_traffic_holding_points: bool,
     /// Display the simulator's follow-me vehicle on the approved taxi route.
     pub show_follow_me: bool,
     /// ILS approach and glideslope volumes on the airport map.
@@ -457,13 +485,19 @@ impl Default for Settings {
             native_traffic_count: 4,
             generated_traffic: false,
             traffic_rate: TrafficRate::EveryFrame,
+            traffic_log: TrafficLog::Summary,
             local_pattern_traffic: false,
             start_first_flight_on_approach: false,
-            preview_traffic: true,
             airline_traffic: 8,
             regional_traffic: 4,
             cargo_traffic: 2,
             ga_traffic: 5,
+            traffic_taxi_min: 4,
+            traffic_taxi_max: 6,
+            traffic_circuit_jet_nm: 30.0,
+            traffic_circuit_turboprop_nm: 20.0,
+            traffic_circuit_ga_nm: 10.0,
+            wake_standard: "auto".into(),
             hear_traffic_radio: true,
             talk_to_traffic: false,
             informal_pilot_chat: false,
@@ -554,6 +588,7 @@ impl Default for Settings {
             show_taxi_arrows: true,
             show_ground_taxi_arrows: false,
             show_holding_point: false,
+            show_traffic_holding_points: false,
             show_follow_me: false,
             show_ils_beams: false,
             show_ownship: true,
@@ -634,6 +669,24 @@ impl Settings {
                     .all(|value| value.is_ascii_alphanumeric() || value == b'-' || value == b' '))
         {
             return Err(ValidationError::BadCallsign);
+        }
+        if self.traffic_taxi_min > self.traffic_taxi_max || self.traffic_taxi_max > 16 {
+            return Err(ValidationError::OutOfRange(
+                "taxi traffic target",
+                f32::from(self.traffic_taxi_max),
+            ));
+        }
+        for (name, value) in [
+            ("jet circuit radius", self.traffic_circuit_jet_nm),
+            (
+                "turboprop circuit radius",
+                self.traffic_circuit_turboprop_nm,
+            ),
+            ("GA circuit radius", self.traffic_circuit_ga_nm),
+        ] {
+            if !value.is_finite() || !(1.0..=200.0).contains(&value) {
+                return Err(ValidationError::OutOfRange(name, value as f32));
+            }
         }
         if self.cpu_workers > 16 {
             return Err(ValidationError::OutOfRange(

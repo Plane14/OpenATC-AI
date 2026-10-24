@@ -17,6 +17,7 @@ pub mod surface;
 pub mod trajectory;
 pub mod vertical;
 pub mod wake;
+pub mod wake_policy;
 use crate::{
     airport::{Airport, airport_point},
     state::{Telemetry, TrafficTarget},
@@ -74,6 +75,60 @@ pub fn runway_position(
         length,
         dx.atan2(dn).to_degrees().rem_euclid(360.0),
     ))
+}
+
+/// Exact plan-view relation between one aircraft and a published runway strip.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RunwayClearance {
+    /// Distance along the runway from the named threshold, metres.
+    pub along_meters: f64,
+    /// Signed offset from the runway centreline, metres.
+    pub offset_meters: f64,
+    /// Aircraft half-extent across the runway, including wings and fuselage angle.
+    pub lateral_half_meters: f64,
+    /// Aircraft half-extent along the runway.
+    pub fore_aft_meters: f64,
+    /// Named runway length, metres.
+    pub length_meters: f64,
+    /// Published runway width, metres.
+    pub width_meters: f64,
+    /// Any part of the aircraft is on the runway strip, including wingtips.
+    pub over_runway: bool,
+}
+
+/// Compare an aircraft footprint with the exact published runway width and length.
+#[must_use]
+pub fn runway_clearance(
+    airport: &Airport,
+    runway: &str,
+    latitude: f64,
+    longitude: f64,
+    heading_degrees: f64,
+    aircraft: &str,
+    reported_span: Option<f64>,
+    margin_meters: f64,
+) -> Option<RunwayClearance> {
+    let (along, across, length, runway_heading) =
+        runway_position(airport, runway, latitude, longitude)?;
+    let width = airport
+        .runways
+        .iter()
+        .find(|r| r.first_name == runway || r.second_name == runway)?
+        .width;
+    let (fore_aft, lateral) = footprint(aircraft, reported_span, heading_degrees, runway_heading);
+    let margin = margin_meters.max(0.0);
+    let over_runway = along >= -fore_aft - margin
+        && along <= length + fore_aft + margin
+        && across.abs() < width / 2.0 + lateral + margin;
+    Some(RunwayClearance {
+        along_meters: along,
+        offset_meters: across,
+        lateral_half_meters: lateral,
+        fore_aft_meters: fore_aft,
+        length_meters: length,
+        width_meters: width,
+        over_runway,
+    })
 }
 
 /// Position relative to the landing threshold, including a published displacement.
@@ -348,6 +403,44 @@ mod tests {
         );
         assert_eq!(crosswind(180.0, 20.0, 90.0), Some((20.0, true)));
     }
+    #[test]
+    fn runway_clearance_uses_exact_width_and_wing_span() {
+        use crate::state::Point;
+        let airport = Airport {
+            reference_latitude: 0.0,
+            reference_longitude: 0.0,
+            runways: vec![crate::airport::Runway {
+                first_name: "09".into(),
+                second_name: "27".into(),
+                first: Point {
+                    east: -1200.0,
+                    north: 0.0,
+                    height: 0.0,
+                },
+                second: Point {
+                    east: 1200.0,
+                    north: 0.0,
+                    height: 0.0,
+                },
+                width: 45.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let over =
+            runway_clearance(&airport, "09", 0.00027, 0.0, 90.0, "A320", Some(36.0), 0.0).unwrap();
+        assert_eq!(over.width_meters, 45.0);
+        assert_eq!(over.lateral_half_meters, 18.0);
+        assert!(
+            over.over_runway,
+            "a wingtip 30 m from the centreline is over a 45 m runway"
+        );
+        let clear =
+            runway_clearance(&airport, "09", 0.0005, 0.0, 90.0, "A320", Some(36.0), 0.0).unwrap();
+        assert!(!clear.over_runway);
+        assert!(clear.offset_meters.abs() > 45.0);
+    }
+
     #[test]
     fn taxi_crossing_traffic_is_protected_but_diverging_traffic_is_not() {
         let a = Airport::default();

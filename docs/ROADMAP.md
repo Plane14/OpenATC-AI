@@ -1,5 +1,55 @@
 # Roadmap
 
+## Selected-runway fleet eligibility — 23 October 2026
+
+Generated fleet selection now uses the runway selected after the weather/flow
+check, rather than the longest runway anywhere at each airport. A heavier aircraft
+can no longer win the weighted fleet choice solely because an unused parallel
+runway is longer. GA departures retain the capacity of their separately prepared
+runway candidates. Simulator airport identifiers are mapped to the configured
+world identifiers for the same selection; controller and movement airport records
+remain the installed ones.
+
+A weighted UPS fleet regression verifies both runway ends, unused-long-runway
+exclusion, selection of the suitable smaller type, unknown-runway refusal and
+published airport-code mapping. The generated source suite passes 144 tests with
+25 installed-data fixtures skipped. The full installed mixed rerun is pending;
+complete cargo/GA and native simulator acceptance remain open.
+
+
+## Cargo route coverage — 22 October 2026
+
+A partial European route sample was excluding FedEx and UPS from every unlisted
+city pair, including their configured US hubs. Operator profiles now have an
+explicit `route_policy`: the default `listed` retains the existing catalogue
+restriction; `hub_spokes` also permits simulated connections through that
+operator's positively weighted configured hubs. Only FedEx and UPS opt in.
+Unrelated non-hub pairs remain excluded. Geography, fleet/range, installed model,
+stand, procedure, weather and full protection checks remain mandatory.
+
+The spoke policy models a network; it does not label an unlisted pair as a
+published flight or schedule. Existing listed pairs retain their weighting.
+FedEx describes its [Memphis World Hub](https://newsroom.fedex.com/newsroom/global-english/fedex-unveils-new-automated-sorting-facility-at-memphis-world-hub)
+as central to its network, and UPS identifies [Louisville Worldport](https://www.jobs-ups.com/us/en/ups-worldport)
+as the center of its global air network. These sources support the hub model,
+not an assertion about a specific direct city-pair service.
+
+Profile regressions pass 10 tests, including hub direction symmetry, non-hub and
+listed-policy refusals, service-area restrictions, range, model availability and
+stand-policy rejection. Both shipped-configuration tests pass. Generated source
+checks pass 139 tests, with 24 installed-data fixtures skipped. The locked Linux
+plugin/engine release build and core library Clippy pass; Clippy retains warnings.
+These changes have not been installed.
+
+The full Memphis–Louisville mixed fixture still fails before movement acceptance.
+Cargo now receives two slots in each direction and reaches actual departure and
+arrival planning; previously all four requested cargo slots were excluded. The
+updated run retains seven nominal flights from the two primary origins and zero
+production releases. It still fails the third-origin requirement. Cargo landing,
+taxi connectivity, vertical/turn geometry and conservative scenery refusals remain
+open. This is no claim of complete cargo, mixed traffic or native acceptance.
+
+
 ## Traffic and setup — 22 October 2026
 
 Implemented:
@@ -11,8 +61,8 @@ Implemented:
 - Category-aware airport discovery, shared scenery planning across network
   directions and removal of rejected actors' live stand/resource ownership.
 - Predictive approach speed control, readback before generated speed changes,
-  restricted direct-entry player holds with an on/off setting, and Australian
-  wake rules alongside the existing FAA rules.
+  restricted direct-entry player holds with an on/off setting, and editable
+  FAA, ICAO, EUROCONTROL RECAT-EU and Australian wake tables.
 - Separate percentage settings for eligible weather calls and shortcut offers,
   with reason checks, cooldown and no repeated roll for the same opportunity.
 
@@ -27,8 +77,8 @@ Remaining priorities:
   bypassing physical clearance checks.
 - Complete mixed cargo, airline, regional and GA flights across multiple airports,
   continuous replenishment and the earlier multi-flight arrival stall.
-- Finish integrated VFR/CTAF, wake warning/wait/release, protected resequencing and
-  full player/generated parity.
+- Finish integrated VFR/CTAF, protected resequencing and full player/generated
+  parity.
 - Extend player holding beyond direct entries, including accepted-hold inability,
   diversion and emergency amendments.
 - Verify native visibility, taxi/takeoff/landing, audio, frame times and setup UI
@@ -118,7 +168,7 @@ The controller consumer can now queue a complete onward flight from a recovery h
 
 Generated flight clearances now accept published Departure controllers for climb and explicit combined station duties for their supported phases. A queued recovery-hold exit is tied to its original flight: removing the active flight, removing its aircraft frame or replacing its plan cancels the pending exit and leaves the current holding circuit intact. Focused controller tests follow both dedicated Departure and combined Tower/Departure cases through parking, and check stale-exit cancellation through another holding circuit.
 
-Generated departures now consult the existing observed wake monitor before a takeoff grant and before the roll. In the supported US wake-policy region, a heavier native, generated or player departure can delay a smaller follower; explicit aircraft categories and runway relationships determine the interval. Player liftoffs are observed alongside traffic liftoffs, including at the generated scene's airports. A conflict during readback cancels the grant. A later conflict withdraws an accepted but unstarted roll and its initial climb authority, queues the cancellation until the radio is free, and requires a fresh clearance after the interval expires. Hold and cancellation wording is editable in `speech/runtime/responses.toml`. This is not worldwide wake-policy coverage or native simulator acceptance.
+Generated departures now consult the observed wake monitor before a takeoff grant and before the roll. The active editable regional table and runway relationship determine the interval; a heavier native, generated or player departure can delay a smaller follower. Player liftoffs are observed alongside traffic liftoffs, including at the generated scene's airports. A conflict during readback cancels the grant. A later conflict withdraws an accepted but unstarted roll and its initial climb authority, queues the cancellation until the radio is free, and requires a fresh clearance after the interval expires. Hold and cancellation wording is editable in `speech/runtime/responses.toml`. The bundled tables are editable starting policies; native simulator acceptance remains separate.
 
 ## Crew conversation pipeline — 16 October 2026
 

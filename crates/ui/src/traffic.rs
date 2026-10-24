@@ -10,6 +10,22 @@
 use crate::widgets;
 use openatc_core::state::State;
 
+/// Draw generated poses alongside fresh simulator telemetry, preferring the engine pose by ID.
+pub(crate) fn targets(state: &State) -> impl Iterator<Item = &openatc_core::state::TrafficTarget> {
+    state
+        .telemetry
+        .traffic
+        .iter()
+        .flatten()
+        .filter(|target| {
+            !state
+                .generated_traffic
+                .iter()
+                .any(|f| f.target.id == target.id)
+        })
+        .chain(state.generated_traffic.iter().map(|frame| &frame.target))
+}
+
 /// How often the generated traffic is drawn, in frames or in hertz.
 fn traffic_rate(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
     use openatc_settings::TrafficRate;
@@ -57,10 +73,36 @@ fn traffic_rate(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
     }
 }
 
+fn wake_standard(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
+    let options = [
+        ("Auto by region", "auto"),
+        ("ICAO Doc 4444", "icao"),
+        ("EUROCONTROL RECAT-EU", "recat_eu"),
+        ("FAA CWT", "faa_cwt"),
+        ("Australian MATS", "mats"),
+    ];
+    let preview = options
+        .iter()
+        .find(|(_, value)| *value == interface.settings.wake_standard)
+        .map_or("Auto by region", |(label, _)| *label);
+    ui.text_disabled("Wake separation");
+    ui.set_next_item_width(-1.0);
+    if let Some(_combo) = ui.begin_combo("##wake-standard", preview) {
+        for (label, value) in options {
+            if ui.selectable(label) && interface.settings.wake_standard != value {
+                interface.settings.wake_standard = value.into();
+                interface.save_settings();
+            }
+        }
+    }
+    ui.text_wrapped("Auto uses FAA CWT at US airports, Australian MATS at Y airports, and ICAO elsewhere. The tables live in traffic/wake.toml and can be edited without rebuilding.");
+}
+
 pub fn settings(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
     scenery_setup(ui, interface);
     widgets::section_title(ui, "TRAFFIC MOTION");
     traffic_rate(ui, interface);
+    wake_standard(ui, interface);
     ui.checkbox(
         "Add local pattern traffic",
         &mut interface.settings.local_pattern_traffic,
@@ -70,14 +112,54 @@ pub fn settings(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
         "Start the first flight on approach",
         &mut interface.settings.start_first_flight_on_approach,
     );
-    ui.text_wrapped("Starts the first released flight on final instead of at its stand, so arrival traffic is visible straight away. That flight then lands instead of departing.");
+    ui.text_wrapped("Allows an approach start even when only one protected flight is available. Larger populations automatically mix nearby arrivals, flying traffic and ground departures.");
+    if ui.collapsing_header("Traffic lifecycle", imgui::TreeNodeFlags::empty()) {
+        let mut changed = false;
+        let mut taxi_min = i32::from(interface.settings.traffic_taxi_min);
+        let mut taxi_max = i32::from(interface.settings.traffic_taxi_max);
+        ui.text_disabled("Moving ground aircraft when traffic is full");
+        ui.set_next_item_width(-1.0);
+        if ui.slider("##taxi-min", 0, 12, &mut taxi_min) {
+            interface.settings.traffic_taxi_min = taxi_min.clamp(0, 12) as u8;
+            changed = true;
+        }
+        ui.text_wrapped("Minimum taxiing aircraft");
+        ui.set_next_item_width(-1.0);
+        if ui.slider("##taxi-max", 0, 12, &mut taxi_max) {
+            interface.settings.traffic_taxi_max = taxi_max.clamp(0, 12) as u8;
+            changed = true;
+        }
+        ui.text_wrapped("Maximum taxiing aircraft. The actual target is rolled once per session inside this range.");
+        if interface.settings.traffic_taxi_min > interface.settings.traffic_taxi_max {
+            interface.settings.traffic_taxi_max = interface.settings.traffic_taxi_min;
+        }
+        let mut jet = interface.settings.traffic_circuit_jet_nm as f32;
+        ui.set_next_item_width(-1.0);
+        if ui.slider("##circuit-jet", 1.0, 100.0, &mut jet) {
+            interface.settings.traffic_circuit_jet_nm = f64::from(jet);
+            changed = true;
+        }
+        ui.text_wrapped("Airliner circuit retention radius (NM)");
+        let mut turboprop = interface.settings.traffic_circuit_turboprop_nm as f32;
+        ui.set_next_item_width(-1.0);
+        if ui.slider("##circuit-turboprop", 1.0, 100.0, &mut turboprop) {
+            interface.settings.traffic_circuit_turboprop_nm = f64::from(turboprop);
+            changed = true;
+        }
+        ui.text_wrapped("Turboprop circuit retention radius (NM)");
+        let mut ga = interface.settings.traffic_circuit_ga_nm as f32;
+        ui.set_next_item_width(-1.0);
+        if ui.slider("##circuit-ga", 1.0, 100.0, &mut ga) {
+            interface.settings.traffic_circuit_ga_nm = f64::from(ga);
+            changed = true;
+        }
+        ui.text_wrapped("Light-aircraft circuit retention radius (NM). Ground, approach and departing traffic stays alive inside this radius; beyond it those slots become airborne traffic near you.");
+        if changed {
+            interface.save_settings();
+        }
+    }
     widgets::section_title(ui, "TRAFFIC SOURCE");
-    ui.text_wrapped("OpenATC generated traffic is still in development. Native X-Plane AI is optional; installing Bluebell models alone does not create flights.");
-    ui.checkbox(
-        "Fast traffic preview",
-        &mut interface.settings.preview_traffic,
-    );
-    ui.text_wrapped("Publishes a small protected scene while the full airport traffic is prepared; the full scene replaces it. The same obstacle and weather checks apply.");
+    ui.text_wrapped("OpenATC generated traffic uses complete flight plans only. Prepare a flight from a gate, holding point or approach; there is no plan-less preview layer. Native X-Plane AI is optional; installing Bluebell models alone does not create flights.");
     if let Some(reply) = interface.engine.take_reply("/traffic/models/index") {
         interface.traffic_notice = if reply.success {
             format!(
@@ -177,11 +259,14 @@ pub fn tab(ui: &imgui::Ui, interface: &mut crate::interface::Interface, state: &
         ui.text_wrapped(&interface.traffic_notice);
     }
     ui.text_wrapped("OpenATC checks simulator-reported aircraft before issuing runway crossing, takeoff and landing clearances.");
-    let Some(targets) = state.telemetry.traffic.as_ref() else {
+    if state.telemetry.traffic.is_none() {
         ui.text_colored(widgets::warning(ui), "Traffic feed unavailable");
         ui.text_wrapped("Runway checks cannot confirm clear traffic. Check the simulator connection and the traffic provider's TCAS output.");
-        return;
-    };
+        if state.generated_traffic.is_empty() {
+            return;
+        }
+    }
+    let targets: Vec<_> = targets(state).take(126).collect();
     ui.text(format!("{} aircraft reported", targets.len()));
     if state.taxi_clearance.waiting_for_traffic {
         ui.text_colored(
@@ -482,7 +567,7 @@ fn model_installer(ui: &imgui::Ui, interface: &mut crate::interface::Interface) 
 }
 
 /// Worker progress is polled only while this page is visible. No files or database on the UI thread.
-fn scenery_setup(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
+pub(crate) fn scenery_setup(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
     widgets::section_title(ui, "TRAFFIC SETUP");
     if let Some(reply) = interface.engine.take_reply("/traffic/scenery/status") {
         interface.scenery_pending = false;
@@ -562,5 +647,54 @@ fn scenery_setup(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
                 .engine
                 .post("/traffic/scenery/clear", serde_json::json!({}));
         }
+    }
+}
+
+#[cfg(test)]
+mod map_tests {
+    use super::*;
+    use openatc_core::state::{GeneratedTraffic, TrafficTarget};
+    #[test]
+    fn fresh_simulator_samples_keep_generated_map_targets_without_duplicates() {
+        let mut state = State::default();
+        state.telemetry.traffic = Some(vec![
+            TrafficTarget {
+                id: 1,
+                ..Default::default()
+            },
+            TrafficTarget {
+                id: 2,
+                latitude: 1.0,
+                ..Default::default()
+            },
+        ]);
+        state.generated_traffic.push(GeneratedTraffic {
+            target: TrafficTarget {
+                id: 2,
+                latitude: 2.0,
+                ..Default::default()
+            },
+            model: std::sync::Arc::new(openatc_core::traffic::csl::Model {
+                id: "TEST".into(),
+                objects: vec![],
+                vertical_offset: None,
+                matches: vec![],
+            }),
+            vertical_speed_fpm: 0.0,
+            body_heading_degrees: None,
+            animation: Default::default(),
+        });
+        let shown: Vec<_> = targets(&state).collect();
+        assert_eq!(shown.len(), 2);
+        assert_eq!(
+            shown.iter().find(|target| target.id == 2).unwrap().latitude,
+            2.0
+        );
+        state.telemetry.traffic = None;
+        assert_eq!(targets(&state).count(), 1);
+        assert!(
+            state.telemetry.traffic.is_none(),
+            "Do not hide an unavailable native feed"
+        );
     }
 }

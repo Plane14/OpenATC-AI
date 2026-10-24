@@ -12,7 +12,7 @@ use std::{
 };
 
 // Bump when the stored format or scenery interpretation changes.
-const VERSION: u32 = 2;
+const VERSION: u32 = 6;
 const MAX_ENTRY: usize = 256 * 1024 * 1024;
 const MAX_STORED: i64 = 1536 * 1024 * 1024;
 const MAX_DEPENDENCIES: usize = 50_000;
@@ -125,6 +125,34 @@ fn location() -> PathBuf {
     std::env::var_os("OPENATC_SCENERY_CACHE_DIR")
         .map_or_else(|| crate::data_dir().join("scenery-index"), PathBuf::from)
 }
+
+/// Remove scenery indexes written by an earlier interpretation.
+///
+/// The index is rebuildable, so a superseded file only occupies disk. Only files named for the
+/// scenery index are removed, and the current one is left alone.
+fn remove_superseded(directory: &Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(version) = name
+            .strip_prefix("scenery-v")
+            .and_then(|rest| rest.strip_suffix(".sqlite3"))
+        else {
+            continue;
+        };
+        if version
+            .parse::<u32>()
+            .is_ok_and(|version| version != VERSION)
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
 pub(super) struct Cache {
     connection: Connection,
     root: String,
@@ -150,6 +178,7 @@ impl Cache {
     }
     fn open(directory: &Path, root: &Path) -> Result<Self, String> {
         std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
+        remove_superseded(directory);
         let path = directory.join(format!("scenery-v{VERSION}.sqlite3"));
         let connection = Connection::open(&path).map_err(|e| e.to_string())?;
         connection
@@ -192,7 +221,7 @@ impl Cache {
             Ok(row) => row,
             Err(error) => {
                 update(|status| {
-                    status.error = format!("Cache read failed; rebuilding scenery: {error}")
+                    status.error = format!("Cache read failed; rebuilding scenery: {error}");
                 });
                 return None;
             }
@@ -205,16 +234,22 @@ impl Cache {
             }
             if Sha256::digest(&payload).as_slice() != checksum {
                 update(|status| {
-                    status.error = "Cache entry failed its checksum; rebuilding scenery".into()
+                    status.error = "Cache entry failed its checksum; rebuilding scenery".into();
                 });
                 return None;
             }
-            let tiles: Vec<Arc<Tile>> = postcard::from_bytes(&payload).ok()?;
+            let tiles: Vec<Tile> = postcard::from_bytes(&payload).ok()?;
             if tiles.is_empty() || tiles.len() > 1024 {
                 return None;
             }
+            // The obstacle index is rebuilt rather than stored, so a cached tile costs a pass
+            // over its obstacles and no extra bytes.
+            let mut tiles = tiles;
+            for tile in &mut tiles {
+                tile.index_obstacles();
+            }
             restore(&dependencies);
-            Some(tiles)
+            Some(tiles.into_iter().map(Arc::new).collect())
         })();
         if loaded.is_some() {
             let _ = self.connection.execute(
@@ -325,7 +360,14 @@ fn now() -> i64 {
 /// the same model for every placement, then allocate a separate model for each on load.
 pub(super) mod obstacles {
     use super::{Arc, BTreeMap, Deserialize, Footprint, Geometry, Obstacle, Placement, Serialize};
-    type Record = (Placement, usize, Option<Arc<Footprint>>, bool, f64);
+    type Record = (
+        Placement,
+        usize,
+        Option<Arc<Footprint>>,
+        bool,
+        f64,
+        Option<(f64, f64)>,
+    );
     pub fn serialize<S: serde::Serializer>(
         items: &[Obstacle],
         serializer: S,
@@ -345,6 +387,7 @@ pub(super) mod obstacles {
                 &item.footprint,
                 item.agl,
                 item.radius,
+                item.local_ground,
             ));
         }
         (geometries, records).serialize(serializer)
@@ -356,12 +399,13 @@ pub(super) mod obstacles {
             Deserialize::deserialize(deserializer)?;
         records
             .into_iter()
-            .map(|(placement, index, footprint, agl, radius)| {
+            .map(|(placement, index, footprint, agl, radius, local_ground)| {
                 let geometry = geometries
                     .get(index)
                     .ok_or_else(|| serde::de::Error::custom("Invalid cached model reference"))?
                     .clone();
                 Ok(Obstacle {
+                    local_ground,
                     placement,
                     geometry,
                     footprint,
@@ -460,6 +504,7 @@ mod tests {
         }]));
         for longitude in [0.4, 0.5] {
             tile.obstacles.push(Obstacle {
+                local_ground: Some((10.0, 50.0)),
                 placement: Placement {
                     resource: "tower.obj".into(),
                     coordinate: [0.5, longitude],
@@ -484,6 +529,7 @@ mod tests {
         let warm = cache
             .load(&packs, (0, 0))
             .expect("persistent compiled stack");
+        assert_eq!(warm[0].obstacles[0].local_ground, Some((10.0, 50.0)));
         assert_eq!(
             warm[0].mesh_height([0.5, 0.5]),
             tiles[0].mesh_height([0.5, 0.5])

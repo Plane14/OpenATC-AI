@@ -16,9 +16,15 @@ use std::{
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Progress {
+    run_id: u64,
+    first_run: bool,
+    reset: bool,
     running: bool,
     phase: String,
     files: usize,
+    completed: usize,
+    total: usize,
+    current_file: String,
     errors: Vec<String>,
 }
 static PROGRESS: OnceLock<Mutex<Progress>> = OnceLock::new();
@@ -30,6 +36,39 @@ fn phase(text: &str) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .phase = text.into();
+}
+fn begin(first_run: bool, reset: bool) -> bool {
+    let mut status = progress()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if status.running {
+        return false;
+    }
+    let run_id = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+    .max(status.run_id.saturating_add(1));
+    *status = Progress {
+        run_id,
+        first_run,
+        reset,
+        running: true,
+        phase: "Waiting for setup worker".into(),
+        ..Default::default()
+    };
+    true
+}
+fn file_progress(completed: usize, total: usize, name: &str) {
+    let mut status = progress()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    status.completed = completed;
+    status.total = total;
+    status.current_file = name.into();
 }
 
 // These are the distributed plugin configuration locations, not the user's whole config tree.
@@ -50,6 +89,7 @@ const BUNDLED: &[&str] = &[
     include_str!("../../../traffic/airlines.toml"),
     include_str!("../../../traffic/hubs.toml"),
     include_str!("../../../traffic/routes.toml"),
+    include_str!("../../../traffic/wake.toml"),
     include_str!("../../../traffic/operations.toml"),
     include_str!("../../../traffic/handling.toml"),
     include_str!("../../../traffic/animation-channels.toml"),
@@ -122,8 +162,12 @@ fn populate(
         collect(path, 0, &mut visited, &mut files)?;
     }
     files.sort();
-    for text in BUNDLED {
+    phase("Caching configuration files");
+    let count = files.len() + BUNDLED.len();
+    file_progress(0, count, "Bundled defaults");
+    for (index, text) in BUNDLED.iter().enumerate() {
         parse(text).map_err(|e| format!("Bundled TOML: {e}"))?;
+        file_progress(index + 1, count, "Bundled defaults");
     }
     let mut total = 0;
     for (index, path) in files.iter().enumerate() {
@@ -138,17 +182,25 @@ fn populate(
                 path.display()
             ));
         }
-        phase(&format!(
-            "Reading TOML {}/{}: {}",
-            index + 1,
-            files.len(),
-            path.file_name().unwrap_or_default().to_string_lossy()
-        ));
+        file_progress(BUNDLED.len() + index, count, &path.display().to_string());
         parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        file_progress(
+            BUNDLED.len() + index + 1,
+            count,
+            &path.display().to_string(),
+        );
     }
     Ok(files.len())
 }
 fn finish(result: Result<usize, String>, reset: bool) {
+    let result = result.and_then(|files| {
+        let error = crate::config_cache::status().error;
+        if !error.is_empty() {
+            return Err(error);
+        }
+        crate::config_cache::finish_setup()?;
+        Ok(files)
+    });
     let mut status = progress()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -158,6 +210,7 @@ fn finish(result: Result<usize, String>, reset: bool) {
             status.files = files;
             status.phase=if reset {"Setup caches rebuilt. Scenery rebuilds on demand. Restart the plugin to reload all active policies."} else {"TOML setup cache ready"}.into();
             status.errors.clear();
+            status.current_file.clear();
         }
         Err(error) => {
             status.phase =
@@ -166,7 +219,7 @@ fn finish(result: Result<usize, String>, reset: bool) {
         }
     }
 }
-pub fn initial(config: &Path, executable: &Path) {
+fn initial(config: &Path, executable: &Path) {
     if !crate::config_cache::available() {
         finish(Err("TOML cache unavailable; parsing configuration directly. Fix the cache directory and retry Re-setup.".into()), false);
         return;
@@ -177,6 +230,23 @@ pub fn initial(config: &Path, executable: &Path) {
         eprintln!("Setup cache: {error}");
     }
     finish(result, false);
+}
+pub async fn start_initial(shared: &crate::Shared) {
+    let (config, executable, workers) = {
+        let state = shared.read().await;
+        (
+            state.config_dir.clone(),
+            state.exe_dir.clone(),
+            state.workers.clone(),
+        )
+    };
+    // The status endpoint remains responsive while the bounded worker scans files.
+    begin(!crate::config_cache::setup_complete(), false);
+    tokio::spawn(async move {
+        if let Err(error) = workers.run(move || initial(&config, &executable)).await {
+            finish(Err(error), false);
+        }
+    });
 }
 pub async fn status(State(_): State<crate::Shared>, Json(_): Json<Value>) -> Json<Value> {
     let status = progress()
@@ -198,18 +268,8 @@ pub async fn rerun(State(shared): State<crate::Shared>, Json(_): Json<Value>) ->
             state.workers.clone(),
         )
     };
-    {
-        let mut status = progress()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if status.running {
-            return Json(json!({"accepted":false,"running":true})).into_response();
-        }
-        *status = Progress {
-            running: true,
-            phase: "Waiting for setup worker".into(),
-            ..Default::default()
-        };
+    if !begin(false, true) {
+        return Json(json!({"accepted":false,"running":true})).into_response();
     }
     tokio::spawn(async move {
         let result = workers

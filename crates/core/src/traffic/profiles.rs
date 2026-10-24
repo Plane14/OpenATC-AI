@@ -137,6 +137,17 @@ impl Aircraft {
     }
 }
 
+/// How an operator's partial route catalogue limits simulated city pairs.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutePolicy {
+    /// Use listed pairs exclusively when the operator has a route catalogue.
+    #[default]
+    Listed,
+    /// Also permit simulated spokes through that operator's configured hubs.
+    HubSpokes,
+}
+
 /// One operating fleet. A regional subsidiary can have its own entry and callsign.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -155,6 +166,9 @@ pub struct Airline {
     pub callsign: String,
     /// Traffic-mix category.
     pub category: Category,
+    /// Hub spokes require a configured operator hub when a pair is not listed.
+    #[serde(default)]
+    pub route_policy: RoutePolicy,
     /// At least one end must be in this home area.
     pub home_prefixes: Vec<String>,
     /// Both ends must be in these ICAO prefix areas; an empty list means worldwide.
@@ -288,7 +302,7 @@ pub struct Profiles {
 pub struct Port {
     /// ICAO airport identifier.
     pub icao: String,
-    /// Longest usable runway, metres.
+    /// Available runway length for this fleet selection, metres.
     pub runway: f64,
     /// Largest known compatible parking size.
     pub parking_size: char,
@@ -572,12 +586,30 @@ impl Profiles {
         Ok(())
     }
 
-    /// Whether the operator has published route data, so it may only fly those pairs.
+    /// Whether the operator has published route entries.
     #[must_use]
     pub fn has_published_network(&self, airline: &str) -> bool {
         self.routes
             .get(airline)
             .is_some_and(|routes| !routes.is_empty())
+    }
+
+    fn route_allowed(&self, airline: &str, origin: &str, destination: &str) -> bool {
+        let Some(operator) = self.airlines.get(airline) else {
+            return false;
+        };
+        if self
+            .published_weight(airline, origin, destination)
+            .is_some()
+        {
+            return true;
+        }
+        match operator.route_policy {
+            RoutePolicy::Listed => !self.has_published_network(airline),
+            RoutePolicy::HubSpokes => {
+                self.hub_weight(airline, origin) > 0 || self.hub_weight(airline, destination) > 0
+            }
+        }
     }
 
     /// Published frequency band for a pair, if the operator flies it.
@@ -660,10 +692,10 @@ impl Profiles {
             {
                 continue;
             }
-            // An operator with published route data only flies the pairs it publishes, so the
-            // generated traffic shows the airlines that really serve this city pair.
+            // Listed networks remain exclusive; explicit hub-spoke profiles may add simulated
+            // connections through a configured hub without claiming a published schedule.
             let published = self.published_weight(id, &origin.icao, &destination.icao);
-            if self.has_published_network(id) && published.is_none() {
+            if !self.route_allowed(id, &origin.icao, &destination.icao) {
                 continue;
             }
             let equipment = self.published_equipment(id, &origin.icao, &destination.icao);
@@ -820,6 +852,98 @@ mod tests {
                 .published_equipment("CCM", "LFBO", "LFKJ")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn cargo_hub_spokes_do_not_turn_partial_european_routes_into_a_global_exclusion() {
+        let mut profiles = Profiles::builtin().unwrap();
+        assert!(profiles.has_published_network("FDX"));
+        assert!(profiles.published_weight("FDX", "KMEM", "KSDF").is_none());
+        assert!(profiles.route_allowed("FDX", "KMEM", "KSDF"));
+        assert!(profiles.route_allowed("FDX", "KSDF", "KMEM"));
+        assert!(profiles.route_allowed("UPS", "KMEM", "KSDF"));
+        assert!(!profiles.route_allowed("FDX", "KAAA", "KBBB"));
+        assert!(!profiles.route_allowed("UPS", "KAAA", "KBBB"));
+        assert!(!profiles.route_allowed("AFR", "LFPG", "EGLL"));
+        profiles.airlines.get_mut("FDX").unwrap().route_policy = RoutePolicy::Listed;
+        assert!(!profiles.route_allowed("FDX", "KMEM", "KSDF"));
+
+        profiles.airlines.get_mut("FDX").unwrap().route_policy = RoutePolicy::HubSpokes;
+        profiles.airlines.retain(|id, _| id == "FDX");
+        let catalogue = models(&profiles);
+        let choice = profiles
+            .select_where(
+                &port("KMEM"),
+                &port("KSDF"),
+                330.0,
+                Category::Cargo,
+                &catalogue,
+                1,
+                |_, _| true,
+            )
+            .unwrap();
+        assert_eq!(choice.operator, "FDX");
+        assert_eq!(choice.category, Category::Cargo);
+        assert!(
+            profiles
+                .select_where(
+                    &port("KMEM"),
+                    &port("KSDF"),
+                    330.0,
+                    Category::Cargo,
+                    &catalogue,
+                    1,
+                    |_, _| false
+                )
+                .is_none()
+        );
+        assert!(
+            profiles
+                .select(
+                    &port("KMEM"),
+                    &port("KSDF"),
+                    330.0,
+                    Category::Cargo,
+                    &Catalogue {
+                        models: vec![],
+                        warnings: vec![]
+                    },
+                    1
+                )
+                .is_none()
+        );
+        assert!(
+            profiles
+                .select(
+                    &port("KMEM"),
+                    &port("KSDF"),
+                    20_000.0,
+                    Category::Cargo,
+                    &catalogue,
+                    1
+                )
+                .is_none()
+        );
+        profiles.airlines.get_mut("FDX").unwrap().serves = vec!["LF".into()];
+        assert!(
+            profiles
+                .select(
+                    &port("KMEM"),
+                    &port("KSDF"),
+                    330.0,
+                    Category::Cargo,
+                    &catalogue,
+                    1
+                )
+                .is_none()
+        );
+        profiles
+            .hubs
+            .get_mut("KMEM")
+            .unwrap()
+            .airlines
+            .remove("FDX");
+        assert!(!profiles.route_allowed("FDX", "KMEM", "KSDF"));
     }
 
     #[test]

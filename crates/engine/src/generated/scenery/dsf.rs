@@ -151,6 +151,7 @@ pub(super) struct StringPolygon {
     pub height_meters: f64,
     /// Horizontal reach of a placed object, used to widen each string segment.
     pub reach_meters: f64,
+    pub ground_reach_meters: Option<f64>,
 }
 
 fn string_definition(names: &[&str], definition: usize) -> Option<bool> {
@@ -802,6 +803,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
                         autogen,
                         height_meters: 0.0,
                         reach_meters: 0.0,
+                        ground_reach_meters: None,
                     });
                     continue;
                 }
@@ -992,6 +994,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Tile, String> {
         unresolved_objects_overflow: false,
         objects,
         obstacles: Vec::new(),
+        obstacle_bins: Vec::new(),
         draped_resources,
         polygons,
         facades,

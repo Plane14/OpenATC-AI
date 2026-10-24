@@ -1187,7 +1187,7 @@ mod tests {
                         altitude_feet: if airborne { 500.0 } else { 0.0 },
                         ground_speed_knots: Some(if airborne { 180.0 } else { 0.0 }),
                         on_ground: !airborne,
-                        track_degrees: 90.0,
+                        track_degrees: if airborne { 180.0 } else { 90.0 },
                         aircraft: "A320".into(),
                         ..Default::default()
                     }]);

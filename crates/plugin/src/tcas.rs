@@ -1,7 +1,28 @@
 //! Publish generated targets only while OpenATC owns the SDK traffic slots.
 use openatc_core::state::GeneratedTraffic;
-use std::ffi::CStr;
+use std::{
+    ffi::CStr,
+    sync::atomic::{AtomicBool, Ordering},
+};
+#[cfg(not(test))]
 use xplane_sys as xp;
+#[cfg(test)]
+#[path = "tcas_test_sdk.rs"]
+mod xp;
+
+// XPLM can call this synchronously while another provider releases its planes.
+// Defer acquisition to the plugin's next flight loop instead of re-entering plugin state.
+static PLANES_AVAILABLE: AtomicBool = AtomicBool::new(false);
+unsafe extern "C-unwind" fn planes_available(_: *mut std::ffi::c_void) {
+    PLANES_AVAILABLE.store(true, Ordering::Relaxed);
+}
+const _: xplane_sys::XPLMPlanesAvailable_f = Some(planes_available);
+
+pub(crate) fn mode_s_identity(raw: i32) -> Option<u32> {
+    let value = raw as u32;
+    let id = value & 0x00ff_ffff;
+    (id != 0 && value & 0x7f00_0000 == 0).then_some(id)
+}
 
 struct References {
     override_tcas: usize,
@@ -91,26 +112,52 @@ impl Tcas {
             self.release();
             self.attempted = false;
             self.source.clear();
+            PLANES_AVAILABLE.store(false, Ordering::Relaxed);
             return;
         }
+        // Do not take the simulator's traffic slots for targets the SDK cannot address.
+        // X-Plane Mode S identities are 24-bit; a scene containing only local or advisory
+        // aircraft outside that range used to acquire and release every frame.
+        let addressable = frames.iter().any(|frame| {
+            let target = &frame.target;
+            (1..=0x00ff_ffff).contains(&target.id)
+                && (-90.0..=90.0).contains(&target.latitude)
+                && (-180.0..=180.0).contains(&target.longitude)
+                && (-2000.0..=60000.0).contains(&target.altitude_feet)
+                && (0.0..360.0).contains(&target.track_degrees)
+        });
+        if !addressable {
+            self.release();
+            self.attempted = false;
+            self.source.clear();
+            return;
+        }
+        if self.owned && !self.still_owned() {
+            self.forget();
+            self.attempted = false;
+        }
         if !self.owned {
-            if self.attempted {
+            if self.attempted && !PLANES_AVAILABLE.swap(false, Ordering::Relaxed) {
                 return;
             }
             self.attempted = true;
             let (mut total, mut active, mut owner) = (0, 0, 0);
             unsafe { xp::XPLMCountAircraft(&raw mut total, &raw mut active, &raw mut owner) };
-            if owner != xp::XPLM_NO_PLUGIN_ID && owner != unsafe { xp::XPLMGetMyID() } {
-                return;
-            }
             let Some(references) = References::load() else {
                 return;
             };
-            if unsafe { xp::XPLMGetDatai(references.override_tcas as xp::XPLMDataRef) } != 0 {
+            if owner == unsafe { xp::XPLMGetMyID() }
+                && unsafe { xp::XPLMGetDatai(references.override_tcas as xp::XPLMDataRef) } != 0
+            {
                 return;
             }
-            if unsafe { xp::XPLMAcquirePlanes(std::ptr::null_mut(), None, std::ptr::null_mut()) }
-                == 0
+            if unsafe {
+                xp::XPLMAcquirePlanes(
+                    std::ptr::null_mut(),
+                    Some(planes_available),
+                    std::ptr::null_mut(),
+                )
+            } == 0
             {
                 return;
             }
@@ -118,6 +165,7 @@ impl Tcas {
             self.owned = true;
             unsafe { xp::XPLMSetDatai(references.override_tcas as xp::XPLMDataRef, 1) };
             self.references = Some(references);
+            self.source.clear();
         }
         if frames == self.source {
             return;
@@ -142,7 +190,7 @@ impl Tcas {
                 break;
             }
             if !(1..=0xffffff).contains(&target.id)
-                || target.id == own_id as u32
+                || Some(target.id) == mode_s_identity(own_id)
                 || !identities.insert(target.id)
                 || !(-90.0..=90.0).contains(&target.latitude)
                 || !(-180.0..=180.0).contains(&target.longitude)
@@ -189,12 +237,12 @@ impl Tcas {
                 self.buffer.floats[channel][slot] = value as f32;
             }
             self.buffer.wheels[slot] = i32::from(target.on_ground);
-            self.buffer.modes[slot] = if frame.animation.engine <= 0.0 {
-                0
-            } else if target.on_ground {
-                5
-            } else {
+            self.buffer.modes[slot] = if !target.on_ground {
                 3
+            } else if frame.animation.engine <= 0.0 {
+                0
+            } else {
+                5
             };
             for (data, text) in [
                 (&mut self.buffer.flights, &target.callsign),
@@ -212,26 +260,23 @@ impl Tcas {
             slot += 1;
         }
         self.used = slot;
-        // Only the aircraft actually provided may be advertised. Reserving the whole capacity
-        // leaves empty slots carrying mode S id 0, which the simulator reports as targets with
-        // no identity and then refuses to track.
         if self.used == 0 {
             self.release();
-            self.attempted = true;
+            self.attempted = false;
             return;
         }
-        unsafe { xp::XPLMSetActiveAircraftCount(self.used as i32 + 1) };
+        // TCAS override counts traffic targets; slot zero remains the user's aircraft.
+        unsafe { xp::XPLMSetActiveAircraftCount(self.used as i32) };
+        self.refresh();
     }
     /// Refresh cached targets each frame so the SDK does not expire them between samples.
     pub fn refresh(&mut self) {
         if !self.owned {
             return;
         }
-        let (mut total, mut active, mut owner) = (0, 0, 0);
-        unsafe { xp::XPLMCountAircraft(&raw mut total, &raw mut active, &raw mut owner) };
-        if owner != unsafe { xp::XPLMGetMyID() } {
-            self.owned = false;
-            self.references = None;
+        if !self.still_owned() {
+            self.forget();
+            self.attempted = false;
             return;
         }
         let refs = self.references.as_ref().unwrap();
@@ -282,7 +327,18 @@ impl Tcas {
     }
     pub fn yield_to_provider(&mut self) {
         self.release();
-        self.attempted = true;
+        self.attempted = false;
+    }
+    fn still_owned(&self) -> bool {
+        let (mut total, mut active, mut owner) = (0, 0, 0);
+        unsafe { xp::XPLMCountAircraft(&raw mut total, &raw mut active, &raw mut owner) };
+        owner == unsafe { xp::XPLMGetMyID() }
+    }
+    fn forget(&mut self) {
+        self.owned = false;
+        self.references = None;
+        self.source.clear();
+        self.used = 0;
     }
     fn release(&mut self) {
         if !self.owned {
@@ -299,8 +355,7 @@ impl Tcas {
                 xp::XPLMReleasePlanes();
             }
         }
-        self.owned = false;
-        self.references = None;
+        self.forget();
     }
 }
 impl Drop for Tcas {

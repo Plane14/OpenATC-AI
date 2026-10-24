@@ -202,6 +202,7 @@ serves = ["E","L"]
 fleet = { E170 = 20, E190 = 40, E295 = 40 }
 
 [airline.FDX]
+route_policy = "hub_spokes"
 name = "FedEx Express"
 operator = "FDX"
 callsign = "FedEx"
@@ -211,6 +212,7 @@ serves = []
 fleet = { A306 = 20, B752 = 25, B763 = 35, B77L = 20 }
 
 [airline.UPS]
+route_policy = "hub_spokes"
 name = "UPS Airlines"
 operator = "UPS"
 callsign = "UPS"

@@ -54,6 +54,24 @@ pub(super) fn accepted_world(runtime: &Runtime) -> World {
     world
 }
 
+/// True when an airborne target is flying parallel to a different runway rather than crossing
+/// the departure path. A 04L arrival must not withhold a 04R departure.
+fn parallel_other_runway(
+    airport: &Airport,
+    runway: &str,
+    latitude: f64,
+    longitude: f64,
+    track_degrees: f64,
+) -> bool {
+    let Some((_, across, _, heading)) =
+        openatc_core::traffic::runway_position(airport, runway, latitude, longitude)
+    else {
+        return false;
+    };
+    let angle = openatc_core::navigation::turn(track_degrees, heading).abs();
+    angle.min((180.0 - angle).abs()) < 20.0 && across.abs() > 250.0
+}
+
 /// The forecast includes existing accepted scopes, their fallback holds and the proposed grant.
 pub(super) fn blocked(
     runtime: &Runtime,
@@ -71,6 +89,12 @@ pub(super) fn blocked(
     if segment.stage.on_ground() && segment.stage != Stage::Takeoff {
         return false;
     }
+    let runway = segment.resources.iter().find_map(|resource| {
+        resource
+            .strip_prefix("RUNWAY/")
+            .and_then(|rest| rest.split('/').nth(1))
+    });
+    let airport = runtime.airport.as_deref();
     let Some(policy) = runtime.policy.as_ref() else {
         return true;
     };
@@ -104,7 +128,7 @@ pub(super) fn blocked(
     if horizon > 900.0 {
         return true;
     }
-    !forecast_clear(runtime, telemetry, id, &world, horizon).unwrap_or(false)
+    !forecast_clear(runtime, telemetry, id, &world, horizon, runway).unwrap_or(false)
 }
 
 pub(super) fn rejoin_blocked(
@@ -146,7 +170,7 @@ pub(super) fn rejoin_check(
             "Onward forecast needs {horizon:.1} seconds, above its 900-second budget"
         ));
     }
-    if forecast_clear(runtime, telemetry, id, &world, horizon)? {
+    if forecast_clear(runtime, telemetry, id, &world, horizon, None)? {
         Ok(())
     } else {
         Err("Onward forecast conflicts with another aircraft".into())
@@ -159,11 +183,20 @@ pub(super) fn forecast_clear(
     id: u32,
     world: &World,
     seconds: f64,
+    runway: Option<&str>,
 ) -> Result<bool, String> {
     let policy = runtime
         .policy
         .as_ref()
         .ok_or("Missing airborne prediction policy")?;
+    let aircraft_airport = runtime.airport.as_deref();
+    let parallel_other = |latitude: f64, longitude: f64, track_degrees: f64| {
+        runway
+            .zip(aircraft_airport)
+            .is_some_and(|(runway, airport)| {
+                parallel_other_runway(airport, runway, latitude, longitude, track_degrees)
+            })
+    };
     let generated: BTreeSet<_> = world.snapshot().iter().map(|pose| pose.id).collect();
     let mut observed = telemetry
         .traffic
@@ -223,6 +256,13 @@ pub(super) fn forecast_clear(
         for other in poses
             .iter()
             .filter(|other| other.id != id && !other.stage.on_ground())
+            .filter(|other| {
+                !parallel_other(
+                    other.position.latitude,
+                    other.position.longitude,
+                    other.heading,
+                )
+            })
         {
             let Some(old) = last.iter().find(|pose| pose.id == other.id) else {
                 return false;
@@ -241,7 +281,13 @@ pub(super) fn forecast_clear(
                 }
             }
         }
-        for (target, rate) in observed.iter().filter(|(target, _)| !target.on_ground) {
+        for (target, rate) in observed
+            .iter()
+            .filter(|(target, _)| !target.on_ground)
+            .filter(|(target, _)| {
+                !parallel_other(target.latitude, target.longitude, target.track_degrees)
+            })
+        {
             let vertical = policy.airborne_separation_feet
                 + if rate.is_none() {
                     15000.0 * time / 60.0

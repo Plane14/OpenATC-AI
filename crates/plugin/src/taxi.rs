@@ -20,6 +20,7 @@ pub struct GroundGuidance {
     load_attempted: bool,
     last_sequence: u32,
     holding_marker: bool,
+    traffic_holding: bool,
 }
 impl GroundGuidance {
     pub fn new() -> Self {
@@ -33,11 +34,17 @@ impl GroundGuidance {
             load_attempted: false,
             last_sequence: 0,
             holding_marker: false,
+            traffic_holding: false,
         }
     }
     pub fn new_holding_marker() -> Self {
         let mut marker = Self::new();
         marker.holding_marker = true;
+        marker
+    }
+    pub fn new_traffic_holding() -> Self {
+        let mut marker = Self::new();
+        marker.traffic_holding = true;
         marker
     }
     pub fn clear(&mut self) {
@@ -48,6 +55,10 @@ impl GroundGuidance {
         }
     }
     pub fn update(&mut self, enabled: bool, state: &State) {
+        if self.traffic_holding {
+            self.update_traffic(enabled, state);
+            return;
+        }
         let route = &state.taxi_clearance;
         if !enabled
             || route.traffic_hold
@@ -76,43 +87,11 @@ impl GroundGuidance {
         }
         self.last_sequence = route.sequence;
         self.last_update = Instant::now();
-        if self.object.is_null() && !self.load_attempted {
-            self.load_attempted = true;
-            if let Some(file) = crate::supervise::plugin_file_path() {
-                let path = std::path::Path::new(&file)
-                    .parent()
-                    .and_then(std::path::Path::parent)
-                    .map(|p| {
-                        p.join(if self.holding_marker {
-                            "assets/taxi-arrow/holding.obj"
-                        } else {
-                            "assets/taxi-arrow/arrow.obj"
-                        })
-                    });
-                if let Some(path) =
-                    path.and_then(|p| CString::new(p.to_string_lossy().as_bytes()).ok())
-                {
-                    unsafe {
-                        self.object = xp::XPLMLoadObject(path.as_ptr());
-                    }
-                }
-            }
-            if self.object.is_null() {
-                crate::debug_log(if self.holding_marker {
-                    "OpenATC: failed to load holding marker asset\n"
-                } else {
-                    "OpenATC: failed to load taxi arrow asset\n"
-                });
-            }
-        }
+        self.ensure_object();
         if self.object.is_null() {
             return;
         }
-        if self.probe.is_null() {
-            unsafe {
-                self.probe = xp::XPLMCreateProbe(xp::XPLMProbeType::Y);
-            }
-        }
+        self.ensure_probe();
         if self.probe.is_null() {
             return;
         }
@@ -128,9 +107,52 @@ impl GroundGuidance {
         } else {
             samples(&route.points, &ownship)
         };
+        let positions = positions.into_iter().map(|(point, heading)| {
+            (
+                route.reference_latitude + point.north / 111_320.0,
+                route.reference_longitude
+                    + point.east / (111_320.0 * route.reference_latitude.to_radians().cos()),
+                heading,
+            )
+        });
+        self.place_positions(state, positions);
+    }
+    /// Ring every generated aircraft's next hold: the crossing it must wait for, or the
+    /// departure runway holding point. Positions come from the engine in absolute coordinates.
+    fn update_traffic(&mut self, enabled: bool, state: &State) {
+        if !enabled || state.generated_holding_points.is_empty() || !state.telemetry.position_valid
+        {
+            self.clear();
+            return;
+        }
+        if self.last_update.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.last_update = Instant::now();
+        self.ensure_object();
+        if self.object.is_null() {
+            return;
+        }
+        self.ensure_probe();
+        if self.probe.is_null() {
+            return;
+        }
+        let cos = state.telemetry.latitude.to_radians().cos();
+        let positions = state.generated_holding_points.values().filter_map(|point| {
+            let [latitude, longitude] = *point;
+            if !latitude.is_finite() || !longitude.is_finite() {
+                return None;
+            }
+            let east = (longitude - state.telemetry.longitude) * 111_320.0 * cos;
+            let north = (latitude - state.telemetry.latitude) * 111_320.0;
+            (east.hypot(north) <= 15_000.0).then_some((latitude, longitude, 0.0))
+        });
+        self.place_positions(state, positions);
+    }
+    fn place_positions(&mut self, state: &State, positions: impl Iterator<Item = (f64, f64, f64)>) {
         let mut used = 0;
-        for (point, heading) in positions {
-            let Some(position) = self.position(state, &point, heading) else {
+        for (latitude, longitude, heading) in positions {
+            let Some(position) = self.position(state, latitude, longitude, heading) else {
                 continue;
             };
             unsafe {
@@ -153,11 +175,51 @@ impl GroundGuidance {
             }
         }
     }
-    fn position(&self, state: &State, point: &Point, heading: f64) -> Option<xp::XPLMDrawInfo_t> {
-        let route = &state.taxi_clearance;
-        let latitude = route.reference_latitude + point.north / 111_320.0;
-        let longitude = route.reference_longitude
-            + point.east / (111_320.0 * route.reference_latitude.to_radians().cos());
+    fn ensure_object(&mut self) {
+        if !self.object.is_null() || self.load_attempted {
+            return;
+        }
+        self.load_attempted = true;
+        if let Some(file) = crate::supervise::plugin_file_path() {
+            let path = std::path::Path::new(&file)
+                .parent()
+                .and_then(std::path::Path::parent)
+                .map(|p| {
+                    p.join(if self.holding_marker || self.traffic_holding {
+                        "assets/taxi-arrow/holding.obj"
+                    } else {
+                        "assets/taxi-arrow/arrow.obj"
+                    })
+                });
+            if let Some(path) = path.and_then(|p| CString::new(p.to_string_lossy().as_bytes()).ok())
+            {
+                unsafe {
+                    self.object = xp::XPLMLoadObject(path.as_ptr());
+                }
+            }
+        }
+        if self.object.is_null() {
+            crate::debug_log(if self.holding_marker || self.traffic_holding {
+                "OpenATC: failed to load holding marker asset\n"
+            } else {
+                "OpenATC: failed to load taxi arrow asset\n"
+            });
+        }
+    }
+    fn ensure_probe(&mut self) {
+        if self.probe.is_null() {
+            unsafe {
+                self.probe = xp::XPLMCreateProbe(xp::XPLMProbeType::Y);
+            }
+        }
+    }
+    fn position(
+        &self,
+        state: &State,
+        latitude: f64,
+        longitude: f64,
+        heading: f64,
+    ) -> Option<xp::XPLMDrawInfo_t> {
         let (mut x, mut y, mut z) = (0.0, 0.0, 0.0);
         unsafe {
             xp::XPLMWorldToLocal(
@@ -176,7 +238,7 @@ impl GroundGuidance {
             z,
             heading,
             &hit,
-            if self.holding_marker {
+            if self.holding_marker || self.traffic_holding {
                 (15.0, 15.0)
             } else {
                 (1.6, 3.0)

@@ -177,7 +177,7 @@ fn checked(
         return None;
     }
     // Include the current recovery and every other aircraft, especially a faster follower.
-    if !super::separation::forecast_clear(runtime, telemetry, id, &probe, 900.0).ok()? {
+    if !super::separation::forecast_clear(runtime, telemetry, id, &probe, 900.0, None).ok()? {
         return None;
     }
     Some(probe)

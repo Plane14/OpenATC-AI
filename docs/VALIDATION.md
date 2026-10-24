@@ -1,5 +1,122 @@
 # Validation
 
+## Gate sequence, runway lock and traffic lifecycle — 24 October 2026
+
+Generated gate departures now request IFR clearance from Delivery (falling back to
+Ground), read it back, then request engine start and pushback on Ground, then request
+taxi. The taxi order is attached to the first taxi-out segment, so it cannot be granted
+before pushback. The IFR exchange uses the destination, departure runway, a published
+departure hint, an initial altitude and a deterministic squawk.
+
+Generated traffic no longer switches to the reciprocal runway when the requested mix is
+better there. The ATIS runway owns the scene; same-flow alternates are only tried when
+the selected runway releases no flight. Ground reservations ignore only aircraft behind
+on the same assigned route and same movement direction, so a follower can be held without
+blocking its leader.
+
+Traffic settings gain a collapsible lifecycle section: taxi target 4–6 (rolled once per
+session), and circuit retention radii of 30 NM for airliners, 20 NM for turboprops and
+10 NM for GA. The opening cast seeds four to six mid-taxi aircraft plus the hold and
+queue where departures allow. Landed arrivals taxi in, pause, despawn and recycle the
+slot; generated traffic no longer leaves parked rows. Arrival exit selection favours the
+forward exit with the shortest total roll plus taxi distance to a compatible stand.
+
+Tests: generated suite 138 passed, 23 ignored, with only the two pre-existing scenery
+failures (`autogen_top_covers_an_interior_ridge_above_its_anchor` and
+`retained_tile_limit_evicts_old_stacks_but_never_live_borrows`). UI 48 passed/1 ignored,
+settings 13 passed. Installed Nice scene and the bidirectional Nice–Milan lifecycle pass.
+The gate Delivery sequence has a focused regression. SDK 440 was reviewed: instance
+positions still update from a flight loop, TCAS targets still require unique 24-bit Mode S
+identities and valid SSR modes, and no new traffic-injection API replaces the current
+path.
+
+## Departure queue and clearance scope — 24 October 2026
+
+Completed taxi departures receive their Ground-to-departure-controller handoff before
+new apron or taxi requests. The controller comes from the prepared line-up clearance,
+including combined services. Readbacks still precede retuning, onward installation and
+movement permission. Summary diagnostics identify controller frequencies, ready calls,
+onward installation and repeated holding reasons without flooding the log.
+
+Active-flight acknowledgements now grant only their explicit clearance scope; they no
+longer approve unrelated later non-crossing segments. A stationary player no longer
+bypasses airborne conflict revocation for other aircraft. Clock discontinuities cancel
+old airborne grants before another controller exchange can begin.
+
+The flight suite passes 25 tests, including a new holding-point versus gate-call
+regression that reaches takeoff through both Tower and a combined departure service.
+Existing runway-occupied missed-approach, crossing readback, wake, airborne conflict,
+clearance-scope and clock-reset checks pass. The wider generated suite reports
+143 passed, 25 ignored and two pre-existing scenery failures: interior-ridge autogen
+coverage and retained-tile eviction. These failures remain open.
+
+The installed LFMN–LIMC two-flight lifecycle completes gate-to-gate after the fix.
+Its fixture refreshes unchanged synthetic weather observations during installed-scenery
+planning, as production receives fresh simulator observations; weather freshness checks
+themselves remain enforced. The serial plugin SDK suite passes 48 tests with 2 ignored.
+
+The official 12.4.4 release notes link the SDK 440 beta download and new API reference.
+The new instance API still permits position updates from flight-loop callbacks; the
+traffic renderer uses that path. See the
+[12.4.4 release notes](https://www.x-plane.com/kb/x-plane-12-4-4-release-notes/) and
+[instance manipulation reference](https://xpsdk-api.docs.staging.x-plane.com/docs-xplm/XPLMInstance/instance_manipulation.html).
+This controller repair does not require adopting a new SDK function.
+
+Traffic counts, worker settings, procedure planning, approach sequencing and recycling
+are preserved. Native Nice departure behavior and the reported Taxi-page visibility
+problem require simulator verification; no native acceptance is claimed here.
+
+
+## Selected-runway fleet eligibility — 23 October 2026
+
+Generated fleet selection now uses the runway selected after the weather/flow
+check, rather than the longest runway anywhere at each airport. A heavier aircraft
+can no longer win the weighted fleet choice solely because an unused parallel
+runway is longer. GA departures retain the capacity of their separately prepared
+runway candidates. Simulator airport identifiers are mapped to the configured
+world identifiers for the same selection; controller and movement airport records
+remain the installed ones.
+
+A weighted UPS fleet regression verifies both runway ends, unused-long-runway
+exclusion, selection of the suitable smaller type, unknown-runway refusal and
+published airport-code mapping. The generated source suite passes 144 tests with
+25 installed-data fixtures skipped. The full installed mixed rerun is pending;
+complete cargo/GA and native simulator acceptance remain open.
+
+
+## Cargo route coverage — 22 October 2026
+
+A partial European route sample was excluding FedEx and UPS from every unlisted
+city pair, including their configured US hubs. Operator profiles now have an
+explicit `route_policy`: the default `listed` retains the existing catalogue
+restriction; `hub_spokes` also permits simulated connections through that
+operator's positively weighted configured hubs. Only FedEx and UPS opt in.
+Unrelated non-hub pairs remain excluded. Geography, fleet/range, installed model,
+stand, procedure, weather and full protection checks remain mandatory.
+
+The spoke policy models a network; it does not label an unlisted pair as a
+published flight or schedule. Existing listed pairs retain their weighting.
+FedEx describes its [Memphis World Hub](https://newsroom.fedex.com/newsroom/global-english/fedex-unveils-new-automated-sorting-facility-at-memphis-world-hub)
+as central to its network, and UPS identifies [Louisville Worldport](https://www.jobs-ups.com/us/en/ups-worldport)
+as the center of its global air network. These sources support the hub model,
+not an assertion about a specific direct city-pair service.
+
+Profile regressions pass 10 tests, including hub direction symmetry, non-hub and
+listed-policy refusals, service-area restrictions, range, model availability and
+stand-policy rejection. Both shipped-configuration tests pass. Generated source
+checks pass 139 tests, with 24 installed-data fixtures skipped. The locked Linux
+plugin/engine release build and core library Clippy pass; Clippy retains warnings.
+These changes have not been installed.
+
+The full Memphis–Louisville mixed fixture still fails before movement acceptance.
+Cargo now receives two slots in each direction and reaches actual departure and
+arrival planning; previously all four requested cargo slots were excluded. The
+updated run retains seven nominal flights from the two primary origins and zero
+production releases. It still fails the third-origin requirement. Cargo landing,
+taxi connectivity, vertical/turn geometry and conservative scenery refusals remain
+open. This is no claim of complete cargo, mixed traffic or native acceptance.
+
+
 ## Traffic, setup and arrival controls — 22 October 2026
 
 The Linux plugin and companion engine were built and installed with X-Plane closed.
@@ -1045,3 +1162,93 @@ The recovery regression now also tests a blank-altitude HM record immediately fo
 The installed Memphis I36L input uses this repeated-fix pattern. Its explicit5000-foot level is corroborated by the [FAA ILS or LOC36L chart for01–29October2026](https://aeronav.faa.gov/d-tpp/2610/00253IL36L.PDF). This is evidence for retaining the explicit same-fix restriction, not a rule for guessing altitude from unrelated earlier legs. Full mixed-route and native acceptance remain separate.
 
 With the repeated-fix level support, the mixed installed-data rerun retains seven complete nominal drafts from both KMEM and KSDF (76.41seconds). It passes the two-primary-origin check, then fails the required third-origin check before category or controller/movement acceptance. Production protection releases zero flights because of physical-obstacle intersections and unresolved facades. This is progress in candidate planning, not seven completed simulator flights. Discovery coverage, valid cargo/operator pairs, some connected stands and clearance/holding cases remain open.
+
+### Opening cast, approach placement and taxi releases — 24 October 2026
+
+The opening cast now fills the configured moving target before the first publication. Local departures supply the hold queue and mid-taxi aircraft, and taxi-in arrivals fill the remainder from their threshold-to-parking route. The installed LFMN probe publishes 12 flights with 3 mid-taxi, 1 taxi-in, 2 at the hold queue and 3 arrivals on final; the first three finals are placed at 8.0, 13.0 and 18.0 NM from the player.
+
+Approach seeding measures distance along the published approach path and searches from the runway backwards, so a procedure turn yields the inbound crossing rather than the outbound leg. Previously only the first arrival was close; later slots used whatever long STAR segment was selected and appeared at 17–35 NM.
+
+Generated IFR requests select the same clearances service as the pilot request. X-Plane publishes Delivery as `Clearance`; a service test limited to the literal `Delivery` sent generated aircraft to Ground. The installed Nice–Milan fixture logs `requests IFR clearance from NICE Delivery on 121780 kHz` and `CLNC DEL on 120900 kHz`.
+
+Ground conflicts now distinguish following traffic from a genuine block. Aircraft sharing a taxiway are cleared up to the cell before the leader instead of holding at the gate; a held aircraft is released with “continue” as soon as the protected path is free, without a second pilot request. A unit regression holds a follower behind a leader, releases it with `continue`, and confirms the shared cell remains owned by the leader. Runway crossings still require their own clearance.
+
+Evidence: generated suite 139 passed, 2 failed (the two pre-existing scenery fixtures), 23 ignored; core library 228 passed, 6 ignored; settings 13 passed; UI 48 passed, 1 ignored; installed Nice departure-route fixture passed; installed mixed bidirectional lifecycle passed. Installed engine `e24a58cc…`, plugin `3142e7a2…`; backup `OpenATC-9rn84q`. Native simulator visibility and audio acceptance remain separate.
+
+### Opening-cast merge, TCAS slot churn and log volume — 25 October 2026
+
+The 24 October runtime log showed a 12-flight opening scene published after preparation, followed by `3 additional flights admitted; 5 aircraft retained`. The prepared cast was correct; the merge path discarded most of it. It applied per-category limits and the 20 NM refill distance to the opening cast, and private registrations that did not match an airline profile were treated as having no category at all. The cast also inherited two plan-less local-pattern frames that consumed slots before the first planned flight was admitted.
+
+The first complete scene now replaces the plan-less seed outright instead of merging into it. Incremental admission only accepts aircraft at segment zero, so a cast containing mid-taxi, holding and taxi-in aircraft was silently reduced to the parked ones even after the category filters were bypassed. Unmatched generated callsigns count as general aviation instead of being dropped. A regression builds a four-aircraft cast, a live scene with two local-pattern frames and zero category caps, and asserts that all four planned aircraft survive publication. The installed population fixture pre-seeds two local frames, merges the opening cast, and now retains all 12 planned aircraft.
+
+The same log showed the plugin acquiring and releasing the simulator's traffic slots every 0.5 s for more than a minute: `override_TCAS` 1, then 0, then `releasing control of AI aircraft`. Local and advisory identities used `0x0E00_0000` and `0x0E10_0000`, above the 24-bit Mode S range, so a scene containing only those frames could never fill a TCAS slot. Their ranges moved to `0x00D0_0000` and `0x00D1_0000`; the plugin also refuses to acquire slots when no frame has an addressable identity. Plugin regression covers the no-addressable-frames case.
+
+Ground-speed instrumentation was writing a `MOTION` line for every speed change in release builds, producing a 6.6 MB log in a short session. It is now opt-in through `OPENATC_MOTION_DEBUG`.
+
+Evidence: generated suite 140 passed, 2 failed (the two pre-existing scenery fixtures), 23 ignored; core library 228 passed, 6 ignored; plugin 49 passed, 2 ignored; installed Nice departure-route fixture, installed mixed bidirectional lifecycle and installed population fixture passed. Installed engine `300a0110…`, plugin `bf222173…`; backup `OpenATC-vj6Sf7`.
+
+### Generated traffic uses the pilot's station resolver — 25 October 2026
+
+Generated exchanges now select controllers through `stations::station_for_intent`, the same capability mapping the pilot uses. It prefers the aircraft's tuned frequency when that station serves the intent, otherwise the nearest published station, and falls back to the airport's published frequencies through `serves`. Combined duties such as Ground on a Tower station are resolved by `has_role`; the previous literal `service == "Ground"` lookup could miss them.
+
+Clearance now treats `Delivery` as a clearance service. The index's inferred Ground or Tower clearance fallback is used only when no Delivery is published, so a real Delivery always wins. Contacting Ground while a Delivery existed was the defect that started this thread. Tower and Ground handoffs keep using the same station object for the aircraft's COM1, the player's receiving radio, the controller voice key and the transcript. Every exchange logs `callsign on station (role) kHz`, so the next log states whether an instruction came from Ground, Tower, Delivery or Approach.
+
+Evidence: core library 232 passed including four station-selection regressions; generated suite 144 passed, 2 failed (the two pre-existing scenery fixtures), 23 ignored; plugin 49 passed, 2 ignored; installed Nice departure-route fixture and installed mixed bidirectional lifecycle passed. Installed engine `02f4a63d…`, plugin `d9dbbf24…`; backup `OpenATC-fpq9Yq`.
+
+### Tower departure priority over the Ground taxi queue — 25 October 2026
+
+The 01:23 runtime log showed `EZY8431` correctly handed from `NICE Ground` to `NICE Tower` on 118.700, followed by Tower's ready acknowledgement, then a stream of Ground taxi clearances to other aircraft. The Tower departure waited at the hold while the Ground queue kept winning the controller loop. Active aircraft already talking to Tower are now checked before ordinary Ground taxi readbacks, so a line-up or takeoff clearance cannot be starved by a busy surface queue. The initial “hold short, stand by” remains the ready acknowledgement; the movement clearance follows on the next controller cycle.
+
+Installed engine `d4ba9615…`, plugin `d9dbbf24…`; backup `OpenATC-DwwfYM`.
+
+### Takeoff waits are no longer silent — 25 October 2026
+
+The AFR3501 sequence showed Tower's ready acknowledgement, then installation of the onward flight, then no further Tower exchange. The takeoff path had a silent `continue` when `world.authorise` refused the line-up segment, so the aircraft sat at the hold without a reason in the transcript or log. A refused line-up or takeoff now returns a Tower hold exchange and logs the blocking resource owners and wake state:
+
+`AFR3501 takeoff held at segment 0 (LineUp): owners [...], wake false`
+
+The next run will identify whether the blocker is a landing aircraft on the same runway, an aircraft still owning a runway resource from the other runway, or wake separation. Active Tower traffic also remains ahead of the ordinary Ground taxi queue.
+
+Installed engine `88d6e0cb…`, plugin `d9dbbf24…`; backup `OpenATC-FxfzcU`.
+
+### Takeoff denial was a surface-cell conflict, not the approach — 25 October 2026
+
+The AFR6424 log resolved the denial: `takeoff held at segment 0 (LineUp): owners [("GROUND/LFMN/-1/1", 15728643), ("GROUND/LFMN/-2/1", 15728643)]`. The owners were the departure's own surface cells, not the arriving aircraft. The approach was not conflicting with the departure runway. The remaining block came from the external cell set, which includes the stationary player and observed native traffic.
+
+A stationary player more than 0.05 NM from the holding point no longer blocks a line-up through the coarse surface grid; moving players and observed traffic still block. The hold log now also records the blocked resource names, observed ground targets within 0.2 NM, the player's distance to the hold and the wake state. A line-up allowed past the stationary player is logged explicitly.
+
+Installed engine `27c4e0d7…`, plugin `d9dbbf24…`; backup `OpenATC-hZkpBu`.
+
+### Exact runway width and wing footprint — 25 October 2026
+
+The take-off denial now uses the published runway dimensions instead of the 50 m ground grid. `traffic::runway_clearance` combines the apt.dat runway width and threshold-to-threshold length with `traffic::footprint`, which applies the aircraft length, reported wingspan and heading. A wingtip is over the runway when the centreline offset is less than `width/2 + lateral half-extent`.
+
+The player's size comes from the ICAO profile and the simulator's reported wingspan, with a 36 m fallback instead of the previous 80 m default. The coarse player cells are removed from a line-up only when the aircraft is clear of the runway strip and is not on a taxiway or stand. A wing over the runway, a taxiway conflict or a moving observer still holds the departure. Logs record runway, offset, lateral extent, half-width and span.
+
+Regression: a 45 m runway with a 36 m span at 30 m offset is over the runway; at 55 m offset it is clear. Evidence: generated suite 144 passed, 2 failed (the two pre-existing scenery fixtures), 23 ignored; core traffic suite 108 passed, 5 ignored; installed Nice and mixed bidirectional lifecycles passed. Installed engine `3cf722b0…`, plugin `f942b9a0…`; backup `OpenATC-8gun6h`.
+
+### Tower answers the ready call immediately — 25 October 2026
+
+The latest EZY341 log showed the aircraft correctly on `NICE Tower 118.700`, but the first Tower exchange was still the generic “hold short, stand by”. The flight was installed on the following cycle, so the actual line-up or take-off clearance was delayed behind the acknowledgment. That handshake is now removed when the clearance can be issued: Tower answers “ready for departure” with the line-up/take-off instruction, or a reason-specific hold, in the same exchange. The generic standby remains only as a fallback when installation cannot complete.
+
+The exact runway-width and wing-footprint check remains in the line-up path; the player is allowed past the coarse cells only when the wing footprint is clear of the published runway strip and the aircraft is not on a taxiway or stand. Installed engine `0e8b3c92…`, plugin `f942b9a0…`; backup `OpenATC-4uPndj`.
+
+### Clear runway means takeoff, not standby — 25 October 2026
+
+Tower no longer answers a ready call with a generic hold when the runway is available. `takeoff_exchange_for` probes both the line-up and take-off movement, then issues the planned take-off contract directly from the hold. If the runway is occupied or wake-protected, the normal line-up/hold path remains. The direct path logs `cleared for takeoff directly from the hold on runway ...`.
+
+Wake is leader-based. The engine previously used a 240-second fallback for an unknown or unsupported pair, which could hold a heavier follower behind a lighter leader. Unknown pairs now add no interval, and a missing runway position adds no interval. Regression: `B738` followed by `B77W` needs zero, while `B77W` followed by `B738` keeps the 120-second full-length interval.
+
+Phrase audit: the only hardcoded generated-traffic speech left was the held-taxi “continue” pair. It moved to `generated_taxi_continue` and `generated_taxi_continue_readback` in `speech/runtime/responses.toml`; take-off, line-up, hold and wake wording continue to use the existing TOML entries.
+
+Installed engine `5b8a4e2b…`, plugin `097c7e5b…`; backup `OpenATC-Vg6D9w`.
+
+### Editable regional wake policy and independent runways — 25 October 2026
+
+`traffic/wake.toml` is now the source of wake and runway-relationship data. It contains FAA CWT, ICAO Doc 4444, EUROCONTROL RECAT-EU and Australian MATS tables, leader/follower category matrices, departure intervals, arrival spacing, LUAW limits and per-region parallel-runway thresholds. The **Wake separation** setting selects `auto`, `icao`, `recat_eu`, `faa_cwt` or `mats`; `auto` resolves by airport prefix with ICAO as the fallback. The plugin reports the simulator's wake category and wingspan; the policy uses that first, then the aircraft profile's `cwt` or `wake`.
+
+A landing on one runway no longer blocks a departure on the other. Runway occupancy and wake checks use the exact runway resource, and airborne separation ignores targets flying parallel to a different runway more than 250 m from the departure centreline. Same-runway traffic and projected crossing paths still block. LFMN 04L/04R are independent for surface operations.
+
+A wake interval now produces **line up and wait**, not hold short. Take-off clearance is issued directly from the hold when the runway is clear and no wake interval applies. A heavy behind a heavy gets LUAW followed by take-off; a heavier follower behind a lighter leader adds no interval. Runway clearances name the flight's own SID and initial level, with no latitude, longitude or full hold procedure in the take-off clearance. The hold remains in the clearance data for the controller and is issued separately only if needed.
+
+Evidence: core 234 passed; engine 311 passed, 2 failed (the two pre-existing scenery fixtures), 33 ignored; settings 13 passed; UI 48 passed, 1 ignored; plugin 49 passed, 2 ignored; installed Nice and mixed bidirectional lifecycles passed. Installed engine `be537cfd…`, plugin `ba7659c9…`; backup `OpenATC-eS93EF`.

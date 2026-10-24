@@ -1,8 +1,13 @@
 # Traffic preferences
 
+## Wake and runway policy
+
+`wake.toml` is the editable wake-turbulence and runway-relationship policy. It contains FAA CWT, ICAO Doc 4444, EUROCONTROL RECAT-EU and Australian MATS tables, with leader/follower categories, departure intervals, arrival spacing, line-up-and-wait limits and parallel-runway thresholds. The **Wake separation** setting selects `auto`, `icao`, `recat_eu`, `faa_cwt` or `mats`; `auto` uses FAA CWT at US airports, MATS at Australian airports and ICAO elsewhere. Aircraft categories come from the simulator's reported wake category first, then the aircraft profile's `cwt` or `wake` field. Edit the tables and restart the engine to apply them.
+
+
 Airborne planning is still being integrated. The worker geometry builder now checks bank and turn-rate limits, crossing floors/ceilings and climb/descent performance across the whole proposed path. It begins descent early enough for later ceilings, and rejects paths whose sampled corridor is not protected. These checks do not yet supply complete generated departures, arrivals or controller clearances.
 
-These three versioned files describe plausible generated traffic. They are not a real-world timetable, a current fleet census or a source of dispatch performance. There are no per-flight schedule files to maintain. The renderer's model inventory comes from installed CSL metadata.
+These versioned files describe plausible generated traffic. They are not a real-world timetable, a current fleet census or a source of dispatch performance. There are no per-flight schedule files to maintain. The renderer's model inventory comes from installed CSL metadata.
 
 - `airlines.toml`: operating callsign, home area, served ICAO prefixes, category, aircraft weights and explicitly permitted partner liveries. Both endpoints must be served and at least one must be in the home area. A Singapore Airlines hub preference at Sydney does not create Singapore Airlines flights from Sydney to Melbourne.
 - `hubs.toml`: relative operator preferences at an airport. Values do not have to sum to 100 and are not market shares. Preferences at both ends influence the selection.

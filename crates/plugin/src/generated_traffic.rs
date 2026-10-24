@@ -305,9 +305,21 @@ impl Renderer {
         paused: bool,
         stamp: Option<(u64, f64)>,
     ) {
-        if self.source_root != root || self.mappings != *mappings {
+        // Only a different scenery root invalidates the loaded CSL instances. The animation
+        // channel map is refreshed far more often than that, and resetting the renderer for it
+        // dropped every instance and reloaded every model on each poll, which showed up as a
+        // flicker and as traffic that only appeared after the page forced a refresh.
+        if self.source_root != root {
+            crate::debug_log("OpenATC traffic: scenery root changed, rebuilding renderer");
             *self = Self::default();
             self.source_root = root.to_path_buf();
+        }
+        if self.mappings != *mappings {
+            crate::debug_log(&format!(
+                "OpenATC traffic: animation channels changed ({} -> {}) without a renderer reset",
+                self.mappings.len(),
+                mappings.len()
+            ));
             self.mappings.clone_from(mappings);
         }
         self.timeline
@@ -327,6 +339,14 @@ impl Renderer {
         let root = self.root.clone();
         if !root.as_os_str().is_empty() || frames.is_empty() {
             self.update(&frames, &root);
+        } else if !frames.is_empty() {
+            static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                crate::debug_log(&format!(
+                    "OpenATC traffic: {} frames sampled before the CSL root was known",
+                    frames.len()
+                ));
+            }
         }
     }
     /// Use a faster lightweight render loop only while generated traffic exists.

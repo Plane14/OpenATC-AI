@@ -53,6 +53,8 @@ pub struct TrafficTarget {
     pub ground_speed_knots: Option<f64>,
     /// Wingspan reported by the traffic provider, if available.
     pub wingspan_meters: Option<f64>,
+    /// Simulator wake category: 0 light, 1 medium, 2 heavy, 3 super.
+    pub wake_category: Option<u8>,
     /// Degrees north.
     pub latitude: f64,
     /// Degrees east.
@@ -104,6 +106,8 @@ pub struct Telemetry {
     pub aircraft_icao: String,
     /// Simulator-reported wingspan in metres, absent when unavailable.
     pub wingspan_meters: Option<f64>,
+    /// Simulator wake category: 0 light, 1 medium, 2 heavy, 3 super.
+    pub wake_category: Option<u8>,
     /// Degrees north.
     pub latitude: f64,
     /// Degrees east.
@@ -168,6 +172,7 @@ impl Default for Telemetry {
         Self {
             aircraft_icao: String::new(),
             wingspan_meters: None,
+            wake_category: None,
             latitude: 0.0,
             longitude: 0.0,
             altitude_feet: 0.0,
@@ -808,6 +813,10 @@ pub struct State {
     /// Generated models ready for simulator rendering; observations remain in telemetry.
     #[serde(default)]
     pub generated_traffic: Vec<GeneratedTraffic>,
+    /// Next hold of each generated ground aircraft, keyed by aircraft id, latitude then
+    /// longitude. Separate from `generated_traffic` because the plugin does not need it.
+    #[serde(default)]
+    pub generated_holding_points: std::collections::BTreeMap<u32, [f64; 2]>,
     /// Simulator sample clock and session identity for buffered rendering.
     #[serde(default)]
     pub generated_traffic_clock: Option<(u64, f64)>,
@@ -911,6 +920,7 @@ impl Default for State {
             weather_airports: Vec::new(),
             control_radio: Radio::Com1,
             generated_traffic: Vec::new(),
+            generated_holding_points: std::collections::BTreeMap::new(),
             generated_traffic_clock: None,
             generated_animation_channels: std::collections::BTreeMap::default(),
             generated_traffic_diagnostics: Vec::new(),

@@ -319,6 +319,15 @@ pub(super) fn endpoints(
             runway(&origin, &plan.runway),
             runway(&destination, &plan.arrival_runway),
         )
+        // A filed plan only names the traffic airports while the player is actually near one of
+        // them. After a landing elsewhere the plan is stale, and following it would put every
+        // generated flight at an airport the player cannot see.
+        && [&origin, &destination].iter().any(|airport| {
+            openatc_core::arrival::distance_nm(
+                own,
+                [airport.reference_latitude, airport.reference_longitude],
+            ) <= policy.surface_monitor_radius_nm
+        })
     {
         return Ok((origin, destination, departure, arrival));
     }
@@ -738,11 +747,39 @@ fn ready_pairs(plan: &Plan, samples: &environment::Samples) -> (Vec<Pair>, BTree
     (pairs, missing)
 }
 
-pub(super) fn prepare(mut input: Preparation, plan: &Plan) -> Result<Scene, String> {
+pub(super) fn prepare(
+    mut input: Preparation,
+    plan: &Plan,
+    local_only: bool,
+) -> Result<Scene, String> {
     let trace = std::env::var_os("OPENATC_TRAFFIC_PROFILE").is_some();
     let started = Instant::now();
     input.refresh_weather()?;
-    let (pairs, missing) = ready_pairs(plan, &input.weather);
+    let (mut pairs, missing) = ready_pairs(plan, &input.weather);
+    // The first publication plans only the player's own airport pair, so traffic exists in
+    // seconds. The rest of the network is admitted by a later merge.
+    if local_only {
+        let origin = input.origin.icao.clone();
+        let destination = input.destination.icao.clone();
+        let local = pairs
+            .iter()
+            .filter(|pair| {
+                (pair.origin.icao == origin && pair.destination.icao == destination)
+                    || (pair.origin.icao == destination && pair.destination.icao == origin)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !local.is_empty() {
+            pairs = local;
+        }
+    }
+    if trace {
+        eprintln!(
+            "Traffic preparation +{:.2}s: {} network pairs ready",
+            started.elapsed().as_secs_f64(),
+            pairs.len()
+        );
+    }
     if !missing.is_empty()
         && pairs
             .iter()
@@ -790,7 +827,7 @@ pub(super) fn prepare(mut input: Preparation, plan: &Plan) -> Result<Scene, Stri
                     started.elapsed().as_secs_f64()
                 );
             }
-            match prepare_direction_with_terrain(request, &terrain) {
+            match prepare_direction_with_terrain(request, &terrain, true) {
                 Ok(next) => {
                     scene = Some(match scene {
                         Some(previous) => previous.merge(next)?,
@@ -805,7 +842,16 @@ pub(super) fn prepare(mut input: Preparation, plan: &Plan) -> Result<Scene, Stri
         .ok_or_else(|| format!("No complete traffic airport pair: {}", warnings.join("; ")))?;
     scene.warnings.extend(plan.warnings.iter().cloned());
     scene.warnings.extend(warnings);
-    scene.seed_airborne(input.own, input.seed_single_arrival);
+    scene.seed_population(
+        input.own,
+        input.seed,
+        input.startup_cast,
+        input.taxi_target,
+        input.seed_single_arrival,
+        &input.observed,
+        input.player_airborne,
+        input.minimum_airborne_spawn_nm,
+    );
     super::ctaf::prepare(&mut scene, &input);
     if trace {
         eprintln!(

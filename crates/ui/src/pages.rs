@@ -2118,6 +2118,34 @@ fn settings_appearance(ui: &imgui::Ui, interface: &mut Interface) {
         ui.checkbox("Enable debugging tools", &mut interface.settings.dev_mode);
         ui.text_wrapped("Shows the controller coverage map, phase fast-forward and detailed errors. Fast-forward moves your aircraft; leave this off for normal flights.");
         if interface.settings.dev_mode {
+            use openatc_settings::TrafficLog;
+            ui.text_disabled("Traffic diagnostics");
+            ui.set_next_item_width(-1.0);
+            let preview = match interface.settings.traffic_log {
+                TrafficLog::Off => "Off",
+                TrafficLog::Summary => "Summary",
+                TrafficLog::Detail => "Detail",
+            };
+            if let Some(_combo) = ui.begin_combo("##traffic-log", preview) {
+                for option in ["Off", "Summary", "Detail"] {
+                    if ui.selectable(option) {
+                        interface.settings.traffic_log = match option {
+                            "Off" => TrafficLog::Off,
+                            "Detail" => TrafficLog::Detail,
+                            _ => TrafficLog::Summary,
+                        };
+                        interface.save_settings();
+                    }
+                }
+            }
+            ui.text_wrapped("Summary logs publication, phase changes, gate counts and every refusal. Detail adds per-aircraft routes, clearance boundaries and radio state.");
+            if ui.checkbox(
+                "Show traffic holding points",
+                &mut interface.settings.show_traffic_holding_points,
+            ) {
+                interface.save_settings();
+            }
+            ui.text_wrapped("Rings the next hold of every generated ground aircraft: before a runway it must cross, or at the departure runway holding point. The ring is the end of the surface route, so it shows where the clearance is keyed, not where the aircraft happens to have stopped.");
             crate::setup::controls(ui, interface);
         }
     }
@@ -2288,30 +2316,6 @@ fn spoken_voices(ui: &imgui::Ui, interface: &mut Interface) {
     ui.checkbox(
         "Speak copilot readbacks",
         &mut interface.settings.copilot_speech,
-    );
-    labeled_slider(
-        ui,
-        "Controller volume",
-        &mut interface.settings.controller_volume,
-        0.0,
-        1.0,
-        "%.2f",
-    );
-    labeled_slider(
-        ui,
-        "Copilot volume",
-        &mut interface.settings.copilot_volume,
-        0.0,
-        1.0,
-        "%.2f",
-    );
-    labeled_slider(
-        ui,
-        "Pilot volume",
-        &mut interface.settings.pilot_volume,
-        0.0,
-        1.0,
-        "%.2f",
     );
     let mut digit_by_digit =
         interface.settings.callsign_numbers == openatc_settings::CallsignNumbers::Digits;
@@ -2625,10 +2629,46 @@ fn audio_devices_row(ui: &imgui::Ui, interface: &mut Interface) {
 /// Master volume, input gain and the mic meter.
 fn audio_levels_row(ui: &imgui::Ui, interface: &mut Interface) {
     widgets::section_title(ui, "LEVELS");
+    let master_before = interface.settings.master_volume;
     labeled_slider(
         ui,
         "Master volume",
         &mut interface.settings.master_volume,
+        0.0,
+        1.0,
+        "%.2f",
+    );
+    if (interface.settings.master_volume - master_before).abs() > f32::EPSILON {
+        // Push the new level into the audio callback immediately so the phrase that is already
+        // playing changes volume instead of waiting for the next utterance.
+        interface.speech.configure(
+            &interface.settings.input_device.clone(),
+            &interface.settings.output_device.clone(),
+            interface.settings.input_gain,
+            interface.settings.master_volume,
+        );
+    }
+    ui.text_wrapped("Master volume scales every utterance, including the one already playing. The role volumes set how loud each kind of message is relative to it.");
+    labeled_slider(
+        ui,
+        "Controller volume",
+        &mut interface.settings.controller_volume,
+        0.0,
+        1.0,
+        "%.2f",
+    );
+    labeled_slider(
+        ui,
+        "Copilot volume",
+        &mut interface.settings.copilot_volume,
+        0.0,
+        1.0,
+        "%.2f",
+    );
+    labeled_slider(
+        ui,
+        "Pilot volume",
+        &mut interface.settings.pilot_volume,
         0.0,
         1.0,
         "%.2f",
