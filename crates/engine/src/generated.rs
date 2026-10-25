@@ -138,6 +138,10 @@ pub struct Runtime {
     departure_wake: BTreeMap<u32, f64>,
     /// Preserve the cancellation reason until the controller can transmit (true means wake).
     cancelled_takeoffs: BTreeMap<u32, bool>,
+    /// Order in which departures reached the holding point, so the runway queue does not
+    /// reorder itself when two taxiways join the runway at different distances.
+    departure_order: BTreeMap<u32, u64>,
+    departure_sequence: u64,
     cancelled_landings: BTreeSet<(u32, usize)>,
     exchange: Option<radio::Exchange>,
     last_speed_check: Option<f64>,
@@ -146,6 +150,9 @@ pub struct Runtime {
     reported_recoveries: BTreeSet<(u32, usize)>,
     warnings: Vec<String>,
     reported_holds: BTreeSet<(u32, usize)>,
+    /// Last logged hold reason per clearance, so a changed cause is attributable without
+    /// repeating the same line every tick.
+    hold_reasons: BTreeMap<(u32, usize), String>,
     departure_waits: BTreeMap<u32, (String, Instant)>,
     tower_notified: BTreeSet<u32>,
     tower_ready: BTreeSet<u32>,
@@ -364,14 +371,53 @@ impl Runtime {
             })
             .sum::<f64>()
             + policy.runway_clearance_buffer_seconds;
+        let line_up =
+            segment.stage == openatc_core::traffic::motion::Stage::LineUp && landing_end.is_none();
+        let takeoff =
+            segment.stage == openatc_core::traffic::motion::Stage::Takeoff && landing_end.is_none();
         runways.any(|runway| {
-            openatc_core::holding::blocked_during(
-                airport,
-                &runway.first_name,
-                targets.iter().filter(|target| target.id != id),
-                seconds,
-            )
-            .is_some()
+            // An aircraft established on a parallel runway's final is not traffic for this
+            // runway. Surface occupancy still counts; only airborne parallel targets are
+            // excluded.
+            let relevant = targets.iter().filter(|target| {
+                target.id != id
+                    && (target.on_ground
+                        || !separation::parallel_other_runway(
+                            airport,
+                            &runway.first_name,
+                            target.latitude,
+                            target.longitude,
+                            target.track_degrees,
+                        ))
+            });
+            if line_up {
+                // Lining up needs the runway clear for the few seconds it takes to enter.
+                // A distant final is handled after line-up, by the take-off clearance; a
+                // short final still holds the departure at the line.
+                openatc_core::holding::blocked_for_movement(
+                    airport,
+                    &runway.first_name,
+                    relevant,
+                    seconds,
+                )
+                .is_some()
+            } else if takeoff {
+                openatc_core::holding::blocked_for_movement(
+                    airport,
+                    &runway.first_name,
+                    relevant,
+                    seconds,
+                )
+                .is_some()
+            } else {
+                openatc_core::holding::blocked_during(
+                    airport,
+                    &runway.first_name,
+                    relevant,
+                    seconds,
+                )
+                .is_some()
+            }
         })
     }
     fn surface_airport(&self, id: &str) -> Option<&Airport> {
@@ -4597,6 +4643,17 @@ fn external_surface_cells(
             ));
             // Runway phases reserve the runway itself, not only its taxi conflict cells.
             for runway in &airport.runways {
+                if !target.on_ground
+                    && separation::parallel_other_runway(
+                        airport,
+                        &runway.first_name,
+                        target.latitude,
+                        target.longitude,
+                        target.track_degrees,
+                    )
+                {
+                    continue;
+                }
                 if openatc_core::holding::blocked_targets(
                     airport,
                     &runway.first_name,
@@ -4696,6 +4753,30 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) ->
         // flight, and generated conflicts are owned by the movement world.
         let targets = external_targets(runtime, telemetry);
         let generation = runtime.world.generation();
+        // A pose without a frame, flight plan or apron assignment has no controller or
+        // lifecycle. It must not retain runway or taxi resources forever.
+        let controlled: BTreeSet<u32> = runtime
+            .frames
+            .iter()
+            .map(|frame| frame.target.id)
+            .chain(runtime.flights.keys().copied())
+            .chain(runtime.apron_ids.iter().copied())
+            .chain(runtime.active_flights.iter().copied())
+            .collect();
+        let orphans: Vec<u32> = runtime
+            .world
+            .snapshot()
+            .into_iter()
+            .map(|pose| pose.id)
+            .filter(|id| !controlled.contains(id))
+            .collect();
+        for id in orphans {
+            runtime.world.remove(id);
+            runtime.log(
+                openatc_settings::TrafficLog::Summary,
+                format!("removed orphan generated pose {id} with no frame, flight plan or station assignment"),
+            );
+        }
         // Advisory traffic at an untowered field is flown by the published procedure, so it
         // never enters the controlled clearance path below.
         ctaf::advance(runtime, &blocked);
@@ -4757,6 +4838,28 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) ->
             }
             if pose.recovering {
                 continue;
+            }
+            // A queue follower extends its movement as the aircraft ahead releases cells.
+            // It should not wait for the leader to stop and request a fresh taxi clearance.
+            if runtime.active_flights.contains(&pose.id)
+                && matches!(
+                    pose.stage,
+                    openatc_core::traffic::motion::Stage::TaxiOut
+                        | openatc_core::traffic::motion::Stage::TaxiIn
+                )
+                && pose.knots < 1.0
+            {
+                let current_approved = runtime.approved_orders.contains(&(pose.id, pose.segment));
+                let next_approved = runtime
+                    .approved_orders
+                    .contains(&(pose.id, pose.segment + 1));
+                runtime.world.resume_taxi(
+                    generation,
+                    pose.id,
+                    &blocked,
+                    current_approved,
+                    next_approved,
+                );
             }
             if pose.awaiting_clearance {
                 // Complete flights carry their own clearances after legacy ground orders are removed.
@@ -5091,6 +5194,17 @@ fn withhold_conflicting_departures(
             .withhold_takeoff(runtime.world.generation(), id)
             && runtime.approved_orders.remove(&(id, 1))
         {
+            let callsign = runtime
+                .frames
+                .iter()
+                .find(|frame| frame.target.id == id)
+                .map_or_else(|| id.to_string(), |frame| frame.target.callsign.clone());
+            runtime.log(
+                openatc_settings::TrafficLog::Summary,
+                format!(
+                    "{callsign} takeoff cancelled: crossing {crossing}, airborne {airborne_blocked}"
+                ),
+            );
             runtime.cancelled_takeoffs.insert(
                 id,
                 runtime
@@ -5131,16 +5245,30 @@ fn withhold_conflicting_landings(
             if contract.landing_rollout.is_some()
                 && runtime.approved_orders.contains(&(pose.id, start))
                 && pose.segment <= start
-                && (runtime.crossing_blocked(pose.id, start, &targets)
-                    || separation::blocked(runtime, telemetry, pose.id, start, contract))
             {
-                revoke.push((pose.id, start));
+                let crossing = runtime.crossing_blocked(pose.id, start, &targets);
+                let airborne = separation::blocked(runtime, telemetry, pose.id, start, contract);
+                if crossing || airborne {
+                    revoke.push((pose.id, start, crossing, airborne));
+                }
             }
         }
     }
-    for (id, start) in revoke {
+    for (id, start, crossing, airborne) in revoke {
+        if runtime.cancelled_landings.insert((id, start)) {
+            let callsign = runtime
+                .frames
+                .iter()
+                .find(|frame| frame.target.id == id)
+                .map_or_else(|| id.to_string(), |frame| frame.target.callsign.clone());
+            runtime.log(
+                openatc_settings::TrafficLog::Summary,
+                format!(
+                    "{callsign} landing clearance withdrawn: crossing {crossing}, airborne {airborne}"
+                ),
+            );
+        }
         flight::revoke_landing(runtime, id, start);
-        runtime.cancelled_landings.insert((id, start));
     }
 }
 

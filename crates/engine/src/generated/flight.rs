@@ -92,7 +92,12 @@ impl Clearance {
     }
 }
 
-fn on_station(runtime: &Runtime, id: u32, frequency: Option<i32>, station: &Station) -> bool {
+pub(super) fn on_station(
+    runtime: &Runtime,
+    id: u32,
+    frequency: Option<i32>,
+    station: &Station,
+) -> bool {
     frequency == Some(station.khz)
         && runtime.controllers.get(&id).is_none_or(|current| {
             current.khz == station.khz
@@ -1239,6 +1244,17 @@ pub(super) fn acknowledge(runtime: &mut Runtime, id: u32, segment: usize) {
                 .world
                 .authorise_airborne_until(runtime.world.generation(), id, 2, end)
         {
+            let callsign = runtime
+                .frames
+                .iter()
+                .find(|frame| frame.target.id == id)
+                .map_or_else(|| id.to_string(), |frame| frame.target.callsign.clone());
+            runtime.log(
+                openatc_settings::TrafficLog::Summary,
+                format!(
+                    "{callsign} takeoff readback could not record the initial climb through segment {end}"
+                ),
+            );
             runtime.approved_orders.remove(&(id, segment));
             return;
         }
@@ -1344,6 +1360,9 @@ pub(super) fn install(runtime: &mut Runtime, id: u32, prepared: &Prepared) -> Re
         .reported_holds
         .retain(|(aircraft, _)| *aircraft != id);
     runtime
+        .hold_reasons
+        .retain(|(aircraft, _), _| *aircraft != id);
+    runtime
         .pending_checkins
         .retain(|(aircraft, _)| *aircraft != id);
     runtime
@@ -1376,6 +1395,129 @@ pub(super) fn ground_exchange(state: &mut EngineState) -> Option<radio::Exchange
 /// The Tower pass restricted to one aircraft, used when Tower answers its ready call.
 pub(super) fn ground_exchange_for(state: &mut EngineState, id: u32) -> Option<radio::Exchange> {
     exchange_filtered(state, true, Some(id))
+}
+
+/// Record the order in which departures reached the holding point.
+///
+/// Distance to the threshold is not a queue order when two taxiways join the runway at
+/// different points: a later aircraft on the nearer taxiway would otherwise jump ahead of
+/// one already waiting. Aircraft present at the first observation are ordered by id so the
+/// queue is stable before any of them talks to Tower.
+fn note_departure_order(runtime: &mut Runtime) {
+    let holding: BTreeSet<u32> = runtime
+        .world
+        .snapshot()
+        .into_iter()
+        .filter(|pose| {
+            pose.stage == Stage::TaxiOut
+                && pose.complete
+                && runtime
+                    .world
+                    .assigned_route(pose.id)
+                    .is_some_and(|route| pose.segment + 1 == route.segment_count())
+        })
+        .map(|pose| pose.id)
+        .collect();
+    // Only aircraft still waiting at a holding point keep an order. A later turnaround at
+    // the same identity joins the queue at the back.
+    runtime.departure_order.retain(|id, _| holding.contains(id));
+    for id in holding {
+        if !runtime.departure_order.contains_key(&id) {
+            runtime
+                .departure_order
+                .insert(id, runtime.departure_sequence);
+            runtime.departure_sequence = runtime.departure_sequence.saturating_add(1);
+        }
+    }
+}
+
+/// Aircraft ahead on the same runway, including a complete taxi-out still at the hold.
+/// A departure already lined up or rolling keeps the runway; aircraft still at their holding
+/// points keep the order in which they arrived.
+pub(super) fn lineup_ahead(
+    runtime: &mut Runtime,
+    id: u32,
+    airport: &Airport,
+    runway: &str,
+) -> Option<u32> {
+    note_departure_order(runtime);
+    let threshold = airport
+        .runways
+        .iter()
+        .find(|candidate| candidate.first_name == runway || candidate.second_name == runway)
+        .map(|candidate| {
+            if candidate.first_name == runway {
+                candidate.first
+            } else {
+                candidate.second
+            }
+        })?;
+    let distance = |pose: &openatc_core::traffic::motion::Pose| {
+        let point = openatc_core::airport::airport_point(
+            airport,
+            pose.position.latitude,
+            pose.position.longitude,
+        );
+        (point.east - threshold.east).hypot(point.north - threshold.north)
+    };
+    let rank = |pose: &openatc_core::traffic::motion::Pose| {
+        if matches!(pose.stage, Stage::LineUp | Stage::Takeoff) {
+            2
+        } else if pose.stage == Stage::TaxiOut && pose.complete {
+            1
+        } else {
+            0
+        }
+    };
+    let own_pose = runtime
+        .world
+        .snapshot()
+        .into_iter()
+        .find(|pose| pose.id == id);
+    let own = own_pose.as_ref().map_or(f64::INFINITY, &distance);
+    let own_rank = own_pose.as_ref().map_or(0, &rank);
+    let own_order = runtime.departure_order.get(&id).copied();
+    runtime.world.snapshot().into_iter().find_map(|pose| {
+        if pose.id == id || rank(&pose) == 0 {
+            return None;
+        }
+        if pose.stage == Stage::Takeoff && pose.knots > 0.1 {
+            return None;
+        }
+        let same_runway = runtime
+            .flights
+            .get(&pose.id)
+            .and_then(|plan| plan.route.segment(pose.segment))
+            .is_some_and(|segment| {
+                segment.resources.iter().any(|resource| {
+                    let Some(rest) = resource.strip_prefix("RUNWAY/") else {
+                        return false;
+                    };
+                    let mut parts = rest.split('/');
+                    parts.next() == Some(&airport.icao) && parts.next() == Some(runway)
+                })
+            })
+            || runtime.orders.get(&pose.id).is_some_and(|orders| {
+                orders
+                    .last()
+                    .is_some_and(|(_, order)| order.hold_short_runway == runway)
+            });
+        if !same_runway {
+            return None;
+        }
+        let other_rank = rank(&pose);
+        if other_rank != own_rank {
+            return (other_rank > own_rank).then_some(pose.id);
+        }
+        if other_rank == 1
+            && let (Some(own_order), Some(other_order)) =
+                (own_order, runtime.departure_order.get(&pose.id).copied())
+        {
+            return (other_order < own_order).then_some(pose.id);
+        }
+        let other = distance(&pose);
+        (other + 1.0 < own || ((other - own).abs() <= 1.0 && pose.id < id)).then_some(pose.id)
+    })
 }
 
 /// Clear a departure for takeoff directly from the hold when the runway is clear.
@@ -1411,7 +1553,10 @@ pub(super) fn takeoff_exchange_for(state: &mut EngineState, id: u32) -> Option<r
     {
         return None;
     }
-    let airport = state.generated.surface_airport(&takeoff.station.airport)?;
+    let airport = state
+        .generated
+        .surface_airport(&takeoff.station.airport)
+        .cloned()?;
     let runway = prepared
         .route
         .segment(index)?
@@ -1423,10 +1568,11 @@ pub(super) fn takeoff_exchange_for(state: &mut EngineState, id: u32) -> Option<r
                 .and_then(|rest| rest.split('/').nth(1))
                 .map(ToOwned::to_owned)
         })?;
-    if state
-        .generated
-        .runway_use(&format!("RUNWAY/{}/{runway}", airport.icao))
-        != super::RunwayUse::Clear
+    if lineup_ahead(&mut state.generated, id, &airport, &runway).is_some()
+        || state
+            .generated
+            .runway_use(&format!("RUNWAY/{}/{runway}", airport.icao))
+            != super::RunwayUse::Clear
         || state
             .generated
             .departure_wake
@@ -1446,13 +1592,13 @@ pub(super) fn takeoff_exchange_for(state: &mut EngineState, id: u32) -> Option<r
             .or_else(|| profile.map(|profile| profile.wingspan))
             .unwrap_or(36.0);
         let point =
-            openatc_core::airport::airport_point(airport, telemetry.latitude, telemetry.longitude);
+            openatc_core::airport::airport_point(&airport, telemetry.latitude, telemetry.longitude);
         let at_stand = airport.parking.iter().any(|stand| {
             (point.east - stand.point.east).hypot(point.north - stand.point.north) <= 50.0
         });
-        let on_taxiway = !at_stand && openatc_core::airport::on_taxiway(airport, &point, 20.0);
+        let on_taxiway = !at_stand && openatc_core::airport::on_taxiway(&airport, &point, 20.0);
         if let Some(clearance) = openatc_core::traffic::runway_clearance(
-            airport,
+            &airport,
             &runway,
             telemetry.latitude,
             telemetry.longitude,
@@ -1464,7 +1610,7 @@ pub(super) fn takeoff_exchange_for(state: &mut EngineState, id: u32) -> Option<r
             && !on_taxiway
         {
             let player_cells =
-                super::cells(airport, point, span / 2.0, policy.conflict_cell_meters);
+                super::cells(&airport, point, span / 2.0, policy.conflict_cell_meters);
             for segment_index in pose.segment..=index {
                 let Some(segment) = prepared.route.segment(segment_index) else {
                     continue;
@@ -1476,6 +1622,20 @@ pub(super) fn takeoff_exchange_for(state: &mut EngineState, id: u32) -> Option<r
                 }
             }
         }
+    }
+    // Use the same conflict checks as the readback grant. Issuing a clearance that the
+    // next tick immediately cancels is worse than holding or lining up.
+    let targets = super::external_targets(&state.generated, &state.session.telemetry);
+    if state.generated.crossing_blocked(id, index, &targets)
+        || super::separation::blocked(
+            &state.generated,
+            &state.session.telemetry,
+            id,
+            index,
+            &takeoff,
+        )
+    {
+        return None;
     }
     let generation = state.generated.world.generation();
     let mut probe = state.generated.world.clone();
@@ -1791,7 +1951,7 @@ fn exchange_filtered(
             if Some(clearance.station.khz) != frame.target.com1_khz {
                 continue;
             }
-            let wake = state.generated.cancelled_takeoffs.remove(&pose.id).unwrap();
+            let wake = *state.generated.cancelled_takeoffs.get(&pose.id).unwrap();
             return Some(radio::hold_takeoff(
                 radio::Exchange {
                     speed: None,
@@ -1990,6 +2150,25 @@ fn exchange_filtered(
             )
             .clone();
         let clearance = &selected;
+        if prepared
+            .route
+            .segment(index)
+            .is_some_and(|segment| matches!(segment.stage, Stage::LineUp | Stage::Takeoff))
+            && let Some(segment) = prepared.route.segment(index)
+            && let Some(runway) = segment.resources.iter().find_map(|resource| {
+                resource
+                    .strip_prefix("RUNWAY/")
+                    .and_then(|rest| rest.split('/').nth(1))
+            })
+            && let Some(airport) = state
+                .generated
+                .surface_airport(&clearance.station.airport)
+                .cloned()
+            && lineup_ahead(&mut state.generated, pose.id, &airport, runway).is_some()
+        {
+            continue;
+        }
+        let crossing = state.generated.crossing_blocked(pose.id, index, &targets);
         let airborne_blocked = super::separation::blocked(
             &state.generated,
             &state.session.telemetry,
@@ -1997,7 +2176,51 @@ fn exchange_filtered(
             index,
             clearance,
         );
-        if state.generated.crossing_blocked(pose.id, index, &targets) || airborne_blocked {
+        if crossing || airborne_blocked {
+            let reason = format!("crossing {crossing}, airborne {airborne_blocked}");
+            if state.generated.hold_reasons.get(&(pose.id, index)) != Some(&reason) {
+                state
+                    .generated
+                    .hold_reasons
+                    .insert((pose.id, index), reason.clone());
+                let mut nearby = Vec::new();
+                for other in state
+                    .generated
+                    .world
+                    .snapshot()
+                    .into_iter()
+                    .filter(|other| other.id != pose.id && !other.stage.on_ground())
+                {
+                    let distance = openatc_core::arrival::distance_nm(
+                        [pose.position.latitude, pose.position.longitude],
+                        [other.position.latitude, other.position.longitude],
+                    );
+                    if distance <= 10.0 {
+                        let callsign = state
+                            .generated
+                            .frames
+                            .iter()
+                            .find(|frame| frame.target.id == other.id)
+                            .map_or_else(
+                                || other.id.to_string(),
+                                |frame| frame.target.callsign.clone(),
+                            );
+                        nearby.push(format!(
+                            "{callsign} {:?}/{} {distance:.1}NM {:.0}ft",
+                            other.stage,
+                            other.segment,
+                            other.position.altitude_feet - pose.position.altitude_feet
+                        ));
+                    }
+                }
+                state.generated.log(
+                    openatc_settings::TrafficLog::Summary,
+                    format!(
+                        "{} clearance withheld at segment {index}: {reason}; nearby {nearby:?}",
+                        frame.target.callsign
+                    ),
+                );
+            }
             let revoked = state.generated.approved_orders.remove(&(pose.id, index));
             if clearance.landing_rollout.is_some() {
                 if revoked {
@@ -2030,6 +2253,12 @@ fn exchange_filtered(
                 .segment(index)
                 .is_some_and(|segment| segment.stage == Stage::Takeoff)
             {
+                // An aircraft already lined up and waiting does not need another hold
+                // transmission. It only hears from Tower when it is cleared or a take-off
+                // clearance is actually cancelled.
+                if !revoked && matches!(pose.stage, Stage::LineUp | Stage::Takeoff) {
+                    continue;
+                }
                 if revoked || state.generated.reported_holds.insert((pose.id, index)) {
                     return Some(radio::hold_takeoff(
                         radio::Exchange {
@@ -2107,6 +2336,8 @@ fn exchange_filtered(
                 ));
             }
             continue;
+        } else {
+            state.generated.hold_reasons.remove(&(pose.id, index));
         }
         if !current_handoff && state.generated.approved_orders.contains(&(pose.id, index)) {
             continue;
@@ -2277,7 +2508,7 @@ fn exchange_filtered(
                 state.generated.log(
                     openatc_settings::TrafficLog::Summary,
                     format!(
-                        "{} takeoff held at segment {index} ({:?}): owners {owners:?}, blocked {blocked_here:?}, observed {observed:?}, player {player:?}, wake {wake}",
+                        "{} takeoff held at segment {index} ({:?}): crossing {crossing}, airborne {airborne_blocked}, owners {owners:?}, blocked {blocked_here:?}, observed {observed:?}, player {player:?}, wake {wake}",
                         frame.target.callsign, pose.stage
                     ),
                 );
@@ -2829,6 +3060,87 @@ mod tests {
         assert!(saw_takeoff && saw_airborne);
         assert_eq!(state.generated.world.snapshot()[0].stage, Stage::Turnaround);
         assert!(state.generated.world.snapshot()[0].complete);
+    }
+
+    #[test]
+    fn the_second_taxiway_does_not_jump_the_holding_queue() {
+        let route = |start: f64, end: f64| {
+            Arc::new(
+                Route::compile(
+                    vec![Segment {
+                        stage: Stage::TaxiOut,
+                        points: vec![point(start, 0.0), point(end, 0.0)],
+                        knots: 10.0,
+                        resources: vec![],
+                        dwell_seconds: 0.0,
+                    }],
+                    4000.0,
+                    4000.0,
+                )
+                .unwrap(),
+            )
+        };
+        let mut world = openatc_core::traffic::motion::World::default();
+        assert!(world.insert(0, 1, route(1000.0, 0.0)));
+        assert!(world.insert(0, 2, route(500.0, -500.0)));
+        assert!(world.authorise(0, 1, 0, &BTreeSet::new()));
+        world.advance(0.0, false);
+        for step in 1..=300 {
+            world.advance(f64::from(step), false);
+        }
+        assert!(
+            world
+                .snapshot()
+                .iter()
+                .any(|pose| pose.id == 1 && pose.complete)
+        );
+        let mut runtime = Runtime {
+            world,
+            ..Default::default()
+        };
+        let airport = Airport {
+            icao: "KTEST".into(),
+            runways: vec![openatc_core::airport::Runway {
+                first_name: "09".into(),
+                second_name: "27".into(),
+                width: 45.0,
+                first: Point {
+                    east: -1000.0,
+                    ..Default::default()
+                },
+                second: Point {
+                    east: 2000.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        for id in [1, 2] {
+            runtime.orders.insert(
+                id,
+                vec![(
+                    0,
+                    openatc_core::state::TaxiClearance {
+                        hold_short_runway: "09".into(),
+                        ..Default::default()
+                    },
+                )],
+            );
+        }
+        assert_eq!(lineup_ahead(&mut runtime, 1, &airport, "09"), None);
+        assert!(runtime.world.authorise(0, 2, 0, &BTreeSet::new()));
+        for step in 301..=600 {
+            runtime.world.advance(f64::from(step), false);
+        }
+        assert!(
+            runtime
+                .world
+                .snapshot()
+                .iter()
+                .any(|pose| pose.id == 2 && pose.complete)
+        );
+        assert_eq!(lineup_ahead(&mut runtime, 2, &airport, "09"), Some(1));
     }
 
     #[test]
@@ -4127,6 +4439,44 @@ mod tests {
     }
 
     #[test]
+    fn a_direct_takeoff_readback_keeps_the_clearance() {
+        let mut state = wake_fixture();
+        state.settings.hear_traffic_radio = true;
+        state.session.telemetry.aircraft_icao = "C172".into();
+        state.session.telemetry.wingspan_meters = Some(11.0);
+        state.session.telemetry.heading_degrees = 90.0;
+        state.session.telemetry.com1_khz = 120_950;
+        let exchange = takeoff_exchange_for(&mut state, 1).expect("clear runway");
+        assert!(exchange.grant);
+        state.generated.exchange = Some(exchange);
+        let mut now = 30.0;
+        for _ in 0..20 {
+            if let Some(exchange) = &mut state.generated.exchange {
+                exchange.due = Instant::now();
+            }
+            super::super::radio_tick(&mut state);
+            now += 0.5;
+            state.session.telemetry.simulation_seconds = Some(now);
+            super::super::advance(&mut state.generated, &state.session.telemetry);
+        }
+        assert!(state.generated.approved_orders.contains(&(1, 1)));
+        assert!(state.generated.approved_orders.contains(&(1, 2)));
+        assert!(!state.generated.cancelled_takeoffs.contains_key(&1));
+    }
+
+    #[test]
+    fn a_cleared_direct_takeoff_is_not_cancelled_by_the_grounded_player() {
+        let mut state = wake_fixture();
+        state.generated.approved_orders.insert((1, 1));
+        super::super::withhold_conflicting_departures(
+            &mut state.generated,
+            &state.session.telemetry,
+        );
+        assert!(state.generated.approved_orders.contains(&(1, 1)));
+        assert!(!state.generated.cancelled_takeoffs.contains_key(&1));
+    }
+
+    #[test]
     #[allow(clippy::float_cmp)]
     fn crossing_airborne_traffic_withholds_takeoff_and_requires_a_fresh_readback_after_clearing() {
         for arrival_stage in 0..3 {
@@ -4402,6 +4752,7 @@ mod tests {
             on_ground: true,
             ..Default::default()
         }]);
+        state.session.telemetry.com1_khz = 120_950;
         state.session.telemetry.radio_busy = true;
         now += 1.0;
         state.session.telemetry.simulation_seconds = Some(now);
@@ -4473,6 +4824,89 @@ mod tests {
         let pose = &state.generated.world.snapshot()[0];
         assert_eq!(pose.stage, Stage::Turnaround, "{pose:?}");
         assert!(pose.complete);
+    }
+
+    #[test]
+    fn a_distant_final_allows_line_up_but_a_short_final_holds() {
+        let mut state = wake_fixture();
+        let target = |longitude: f64, callsign: &str| TrafficTarget {
+            id: 88,
+            callsign: callsign.into(),
+            aircraft: "A320".into(),
+            longitude,
+            altitude_feet: 2000.0,
+            track_degrees: 90.0,
+            ground_speed_knots: Some(200.0),
+            on_ground: false,
+            ..Default::default()
+        };
+        assert!(!state.generated.crossing_blocked(
+            1,
+            0,
+            std::slice::from_ref(&target(-0.1, "FAR88"))
+        ));
+        assert!(state.generated.crossing_blocked(
+            1,
+            0,
+            std::slice::from_ref(&target(-0.02, "NEAR88"))
+        ));
+    }
+
+    #[test]
+    fn a_parallel_runway_final_does_not_withhold_the_departure() {
+        let mut state = wake_fixture();
+        state
+            .generated
+            .policy
+            .as_mut()
+            .unwrap()
+            .runway_clearance_buffer_seconds = 180.0;
+        let airport = Arc::make_mut(state.generated.airport.as_mut().unwrap());
+        airport.runways.push(openatc_core::airport::Runway {
+            first_name: "09L".into(),
+            second_name: "27R".into(),
+            width: 45.0,
+            first: Point {
+                east: 0.0,
+                north: 800.0,
+                ..Default::default()
+            },
+            second: Point {
+                east: 3000.0,
+                north: 800.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let target = |north: f64, callsign: &str| TrafficTarget {
+            id: 88,
+            callsign: callsign.into(),
+            aircraft: "A320".into(),
+            latitude: north / 111_320.0,
+            longitude: -0.1,
+            altitude_feet: 2000.0,
+            track_degrees: 90.0,
+            ground_speed_knots: Some(200.0),
+            on_ground: false,
+            ..Default::default()
+        };
+        assert!(state.generated.crossing_blocked(
+            1,
+            1,
+            std::slice::from_ref(&target(0.0, "SAME88"))
+        ));
+        assert!(!state.generated.crossing_blocked(
+            1,
+            1,
+            std::slice::from_ref(&target(800.0, "PAR88"))
+        ));
+        state.session.telemetry.traffic = Some(vec![target(800.0, "PAR88")]);
+        assert!(takeoff_exchange_for(&mut state, 1).is_some());
+        let mut short = target(800.0, "SHORT88");
+        short.longitude = -0.02;
+        short.altitude_feet = 500.0;
+        state.session.telemetry.traffic = Some(vec![short]);
+        assert!(takeoff_exchange_for(&mut state, 1).is_none());
     }
 
     #[test]

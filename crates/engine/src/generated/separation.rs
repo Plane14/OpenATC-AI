@@ -54,9 +54,82 @@ pub(super) fn accepted_world(runtime: &Runtime) -> World {
     world
 }
 
+/// True when two named runways are parallel and far enough apart to be treated as separate
+/// movement surfaces. The 04L/04R pair at Nice is about 309 m apart.
+fn parallel_runways(airport: &Airport, runway: &str, other: &str) -> bool {
+    if runway == other {
+        return false;
+    }
+    let endpoints = |name: &str| {
+        let runway = airport
+            .runways
+            .iter()
+            .find(|candidate| candidate.first_name == name || candidate.second_name == name)?;
+        if runway.first_name == name {
+            Some((runway.first, runway.second))
+        } else {
+            Some((runway.second, runway.first))
+        }
+    };
+    let (Some((start, end)), Some((other_start, other_end))) =
+        (endpoints(runway), endpoints(other))
+    else {
+        return false;
+    };
+    let heading = |start: Point, end: Point| {
+        (end.east - start.east)
+            .atan2(end.north - start.north)
+            .to_degrees()
+            .rem_euclid(360.0)
+    };
+    let angle =
+        openatc_core::navigation::turn(heading(start, end), heading(other_start, other_end)).abs();
+    if angle.min((180.0 - angle).abs()) >= 20.0 {
+        return false;
+    }
+    let dx = end.east - start.east;
+    let dn = end.north - start.north;
+    let length = dx.hypot(dn);
+    if length < 100.0 {
+        return false;
+    }
+    let across =
+        ((other_start.east - start.east) * dn - (other_start.north - start.north) * dx) / length;
+    across.abs() > 250.0
+}
+
+/// A low aircraft on short final to any runway can go around across the parallel runway.
+/// It must not be ignored by the parallel-runway filter at that point.
+pub(super) fn short_final(
+    airport: &Airport,
+    latitude: f64,
+    longitude: f64,
+    altitude_feet: f64,
+    track_degrees: f64,
+) -> bool {
+    let agl = altitude_feet - airport.elevation_feet;
+    if !(0.0..2000.0).contains(&agl) {
+        return false;
+    }
+    airport.runways.iter().any(|runway| {
+        let Some((along, across, length, heading)) = openatc_core::traffic::runway_position(
+            airport,
+            &runway.first_name,
+            latitude,
+            longitude,
+        ) else {
+            return false;
+        };
+        let turn = openatc_core::navigation::turn(heading, track_degrees).abs();
+        let inbound = along < 0.0 && turn < 35.0 || along > length && turn > 145.0;
+        let distance = if along < 0.0 { -along } else { along - length };
+        inbound && distance < 3.0 * 1852.0 && across.abs() < 300.0
+    })
+}
+
 /// True when an airborne target is flying parallel to a different runway rather than crossing
 /// the departure path. A 04L arrival must not withhold a 04R departure.
-fn parallel_other_runway(
+pub(super) fn parallel_other_runway(
     airport: &Airport,
     runway: &str,
     latitude: f64,
@@ -89,12 +162,29 @@ pub(super) fn blocked(
     if segment.stage.on_ground() && segment.stage != Stage::Takeoff {
         return false;
     }
-    let runway = segment.resources.iter().find_map(|resource| {
-        resource
-            .strip_prefix("RUNWAY/")
-            .and_then(|rest| rest.split('/').nth(1))
-    });
-    let airport = runtime.airport.as_deref();
+    let runway = segment
+        .resources
+        .iter()
+        .find_map(|resource| {
+            resource
+                .strip_prefix("RUNWAY/")
+                .and_then(|rest| rest.split('/').nth(1))
+        })
+        .or_else(|| {
+            // The initial-climb clearance follows the takeoff segment and does not repeat
+            // its runway. Keep using the departure runway for the parallel-runway filter.
+            plan.clearances
+                .get(&1)
+                .filter(|clearance| clearance.initial_climb.is_some())
+                .and_then(|_| plan.route.segment(1))
+                .and_then(|segment| {
+                    segment.resources.iter().find_map(|resource| {
+                        resource
+                            .strip_prefix("RUNWAY/")
+                            .and_then(|rest| rest.split('/').nth(1))
+                    })
+                })
+        });
     let Some(policy) = runtime.policy.as_ref() else {
         return true;
     };
@@ -177,6 +267,22 @@ pub(super) fn rejoin_check(
     }
 }
 
+/// The runway named by the next protected movement of a generated flight. An arrival on a
+/// parallel runway is identified here even while its current track is still turning onto final.
+fn assigned_runway(runtime: &Runtime, airport: &Airport, pose: &Pose) -> Option<String> {
+    let plan = runtime.flights.get(&pose.id)?;
+    (pose.segment..plan.route.segment_count())
+        .filter_map(|index| plan.route.segment(index))
+        .flat_map(|segment| segment.resources.iter())
+        .find_map(|resource| {
+            let rest = resource.strip_prefix("RUNWAY/")?;
+            let mut parts = rest.split('/');
+            let icao = parts.next()?;
+            let name = parts.next()?;
+            (icao == airport.icao).then(|| name.to_owned())
+        })
+}
+
 pub(super) fn forecast_clear(
     runtime: &Runtime,
     telemetry: &Telemetry,
@@ -197,6 +303,8 @@ pub(super) fn forecast_clear(
                 parallel_other_runway(airport, runway, latitude, longitude, track_degrees)
             })
     };
+    let assigned_runway =
+        |other: &Pose| -> Option<String> { assigned_runway(runtime, aircraft_airport?, other) };
     let generated: BTreeSet<_> = world.snapshot().iter().map(|pose| pose.id).collect();
     let mut observed = telemetry
         .traffic
@@ -257,11 +365,32 @@ pub(super) fn forecast_clear(
             .iter()
             .filter(|other| other.id != id && !other.stage.on_ground())
             .filter(|other| {
-                !parallel_other(
-                    other.position.latitude,
-                    other.position.longitude,
-                    other.heading,
-                )
+                let short = aircraft_airport.is_some_and(|airport| {
+                    short_final(
+                        airport,
+                        other.position.latitude,
+                        other.position.longitude,
+                        other.position.altitude_feet,
+                        other.heading,
+                    )
+                });
+                if !short
+                    && matches!(
+                        other.stage,
+                        Stage::Approach | Stage::MissedApproach | Stage::Rollout
+                    )
+                    && let (Some(own), Some(other_runway)) = (runway, assigned_runway(other))
+                    && let Some(airport) = aircraft_airport
+                    && parallel_runways(airport, own, &other_runway)
+                {
+                    return false;
+                }
+                short
+                    || !parallel_other(
+                        other.position.latitude,
+                        other.position.longitude,
+                        other.heading,
+                    )
             })
         {
             let Some(old) = last.iter().find(|pose| pose.id == other.id) else {
@@ -285,7 +414,15 @@ pub(super) fn forecast_clear(
             .iter()
             .filter(|(target, _)| !target.on_ground)
             .filter(|(target, _)| {
-                !parallel_other(target.latitude, target.longitude, target.track_degrees)
+                aircraft_airport.is_some_and(|airport| {
+                    short_final(
+                        airport,
+                        target.latitude,
+                        target.longitude,
+                        target.altitude_feet,
+                        target.track_degrees,
+                    )
+                }) || !parallel_other(target.latitude, target.longitude, target.track_degrees)
             })
         {
             let vertical = policy.airborne_separation_feet
@@ -454,6 +591,67 @@ mod tests {
         assert!(!blocked(&runtime, &telemetry, 1, 0, &clearance));
         telemetry.traffic = None;
         assert!(blocked(&runtime, &telemetry, 1, 0, &clearance));
+    }
+
+    #[test]
+    fn parallel_runways_need_separation_and_alignment() {
+        let airport = Airport {
+            runways: vec![
+                openatc_core::airport::Runway {
+                    first_name: "09".into(),
+                    second_name: "27".into(),
+                    width: 45.0,
+                    first: Point {
+                        east: 0.0,
+                        north: 0.0,
+                        ..Default::default()
+                    },
+                    second: Point {
+                        east: 3000.0,
+                        north: 0.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                openatc_core::airport::Runway {
+                    first_name: "09L".into(),
+                    second_name: "27R".into(),
+                    width: 45.0,
+                    first: Point {
+                        east: 0.0,
+                        north: 309.0,
+                        ..Default::default()
+                    },
+                    second: Point {
+                        east: 3000.0,
+                        north: 309.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                openatc_core::airport::Runway {
+                    first_name: "18".into(),
+                    second_name: "36".into(),
+                    width: 45.0,
+                    first: Point {
+                        east: 0.0,
+                        north: 0.0,
+                        ..Default::default()
+                    },
+                    second: Point {
+                        east: 0.0,
+                        north: 3000.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(parallel_runways(&airport, "09", "09L"));
+        assert!(parallel_runways(&airport, "09", "27R"));
+        assert!(!parallel_runways(&airport, "09", "09"));
+        assert!(!parallel_runways(&airport, "09", "18"));
     }
 
     #[test]

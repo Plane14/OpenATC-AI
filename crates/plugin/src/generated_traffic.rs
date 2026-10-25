@@ -113,15 +113,27 @@ fn blended(previous: &GeneratedTraffic, frame: &mut GeneratedTraffic, amount: f6
 /// A short playout buffer absorbs the engine/HTTP cadence without advancing aircraft beyond
 /// the newest authorised sample. Arrival instants share the renderer's monotonic clock; source
 /// simulator time and session generation detect resets and duplicate HTTP replies.
+struct TimelineSample {
+    arrived: std::time::Instant,
+    source: Option<f64>,
+    frames: Vec<GeneratedTraffic>,
+}
+
+/// A short playout buffer absorbs the engine/HTTP cadence without advancing aircraft beyond
+/// the newest authorised sample. Interpolation uses the source simulator clock when it is
+/// available, so an irregular HTTP delivery cannot make an aircraft appear to speed up and
+/// slow down. Arrival instants are the fallback for older servers.
 #[derive(Default)]
 struct Timeline {
-    samples: VecDeque<(std::time::Instant, Vec<GeneratedTraffic>)>,
+    samples: VecDeque<TimelineSample>,
     stamp: Option<(u64, f64)>,
     paused: bool,
     rendered: Vec<GeneratedTraffic>,
+    /// Monotonic source-time playhead; a late HTTP sample must not jump the traffic back.
+    playhead: Option<f64>,
 }
 impl Timeline {
-    const DELAY: std::time::Duration = std::time::Duration::from_millis(750);
+    const DELAY_SECONDS: f64 = 0.75;
 
     fn receive(
         &mut self,
@@ -130,7 +142,10 @@ impl Timeline {
         paused: bool,
         now: std::time::Instant,
     ) {
-        let same = self.samples.back().is_some_and(|(_, old)| old == frames);
+        let same = self
+            .samples
+            .back()
+            .is_some_and(|sample| sample.frames == frames);
         if same && stamp == self.stamp && paused == self.paused {
             return;
         }
@@ -144,23 +159,31 @@ impl Timeline {
         if reset || frames.is_empty() {
             self.samples.clear();
             self.rendered.clear();
+            self.playhead = None;
         } else if self.paused && !paused {
+            self.playhead = None;
             self.samples.clear();
             if !self.rendered.is_empty() {
-                self.samples.push_back((
-                    now.checked_sub(Self::DELAY).unwrap_or(now),
-                    self.rendered.clone(),
-                ));
+                self.samples.push_back(TimelineSample {
+                    arrived: now
+                        .checked_sub(std::time::Duration::from_secs_f64(Self::DELAY_SECONDS))
+                        .unwrap_or(now),
+                    source: stamp.map(|(_, time)| time),
+                    frames: self.rendered.clone(),
+                });
             }
         }
         self.paused = paused;
         // Equal source times can carry a clearance/visibility change; replace that sample
         // without shifting its clock. Unchanged positions at a later time are real stops.
         if !resumed && stamp.is_some() && stamp == self.stamp && !self.samples.is_empty() {
-            self.samples.back_mut().unwrap().1 = frames.iter().take(63).cloned().collect();
+            self.samples.back_mut().unwrap().frames = frames.iter().take(63).cloned().collect();
         } else {
-            self.samples
-                .push_back((now, frames.iter().take(63).cloned().collect()));
+            self.samples.push_back(TimelineSample {
+                arrived: now,
+                source: stamp.map(|(_, time)| time),
+                frames: frames.iter().take(63).cloned().collect(),
+            });
         }
         self.stamp = stamp;
         while self.samples.len() > 8 {
@@ -169,42 +192,91 @@ impl Timeline {
     }
 
     fn sample(&mut self, now: std::time::Instant) -> &[GeneratedTraffic] {
-        let Some((_, latest)) = self.samples.back() else {
+        let Some(latest) = self.samples.back() else {
             return &self.rendered;
         };
         if self.paused && !self.rendered.is_empty() {
             self.rendered.retain(|frame| {
                 latest
+                    .frames
                     .iter()
                     .any(|new| new.target.id == frame.target.id && new.model == frame.model)
             });
             return &self.rendered;
         }
-        let at = now.checked_sub(Self::DELAY).unwrap_or(now);
-        while self.samples.len() > 2 && self.samples[1].0 <= at {
-            self.samples.pop_front();
-        }
-        let (start, left) = &self.samples[0];
-        let (end, right) = self.samples.get(1).unwrap_or(&self.samples[0]);
-        let span = end.saturating_duration_since(*start).as_secs_f64();
-        let amount = if span > 0.0 {
-            (at.saturating_duration_since(*start).as_secs_f64() / span).min(1.0)
+        let (left_index, right_index, amount) = if let (Some(latest_source), Some(first_source)) = (
+            latest.source,
+            self.samples.front().and_then(|sample| sample.source),
+        ) {
+            // Advance the source-time playhead with wall time since the newest sample.
+            // This keeps motion continuous when HTTP samples arrive early or late, and it
+            // still reaches the newest pose after the playout delay.
+            let target = latest_source - Self::DELAY_SECONDS
+                + now.saturating_duration_since(latest.arrived).as_secs_f64();
+            let target = self
+                .playhead
+                .map_or(target, |previous| target.max(previous));
+            self.playhead = Some(target);
+            if target <= first_source {
+                (0, 0, 0.0)
+            } else if target >= latest_source {
+                (self.samples.len() - 1, self.samples.len() - 1, 1.0)
+            } else {
+                let mut left = 0;
+                let mut right = 1;
+                for index in 1..self.samples.len() {
+                    let Some(source) = self.samples[index].source else {
+                        break;
+                    };
+                    if source >= target {
+                        right = index;
+                        break;
+                    }
+                    left = index;
+                }
+                let start = self.samples[left].source.unwrap_or(first_source);
+                let end = self.samples[right].source.unwrap_or(latest_source);
+                let span = end - start;
+                (
+                    left,
+                    right,
+                    if span > 0.0 {
+                        ((target - start) / span).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    },
+                )
+            }
         } else {
-            1.0
+            let at = now
+                .checked_sub(std::time::Duration::from_secs_f64(Self::DELAY_SECONDS))
+                .unwrap_or(now);
+            while self.samples.len() > 2 && self.samples[1].arrived <= at {
+                self.samples.pop_front();
+            }
+            let start = self.samples[0].arrived;
+            let end = self.samples.get(1).map_or(start, |sample| sample.arrived);
+            let span = end.saturating_duration_since(start).as_secs_f64();
+            let amount = if span > 0.0 {
+                (at.saturating_duration_since(start).as_secs_f64() / span).min(1.0)
+            } else {
+                1.0
+            };
+            (0, self.samples.len().min(2) - 1, amount)
         };
-        self.rendered = self
-            .samples
-            .back()
-            .unwrap()
-            .1
+        let left = &self.samples[left_index];
+        let right = &self.samples[right_index];
+        let latest_frames = &self.samples.back().unwrap().frames;
+        self.rendered = latest_frames
             .iter()
             .map(|latest| {
-                let Some(to) = right.iter().find(|frame| {
+                let Some(to) = right.frames.iter().find(|frame| {
                     frame.target.id == latest.target.id && frame.model == latest.model
                 }) else {
                     return latest.clone();
                 };
                 let Some(from) = left
+                    .frames
                     .iter()
                     .find(|frame| frame.target.id == to.target.id && frame.model == to.model)
                 else {
@@ -228,6 +300,10 @@ impl Timeline {
                     if amount < 1.0 {
                         frame.target.on_ground = from.target.on_ground;
                     }
+                    let span = left
+                        .source
+                        .zip(right.source)
+                        .map_or(Self::DELAY_SECONDS, |(start, end)| (end - start).max(0.0));
                     frame.animation.propeller_angle = (from.animation.propeller_angle
                         + from.animation.propeller_rpm * 6.0 * span * amount)
                         .rem_euclid(360.0);
@@ -354,7 +430,7 @@ impl Renderer {
         self.timeline
             .samples
             .back()
-            .is_some_and(|(_, frames)| !frames.is_empty())
+            .is_some_and(|sample| !sample.frames.is_empty())
             || !self.aircraft.is_empty()
     }
     pub fn frames(&self) -> &[GeneratedTraffic] {
@@ -772,6 +848,32 @@ mod tests {
         assert_eq!(timeline.sample(at(11.6))[0].target.latitude, 0.002);
         timeline.receive(&[], Some((2, 1.0)), true, at(12.0));
         assert!(timeline.sample(at(12.0)).is_empty());
+    }
+
+    #[test]
+    fn late_samples_do_not_reverse_the_playhead() {
+        let start = std::time::Instant::now();
+        let mut timeline = Timeline::default();
+        timeline.receive(&[frame(0.0, 0.0)], Some((1, 0.0)), false, start);
+        timeline.receive(
+            &[frame(0.0005, 0.0)],
+            Some((1, 0.5)),
+            false,
+            start + std::time::Duration::from_millis(200),
+        );
+        let before = timeline.sample(start + std::time::Duration::from_millis(990))[0]
+            .target
+            .latitude;
+        timeline.receive(
+            &[frame(0.001, 0.0)],
+            Some((1, 1.0)),
+            false,
+            start + std::time::Duration::from_secs(1),
+        );
+        let after = timeline.sample(start + std::time::Duration::from_millis(1010))[0]
+            .target
+            .latitude;
+        assert!(after >= before - 1e-12, "{before} then {after}");
     }
 
     #[test]

@@ -724,7 +724,12 @@ impl Aircraft {
                 .copied()
                 .unwrap_or(s.knots)
         });
-        let end = if next_authorised {
+        let end = if self.route.segments[self.segment].stage == Stage::Takeoff {
+            // A missing climb clearance must not brake the take-off roll. The aircraft
+            // holds or recovers after rotation instead of accelerating and slowing on the
+            // runway while Tower waits for final traffic.
+            cap
+        } else if next_authorised {
             next_speed
         } else {
             self.recoveries
@@ -2013,7 +2018,9 @@ impl World {
         true
     }
     /// Grant the explicit airborne limits covered by one accepted readback.
-    /// Landing, holding, runway and surface permissions cannot be included.
+    /// Landing, holding and surface permissions cannot be included. A takeoff clearance
+    /// issued from the line-up is the exception: the intervening takeoff segment belongs to
+    /// the same clearance and is granted with its initial climb.
     /// # Panics
     ///
     /// Panics if the cleared segment index is outside the route.
@@ -2030,10 +2037,22 @@ impl World {
         let Some(aircraft) = self.aircraft.get(&id) else {
             return false;
         };
+        let current = aircraft.segment;
+        let after_takeoff = first == current + 2
+            && aircraft
+                .route
+                .segments
+                .get(current)
+                .is_some_and(|segment| segment.stage == Stage::LineUp)
+            && aircraft
+                .route
+                .segments
+                .get(current + 1)
+                .is_some_and(|segment| segment.stage == Stage::Takeoff);
         if aircraft.complete
             || aircraft.recovery_from.is_some()
-            || first < aircraft.segment
-            || first > aircraft.segment + 1
+            || first < current
+            || first > current + 1 + usize::from(after_takeoff)
             || end < first
             || end >= aircraft.route.segments.len()
         {
@@ -2077,7 +2096,11 @@ impl World {
         let waiting_takeoff = first == current + 1
             && !aircraft.authorised
             && aircraft.route.segments[current].stage == Stage::Takeoff;
-        let accepted = if waiting_takeoff {
+        let accepted = if after_takeoff {
+            // Reserve the line-up exit and the takeoff roll before recording the climb.
+            self.authorise(generation, id, current, &BTreeSet::new())
+                && self.authorise_continuation(generation, id, current + 1, &BTreeSet::new())
+        } else if waiting_takeoff {
             true
         } else if first == current {
             self.authorise(generation, id, first, &BTreeSet::new())
@@ -2423,6 +2446,80 @@ impl World {
         aircraft.next_authorised = true;
         true
     }
+    /// Extend a stopped taxi movement when the queue ahead has moved.
+    /// A follower does not need a new radio clearance merely because it reached the end of a
+    /// reservation that was shortened behind the leader, or stopped at the start of a shared
+    /// cell that the leader has now released.
+    pub fn resume_taxi(
+        &mut self,
+        generation: u64,
+        id: u32,
+        blocked: &BTreeSet<String>,
+        current_approved: bool,
+        next_approved: bool,
+    ) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        let Some(aircraft) = self.aircraft.get(&id) else {
+            return false;
+        };
+        if aircraft.complete
+            || aircraft.recovery_from.is_some()
+            || aircraft.holding
+            || !matches!(
+                aircraft.route.segments[aircraft.segment].stage,
+                Stage::TaxiOut | Stage::TaxiIn
+            )
+        {
+            return false;
+        }
+        let current = aircraft.segment;
+        let at_end = aircraft.elapsed + 1e-6 >= aircraft.duration();
+        let rolling_into_segment = current > 0 && aircraft.elapsed <= 1e-6;
+        if !at_end && !rolling_into_segment {
+            return false;
+        }
+        let Some(next_segment) = aircraft.route.segments.get(current + 1) else {
+            return false;
+        };
+        let next_is_taxi = matches!(next_segment.stage, Stage::TaxiOut | Stage::TaxiIn);
+        if at_end && !next_is_taxi {
+            return false;
+        }
+        let current_resources = aircraft.route.segments[current].resources.clone();
+        let next_resources = next_segment.resources.clone();
+        let blocked_resources = |resources: &[String]| {
+            resources.iter().any(|resource| {
+                blocked.contains(resource)
+                    || self.owners.get(resource).is_some_and(|owner| *owner != id)
+            })
+        };
+        if rolling_into_segment && (!current_approved || blocked_resources(&current_resources)) {
+            return false;
+        }
+        if at_end && (!next_approved || blocked_resources(&next_resources)) {
+            return false;
+        }
+        let Some(aircraft) = self.aircraft.get_mut(&id) else {
+            return false;
+        };
+        if rolling_into_segment {
+            for resource in &current_resources {
+                self.owners.insert(resource.clone(), id);
+            }
+            aircraft.authorised = true;
+        }
+        if at_end {
+            for resource in &next_resources {
+                self.owners.insert(resource.clone(), id);
+            }
+            aircraft.authorised = true;
+            aircraft.next_authorised = true;
+        }
+        true
+    }
+
     /// Pausing and large clock changes cannot move traffic through a clearance limit.
     /// # Panics
     ///
@@ -2504,6 +2601,10 @@ impl World {
                                         .copied()
                                         .unwrap_or(segment.knots)
                                 })
+                        } else if segment.stage == Stage::Takeoff {
+                            // Keep the take-off roll smooth while the climb clearance is
+                            // pending; do not brake toward the recovery speed.
+                            Some(segment.knots)
                         } else {
                             aircraft
                                 .recoveries
@@ -3976,6 +4077,194 @@ mod tests {
         assert!(!world.snapshot()[0].recovering);
         world.advance(4.0, false);
         assert_eq!(world.snapshot()[0].recovery_from, Some(2));
+    }
+
+    #[test]
+    fn initial_climb_after_line_up_covers_the_takeoff_segment() {
+        let hold = |fix| {
+            crate::traffic::holding::Pattern {
+                fix,
+                inbound_degrees: 90.0,
+                right: true,
+                ground_knots: 100.0,
+                leg_seconds: 60.0,
+                bank_degrees: 25.0,
+                turn_rate_degrees_sec: 3.0,
+            }
+            .compile(|_, _| true)
+            .unwrap()
+        };
+        let mut segments = [Stage::LineUp, Stage::Takeoff, Stage::Climb, Stage::Climb]
+            .iter()
+            .enumerate()
+            .map(|(index, stage)| Segment {
+                stage: *stage,
+                points: vec![
+                    point(index as f64 * 40.0, 5000.0),
+                    point((index + 1) as f64 * 40.0, 5000.0),
+                ],
+                knots: if *stage == Stage::LineUp { 10.0 } else { 100.0 },
+                resources: if matches!(*stage, Stage::LineUp | Stage::Takeoff) {
+                    vec!["RUNWAY".into()]
+                } else {
+                    vec![]
+                },
+                dwell_seconds: 0.0,
+            })
+            .collect::<Vec<_>>();
+        segments.push(hold(point(160.0, 5000.0)));
+        let mut world = World::default();
+        assert!(world.insert(
+            0,
+            1,
+            std::sync::Arc::new(Route::compile(segments, 1000.0, 1000.0).unwrap())
+        ));
+        for boundary in 2..4 {
+            assert!(
+                world.recovery(
+                    0,
+                    1,
+                    boundary,
+                    std::sync::Arc::new(
+                        Route::compile(
+                            vec![hold(point((boundary + 1) as f64 * 40.0, 5000.0))],
+                            1000.0,
+                            1000.0
+                        )
+                        .unwrap()
+                    )
+                )
+            );
+        }
+        assert!(world.authorise_airborne_until(0, 1, 2, 3));
+        assert!(!world.snapshot()[0].awaiting_clearance);
+        world.advance(0.0, false);
+        for step in 1..=20 {
+            world.advance(f64::from(step) * 0.5, false);
+        }
+        assert!(world.snapshot()[0].segment >= 2);
+        assert!(!world.snapshot()[0].recovering);
+    }
+
+    #[test]
+    fn a_taxi_follower_resumes_when_the_queue_ahead_moves() {
+        let route = |first: &str, second: &str, north: f64| {
+            std::sync::Arc::new(
+                Route::compile(
+                    vec![
+                        Segment {
+                            stage: Stage::TaxiOut,
+                            points: vec![point(0.0, north), point(100.0, north)],
+                            knots: 10.0,
+                            resources: vec![first.into()],
+                            dwell_seconds: 0.0,
+                        },
+                        Segment {
+                            stage: Stage::TaxiOut,
+                            points: vec![point(100.0, north), point(200.0, north)],
+                            knots: 10.0,
+                            resources: vec![second.into()],
+                            dwell_seconds: 0.0,
+                        },
+                        Segment {
+                            stage: Stage::Turnaround,
+                            points: vec![point(200.0, north)],
+                            knots: 0.0,
+                            resources: vec![],
+                            dwell_seconds: 0.0,
+                        },
+                    ],
+                    1000.0,
+                    1000.0,
+                )
+                .unwrap(),
+            )
+        };
+        let mut world = World::default();
+        assert!(world.insert(0, 1, route("SHARED", "L1", 0.0)));
+        assert!(world.insert(0, 2, route("F0", "SHARED", -20.0)));
+        assert!(world.authorise(0, 1, 0, &BTreeSet::new()));
+        assert!(world.authorise(0, 2, 0, &BTreeSet::new()));
+        world.advance(0.0, false);
+        world.advance(25.0, false);
+        assert_eq!(world.snapshot()[0].segment, 1);
+        let follower = world
+            .snapshot()
+            .into_iter()
+            .find(|pose| pose.id == 2)
+            .unwrap();
+        assert_eq!(follower.segment, 1);
+        assert!(follower.awaiting_clearance);
+        let start = follower.position.longitude;
+        assert!(world.resume_taxi(0, 2, &BTreeSet::new(), true, true));
+        world.advance(26.0, false);
+        let moved = world
+            .snapshot()
+            .into_iter()
+            .find(|pose| pose.id == 2)
+            .unwrap();
+        assert!(moved.position.longitude > start);
+    }
+
+    #[test]
+    fn the_runway_resource_is_released_when_the_takeoff_roll_completes() {
+        let mut world = World::default();
+        assert!(
+            world.insert(
+                0,
+                1,
+                std::sync::Arc::new(
+                    Route::compile(
+                        vec![
+                            Segment {
+                                stage: Stage::Takeoff,
+                                points: vec![point(0.0, 0.0), point(800.0, 0.0)],
+                                knots: 100.0,
+                                resources: vec!["RUNWAY".into()],
+                                dwell_seconds: 0.0,
+                            },
+                            Segment {
+                                stage: Stage::Climb,
+                                points: vec![point(800.0, 0.0), point(12000.0, 1000.0)],
+                                knots: 150.0,
+                                resources: vec![],
+                                dwell_seconds: 0.0,
+                            },
+                            Segment {
+                                stage: Stage::Climb,
+                                points: vec![point(12000.0, 1000.0), point(24000.0, 2000.0)],
+                                knots: 150.0,
+                                resources: vec![],
+                                dwell_seconds: 0.0,
+                            },
+                            crate::traffic::holding::Pattern {
+                                fix: point(24000.0, 2000.0),
+                                inbound_degrees: 270.0,
+                                right: true,
+                                ground_knots: 150.0,
+                                leg_seconds: 60.0,
+                                bank_degrees: 25.0,
+                                turn_rate_degrees_sec: 3.0,
+                            }
+                            .compile(|_, _| true)
+                            .unwrap(),
+                        ],
+                        1000.0,
+                        1000.0,
+                    )
+                    .unwrap()
+                )
+            )
+        );
+        assert!(world.authorise(0, 1, 0, &BTreeSet::new()));
+        world.advance(0.0, false);
+        assert_eq!(world.owners.get("RUNWAY"), Some(&1));
+        world.aircraft.get_mut(&1).unwrap().next_authorised = true;
+        for step in 1..=40 {
+            world.advance(f64::from(step) * 0.5, false);
+        }
+        assert_eq!(world.snapshot()[0].stage, Stage::Climb);
+        assert!(!world.owners.contains_key("RUNWAY"));
     }
 
     #[test]

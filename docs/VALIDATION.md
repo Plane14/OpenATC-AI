@@ -1252,3 +1252,43 @@ A landing on one runway no longer blocks a departure on the other. Runway occupa
 A wake interval now produces **line up and wait**, not hold short. Take-off clearance is issued directly from the hold when the runway is clear and no wake interval applies. A heavy behind a heavy gets LUAW followed by take-off; a heavier follower behind a lighter leader adds no interval. Runway clearances name the flight's own SID and initial level, with no latitude, longitude or full hold procedure in the take-off clearance. The hold remains in the clearance data for the controller and is issued separately only if needed.
 
 Evidence: core 234 passed; engine 311 passed, 2 failed (the two pre-existing scenery fixtures), 33 ignored; settings 13 passed; UI 48 passed, 1 ignored; plugin 49 passed, 2 ignored; installed Nice and mixed bidirectional lifecycles passed. Installed engine `be537cfd…`, plugin `ba7659c9…`; backup `OpenATC-eS93EF`.
+
+### Runway queue and initial-climb authority, not runway width — 25 October 2026
+
+The EZY1021 and EZY824 transcripts ended in `cancel takeoff clearance` immediately after a direct takeoff clearance from the hold. In both logs the player was about 0.13 NM from the holding point and clear of the runway; LFMN 04R is 45.11 m wide and the player was roughly 150 m from its centreline. Runway width was not the cause.
+
+Two separate faults produced the same symptom.
+
+The first was the initial-climb authority. A take-off clearance issued from the line-up carries an airborne scope beginning at route segment 2, with the take-off roll at segment 1. `World::authorise_airborne_until` only accepted a scope beginning at the current segment or the next one, so the readback or the next conflict check could not record the climb. The take-off grant was inserted and then withdrawn, which the controller announced as a cancellation. The motion world now accepts the intervening take-off segment as part of the same clearance, grants the line-up exit and take-off roll with it, and a regression test confirms the approved take-off order survives the readback and the next conflict check.
+
+The second was queue ownership. Ordering complete taxi-out aircraft by distance to the threshold let a later arrival on a nearer parallel taxiway jump ahead of an aircraft already waiting. The queue now keeps aircraft that reached the holding point first, gives a lined-up or rolling aircraft priority, and uses distance only as a tie-break. A `lineup_ahead` gate applies before installation, before a line-up clearance and before a direct take-off clearance. Take-off cancellations now log `{callsign} takeoff cancelled: crossing …, airborne …` so the cause is attributable.
+
+A third fault held 04R departures for traffic established on the 04L final. The final-approach corridor widens with distance, so an arrival on the parallel runway eventually fell inside the 04R corridor. Line-up and take-off protection now ignores airborne targets aligned with a different runway when they are more than 250 m from the departure centreline. A generated arrival is also matched to its landing runway, so a 04L arrival is ignored even while turning onto final. Initial-climb clearances inherit the take-off runway, because their own segment carries no runway resource. Surface occupancy still counts, and traffic on the same runway's final still blocks. Runway cells built from external targets and taxi crossing holds use the same rule. With the Nice runway centrelines about 309 m apart, the 04L final no longer blocks a 04R departure or crossing.
+
+Hold logs now name the crossing and airborne results and report a changed hold reason. Landing clearances withdrawn by a conflict are logged separately. This makes a stuck queue attributable to a runway, an airborne forecast or the movement world rather than a generic traffic message.
+
+### Line-up and departure pacing — 25 October 2026
+
+A distant final-approach aircraft no longer prevents a departure from lining up. The line-up check now uses the time needed to enter the runway; a short final still holds the departure at the line, but a distant one allows `line up and wait`. The final-approach conflict is then applied to the take-off clearance after the aircraft is lined up. A lined-up aircraft that is still waiting does not receive repeated `hold position` calls. It hears from Tower when it is cleared or when an issued take-off clearance is actually cancelled.
+
+A low aircraft on short final to either parallel runway now blocks the take-off before the clearance is issued. The EZY3931 cancellation occurred when EZY7000 went around from short final at 1.7 NM and 690 ft, after the clearance had been issued. The runway-relationship filter no longer ignores a target below 2,000 ft AGL within 3 NM of a runway, so the departure waits instead of being cleared and then cancelled.
+
+A stopped taxi follower now resumes when the aircraft ahead releases the shared cell. It still needs current or next-segment approval from its own taxi clearance; the automatic resume cannot bypass a readback or a hold. This keeps the queue rolling instead of waiting for the leader to stop and for another Ground call.
+
+The Ground-to-Tower handoff now starts while the aircraft is still taxiing, within 550 m of the hold. The hold itself is then a ready/line-up exchange rather than a handoff, ready call and clearance serialized after the aircraft stops.
+
+A stopped active flight whose current clearance is a runway crossing now has that current-segment clearance reissued when the runway is clear. Previously the controller only looked at the next segment, so an aircraft that lost or consumed its crossing grant could sit at the line indefinitely. The reissue path is restricted to the current crossing and still checks the runway before transmitting.
+
+The blunt 60-second removal watchdog was removed. It removed a legitimate flight in the installed mixed-lifecycle fixture. A phase-aware session health and rogue-aircraft escalation is still required before alpha3.
+
+A generated pose with no frame, flight plan, apron assignment or active-flight assignment is now removed on the next movement tick and its resources are released. This prevents an orphan world aircraft from retaining a runway or taxi cell after its controller lifecycle has gone.
+
+Take-off and runway-crossing checks now use the time the movement needs to clear the runway instead of the fixed 5 NM final radius. A distant arrival that cannot reach the threshold before the departure is airborne does not block the take-off. The fixed envelope remains in use for landing clearances.
+
+The take-off roll no longer targets the recovery speed while the initial climb clearance is pending. This removes the visible accelerate-brake-accelerate cycle while Tower waits for final traffic. Visual interpolation now uses the source simulator clock and a monotonic playhead instead of HTTP arrival time, so a late or early snapshot cannot make the aircraft surge and slow down. Wall-clock interpolation remains the fallback for older servers.
+
+The player's microphone now blocks only a controller on the frequency in use. A busy Tower frequency no longer stops a Ground or Delivery exchange, and a pending player readback no longer holds every generated controller. Generated exchanges continue back-to-back instead of waiting for the player's radio, the copilot queue or a movement simulation job to finish.
+
+Tests: core 238 passed; engine 317 passed, 2 failed (the two pre-existing scenery fixtures); release generated suite 152 passed, same 2 failures; settings 13 passed; UI 48 passed, 1 ignored; plugin 50 passed, 2 ignored; installed Nice and mixed bidirectional lifecycles passed.
+
+Installed engine `88db5cec…`, plugin `a93ebafc…`; backup `OpenATC-JPB8Nz`.

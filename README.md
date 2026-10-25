@@ -397,6 +397,10 @@ At the final departure hold, Ground sends you to the published Tower frequency. 
 
 Holding-point detection considers approach geometry and the aircraft's reference position; it does not require the aircraft to be perfectly stopped to recognise arrival. Tower checks available runway and final-approach traffic and either clears takeoff or explains the hold. A previously reported ready aircraft can receive clearance when blocking traffic clears.
 
+Generated departures keep the order in which they reached the holding point. An aircraft already lining up or rolling keeps the runway; a later arrival on a taxiway that joins nearer the threshold does not jump ahead. Ground starts the Tower handoff while the aircraft is still taxiing, so the aircraft can request ready immediately at the hold.
+
+Tower lines a departure up as soon as the runway surface is clear, even when traffic is still on final. The take-off clearance then waits for the arrival to pass. A lined-up aircraft is not repeatedly told to hold, and a distant arrival does not block take-off if the departure will be airborne before it reaches the threshold.
+
 A takeoff instruction may include known wind, pressure and departure guidance. The cleared altitude and departure constraints remain authoritative. The departure handoff is tied to the airborne workflow; accepting a takeoff readback alone should not send the aircraft to another controller while still parked at the hold.
 
 ### 5. Departure, enroute requests and constraints
@@ -623,10 +627,12 @@ Route refusals include both endpoints, heights and the aircraft envelope for dia
 **Traffic update rate** offers Every frame, Every N frames and Hertz. The default
 is now Every frame; saved explicit choices are retained. A short 750 ms sample
 buffer smooths movement between engine updates, including when TCAS is active.
-If updates stop, aircraft hold at the last received position without extrapolating
-past a clearance limit. The delay affects displayed generated traffic and TCAS;
-controller decisions continue to use current engine positions. Visual smoothness,
-takeoff/landing and frame-time acceptance still require an X-Plane check.
+Interpolation follows the simulator clock with a monotonic playhead, so an early
+or late snapshot cannot make an aircraft surge or move backwards. If updates stop,
+aircraft hold at the last received position without extrapolating past a clearance
+limit. The delay affects displayed generated traffic and TCAS; controller decisions
+continue to use current engine positions. Visual smoothness, takeoff/landing and
+frame-time acceptance still require an X-Plane check.
 
 Generated aircraft use X-Plane's instance renderer and a separate TCAS publisher.
 TCAS receives only populated slots, with unique nonzero 24-bit identities before
@@ -635,6 +641,10 @@ traffic reports altitude even with its engine stopped. OpenATC yields TCAS owner
 to another traffic provider and waits for availability before retrying. These are
 the requirements of the [TCAS override API](https://developer.x-plane.com/article/overriding-tcas-and-providing-traffic-information/)
 and [X-Plane 12.4.1 TCAS II guidance](https://developer.x-plane.com/article/tcas-resolution-advisories-and-plugin-traffic/).
+
+Generated Ground, Tower and Delivery positions work independently. A player
+transmission blocks a controller only on the frequency in use, not every generated
+position.
 
 Generated traffic starts with a mixture of nearby approaches, airborne routes and
 surface activity when enough protected routes are available. The fast apron first
@@ -788,6 +798,10 @@ Copilot playback and acceptance are separate steps. Repeated preparation request
 - **Airliner, turboprop and light-aircraft circuit radii** default to 30, 20 and 10 NM. Inside the radius, ground, approach and departing traffic stays alive. Beyond it, those slots are recycled into airborne traffic around you.
 - Landed arrivals taxi to their stand, pause briefly, then despawn and recycle the slot to another arrival on final. Generated traffic does not leave parked rows; static scenery provides those.
 - Gate departures are transient. They request IFR clearance from Delivery, then start and push back on Ground, then request taxi. They are not kept parked.
+- Ground hands a taxiing departure to Tower before it reaches the hold, so the hold itself is not the start of a handoff, ready call and clearance chain.
+- A taxi follower resumes when the aircraft ahead releases the shared taxiway cell. It still needs its own approved taxi scope and cannot bypass a readback or hold.
+- A stopped aircraft whose current clearance is a runway crossing has that current crossing clearance reissued when the runway is clear. This prevents a lost crossing grant from holding the runway indefinitely.
+- Generated poses without a frame, flight plan or station assignment are removed on the next movement tick and release their resources.
 - The runway is fixed to the ATIS flow. Reciprocal runway ends are not selected for generated traffic just to improve the mix.
 - **Wake separation** in Traffic settings selects `auto`, `icao`, `recat_eu`, `faa_cwt` or `mats`. The tables and runway-relationship thresholds are in `traffic/wake.toml`; aircraft category comes from the simulator when reported, then from the aircraft profile. A wake interval produces **line up and wait**, not hold short; a landing on one parallel runway does not block a departure on the other.
 - A takeoff clearance names the flight's own SID and initial level. It does not read latitude, longitude or a full hold procedure; a hold is issued separately only when needed.
@@ -796,6 +810,8 @@ Copilot playback and acceptance are separate steps. Repeated preparation request
 - The preparation worker now decodes bounded aircraft-specific SID/STAR/approach inputs from the actual nominal rotation point and fresh endpoint weather, preserving restrictions, IAS and selected-runway threshold heights.
 - Missing or incompatible inputs are reported without granting flight.
 - The preparation worker assembles the complete protected route, recovery and landing before publishing a flight. Runway-compatible terminal candidates, published recovery legs and enroute MORA floors are retained within `terminal_candidate_limit` in `traffic/operations.toml`.
+- Departures use their published SID. Arrival STAR joining is not available for every airport and procedure combination; when no compatible STAR/approach join is resolved, the arrival is not claimed as STAR traffic.
+- Generated radio still processes one exchange at a time. Per-frequency station threads, independent queues and concurrent station audio remain unfinished.
 - Generated traffic is installed and exercised at installed airports; native simulator visibility, audio and performance acceptance remain separate checks.
 
 The controller consumer can now queue a complete onward flight from a recovery hold after its pilot readback. The aircraft finishes its current circuit and leaves at the holding fix; the new plan takes effect there, with separate landing and taxi permissions. Incomplete recovery sets and incompatible joins are refused. A simulation-clock change cancels a queued exit while preserving the hold. The integrated consumer regression reaches parking after rejoin; this does not establish production route generation or native simulator acceptance.

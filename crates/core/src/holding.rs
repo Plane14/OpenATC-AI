@@ -12,60 +12,121 @@ pub fn blocked(airport: &Airport, runway: &str, telemetry: &Telemetry) -> Option
     blocked_targets(airport, runway, targets.iter().take(63))
 }
 
-/// Check a bounded traffic view without copying telemetry or aircraft lists.
-pub fn blocked_targets<'a>(
-    airport: &Airport,
-    runway: &str,
-    targets: impl Iterator<Item = &'a crate::state::TrafficTarget>,
-) -> Option<&'static str> {
-    let Some(r) = airport
+/// Runway geometry used by the surface and final-approach checks.
+struct RunwayFrame<'a> {
+    runway: &'a crate::airport::Runway,
+    start: crate::state::Point,
+    dx: f64,
+    dn: f64,
+    length: f64,
+    heading: f64,
+}
+
+fn runway_frame<'a>(airport: &'a Airport, runway: &str) -> Option<RunwayFrame<'a>> {
+    let runway_data = airport
         .runways
         .iter()
-        .find(|r| r.first_name == runway || r.second_name == runway)
-    else {
-        return Some("holding_standby");
-    };
-    let (start, end) = if r.first_name == runway {
-        (r.first, r.second)
+        .find(|candidate| candidate.first_name == runway || candidate.second_name == runway)?;
+    let (start, end) = if runway_data.first_name == runway {
+        (runway_data.first, runway_data.second)
     } else {
-        (r.second, r.first)
+        (runway_data.second, runway_data.first)
     };
     let dx = end.east - start.east;
     let dn = end.north - start.north;
     let length = dx.hypot(dn);
     if length < 100.0 {
-        return Some("holding_standby");
+        return None;
     }
-    let heading = dx.atan2(dn).to_degrees().rem_euclid(360.0);
-    for t in targets {
-        if ![t.latitude, t.longitude, t.altitude_feet, t.track_degrees]
-            .iter()
-            .all(|v| v.is_finite())
-            || t.latitude.abs() > 90.0
-            || t.longitude.abs() > 180.0
-        {
+    Some(RunwayFrame {
+        runway: runway_data,
+        start,
+        dx,
+        dn,
+        length,
+        heading: dx.atan2(dn).to_degrees().rem_euclid(360.0),
+    })
+}
+
+/// Physical runway occupancy, without treating a distant final as surface traffic.
+pub fn blocked_surface<'a>(
+    airport: &Airport,
+    runway: &str,
+    targets: impl Iterator<Item = &'a crate::state::TrafficTarget>,
+) -> Option<&'static str> {
+    let Some(frame) = runway_frame(airport, runway) else {
+        return Some("holding_standby");
+    };
+    for target in targets {
+        if !valid(target) {
             return Some("holding_standby");
         }
-        let p = airport_point(airport, t.latitude, t.longitude);
-        let east = p.east - start.east;
-        let north = p.north - start.north;
-        let along = (east * dx + north * dn) / length;
-        let across = (east * dn - north * dx).abs() / length;
-        let agl = t.altitude_feet - airport.elevation_feet;
-        let (fore_aft, lateral) =
-            crate::traffic::footprint(&t.aircraft, t.wingspan_meters, t.track_degrees, heading);
-        if (-fore_aft - 10.0..=length + fore_aft + 10.0).contains(&along)
-            && across < r.width / 2.0 + lateral + 10.0
-            && (t.on_ground || agl < 150.0)
+        let p = airport_point(airport, target.latitude, target.longitude);
+        let east = p.east - frame.start.east;
+        let north = p.north - frame.start.north;
+        let along = (east * frame.dx + north * frame.dn) / frame.length;
+        let across = (east * frame.dn - north * frame.dx).abs() / frame.length;
+        let agl = target.altitude_feet - airport.elevation_feet;
+        let (fore_aft, lateral) = crate::traffic::footprint(
+            &target.aircraft,
+            target.wingspan_meters,
+            target.track_degrees,
+            frame.heading,
+        );
+        if (-fore_aft - 10.0..=frame.length + fore_aft + 10.0).contains(&along)
+            && across < frame.runway.width / 2.0 + lateral + 10.0
+            && (target.on_ground || agl < 150.0)
         {
             return Some("holding_runway_occupied");
         }
-        let heading_difference = (t.track_degrees - heading + 180.0).rem_euclid(360.0) - 180.0;
+    }
+    None
+}
+
+fn valid(target: &crate::state::TrafficTarget) -> bool {
+    [
+        target.latitude,
+        target.longitude,
+        target.altitude_feet,
+        target.track_degrees,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+        && target.latitude.abs() <= 90.0
+        && target.longitude.abs() <= 180.0
+}
+
+/// A final-approach target inside the fixed protection envelope. This is deliberately
+/// conservative and is used for landing and crossing clearances.
+fn blocked_final<'a>(
+    airport: &Airport,
+    runway: &str,
+    targets: impl Iterator<Item = &'a crate::state::TrafficTarget>,
+) -> Option<&'static str> {
+    let Some(frame) = runway_frame(airport, runway) else {
+        return Some("holding_standby");
+    };
+    for target in targets {
+        if !valid(target) {
+            return Some("holding_standby");
+        }
+        let p = airport_point(airport, target.latitude, target.longitude);
+        let east = p.east - frame.start.east;
+        let north = p.north - frame.start.north;
+        let along = (east * frame.dx + north * frame.dn) / frame.length;
+        let across = (east * frame.dn - north * frame.dx).abs() / frame.length;
+        let agl = target.altitude_feet - airport.elevation_feet;
+        let heading_difference =
+            (target.track_degrees - frame.heading + 180.0).rem_euclid(360.0) - 180.0;
         // Protect both approach ends of the same physical runway.
         let inbound = (along < 0.0 && heading_difference.abs() < 35.0)
-            || (along > length && heading_difference.abs() > 145.0);
-        let distance = if along < 0.0 { -along } else { along - length };
-        if !t.on_ground
+            || (along > frame.length && heading_difference.abs() > 145.0);
+        let distance = if along < 0.0 {
+            -along
+        } else {
+            along - frame.length
+        };
+        if !target.on_ground
             && inbound
             && distance < 9260.0
             && across < 150.0 + distance * 0.08
@@ -77,19 +138,23 @@ pub fn blocked_targets<'a>(
     None
 }
 
-/// Protect the time needed for a particular runway movement, not just a fixed radius.
-pub fn blocked_during<'a>(
+/// Check a bounded traffic view without copying telemetry or aircraft lists.
+pub fn blocked_targets<'a>(
     airport: &Airport,
     runway: &str,
     targets: impl Iterator<Item = &'a crate::state::TrafficTarget> + Clone,
+) -> Option<&'static str> {
+    blocked_surface(airport, runway, targets.clone())
+        .or_else(|| blocked_final(airport, runway, targets))
+}
+
+/// Time the movement needs against a final-approach target, rather than a fixed radius.
+fn blocked_final_timing<'a>(
+    airport: &Airport,
+    runway: &str,
+    targets: impl Iterator<Item = &'a crate::state::TrafficTarget>,
     seconds: f64,
 ) -> Option<&'static str> {
-    if !seconds.is_finite() || !(0.0..=600.0).contains(&seconds) {
-        return Some("holding_standby");
-    }
-    if let Some(reason) = blocked_targets(airport, runway, targets.clone()) {
-        return Some(reason);
-    }
     for target in targets.filter(|target| !target.on_ground) {
         let Some((along, across, length, heading)) =
             crate::traffic::runway_position(airport, runway, target.latitude, target.longitude)
@@ -120,10 +185,71 @@ pub fn blocked_during<'a>(
     }
     None
 }
+
+/// A take-off or crossing only needs the runway clear while it moves. A distant final that
+/// cannot reach the threshold before the movement clears does not block the clearance.
+pub fn blocked_for_movement<'a>(
+    airport: &Airport,
+    runway: &str,
+    targets: impl Iterator<Item = &'a crate::state::TrafficTarget> + Clone,
+    seconds: f64,
+) -> Option<&'static str> {
+    if !seconds.is_finite() || !(0.0..=600.0).contains(&seconds) {
+        return Some("holding_standby");
+    }
+    blocked_surface(airport, runway, targets.clone())
+        .or_else(|| blocked_final_timing(airport, runway, targets, seconds))
+}
+
+/// Protect the time needed for a particular runway movement, not just a fixed radius.
+pub fn blocked_during<'a>(
+    airport: &Airport,
+    runway: &str,
+    targets: impl Iterator<Item = &'a crate::state::TrafficTarget> + Clone,
+    seconds: f64,
+) -> Option<&'static str> {
+    if !seconds.is_finite() || !(0.0..=600.0).contains(&seconds) {
+        return Some("holding_standby");
+    }
+    if let Some(reason) = blocked_targets(airport, runway, targets.clone()) {
+        return Some(reason);
+    }
+    blocked_final_timing(airport, runway, targets, seconds)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::{Point, TrafficTarget};
+    #[test]
+    fn lining_up_needs_surface_occupancy_but_not_a_distant_final() {
+        let airport = crate::airport::demo_airport();
+        let mut target = TrafficTarget {
+            latitude: 0.0,
+            longitude: -0.18,
+            altitude_feet: 1200.0,
+            track_degrees: 90.0,
+            ground_speed_knots: Some(200.0),
+            on_ground: false,
+            ..Default::default()
+        };
+        assert!(blocked_surface(&airport, "09", std::iter::once(&target)).is_none());
+        assert_eq!(
+            blocked_for_movement(&airport, "09", std::iter::once(&target), 240.0),
+            Some("holding_traffic_final")
+        );
+        assert!(blocked_for_movement(&airport, "09", std::iter::once(&target), 60.0).is_none());
+        target.on_ground = true;
+        target.longitude = 0.0;
+        assert_eq!(
+            blocked_surface(&airport, "09", std::iter::once(&target)),
+            Some("holding_runway_occupied")
+        );
+        assert_eq!(
+            blocked_for_movement(&airport, "09", std::iter::once(&target), 60.0),
+            Some("holding_runway_occupied")
+        );
+    }
+
     #[test]
     fn a_long_crossing_protects_an_arrival_outside_the_fixed_final_radius() {
         let airport = crate::airport::demo_airport();
