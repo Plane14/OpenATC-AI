@@ -7,6 +7,7 @@
     clippy::cast_sign_loss
 )]
 use crate::EngineState;
+use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::{
     apply::add_transmission,
     dialogue::say,
@@ -841,7 +842,7 @@ fn transmit_descent(
     direction: Vertical,
 ) {
     if direction == Vertical::Descend {
-        state.session.phase = PhaseCode::Arrival;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
     }
     let notice = published_speed_notice(state);
     let speed = notice.map(|(index, limit, exact)| {
@@ -1101,7 +1102,7 @@ mod tests {
     use super::*;
     fn speed_fixture() -> (EngineState, Station) {
         let mut state = crate::test_state();
-        state.session.phase = PhaseCode::Arrival;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
         state.flow.monitor.next_fix = 1;
         state.session.telemetry = openatc_core::state::Telemetry {
             position_valid: true,
@@ -1191,7 +1192,7 @@ mod tests {
     fn altitude_instruction_direction_follows_the_actual_altitude() {
         let fixture = |actual: f64, assigned: i32, maximum: Option<i32>, minimum: Option<i32>| {
             let mut state = crate::test_state();
-            state.session.phase = PhaseCode::Cruise;
+            state.session.on_event(openatc_core::aircraft::AircraftEvent::Cruise);
             state.session.telemetry = openatc_core::state::Telemetry {
                 position_valid: true,
                 on_ground: false,
@@ -1288,7 +1289,7 @@ mod tests {
     #[test]
     fn resume_route_uses_the_active_arrival_leg_not_a_departure_fix() {
         let mut state = crate::test_state();
-        state.session.phase = PhaseCode::Arrival;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
         state.session.telemetry = openatc_core::state::Telemetry {
             position_valid: true,
             on_ground: false,
@@ -1349,7 +1350,7 @@ mod tests {
     fn a_passed_crossing_restriction_stops_limiting_the_level() {
         let mut state = crate::test_state();
         state.settings.enforce_clearance_constraints = false;
-        state.session.phase = PhaseCode::Cruise;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Cruise);
         state.session.telemetry = openatc_core::state::Telemetry {
             position_valid: true,
             on_ground: false,
@@ -1432,7 +1433,7 @@ mod tests {
     fn off_course_vector_targets_the_leg_ahead_not_the_passed_fix() {
         let mut state = crate::test_state();
         state.settings.enforce_clearance_constraints = true;
-        state.session.phase = PhaseCode::Cruise;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Cruise);
         state.session.telemetry = openatc_core::state::Telemetry {
             position_valid: true,
             on_ground: false,
@@ -1618,7 +1619,7 @@ mod tests {
         let fixture = |flight_level: bool, indicated: f64| {
             let mut state = crate::test_state();
             state.settings.enforce_clearance_constraints = true;
-            state.session.phase = PhaseCode::Arrival;
+            state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
             state.session.plan.departure = "KLAX".into();
             state.session.plan.destination = "KONT".into();
             state.session.telemetry = openatc_core::state::Telemetry {
@@ -1688,7 +1689,7 @@ mod tests {
             ("L36", "36", 2000),
         ] {
             let mut state = crate::test_state();
-            state.session.phase = PhaseCode::Arrival;
+            state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
             state.session.telemetry.on_ground = false;
             state.session.telemetry.longitude = -0.15;
             state.session.telemetry.altitude_feet = 6000.0;
@@ -1735,7 +1736,7 @@ mod tests {
         state.session.plan.destination = "TEST".into();
         state.session.plan.arrival_runway = "09".into();
         state.session.plan.approach = "I09".into();
-        state.session.phase = PhaseCode::Cruise;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Cruise);
         state.session.clearance = Some(openatc_core::state::Clearance {
             altitude_feet: 18000,
             acknowledged: true,
@@ -1869,7 +1870,7 @@ mod tests {
             .find(|fix| fix.identifier == "DEVOX")
             .unwrap();
         assert_eq!(devox.maximum_speed_knots, Some(250.0));
-        state.session.phase = PhaseCode::Cruise;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Cruise);
         state.session.clearance = Some(openatc_core::state::Clearance {
             altitude_feet: 18000,
             acknowledged: true,
@@ -1994,7 +1995,7 @@ mod tests {
         state.session.telemetry.longitude = entry.longitude;
         state.session.telemetry.on_ground = false;
         state.session.telemetry.altitude_feet = 5000.0;
-        state.session.phase = PhaseCode::Approach;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Approach);
         state.session.clearance = Some(openatc_core::state::Clearance {
             altitude_feet: 5000,
             acknowledged: true,
@@ -2030,7 +2031,7 @@ mod tests {
     #[test]
     fn descent_looks_past_unrestricted_fix_and_preserves_intermediate_floor() {
         let mut state = crate::test_state();
-        state.session.phase = PhaseCode::Arrival;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
         state.session.telemetry.latitude = 44.0;
         state.session.telemetry.longitude = 8.0;
         state.session.telemetry.on_ground = false;

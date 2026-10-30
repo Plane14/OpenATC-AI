@@ -6,6 +6,7 @@ use axum::{
     extract::State as AxumState,
     response::{IntoResponse, Response},
 };
+use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::{
     apply::add_transmission,
     ops::update_flight_phase,
@@ -75,6 +76,7 @@ pub async fn post_telemetry(
         if let Err(error) = update_flight_phase(&mut state.session, &telemetry) {
             return bad_request(&error);
         }
+        crate::atc::sync_ownship(&mut state);
         crate::radio::observe_atis_tuning(&mut state, previous_receivers, was_powered);
         // Re-plan once when the player becomes airborne, so the traffic is seeded on the
         // procedure they are actually flying: one aircraft ahead and one behind, rather than
@@ -433,7 +435,7 @@ mod tests {
 
     fn fixture() -> crate::EngineState {
         let mut state = crate::test_state();
-        state.session.phase = PhaseCode::Taxi;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Taxi);
         state.session.plan.departure = "TEST".into();
         state.session.plan.runway = "09".into();
         state.session.plan.callsign = "C-GTLT".into();

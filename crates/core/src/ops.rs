@@ -1,4 +1,5 @@
 //! Flight phases, request eligibility, plan validation and navigation helpers.
+use crate::aircraft::AircraftBehaviour;
 
 use super::airport::{Airport, airport_point};
 use super::state::{FlightPlan, PhaseCode, State, Telemetry};
@@ -347,7 +348,7 @@ pub fn update_flight_phase(state: &mut State, telemetry: &Telemetry) -> Result<(
             .last()
             .is_some_and(|p| (p.east - here.east).hypot(p.north - here.north) <= 8.0)
         {
-            state.phase = PhaseCode::Finished;
+            state.on_event(crate::aircraft::AircraftEvent::Finished);
             state.taxi_clearance.guidance_complete = true;
             state.taxi_clearance.approved = false;
         }
@@ -985,7 +986,7 @@ mod tests {
     #[test]
     fn parking_completion_requires_the_final_stand_and_a_stopped_aircraft() {
         let mut state = State::default();
-        state.phase = PhaseCode::TaxiIn;
+        state.on_event(crate::aircraft::AircraftEvent::TaxiIn);
         state.has_departed = true;
         state.taxi_clearance = crate::state::TaxiClearance {
             approved: true,
@@ -1112,7 +1113,7 @@ mod tests {
         assert_eq!(found.khz, 125_300);
         // Cruise far from home wants Approach; the airport lacks it, so the
         // center answers.
-        state.phase = PhaseCode::Cruise;
+        state.on_event(crate::aircraft::AircraftEvent::Cruise);
         state.telemetry.on_ground = false;
         let found = covering_facility(&state, Some(&airport), &region).unwrap();
         assert_eq!(found.service, "Center");

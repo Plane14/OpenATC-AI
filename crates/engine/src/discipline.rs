@@ -2,6 +2,7 @@
 
 #![allow(clippy::default_trait_access)]
 use crate::EngineState;
+use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::{
     airport::{Runway, airport_point},
     state::{PhaseCode, Point},
@@ -577,7 +578,7 @@ mod tests {
         s.session.plan.departure = "TEST".into();
         s.session.plan.runway = "09".into();
         s.session.plan.callsign = "TEST1".into();
-        s.session.phase = PhaseCode::Taxi;
+        s.session.on_event(openatc_core::aircraft::AircraftEvent::Taxi);
         s.session.telemetry.com1_khz = 121_900;
         s.session.telemetry.position_valid = true;
         s.session.telemetry.latitude = 0.001;
@@ -671,7 +672,7 @@ mod tests {
         let mut s = state();
         s.session.plan.departure = "LFMN".into();
         s.session.plan.runway = "04R".into();
-        s.session.phase = PhaseCode::Pushback;
+        s.session.on_event(openatc_core::aircraft::AircraftEvent::PushbackComplete);
         s.session.telemetry.latitude = 43.652_675;
         s.session.telemetry.longitude = 7.205_204;
         s.session.telemetry.on_ground = true;
@@ -837,7 +838,7 @@ mod tests {
             let now = Instant::now();
             assert!(!tick_at(&mut s, true, now));
             s.session.telemetry.on_ground = true;
-            s.session.phase = PhaseCode::Landed;
+            s.session.on_event(openatc_core::aircraft::AircraftEvent::Landed);
             s.session.telemetry.ground_speed_knots = 80.0;
             assert!(!tick_at(&mut s, true, now));
             s.session.telemetry.ground_speed_knots = 25.0;
@@ -877,7 +878,7 @@ mod tests {
     #[test]
     fn apron_join_does_not_warn_until_the_aircraft_leaves_its_connector() {
         let mut state = taxi_state();
-        state.session.phase = PhaseCode::Taxi;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Taxi);
         state.session.telemetry.longitude = 0.0;
         state.session.telemetry.latitude = 300.0 / 111_320.0;
         let mut movement = TaxiMovement::default();

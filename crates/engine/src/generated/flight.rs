@@ -1397,6 +1397,35 @@ pub(super) fn ground_exchange_for(state: &mut EngineState, id: u32) -> Option<ra
     exchange_filtered(state, true, Some(id))
 }
 
+/// True when a generated aircraft has reached the holding point geometry. This is the
+/// same marker/endpoint/hold-line test the player uses, so an aircraft rolling over the
+/// line is recognized without waiting for the motion world to mark the segment complete.
+pub(super) fn at_departure_hold(
+    runtime: &Runtime,
+    pose: &openatc_core::traffic::motion::Pose,
+) -> bool {
+    if pose.stage != Stage::TaxiOut {
+        return false;
+    }
+    let Some(airport) = runtime.departure_airport(pose.id) else {
+        return false;
+    };
+    let Some(order) = runtime
+        .orders
+        .get(&pose.id)
+        .and_then(|orders| orders.iter().find(|(segment, _)| *segment == pose.segment))
+        .map(|(_, order)| order)
+    else {
+        return false;
+    };
+    let here = openatc_core::airport::airport_point(
+        &airport,
+        pose.position.latitude,
+        pose.position.longitude,
+    );
+    openatc_core::airport::taxi_hold_geometry_reached(&airport, order, here)
+}
+
 /// Record the order in which departures reached the holding point.
 ///
 /// Distance to the threshold is not a queue order when two taxiways join the runway at
@@ -1409,12 +1438,12 @@ fn note_departure_order(runtime: &mut Runtime) {
         .snapshot()
         .into_iter()
         .filter(|pose| {
-            pose.stage == Stage::TaxiOut
-                && pose.complete
-                && runtime
-                    .world
-                    .assigned_route(pose.id)
-                    .is_some_and(|route| pose.segment + 1 == route.segment_count())
+            at_departure_hold(runtime, pose)
+                || (pose.complete
+                    && runtime
+                        .world
+                        .assigned_route(pose.id)
+                        .is_some_and(|route| pose.segment + 1 == route.segment_count()))
         })
         .map(|pose| pose.id)
         .collect();
@@ -4439,6 +4468,68 @@ mod tests {
     }
 
     #[test]
+    fn a_rolling_takeoff_is_not_cancelled_by_late_traffic() {
+        let mut state = wake_fixture();
+        state
+            .generated
+            .policy
+            .as_mut()
+            .unwrap()
+            .runway_clearance_buffer_seconds = 120.0;
+        let exchange = takeoff_exchange_for(&mut state, 1).expect("clear runway");
+        state.generated.exchange = Some(exchange);
+        let mut now = 30.0;
+        for _ in 0..40 {
+            if let Some(exchange) = &mut state.generated.exchange {
+                exchange.due = Instant::now();
+            }
+            super::super::radio_tick(&mut state);
+            if state.generated.approved_orders.contains(&(1, 1)) {
+                break;
+            }
+            now += 1.0;
+            state.session.telemetry.simulation_seconds = Some(now);
+            super::super::advance(&mut state.generated, &state.session.telemetry);
+        }
+        assert!(state.generated.approved_orders.contains(&(1, 1)));
+        let mut rolling = false;
+        for _ in 0..120 {
+            now += 1.0;
+            state.session.telemetry.simulation_seconds = Some(now);
+            super::super::advance(&mut state.generated, &state.session.telemetry);
+            let pose = &state.generated.world.snapshot()[0];
+            if pose.stage == Stage::Takeoff && pose.knots > 20.0 {
+                rolling = true;
+                break;
+            }
+        }
+        assert!(rolling, "the departure did not start its roll");
+        let incoming = TrafficTarget {
+            id: 88,
+            callsign: "ARR88".into(),
+            aircraft: "A320".into(),
+            latitude: 0.0,
+            longitude: -0.02,
+            altitude_feet: 500.0,
+            track_degrees: 90.0,
+            ground_speed_knots: Some(200.0),
+            on_ground: false,
+            ..Default::default()
+        };
+        state.session.telemetry.traffic = Some(vec![incoming]);
+        for _ in 0..5 {
+            now += 1.0;
+            state.session.telemetry.simulation_seconds = Some(now);
+            super::super::advance(&mut state.generated, &state.session.telemetry);
+        }
+        assert!(
+            state.generated.approved_orders.contains(&(1, 1)),
+            "a rolling take-off must keep its clearance"
+        );
+        assert!(!state.generated.cancelled_takeoffs.contains_key(&1));
+    }
+
+    #[test]
     fn a_direct_takeoff_readback_keeps_the_clearance() {
         let mut state = wake_fixture();
         state.settings.hear_traffic_radio = true;
@@ -4828,7 +4919,7 @@ mod tests {
 
     #[test]
     fn a_distant_final_allows_line_up_but_a_short_final_holds() {
-        let mut state = wake_fixture();
+        let state = wake_fixture();
         let target = |longitude: f64, callsign: &str| TrafficTarget {
             id: 88,
             callsign: callsign.into(),
@@ -4902,11 +4993,47 @@ mod tests {
         ));
         state.session.telemetry.traffic = Some(vec![target(800.0, "PAR88")]);
         assert!(takeoff_exchange_for(&mut state, 1).is_some());
-        let mut short = target(800.0, "SHORT88");
-        short.longitude = -0.02;
-        short.altitude_feet = 500.0;
-        state.session.telemetry.traffic = Some(vec![short]);
-        assert!(takeoff_exchange_for(&mut state, 1).is_none());
+        // 4.2 NM final on the parallel runway, the distance at which the old build
+        // withheld AFR7246 while HOP3870 was still turning onto 04L.
+        let mut medium = target(800.0, "MED88");
+        medium.longitude = -0.07;
+        medium.altitude_feet = 1487.0;
+        state.session.telemetry.traffic = Some(vec![medium]);
+        assert!(
+            takeoff_exchange_for(&mut state, 1).is_some(),
+            "a parallel final outside the short-final radius must not withhold take-off"
+        );
+        // A real localizer is wider than 200 m at 1.5 NM. A parallel arrival offset
+        // within the corridor must still be recognised, or a short final on 09L
+        // cancels a 09 departure after the clearance.
+        let mut offset = target(1250.0, "OFFSET88");
+        offset.longitude = -0.025;
+        offset.altitude_feet = 612.0;
+        state.session.telemetry.traffic = Some(vec![offset]);
+        assert!(
+            takeoff_exchange_for(&mut state, 1).is_some(),
+            "an offset parallel final must not withhold take-off"
+        );
+        // A departure on 09 is independent of a short final to the parallel 09L. The
+        // arrival is established on a different strip, and a go-around remains the
+        // arrival's responsibility; it must not cancel the departure.
+        let mut parallel_short = target(800.0, "PARSHORT88");
+        parallel_short.longitude = -0.02;
+        parallel_short.altitude_feet = 500.0;
+        state.session.telemetry.traffic = Some(vec![parallel_short]);
+        assert!(
+            takeoff_exchange_for(&mut state, 1).is_some(),
+            "a short final on the parallel runway must not withhold take-off"
+        );
+        // The same runway's short final still blocks.
+        let mut same_short = target(0.0, "SAMSHORT88");
+        same_short.longitude = -0.02;
+        same_short.altitude_feet = 500.0;
+        state.session.telemetry.traffic = Some(vec![same_short]);
+        assert!(
+            takeoff_exchange_for(&mut state, 1).is_none(),
+            "a short final on the departure runway must withhold take-off"
+        );
     }
 
     #[test]

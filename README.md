@@ -399,7 +399,9 @@ Holding-point detection considers approach geometry and the aircraft's reference
 
 Generated departures keep the order in which they reached the holding point. An aircraft already lining up or rolling keeps the runway; a later arrival on a taxiway that joins nearer the threshold does not jump ahead. Ground starts the Tower handoff while the aircraft is still taxiing, so the aircraft can request ready immediately at the hold.
 
-Tower lines a departure up as soon as the runway surface is clear, even when traffic is still on final. The take-off clearance then waits for the arrival to pass. A lined-up aircraft is not repeatedly told to hold, and a distant arrival does not block take-off if the departure will be airborne before it reaches the threshold.
+Generated radio keeps one durable station per published frequency, but its worker thread is short-lived: it exits when its trigger and transmission queues drain and restarts when a new aircraft, phase trigger or transmission arrives. Same-frequency speech stays ordered across the restart; different frequencies never wait on each other's queue.
+
+Tower lines a departure up as soon as the runway surface is clear, even when traffic is still on final. The take-off clearance waits for same-runway arrival traffic to pass; an arrival on a parallel runway, including one on short final, does not withhold it. Once the roll has started, a late conflict does not cancel the take-off; the arrival or go-around is sequenced around the departing aircraft. A lined-up aircraft is not repeatedly told to hold, and a distant arrival does not block take-off if the departure will be airborne before it reaches the threshold.
 
 A takeoff instruction may include known wind, pressure and departure guidance. The cleared altitude and departure constraints remain authoritative. The departure handoff is tied to the airborne workflow; accepting a takeoff readback alone should not send the aircraft to another controller while still parked at the hold.
 
@@ -811,7 +813,7 @@ Copilot playback and acceptance are separate steps. Repeated preparation request
 - Missing or incompatible inputs are reported without granting flight.
 - The preparation worker assembles the complete protected route, recovery and landing before publishing a flight. Runway-compatible terminal candidates, published recovery legs and enroute MORA floors are retained within `terminal_candidate_limit` in `traffic/operations.toml`.
 - Departures use their published SID. Arrival STAR joining is not available for every airport and procedure combination; when no compatible STAR/approach join is resolved, the arrival is not claimed as STAR traffic.
-- Generated radio still processes one exchange at a time. Per-frequency station threads, independent queues and concurrent station audio remain unfinished.
+- Generated speech is queued on one OS thread per frequency, so transmissions on one frequency stay ordered while different frequencies can transmit independently. Clearance selection still processes one exchange at a time; replacing that global selector remains unfinished.
 - Generated traffic is installed and exercised at installed airports; native simulator visibility, audio and performance acceptance remain separate checks.
 
 The controller consumer can now queue a complete onward flight from a recovery hold after its pilot readback. The aircraft finishes its current circuit and leaves at the holding fix; the new plan takes effect there, with separate landing and taxi permissions. Incomplete recovery sets and incompatible joins are refused. A simulation-clock change cancels a queued exit while preserving the hold. The integrated consumer regression reaches parking after rejoin; this does not establish production route generation or native simulator acceptance.

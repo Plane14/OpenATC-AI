@@ -1,4 +1,5 @@
 //! Follow-me movement along an acknowledged surface route.
+use crate::aircraft::AircraftBehaviour;
 use crate::state::{PhaseCode, Point, State};
 
 /// Cached route and vehicle progress in metres along it.
@@ -207,7 +208,7 @@ mod tests {
     #[test]
     fn readback_pause_and_arrival_crossing_keep_the_same_clearance_limit() {
         let mut state = route();
-        state.phase = PhaseCode::TaxiIn;
+        state.on_event(crate::aircraft::AircraftEvent::TaxiIn);
         state.taxi_clearance.to_parking = true;
         let mut car = Escort::default();
         state.taxi_clearance.pending_readback = true;
@@ -222,7 +223,7 @@ mod tests {
         state.taxi_clearance.approved = false;
         assert!(car.update(&state));
         assert_eq!(car.advance(0.1).unwrap(), before);
-        state.phase = PhaseCode::Finished;
+        state.on_event(crate::aircraft::AircraftEvent::Finished);
         assert!(!car.update(&state));
         assert!(car.advance(0.1).is_none());
     }

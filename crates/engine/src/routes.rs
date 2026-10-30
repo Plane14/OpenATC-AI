@@ -11,6 +11,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::airport::{demo_airport, load_airport_from_simulator};
 use openatc_core::apply::{
     AssignOrder, RequestContext, SimpleRng, add_transmission, apply_request, assign_controller,
@@ -398,6 +399,8 @@ fn reset_flight(state: &mut crate::EngineState) {
     state.cabin.reset();
     state.mission = Default::default();
     state.traffic = Default::default();
+    state.aircraft = Default::default();
+    state.atc = Default::default();
     state.parking = Default::default();
     state.initiative = Default::default();
     state.expectations.clear();
@@ -3223,7 +3226,7 @@ mod chatter_tests {
                 state.voices_refreshed = Some(std::time::Instant::now());
                 state.session.plan = FlightPlan::default();
                 state.session.clearance = None;
-                state.session.phase = PhaseCode::Parked;
+                state.session.on_event(openatc_core::aircraft::AircraftEvent::Parked);
                 state.session.telemetry.on_ground = true;
                 state.session.telemetry.radio_power = true;
                 state.session.telemetry.position_valid = true;
@@ -3528,7 +3531,7 @@ mod chatter_tests {
         state.settings.ai_enabled = false;
         state.session.demo = false;
         state.session.has_departed = true;
-        state.session.phase = PhaseCode::Departure;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Departure);
         state.session.plan.callsign = "TOL1975".into();
         state.session.plan.departure = "KLAX".into();
         state.session.plan.destination = "KONT".into();
@@ -3795,7 +3798,7 @@ mod chatter_tests {
             assert_eq!(s.session.next_sequence, sequence);
             assert_eq!(s.session.transcript.len(), 1);
             assert_eq!(s.session.mission.id, "preflight-story");
-            s.session.phase = PhaseCode::Finished;
+            s.session.on_event(openatc_core::aircraft::AircraftEvent::Finished);
             s.session.emergency_declared = true;
         }
         assert!(

@@ -58,6 +58,9 @@ Thumbs.db
 desktop.ini
 # Rust build output (lockfile stays committed: reproducible service builds)
 /target/
+
+# Local source snapshots (archived copies, not part of the build)
+/backups/
 # CMake leftovers outside build/
 CMakeCache.txt
 CMakeFiles/

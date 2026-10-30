@@ -1,5 +1,6 @@
 //! Discretionary player delay holds before final, with explicit readback and onward clearance.
 use crate::EngineState;
+use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::{
     arrival::{bearing, distance_nm},
     navigation,
@@ -452,7 +453,7 @@ pub(crate) fn tick(state: &mut EngineState, station: &Station) -> bool {
         {
             state.flow.monitor.next_fix = hold.fix + 1;
             state.flow.monitor.previous = None;
-            state.session.phase = PhaseCode::Arrival;
+            state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
             state.traffic.spacing_path_required = false;
             return false;
         }
@@ -609,7 +610,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        s.session.phase = PhaseCode::Arrival;
+        s.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
         s.session.has_departed = true;
         s.session.clearance = Some(Clearance {
             altitude_feet: 6000,

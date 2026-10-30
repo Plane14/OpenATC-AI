@@ -146,7 +146,7 @@ fn decorate_apron_exchange(state: &EngineState, exchange: &mut Exchange) {
 }
 
 /// A short ground exchange for an apron taxi aircraft that has no full flight plan yet.
-fn apron_exchange(state: &mut EngineState) -> Option<Exchange> {
+fn apron_exchange(state: &mut EngineState, parked_only: bool) -> Option<Exchange> {
     // A planned departure at a stand first obtains its IFR clearance. Pushback, engine start
     // and taxi are separate Ground exchanges; granting the taxi route here bypassed them.
     let planned = {
@@ -156,11 +156,12 @@ fn apron_exchange(state: &mut EngineState) -> Option<Exchange> {
             .snapshot()
             .into_iter()
             .filter(|pose| {
-                matches!(
+                (matches!(
                     pose.stage,
                     openatc_core::traffic::motion::Stage::Parked
                         | openatc_core::traffic::motion::Stage::Pushback
-                ) && state.generated.flights.contains_key(&pose.id)
+                ) && (!parked_only || pose.stage == openatc_core::traffic::motion::Stage::Parked))
+                    && state.generated.flights.contains_key(&pose.id)
                     && !state.generated.delivery_cleared.contains(&pose.id)
                     && !state.generated.delivery_pending.contains(&pose.id)
                     && state.generated.orders.contains_key(&pose.id)
@@ -398,16 +399,16 @@ fn departure_hold(state: &mut EngineState) {
     // The surface route ends at the departure hold; the onward flight is installed only
     // after the Ground handoff and Tower ready exchange finish.
     let holding = |pose: &openatc_core::traffic::motion::Pose| {
-        // Only a finished taxi on the final surface segment is at the holding point. An
-        // aircraft queued on the preceding segment is still behind the hold line and must not
-        // ask Tower to line up over the aircraft in front of it.
-        pose.stage == openatc_core::traffic::motion::Stage::TaxiOut
-            && pose.complete
-            && state
-                .generated
-                .world
-                .assigned_route(pose.id)
-                .is_some_and(|route| pose.segment + 1 == route.segment_count())
+        // Use the same holding marker/endpoint/hold-line geometry as the player. A rolling
+        // aircraft is recognized as soon as it crosses the line, not only when the motion
+        // world has marked its final taxi segment complete.
+        super::flight::at_departure_hold(&state.generated, pose)
+            || (pose.complete
+                && state
+                    .generated
+                    .world
+                    .assigned_route(pose.id)
+                    .is_some_and(|route| pose.segment + 1 == route.segment_count()))
     };
     let all = state.generated.world.snapshot();
     // Start the Ground-to-Tower handoff while the aircraft is still rolling toward the
@@ -496,11 +497,20 @@ fn departure_hold(state: &mut EngineState) {
         });
         return;
     }
+    let at_hold: std::collections::BTreeSet<u32> = all
+        .iter()
+        .filter(|pose| holding(pose))
+        .map(|pose| pose.id)
+        .collect();
     state
         .generated
         .departure_waits
-        .retain(|id, _| all.iter().any(|pose| pose.id == *id && holding(pose)));
-    let candidates: Vec<_> = all.iter().filter(|pose| holding(pose)).cloned().collect();
+        .retain(|id, _| at_hold.contains(id));
+    let candidates: Vec<_> = all
+        .iter()
+        .filter(|pose| at_hold.contains(&pose.id))
+        .cloned()
+        .collect();
     // A short, rate-limited trace of the departure gate: how many aircraft exist, how many are
     // at a holding point, and what the first one's segment looks like.
     {
@@ -974,12 +984,570 @@ fn release_held(state: &mut EngineState) -> Option<Exchange> {
     None
 }
 
+fn process_delivery(state: &mut EngineState, rate: f64, gap: f64) {
+    let Some(mut exchange) = state.generated.delivery_exchange.take() else {
+        return;
+    };
+    if exchange.due > Instant::now() {
+        state.generated.delivery_exchange = Some(exchange);
+        return;
+    }
+    if exchange.next == exchange.messages.len() {
+        state.generated.delivery_pending.remove(&exchange.id);
+        state.generated.delivery_cleared.insert(exchange.id);
+        return;
+    }
+    let (controller, text) = &exchange.messages[exchange.next];
+    let spoken_text = state.generated.spoken_text(text);
+    if state.settings.hear_traffic_radio
+        && state.session.telemetry.radio_power
+        && let Some(radio) = state.session.receiving_radio(exchange.station.khz)
+    {
+        let mut tag = if *controller {
+            crate::flight::tag(state, &exchange.station)
+        } else {
+            SpeechTag {
+                position: "Traffic".into(),
+                voice: crate::traffic::pilot_voice(state, exchange.id),
+                ..Default::default()
+            }
+        };
+        tag.radio = Some(radio);
+        let spoken_callsign = state.generated.spoken_text(&exchange.callsign);
+        state.station_bus.transmit(
+            exchange.station.khz,
+            crate::traffic_runtime::Transmission {
+                session: exchange.id,
+                speaker: if *controller {
+                    "ATC".into()
+                } else {
+                    spoken_callsign
+                },
+                text: spoken_text.clone(),
+                controller: *controller,
+                tag,
+                due: Instant::now(),
+            },
+        );
+        deliver_station_transmissions(state, Duration::from_millis(2));
+    }
+    exchange.due =
+        Instant::now() + Duration::from_secs_f64(spoken_text.chars().count() as f64 / rate + gap);
+    exchange.next += 1;
+    state.generated.delivery_exchange = Some(exchange);
+}
+
+fn deliver_station_transmissions(state: &mut EngineState, timeout: Duration) {
+    let transmissions = if timeout.is_zero() {
+        state.station_bus.drain()
+    } else {
+        state.station_bus.flush(timeout)
+    };
+    for (_, transmission) in transmissions {
+        add_transmission(
+            &mut state.session,
+            &transmission.speaker,
+            &transmission.text,
+            &transmission.tag,
+        );
+        if let Some(last) = state.session.transcript.last_mut() {
+            last.background = true;
+        }
+    }
+}
+
+/// Reissue the current segment for a stopped crossing or taxi aircraft. This runs after the
+/// Tower queue but before the general surface queue, so a lost grant is recovered without
+/// starving a departure that is already at the runway.
+fn reissue_stopped_crossing(state: &mut EngineState) -> Option<Exchange> {
+    if state.generated.reissued_crossings.len() > 256 {
+        state
+            .generated
+            .reissued_crossings
+            .retain(|_, last| last.elapsed() < Duration::from_secs(60));
+    }
+    let targets = super::external_targets(&state.generated, &state.session.telemetry);
+    for pose in state.generated.world.snapshot().into_iter().filter(|pose| {
+        matches!(
+            pose.stage,
+            openatc_core::traffic::motion::Stage::Crossing
+                | openatc_core::traffic::motion::Stage::TaxiOut
+                | openatc_core::traffic::motion::Stage::TaxiIn
+        ) && pose.awaiting_clearance
+            && !state
+                .generated
+                .approved_orders
+                .contains(&(pose.id, pose.segment))
+    }) {
+        let Some(plan) = state.generated.flights.get(&pose.id).cloned() else {
+            continue;
+        };
+        let Some(clearance) = plan.clearances.get(&pose.segment).cloned() else {
+            continue;
+        };
+        let Some(frame) = state
+            .generated
+            .frames
+            .iter()
+            .find(|frame| frame.target.id == pose.id)
+        else {
+            continue;
+        };
+        if !super::flight::on_station(
+            &state.generated,
+            pose.id,
+            frame.target.com1_khz,
+            &clearance.station,
+        ) || state
+            .generated
+            .crossing_blocked(pose.id, pose.segment, &targets)
+        {
+            continue;
+        }
+        let key = (pose.id, pose.segment);
+        if state
+            .generated
+            .reissued_crossings
+            .get(&key)
+            .is_some_and(|last| last.elapsed() < Duration::from_secs(10))
+        {
+            continue;
+        }
+        state
+            .generated
+            .reissued_crossings
+            .insert(key, Instant::now());
+        state.generated.log(
+            openatc_settings::TrafficLog::Summary,
+            format!(
+                "{} reissued crossing clearance at segment {}",
+                frame.target.callsign, pose.segment
+            ),
+        );
+        return Some(Exchange {
+            speed: None,
+            id: pose.id,
+            segment: pose.segment,
+            station: clearance.station.clone(),
+            callsign: frame.target.callsign.clone(),
+            messages: vec![(true, clearance.instruction), (false, clearance.readback)],
+            next: 0,
+            due: Instant::now(),
+            grant: true,
+            tune_after: None,
+            sector_transfer: None,
+            recovery_from: None,
+            rejoin: false,
+        });
+    }
+    None
+}
+
+fn advance_exchange(state: &mut EngineState, mut exchange: Exchange) -> Option<Exchange> {
+    // The player's microphone only blocks a controller on the frequency being used. Ground,
+    // Tower and Delivery are separate positions and may work different aircraft at once.
+    if state.session.telemetry.radio_busy
+        && [
+            Some(state.session.telemetry.com1_khz),
+            state.session.telemetry.com2_khz,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|frequency| frequency == exchange.station.khz)
+    {
+        return Some(exchange);
+    }
+    decorate_apron_exchange(state, &mut exchange);
+    if exchange.sector_transfer.as_ref().is_some_and(|(plan, _)| {
+        !state
+            .generated
+            .flights
+            .get(&exchange.id)
+            .is_some_and(|current| Arc::ptr_eq(plan, current))
+    }) {
+        return None;
+    }
+    if exchange.due > Instant::now() {
+        return Some(exchange);
+    }
+    if exchange.next == exchange.messages.len() {
+        if exchange.segment == 1 && !exchange.grant {
+            // The cancellation message has now been transmitted; the next event can be a
+            // fresh clearance.
+            state.generated.cancelled_takeoffs.remove(&exchange.id);
+        }
+        if state.generated.delivery_pending.remove(&exchange.id) {
+            state.generated.delivery_cleared.insert(exchange.id);
+            return None;
+        }
+        if let Some(speed) = exchange.speed.take() {
+            if !super::sequencing::accept(
+                &mut state.generated,
+                &state.session.telemetry,
+                exchange.id,
+                &speed,
+            ) {
+                exchange.messages = vec![(
+                    true,
+                    say(
+                        "generated_arrival_speed_cancelled",
+                        &[("callsign", exchange.callsign.clone())],
+                    ),
+                )];
+                exchange.next = 0;
+                return Some(exchange);
+            }
+            return None;
+        }
+        if exchange.rejoin {
+            if let Some(receiver) = exchange.tune_after.as_ref() {
+                if let Some(frame) = state
+                    .generated
+                    .frames
+                    .iter_mut()
+                    .find(|frame| frame.target.id == exchange.id)
+                {
+                    frame.target.com1_khz = Some(receiver.khz);
+                    state
+                        .generated
+                        .controllers
+                        .insert(exchange.id, receiver.clone());
+                }
+            } else if exchange.grant
+                && let Some(source) = exchange.recovery_from
+            {
+                if super::flight::rejoin_blocked(
+                    &state.generated,
+                    &state.session.telemetry,
+                    exchange.id,
+                ) {
+                    return Some(hold_airborne(exchange));
+                }
+                super::flight::accept_rejoin(&mut state.generated, exchange.id, source);
+            }
+            return None;
+        }
+        if exchange.grant
+            && state.generated.active_flights.contains(&exchange.id)
+            && state
+                .generated
+                .flights
+                .get(&exchange.id)
+                .and_then(|plan| plan.clearances.get(&exchange.segment))
+                .is_some_and(|clearance| {
+                    super::separation::blocked(
+                        &state.generated,
+                        &state.session.telemetry,
+                        exchange.id,
+                        exchange.segment,
+                        clearance,
+                    )
+                })
+        {
+            state
+                .generated
+                .reported_holds
+                .insert((exchange.id, exchange.segment));
+            let plan = &state.generated.flights[&exchange.id];
+            if plan
+                .route
+                .segment(exchange.segment)
+                .is_some_and(|s| s.stage == openatc_core::traffic::motion::Stage::Takeoff)
+            {
+                state.generated.log(
+                    openatc_settings::TrafficLog::Summary,
+                    format!(
+                        "{} takeoff cancelled on readback: airborne separation at segment {}",
+                        exchange.callsign, exchange.segment
+                    ),
+                );
+                state.generated.exchange = Some(hold_takeoff(exchange, true, false));
+            } else if plan.clearances[&exchange.segment].landing_rollout.is_some() {
+                state.generated.exchange = Some(hold_landing(exchange, true));
+            } else {
+                state.generated.exchange = Some(hold_airborne(exchange));
+            }
+            return None;
+        }
+        if exchange.grant
+            && state
+                .generated
+                .flights
+                .get(&exchange.id)
+                .and_then(|plan| plan.clearances.get(&exchange.segment))
+                .is_some_and(|clearance| clearance.landing_rollout.is_some())
+            && state.generated.crossing_blocked(
+                exchange.id,
+                exchange.segment,
+                &super::external_targets(&state.generated, &state.session.telemetry),
+            )
+        {
+            super::flight::revoke_landing(&mut state.generated, exchange.id, exchange.segment);
+            return Some(hold_landing(exchange, true));
+        }
+        if exchange.grant
+            && state.generated.crossing_blocked(
+                exchange.id,
+                exchange.segment,
+                &super::external_targets(&state.generated, &state.session.telemetry),
+            )
+            && state
+                .generated
+                .flights
+                .get(&exchange.id)
+                .and_then(|flight| flight.route.segment(exchange.segment))
+                .is_some_and(|segment| {
+                    segment.stage == openatc_core::traffic::motion::Stage::Takeoff
+                })
+        {
+            // Issue the hold only once per segment; keep holding without repeating.
+            if state
+                .generated
+                .reported_holds
+                .contains(&(exchange.id, exchange.segment))
+            {
+                return None;
+            }
+            state
+                .generated
+                .reported_holds
+                .insert((exchange.id, exchange.segment));
+            let wake = state
+                .generated
+                .departure_wake
+                .get(&exchange.id)
+                .is_some_and(|seconds| *seconds > 0.0);
+            return Some(hold_takeoff(exchange, true, wake));
+        }
+        if exchange.grant
+            && state.generated.active_flights.contains(&exchange.id)
+            && state
+                .generated
+                .flights
+                .get(&exchange.id)
+                .and_then(|flight| flight.route.segment(exchange.segment))
+                .is_some_and(|segment| {
+                    segment.stage == openatc_core::traffic::motion::Stage::Crossing
+                })
+            && state.generated.crossing_blocked(
+                exchange.id,
+                exchange.segment,
+                &super::external_targets(&state.generated, &state.session.telemetry),
+            )
+        {
+            let runway = state
+                .generated
+                .flights
+                .get(&exchange.id)
+                .and_then(|flight| flight.vacated_reports.get(&(exchange.segment + 1)))
+                .map(|report| report.runway.as_str());
+            return Some(cancel_crossing(exchange, runway));
+        }
+        if let Some((plan, _)) = exchange.sector_transfer.as_ref()
+            && (!state
+                .generated
+                .flights
+                .get(&exchange.id)
+                .is_some_and(|current| Arc::ptr_eq(plan, current))
+                || state
+                    .generated
+                    .world
+                    .snapshot()
+                    .iter()
+                    .any(|pose| pose.id == exchange.id && pose.recovering))
+        {
+            return None;
+        }
+        if let Some(receiver) = exchange.tune_after.as_ref()
+            && let Some(frame) = state
+                .generated
+                .frames
+                .iter_mut()
+                .find(|frame| frame.target.id == exchange.id)
+        {
+            frame.target.com1_khz = Some(receiver.khz);
+            state
+                .generated
+                .controllers
+                .insert(exchange.id, receiver.clone());
+            if let Some((plan, count)) = exchange.sector_transfer.as_ref() {
+                if state
+                    .generated
+                    .flights
+                    .get(&exchange.id)
+                    .is_some_and(|current| Arc::ptr_eq(plan, current))
+                    && state
+                        .generated
+                        .world
+                        .snapshot()
+                        .iter()
+                        .any(|pose| pose.id == exchange.id && !pose.recovering)
+                {
+                    state
+                        .generated
+                        .sector_transfers
+                        .insert((exchange.id, exchange.segment), *count);
+                    state
+                        .generated
+                        .pending_sector_checkins
+                        .insert(exchange.id, (plan.clone(), receiver.clone()));
+                }
+            } else if state.generated.active_flights.contains(&exchange.id) {
+                state
+                    .generated
+                    .handoff_targets
+                    .insert(exchange.id, exchange.segment);
+                state
+                    .generated
+                    .pending_checkins
+                    .insert((exchange.id, exchange.segment));
+            }
+        }
+        if exchange.grant {
+            state
+                .generated
+                .approved_orders
+                .insert((exchange.id, exchange.segment));
+            // A ground clearance covers the contiguous movement of its own stage. It must not
+            // approve a later pushback, taxi or takeoff segment that needs its own readback.
+            if !state.generated.active_flights.contains(&exchange.id)
+                && let Some(route) = state
+                    .generated
+                    .apron_routes
+                    .get(&exchange.id)
+                    .cloned()
+                    .or_else(|| state.generated.world.assigned_route(exchange.id))
+            {
+                let stage = route.segment(exchange.segment).map(|segment| segment.stage);
+                if matches!(
+                    stage,
+                    Some(
+                        openatc_core::traffic::motion::Stage::Pushback
+                            | openatc_core::traffic::motion::Stage::TaxiOut
+                            | openatc_core::traffic::motion::Stage::TaxiIn
+                    )
+                ) {
+                    for index in exchange.segment..route.segment_count() {
+                        let Some(segment) = route.segment(index) else {
+                            break;
+                        };
+                        if Some(segment.stage) != stage {
+                            break;
+                        }
+                        state.generated.approved_orders.insert((exchange.id, index));
+                    }
+                }
+            }
+            super::flight::acknowledge(&mut state.generated, exchange.id, exchange.segment);
+        }
+        return None;
+    }
+    if exchange.next == 0 {
+        let role = if exchange.station.services.is_empty() {
+            exchange.station.service.clone()
+        } else {
+            format!(
+                "{} [{}]",
+                exchange.station.service,
+                exchange.station.services.join(" + ")
+            )
+        };
+        state.generated.log(
+            openatc_settings::TrafficLog::Summary,
+            format!(
+                "{} on {} ({role}) {} kHz",
+                exchange.callsign, exchange.station.name, exchange.station.khz
+            ),
+        );
+    }
+    let (controller, text) = &exchange.messages[exchange.next];
+    let spoken_text = state.generated.spoken_text(text);
+    if state.settings.hear_traffic_radio
+        && state.session.telemetry.radio_power
+        && let Some(radio) = state.session.receiving_radio(exchange.station.khz)
+    {
+        let mut tag = if *controller {
+            crate::flight::tag(state, &exchange.station)
+        } else {
+            SpeechTag {
+                position: "Traffic".into(),
+                voice: crate::traffic::pilot_voice(state, exchange.id),
+                ..Default::default()
+            }
+        };
+        tag.radio = Some(radio);
+        let spoken_callsign = state.generated.spoken_text(&exchange.callsign);
+        state.station_bus.transmit(
+            exchange.station.khz,
+            crate::traffic_runtime::Transmission {
+                session: exchange.id,
+                speaker: if *controller {
+                    "ATC".into()
+                } else {
+                    spoken_callsign
+                },
+                text: spoken_text.clone(),
+                controller: *controller,
+                tag,
+                due: Instant::now(),
+            },
+        );
+        deliver_station_transmissions(state, Duration::from_millis(2));
+    }
+    let (rate, gap) = state
+        .generated
+        .policy
+        .as_ref()
+        .map_or((12.0, 0.3), |policy| {
+            (policy.radio_characters_per_second, policy.radio_gap_seconds)
+        });
+    exchange.due =
+        Instant::now() + Duration::from_secs_f64(spoken_text.chars().count() as f64 / rate + gap);
+    exchange.next += 1;
+    return Some(exchange);
+}
 pub fn tick(state: &mut EngineState) {
+    deliver_station_transmissions(state, Duration::ZERO);
+    let sessions = state
+        .generated
+        .sessions
+        .sessions()
+        .filter(|(id, session)| **id != 0 && session.frequency > 0)
+        .map(|(&id, session)| (id, session.frequency, session.phase))
+        .collect::<Vec<_>>();
+    let now = state.session.telemetry.simulation_seconds.unwrap_or(0.0);
+    state.station_bus.sync_sessions(sessions, now);
+    let triggers = state.station_bus.take_triggers();
+    for trigger in &triggers {
+        state
+            .generated
+            .sessions
+            .phase(trigger.session, trigger.phase, trigger.at);
+        state.generated.sessions.progress(trigger.session, trigger.at);
+    }
+    if !triggers.is_empty() {
+        state.generated.log(
+            openatc_settings::TrafficLog::Detail,
+            format!(
+                "station triggers: {}",
+                triggers
+                    .iter()
+                    .map(|trigger| format!(
+                        "{}:{:?}@{}",
+                        trigger.session, trigger.phase, trigger.frequency
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    }
     super::flight::synchronise_recoveries(&mut state.generated);
     super::ctaf::announce(state);
     let held = if !state.settings.generated_traffic {
         Some("generated traffic disabled")
-    } else if state.generated.epoch != Some(state.session_generation) {
+    } else if state.generated.epoch != Some(state.session_generation)
+        && state.generated.flights.is_empty()
+    {
         Some("scene epoch changed")
     } else if state.session.telemetry.paused {
         Some("simulator paused")
@@ -1015,6 +1583,13 @@ pub fn tick(state: &mut EngineState) {
     else {
         return;
     };
+    process_delivery(state, rate, gap);
+    if state.generated.delivery_exchange.is_none()
+        && state.generated.exchange.is_some()
+        && let Some(exchange) = apron_exchange(state, true)
+    {
+        state.generated.delivery_exchange = Some(exchange);
+    }
 
     if state.generated.exchange.is_none() {
         // Ground traffic talks first: the runway queue, then taxiing/pushback, then gate
@@ -1029,68 +1604,8 @@ pub fn tick(state: &mut EngineState) {
     if state.generated.exchange.is_none() {
         state.generated.exchange = super::flight::ground_exchange(state);
     }
-    // A crossing clearance grants the current segment. If a stopped aircraft lost that grant,
-    // waiting for the next segment leaves it at the line forever. Reissue the current crossing
-    // clearance when the runway is clear.
     if state.generated.exchange.is_none() {
-        let targets = super::external_targets(&state.generated, &state.session.telemetry);
-        for pose in state.generated.world.snapshot().into_iter().filter(|pose| {
-            pose.stage == openatc_core::traffic::motion::Stage::Crossing
-                && pose.awaiting_clearance
-                && !state
-                    .generated
-                    .approved_orders
-                    .contains(&(pose.id, pose.segment))
-        }) {
-            let Some(plan) = state.generated.flights.get(&pose.id).cloned() else {
-                continue;
-            };
-            let Some(clearance) = plan.clearances.get(&pose.segment).cloned() else {
-                continue;
-            };
-            let Some(frame) = state
-                .generated
-                .frames
-                .iter()
-                .find(|frame| frame.target.id == pose.id)
-            else {
-                continue;
-            };
-            if !super::flight::on_station(
-                &state.generated,
-                pose.id,
-                frame.target.com1_khz,
-                &clearance.station,
-            ) || state
-                .generated
-                .crossing_blocked(pose.id, pose.segment, &targets)
-            {
-                continue;
-            }
-            state.generated.log(
-                openatc_settings::TrafficLog::Summary,
-                format!(
-                    "{} reissued crossing clearance at segment {}",
-                    frame.target.callsign, pose.segment
-                ),
-            );
-            state.generated.exchange = Some(Exchange {
-                speed: None,
-                id: pose.id,
-                segment: pose.segment,
-                station: clearance.station.clone(),
-                callsign: frame.target.callsign.clone(),
-                messages: vec![(true, clearance.instruction), (false, clearance.readback)],
-                next: 0,
-                due: Instant::now(),
-                grant: true,
-                tune_after: None,
-                sector_transfer: None,
-                recovery_from: None,
-                rejoin: false,
-            });
-            break;
-        }
+        state.generated.exchange = reissue_stopped_crossing(state);
     }
     if state.generated.exchange.is_none() {
         let mut poses = state
@@ -1539,359 +2054,20 @@ pub fn tick(state: &mut EngineState) {
         }
     }
     if state.generated.exchange.is_none() {
-        state.generated.exchange = apron_exchange(state);
+        state.generated.exchange = apron_exchange(state, false);
     }
     if state.generated.exchange.is_none() {
         super::flight::prepare_limit_rejoins(&mut state.generated);
         state.generated.exchange =
             super::flight::exchange(state).or_else(|| super::sequencing::exchange(state));
     }
-    let Some(mut exchange) = state.generated.exchange.take() else {
+
+    let Some(exchange) = state.generated.exchange.take() else {
         return;
     };
-    // The player's microphone only blocks a controller on the frequency being used. Ground,
-    // Tower and Delivery are separate positions and may work different aircraft at once.
-    if state.session.telemetry.radio_busy
-        && [
-            Some(state.session.telemetry.com1_khz),
-            state.session.telemetry.com2_khz,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|frequency| frequency == exchange.station.khz)
-    {
+    if let Some(exchange) = advance_exchange(state, exchange) {
         state.generated.exchange = Some(exchange);
-        return;
     }
-    decorate_apron_exchange(state, &mut exchange);
-    if exchange.sector_transfer.as_ref().is_some_and(|(plan, _)| {
-        !state
-            .generated
-            .flights
-            .get(&exchange.id)
-            .is_some_and(|current| Arc::ptr_eq(plan, current))
-    }) {
-        return;
-    }
-    if exchange.due > Instant::now() {
-        state.generated.exchange = Some(exchange);
-        return;
-    }
-    if exchange.next == exchange.messages.len() {
-        if exchange.segment == 1 && !exchange.grant {
-            // The cancellation message has now been transmitted; the next event can be a
-            // fresh clearance.
-            state.generated.cancelled_takeoffs.remove(&exchange.id);
-        }
-        if state.generated.delivery_pending.remove(&exchange.id) {
-            state.generated.delivery_cleared.insert(exchange.id);
-            return;
-        }
-        if let Some(speed) = exchange.speed.take() {
-            if !super::sequencing::accept(
-                &mut state.generated,
-                &state.session.telemetry,
-                exchange.id,
-                &speed,
-            ) {
-                exchange.messages = vec![(
-                    true,
-                    say(
-                        "generated_arrival_speed_cancelled",
-                        &[("callsign", exchange.callsign.clone())],
-                    ),
-                )];
-                exchange.next = 0;
-                state.generated.exchange = Some(exchange);
-            }
-            return;
-        }
-        if exchange.rejoin {
-            if let Some(receiver) = exchange.tune_after.as_ref() {
-                if let Some(frame) = state
-                    .generated
-                    .frames
-                    .iter_mut()
-                    .find(|frame| frame.target.id == exchange.id)
-                {
-                    frame.target.com1_khz = Some(receiver.khz);
-                    state
-                        .generated
-                        .controllers
-                        .insert(exchange.id, receiver.clone());
-                }
-            } else if exchange.grant
-                && let Some(source) = exchange.recovery_from
-            {
-                if super::flight::rejoin_blocked(
-                    &state.generated,
-                    &state.session.telemetry,
-                    exchange.id,
-                ) {
-                    state.generated.exchange = Some(hold_airborne(exchange));
-                    return;
-                }
-                super::flight::accept_rejoin(&mut state.generated, exchange.id, source);
-            }
-            return;
-        }
-        if exchange.grant
-            && state.generated.active_flights.contains(&exchange.id)
-            && state
-                .generated
-                .flights
-                .get(&exchange.id)
-                .and_then(|plan| plan.clearances.get(&exchange.segment))
-                .is_some_and(|clearance| {
-                    super::separation::blocked(
-                        &state.generated,
-                        &state.session.telemetry,
-                        exchange.id,
-                        exchange.segment,
-                        clearance,
-                    )
-                })
-        {
-            state
-                .generated
-                .reported_holds
-                .insert((exchange.id, exchange.segment));
-            let plan = &state.generated.flights[&exchange.id];
-            if plan
-                .route
-                .segment(exchange.segment)
-                .is_some_and(|s| s.stage == openatc_core::traffic::motion::Stage::Takeoff)
-            {
-                state.generated.log(
-                    openatc_settings::TrafficLog::Summary,
-                    format!(
-                        "{} takeoff cancelled on readback: airborne separation at segment {}",
-                        exchange.callsign, exchange.segment
-                    ),
-                );
-                state.generated.exchange = Some(hold_takeoff(exchange, true, false));
-            } else if plan.clearances[&exchange.segment].landing_rollout.is_some() {
-                state.generated.exchange = Some(hold_landing(exchange, true));
-            } else {
-                state.generated.exchange = Some(hold_airborne(exchange));
-            }
-            return;
-        }
-        if exchange.grant
-            && state
-                .generated
-                .flights
-                .get(&exchange.id)
-                .and_then(|plan| plan.clearances.get(&exchange.segment))
-                .is_some_and(|clearance| clearance.landing_rollout.is_some())
-            && state.generated.crossing_blocked(
-                exchange.id,
-                exchange.segment,
-                &super::external_targets(&state.generated, &state.session.telemetry),
-            )
-        {
-            super::flight::revoke_landing(&mut state.generated, exchange.id, exchange.segment);
-            state.generated.exchange = Some(hold_landing(exchange, true));
-            return;
-        }
-        if exchange.grant
-            && state.generated.crossing_blocked(
-                exchange.id,
-                exchange.segment,
-                &super::external_targets(&state.generated, &state.session.telemetry),
-            )
-            && state
-                .generated
-                .flights
-                .get(&exchange.id)
-                .and_then(|flight| flight.route.segment(exchange.segment))
-                .is_some_and(|segment| {
-                    segment.stage == openatc_core::traffic::motion::Stage::Takeoff
-                })
-        {
-            state
-                .generated
-                .reported_holds
-                .insert((exchange.id, exchange.segment));
-            let wake = state
-                .generated
-                .departure_wake
-                .get(&exchange.id)
-                .is_some_and(|seconds| *seconds > 0.0);
-            state.generated.exchange = Some(hold_takeoff(exchange, true, wake));
-            return;
-        }
-        if exchange.grant
-            && state.generated.active_flights.contains(&exchange.id)
-            && state
-                .generated
-                .flights
-                .get(&exchange.id)
-                .and_then(|flight| flight.route.segment(exchange.segment))
-                .is_some_and(|segment| {
-                    segment.stage == openatc_core::traffic::motion::Stage::Crossing
-                })
-            && state.generated.crossing_blocked(
-                exchange.id,
-                exchange.segment,
-                &super::external_targets(&state.generated, &state.session.telemetry),
-            )
-        {
-            let runway = state
-                .generated
-                .flights
-                .get(&exchange.id)
-                .and_then(|flight| flight.vacated_reports.get(&(exchange.segment + 1)))
-                .map(|report| report.runway.as_str());
-            state.generated.exchange = Some(cancel_crossing(exchange, runway));
-            return;
-        }
-        if let Some((plan, _)) = exchange.sector_transfer.as_ref()
-            && (!state
-                .generated
-                .flights
-                .get(&exchange.id)
-                .is_some_and(|current| Arc::ptr_eq(plan, current))
-                || state
-                    .generated
-                    .world
-                    .snapshot()
-                    .iter()
-                    .any(|pose| pose.id == exchange.id && pose.recovering))
-        {
-            return;
-        }
-        if let Some(receiver) = exchange.tune_after.as_ref()
-            && let Some(frame) = state
-                .generated
-                .frames
-                .iter_mut()
-                .find(|frame| frame.target.id == exchange.id)
-        {
-            frame.target.com1_khz = Some(receiver.khz);
-            state
-                .generated
-                .controllers
-                .insert(exchange.id, receiver.clone());
-            if let Some((plan, count)) = exchange.sector_transfer.as_ref() {
-                if state
-                    .generated
-                    .flights
-                    .get(&exchange.id)
-                    .is_some_and(|current| Arc::ptr_eq(plan, current))
-                    && state
-                        .generated
-                        .world
-                        .snapshot()
-                        .iter()
-                        .any(|pose| pose.id == exchange.id && !pose.recovering)
-                {
-                    state
-                        .generated
-                        .sector_transfers
-                        .insert((exchange.id, exchange.segment), *count);
-                    state
-                        .generated
-                        .pending_sector_checkins
-                        .insert(exchange.id, (plan.clone(), receiver.clone()));
-                }
-            } else if state.generated.active_flights.contains(&exchange.id) {
-                state
-                    .generated
-                    .handoff_targets
-                    .insert(exchange.id, exchange.segment);
-                state
-                    .generated
-                    .pending_checkins
-                    .insert((exchange.id, exchange.segment));
-            }
-        }
-        if exchange.grant {
-            state
-                .generated
-                .approved_orders
-                .insert((exchange.id, exchange.segment));
-            // A ground clearance covers the contiguous movement of its own stage. It must not
-            // approve a later pushback, taxi or takeoff segment that needs its own readback.
-            if !state.generated.active_flights.contains(&exchange.id)
-                && let Some(route) = state
-                    .generated
-                    .apron_routes
-                    .get(&exchange.id)
-                    .cloned()
-                    .or_else(|| state.generated.world.assigned_route(exchange.id))
-            {
-                let stage = route.segment(exchange.segment).map(|segment| segment.stage);
-                if matches!(
-                    stage,
-                    Some(
-                        openatc_core::traffic::motion::Stage::Pushback
-                            | openatc_core::traffic::motion::Stage::TaxiOut
-                            | openatc_core::traffic::motion::Stage::TaxiIn
-                    )
-                ) {
-                    for index in exchange.segment..route.segment_count() {
-                        let Some(segment) = route.segment(index) else {
-                            break;
-                        };
-                        if Some(segment.stage) != stage {
-                            break;
-                        }
-                        state.generated.approved_orders.insert((exchange.id, index));
-                    }
-                }
-            }
-            super::flight::acknowledge(&mut state.generated, exchange.id, exchange.segment);
-        }
-        return;
-    }
-    if exchange.next == 0 {
-        let role = if exchange.station.services.is_empty() {
-            exchange.station.service.clone()
-        } else {
-            format!(
-                "{} [{}]",
-                exchange.station.service,
-                exchange.station.services.join(" + ")
-            )
-        };
-        state.generated.log(
-            openatc_settings::TrafficLog::Summary,
-            format!(
-                "{} on {} ({role}) {} kHz",
-                exchange.callsign, exchange.station.name, exchange.station.khz
-            ),
-        );
-    }
-    let (controller, text) = &exchange.messages[exchange.next];
-    let spoken_text = state.generated.spoken_text(text);
-    if state.settings.hear_traffic_radio
-        && state.session.telemetry.radio_power
-        && let Some(radio) = state.session.receiving_radio(exchange.station.khz)
-    {
-        let mut tag = if *controller {
-            crate::flight::tag(state, &exchange.station)
-        } else {
-            SpeechTag {
-                position: "Traffic".into(),
-                voice: crate::traffic::pilot_voice(state, exchange.id),
-                ..Default::default()
-            }
-        };
-        tag.radio = Some(radio);
-        let spoken_callsign = state.generated.spoken_text(&exchange.callsign);
-        add_transmission(
-            &mut state.session,
-            if *controller { "ATC" } else { &spoken_callsign },
-            &spoken_text,
-            &tag,
-        );
-        state.session.transcript.last_mut().unwrap().background = true;
-    }
-    exchange.due =
-        Instant::now() + Duration::from_secs_f64(spoken_text.chars().count() as f64 / rate + gap);
-    exchange.next += 1;
-    state.generated.exchange = Some(exchange);
 }
 
 #[cfg(test)]
@@ -2039,7 +2215,8 @@ mod tests {
             }),
             animation: Animation::default(),
         });
-        let exchange = apron_exchange(&mut state).expect("gate departure should call Delivery");
+        let exchange =
+            apron_exchange(&mut state, true).expect("gate departure should call Delivery");
         assert_eq!(exchange.station.service, "Delivery");
         assert_eq!(exchange.messages.len(), 3);
         assert!(exchange.messages[0].0 == false);

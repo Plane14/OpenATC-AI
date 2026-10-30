@@ -2231,20 +2231,14 @@ pub fn holding_marker_position(airport: &Airport, points: &[Point]) -> Option<Po
 /// Arrival tolerance around a taxi route's endpoint.
 pub const HOLD_POINT_RADIUS_METRES: f64 = 45.0;
 
-/// Recognize the route endpoint or its nearby painted holding line on approach.
+/// Geometry-only holding point test shared by the player and generated traffic.
+/// It recognizes the holding marker, the route endpoint, or a nearby painted hold line
+/// without requiring the aircraft to be fully stopped.
 #[must_use]
-pub fn taxi_hold_reached(airport: &Airport, route: &TaxiClearance, telemetry: &Telemetry) -> bool {
-    if !telemetry.position_valid
-        || !telemetry.on_ground
-        || telemetry.paused
-        || !route.crossing_runway.is_empty()
-    {
-        return false;
-    }
+pub fn taxi_hold_geometry_reached(airport: &Airport, route: &TaxiClearance, here: Point) -> bool {
     let Some(end) = route.points.last() else {
         return false;
     };
-    let here = airport_point(airport, telemetry.latitude, telemetry.longitude);
     if !route.hold_short_runway.is_empty()
         && route
             .holding_marker_point
@@ -2266,6 +2260,20 @@ pub fn taxi_hold_reached(airport: &Airport, route: &TaxiClearance, telemetry: &T
             segment_distance(*end, line[0], line[1]) <= 100.0
                 && segment_distance(here, line[0], line[1]) <= 25.0
         })
+}
+
+/// Recognize the route endpoint or its nearby painted holding line on approach.
+#[must_use]
+pub fn taxi_hold_reached(airport: &Airport, route: &TaxiClearance, telemetry: &Telemetry) -> bool {
+    if !telemetry.position_valid
+        || !telemetry.on_ground
+        || telemetry.paused
+        || !route.crossing_runway.is_empty()
+    {
+        return false;
+    }
+    let here = airport_point(airport, telemetry.latitude, telemetry.longitude);
+    taxi_hold_geometry_reached(airport, route, here)
 }
 
 /// A crossing finishes once the aircraft is on the opposite side with tail clearance.
@@ -2628,6 +2636,44 @@ fn calculate_crossing_route_with(
         reference_longitude: airport.reference_longitude,
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod hold_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn a_rolling_aircraft_is_at_the_hold_before_the_segment_completes() {
+        let airport = demo_airport();
+        let point = |east, north| Point {
+            east,
+            north,
+            height: 0.0,
+        };
+        let route = TaxiClearance {
+            points: vec![
+                point(-1000.0, 200.0),
+                point(-500.0, 200.0),
+                point(0.0, 200.0),
+            ],
+            hold_short_runway: "09".into(),
+            ..Default::default()
+        };
+        assert!(taxi_hold_geometry_reached(
+            &airport,
+            &route,
+            point(0.0, 200.0)
+        ));
+        assert!(
+            taxi_hold_geometry_reached(&airport, &route, point(-30.0, 200.0)),
+            "a rolling aircraft within the hold radius is already at the hold"
+        );
+        assert!(!taxi_hold_geometry_reached(
+            &airport,
+            &route,
+            point(-200.0, 200.0)
+        ));
+    }
 }
 
 #[cfg(test)]

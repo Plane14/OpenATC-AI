@@ -54,36 +54,42 @@ pub(super) fn accepted_world(runtime: &Runtime) -> World {
     world
 }
 
+fn runway_endpoints(airport: &Airport, name: &str) -> Option<(Point, Point)> {
+    let runway = airport
+        .runways
+        .iter()
+        .find(|candidate| candidate.first_name == name || candidate.second_name == name)?;
+    if runway.first_name == name {
+        Some((runway.first, runway.second))
+    } else {
+        Some((runway.second, runway.first))
+    }
+}
+
+fn runway_heading(start: Point, end: Point) -> f64 {
+    (end.east - start.east)
+        .atan2(end.north - start.north)
+        .to_degrees()
+        .rem_euclid(360.0)
+}
+
 /// True when two named runways are parallel and far enough apart to be treated as separate
 /// movement surfaces. The 04L/04R pair at Nice is about 309 m apart.
 fn parallel_runways(airport: &Airport, runway: &str, other: &str) -> bool {
     if runway == other {
         return false;
     }
-    let endpoints = |name: &str| {
-        let runway = airport
-            .runways
-            .iter()
-            .find(|candidate| candidate.first_name == name || candidate.second_name == name)?;
-        if runway.first_name == name {
-            Some((runway.first, runway.second))
-        } else {
-            Some((runway.second, runway.first))
-        }
-    };
-    let (Some((start, end)), Some((other_start, other_end))) =
-        (endpoints(runway), endpoints(other))
-    else {
+    let (Some((start, end)), Some((other_start, other_end))) = (
+        runway_endpoints(airport, runway),
+        runway_endpoints(airport, other),
+    ) else {
         return false;
     };
-    let heading = |start: Point, end: Point| {
-        (end.east - start.east)
-            .atan2(end.north - start.north)
-            .to_degrees()
-            .rem_euclid(360.0)
-    };
-    let angle =
-        openatc_core::navigation::turn(heading(start, end), heading(other_start, other_end)).abs();
+    let angle = openatc_core::navigation::turn(
+        runway_heading(start, end),
+        runway_heading(other_start, other_end),
+    )
+    .abs();
     if angle.min((180.0 - angle).abs()) >= 20.0 {
         return false;
     }
@@ -94,14 +100,21 @@ fn parallel_runways(airport: &Airport, runway: &str, other: &str) -> bool {
         return false;
     }
     let across =
-        ((other_start.east - start.east) * dn - (other_start.north - start.north) * dx) / length;
-    across.abs() > 250.0
+        |point: Point| ((point.east - start.east) * dn - (point.north - start.north) * dx) / length;
+    let near = across(other_start);
+    let far = across(other_end);
+    // Both ends must stay on the same side of this centreline and clear of it. A runway
+    // that converges on, or crosses, this one is never treated as parallel even when its
+    // heading happens to match within the angular tolerance.
+    near * far > 0.0 && near.abs() > 250.0 && far.abs() > 250.0
 }
 
-/// A low aircraft on short final to any runway can go around across the parallel runway.
-/// It must not be ignored by the parallel-runway filter at that point.
-pub(super) fn short_final(
+/// A low aircraft on short final to this runway can go around across its departure path.
+/// A parallel runway is handled by the runway-pair filter instead: a departure on one strip
+/// is allowed while an arrival is landing on the other, including a short final.
+fn short_final_for(
     airport: &Airport,
+    runway: &str,
     latitude: f64,
     longitude: f64,
     altitude_feet: f64,
@@ -111,24 +124,21 @@ pub(super) fn short_final(
     if !(0.0..2000.0).contains(&agl) {
         return false;
     }
-    airport.runways.iter().any(|runway| {
-        let Some((along, across, length, heading)) = openatc_core::traffic::runway_position(
-            airport,
-            &runway.first_name,
-            latitude,
-            longitude,
-        ) else {
-            return false;
-        };
-        let turn = openatc_core::navigation::turn(heading, track_degrees).abs();
-        let inbound = along < 0.0 && turn < 35.0 || along > length && turn > 145.0;
-        let distance = if along < 0.0 { -along } else { along - length };
-        inbound && distance < 3.0 * 1852.0 && across.abs() < 300.0
-    })
+    let Some((along, across, length, heading)) =
+        openatc_core::traffic::runway_position(airport, runway, latitude, longitude)
+    else {
+        return false;
+    };
+    let turn = openatc_core::navigation::turn(heading, track_degrees).abs();
+    let inbound = along < 0.0 && turn < 35.0 || along > length && turn > 145.0;
+    let distance = if along < 0.0 { -along } else { along - length };
+    inbound && distance < 3.0 * 1852.0 && across.abs() < 300.0
 }
 
-/// True when an airborne target is flying parallel to a different runway rather than crossing
-/// the departure path. A 04L arrival must not withhold a 04R departure.
+/// True when an airborne target is established on a genuinely parallel runway rather than
+/// crossing the departure path. A 04L arrival must not withhold a 04R departure, but traffic
+/// on a converging or crossing final is never dismissed as parallel just because its track
+/// happens to line up with the departure runway.
 pub(super) fn parallel_other_runway(
     airport: &Airport,
     runway: &str,
@@ -136,13 +146,49 @@ pub(super) fn parallel_other_runway(
     longitude: f64,
     track_degrees: f64,
 ) -> bool {
-    let Some((_, across, _, heading)) =
+    let Some((_, across, _, _)) =
         openatc_core::traffic::runway_position(airport, runway, latitude, longitude)
     else {
         return false;
     };
-    let angle = openatc_core::navigation::turn(track_degrees, heading).abs();
-    angle.min((180.0 - angle).abs()) < 20.0 && across.abs() > 250.0
+    // A target on the departure runway itself is never "parallel other runway".
+    if across.abs() <= 80.0 {
+        return false;
+    }
+    let nearest = airport
+        .runways
+        .iter()
+        .filter_map(|candidate| {
+            let name = if openatc_core::navigation::turn(
+                track_degrees,
+                runway_heading(candidate.first, candidate.second),
+            )
+            .abs()
+                < 20.0
+            {
+                &candidate.first_name
+            } else if openatc_core::navigation::turn(
+                track_degrees,
+                runway_heading(candidate.second, candidate.first),
+            )
+            .abs()
+                < 20.0
+            {
+                &candidate.second_name
+            } else {
+                return None;
+            };
+            // Use the nearest aligned runway. A converging final can be within the wider
+            // localizer corridor of a nearby parallel strip; attributing it to that strip
+            // would wrongly dismiss it.
+            let across =
+                openatc_core::traffic::runway_position(airport, name, latitude, longitude)?
+                    .1
+                    .abs();
+            (across < 500.0).then_some((across, name))
+        })
+        .min_by(|(left, _), (right, _)| left.total_cmp(right));
+    nearest.is_some_and(|(_, name)| parallel_runways(airport, runway, name))
 }
 
 /// The forecast includes existing accepted scopes, their fallback holds and the proposed grant.
@@ -365,20 +411,24 @@ pub(super) fn forecast_clear(
             .iter()
             .filter(|other| other.id != id && !other.stage.on_ground())
             .filter(|other| {
-                let short = aircraft_airport.is_some_and(|airport| {
-                    short_final(
-                        airport,
-                        other.position.latitude,
-                        other.position.longitude,
-                        other.position.altitude_feet,
-                        other.heading,
-                    )
+                let short = runway.is_some_and(|own| {
+                    aircraft_airport.is_some_and(|airport| {
+                        short_final_for(
+                            airport,
+                            own,
+                            other.position.latitude,
+                            other.position.longitude,
+                            other.position.altitude_feet,
+                            other.heading,
+                        )
+                    })
                 });
+                // A generated arrival assigned to the parallel runway is a separate
+                // operation, whether it is established or still joining final. A missed
+                // approach that turns across the departure path is a separate stage and is
+                // still checked by the generic parallel filter below.
                 if !short
-                    && matches!(
-                        other.stage,
-                        Stage::Approach | Stage::MissedApproach | Stage::Rollout
-                    )
+                    && other.stage == Stage::Approach
                     && let (Some(own), Some(other_runway)) = (runway, assigned_runway(other))
                     && let Some(airport) = aircraft_airport
                     && parallel_runways(airport, own, &other_runway)
@@ -414,14 +464,17 @@ pub(super) fn forecast_clear(
             .iter()
             .filter(|(target, _)| !target.on_ground)
             .filter(|(target, _)| {
-                aircraft_airport.is_some_and(|airport| {
-                    short_final(
-                        airport,
-                        target.latitude,
-                        target.longitude,
-                        target.altitude_feet,
-                        target.track_degrees,
-                    )
+                runway.is_some_and(|own| {
+                    aircraft_airport.is_some_and(|airport| {
+                        short_final_for(
+                            airport,
+                            own,
+                            target.latitude,
+                            target.longitude,
+                            target.altitude_feet,
+                            target.track_degrees,
+                        )
+                    })
                 }) || !parallel_other(target.latitude, target.longitude, target.track_degrees)
             })
         {
@@ -619,12 +672,12 @@ mod tests {
                     width: 45.0,
                     first: Point {
                         east: 0.0,
-                        north: 309.0,
+                        north: 800.0,
                         ..Default::default()
                     },
                     second: Point {
                         east: 3000.0,
-                        north: 309.0,
+                        north: 800.0,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -645,13 +698,42 @@ mod tests {
                     },
                     ..Default::default()
                 },
+                openatc_core::airport::Runway {
+                    first_name: "09C".into(),
+                    second_name: "27C".into(),
+                    width: 45.0,
+                    first: Point {
+                        east: 0.0,
+                        north: 500.0,
+                        ..Default::default()
+                    },
+                    second: Point {
+                        east: 3000.0,
+                        north: 200.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };
         assert!(parallel_runways(&airport, "09", "09L"));
+        assert!(parallel_runways(&airport, "09L", "09"));
         assert!(parallel_runways(&airport, "09", "27R"));
         assert!(!parallel_runways(&airport, "09", "09"));
         assert!(!parallel_runways(&airport, "09", "18"));
+        assert!(
+            !parallel_runways(&airport, "09", "09C"),
+            "a converging runway is not parallel even when its heading is close"
+        );
+        assert!(
+            !parallel_other_runway(&airport, "09", 480.0 / 111_320.0, -0.02, 95.7),
+            "an aircraft on a converging final must stay a conflict"
+        );
+        assert!(
+            parallel_other_runway(&airport, "09", 800.0 / 111_320.0, -0.02, 90.0),
+            "an aircraft established on the parallel final is not a conflict"
+        );
     }
 
     #[test]

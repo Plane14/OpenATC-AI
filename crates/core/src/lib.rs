@@ -1,10 +1,12 @@
 //! Unit conversion and display/speech formatting for flight quantities.
 //! Whole-unit values round half away from zero.
 
+pub mod aircraft;
 pub mod airport;
 pub mod apply;
 pub mod arrival;
 mod atc;
+pub mod atc_manager;
 pub mod catalog;
 pub mod compliance;
 pub mod configuration;

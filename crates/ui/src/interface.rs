@@ -241,6 +241,10 @@ pub struct Interface {
     pub settings_changed_at: f64,
     /// Last user interaction time.
     pub last_interaction: f64,
+    /// Last tuned COM1 frequency in kHz, for stopping speech on change.
+    pub last_com1_khz: i32,
+    /// Last tuned COM2 frequency in kHz, for stopping speech on change.
+    pub last_com2_khz: Option<i32>,
     /// Open request modal intent.
     pub modal_intent: String,
     /// Open request modal title.
@@ -490,6 +494,8 @@ impl Interface {
             last_settings_json: String::new(),
             settings_changed_at: 0.0,
             last_interaction: 0.0,
+            last_com1_khz: 0,
+            last_com2_khz: None,
             modal_intent: String::new(),
             modal_title: String::new(),
             requested_altitude: 32000,
@@ -1092,6 +1098,16 @@ impl Interface {
     pub fn update_speech(&mut self, state: &State) {
         use openatc_core::identify::interpret_text;
         use openatc_core::intents::speech_worth_sending;
+        if self.last_com1_khz != 0 && self.last_com1_khz != state.telemetry.com1_khz {
+            self.speech.stop_speech();
+            self.speech_queue.retain(|q| q.radio != Some(openatc_core::state::Radio::Com1));
+        }
+        if self.last_com2_khz != state.telemetry.com2_khz {
+            self.speech_com2.stop_speech();
+            self.speech_queue.retain(|q| q.radio != Some(openatc_core::state::Radio::Com2));
+        }
+        self.last_com1_khz = state.telemetry.com1_khz;
+        self.last_com2_khz = state.telemetry.com2_khz;
         self.speech.configure(
             &self.settings.input_device.clone(),
             &self.settings.output_device.clone(),

@@ -19,6 +19,7 @@ use axum::{
     extract::State as AxumState,
     response::{IntoResponse, Response},
 };
+use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::{
     apply::add_transmission,
     dialogue::say,
@@ -59,6 +60,7 @@ pub struct Traffic {
     report: Option<(u32, String)>,
     last_radio: Option<Instant>,
     clear_since: Option<Instant>,
+    hold_target: Option<u32>,
     speed: Option<(f64, Option<f64>)>,
     speed_declined: bool,
     speed_sequence: u32,
@@ -100,6 +102,7 @@ pub fn observe(state: &mut EngineState) {
         return;
     }
     state.traffic.observed = Some(Instant::now());
+    crate::atc::sync_traffic(state);
     state
         .traffic
         .pilots
@@ -411,12 +414,18 @@ fn surface(state: &mut EngineState, station: &Station) -> bool {
         if route.traffic_hold {
             return true;
         }
+        if state.traffic.hold_target == Some(target.id) {
+            // Already holding for this traffic; do not repeat the instruction.
+            state.session.taxi_clearance.traffic_hold = true;
+            return true;
+        }
         let traffic = if target.callsign.is_empty() {
             say("traffic_unidentified", &[])
         } else {
             target.callsign.clone()
         };
         state.session.taxi_clearance.traffic_hold = true;
+        state.traffic.hold_target = Some(target.id);
         atc(
             state,
             station,
@@ -440,6 +449,7 @@ fn surface(state: &mut EngineState, station: &Station) -> bool {
         let instructions = route.instructions.clone();
         state.session.taxi_clearance.traffic_hold = false;
         state.traffic.clear_since = None;
+        state.traffic.hold_target = None;
         atc(
             state,
             station,
@@ -878,7 +888,7 @@ mod tests {
             icao: "TEST".into(),
             ..Default::default()
         });
-        s.session.phase = PhaseCode::Taxi;
+        s.session.on_event(openatc_core::aircraft::AircraftEvent::Taxi);
         s.session.taxi_clearance = TaxiClearance {
             airport: "TEST".into(),
             approved: true,
@@ -944,7 +954,7 @@ mod tests {
         let mut port = airport();
         port.icao = "KTEST".into();
         state.arrival_airport = Some(port);
-        state.session.phase = PhaseCode::Arrival;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
         state.session.plan.arrival_runway = "36".into();
         state.session.plan.aircraft = code.into();
         state.session.telemetry = Telemetry {

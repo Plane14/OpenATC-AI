@@ -1,6 +1,8 @@
 //! Controller request handling, clearance state and transcript recording.
 //! Network and model calls are handled by the companion engine.
 
+use crate::aircraft::AircraftBehaviour;
+
 use super::airport::{Airport, airport_point, calculate_taxi_route};
 use super::intents::Realism;
 use super::ops::{phase_name, request_available};
@@ -505,7 +507,7 @@ fn apply_clearance(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcom
         sequence: state.next_sequence,
         ..Default::default()
     });
-    state.phase = PhaseCode::Clearance;
+    state.on_event(crate::aircraft::AircraftEvent::IfrClearanceReceived);
     let prefix = if state.demo { "DEMO: " } else { "" };
     let altitude = altitude_text(f64::from(state.plan.initial_altitude_feet), ctx.units, true);
     let via = if departure_readback.is_empty() {
@@ -762,7 +764,7 @@ fn apply_ready(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome {
         }
     }
     state.taxi_clearance.waiting_for_traffic = false;
-    state.phase = PhaseCode::Departure;
+    state.on_event(crate::aircraft::AircraftEvent::Departure);
     state.taxi_clearance.approved = false;
     let prefix = if state.demo { "DEMO: " } else { "" };
     reply(
@@ -861,7 +863,7 @@ fn apply_ground(state: &mut State, ctx: &RequestContext<'_>) -> Option<RequestOu
         if intent == "start_pushback" {
             state.startup_approved = true;
         }
-        state.phase = PhaseCode::Pushback;
+        state.on_event(crate::aircraft::AircraftEvent::PushbackComplete);
         let prefix = if state.demo { "DEMO: " } else { "" };
         return Some(reply(
             state,
@@ -976,7 +978,7 @@ fn apply_airborne(state: &mut State, ctx: &RequestContext<'_>) -> Option<Request
                 crate::dialogue::say("descent_altitude_must_be_below_your_current", &[]),
             ));
         }
-        state.phase = PhaseCode::Arrival;
+        state.on_event(crate::aircraft::AircraftEvent::Arrival);
     }
     proposed.readback_scope = if intent == "direct" {
         "direct"
@@ -1123,7 +1125,7 @@ fn apply_service(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome 
         );
     }
     if intent == "go_around" {
-        state.phase = PhaseCode::Departure;
+        state.on_event(crate::aircraft::AircraftEvent::Departure);
         state.phase_evidence = 0;
         return reply(
             state,
@@ -1143,7 +1145,7 @@ fn apply_service(state: &mut State, ctx: &RequestContext<'_>) -> RequestOutcome 
         return outcome;
     }
     if intent == "approach" {
-        state.phase = PhaseCode::Approach;
+        state.on_event(crate::aircraft::AircraftEvent::Approach);
         return reply(
             state,
             ctx,

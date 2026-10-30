@@ -12,6 +12,7 @@
 
 use crate::interface::Interface;
 use crate::widgets;
+use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::ops::{phase_name, request_available};
 use openatc_core::state::{Request, State};
 use openatc_core::{altitude_text, feet_to_meters, meters_to_feet, resolve_units};
@@ -3341,7 +3342,7 @@ mod tests {
     #[test]
     fn center_radio_keeps_departure_requests_available() {
         let mut state = State::default();
-        state.phase = openatc_core::state::PhaseCode::Departure;
+        state.on_event(openatc_core::aircraft::AircraftEvent::Departure);
         state.has_departed = true;
         state.clearance = Some(openatc_core::state::Clearance {
             altitude_feet: 5000,
@@ -3560,7 +3561,7 @@ mod tests {
         ));
         assert!(!quick_request_available(&state, Some(&ground), "clearance"));
         assert!(!quick_request_available(&state, None, "radio_check"));
-        state.phase = PhaseCode::Clearance;
+        state.on_event(openatc_core::aircraft::AircraftEvent::IfrClearanceReceived);
         state.clearance = Some(Clearance {
             acknowledged: true,
             ..Default::default()
@@ -3572,7 +3573,7 @@ mod tests {
         assert!(quick_request_available(&state, Some(&tower), "taxi"));
         assert!(quick_request_available(&state, Some(&tower), "checkin"));
         assert!(quick_request_available(&state, Some(&delivery), "checkin"));
-        state.phase = PhaseCode::Cruise;
+        state.on_event(openatc_core::aircraft::AircraftEvent::Cruise);
         state.telemetry.on_ground = false;
         let center = Station {
             service: "Center".into(),

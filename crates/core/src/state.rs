@@ -862,6 +862,9 @@ pub struct State {
     pub telemetry: Telemetry,
     /// Flight stage, integer-coded.
     pub phase: PhaseCode,
+    /// Shared aircraft state for unified pilot/traffic behaviour.
+    #[serde(default)]
+    pub aircraft: crate::aircraft::AircraftState,
     /// Active clearance, if any.
     #[serde(default)]
     pub clearance: Option<Clearance>,
@@ -937,6 +940,7 @@ impl Default for State {
             plan: FlightPlan::default(),
             telemetry: Telemetry::default(),
             phase: PhaseCode::Parked,
+            aircraft: crate::aircraft::AircraftState::default(),
             clearance: None,
             transcript: Vec::new(),
             demo: true,
@@ -1004,4 +1008,86 @@ pub struct AtcOffer {
     pub frequency_khz: i32,
     /// Known downstream route fix.
     pub waypoint: String,
+}
+
+impl crate::aircraft::AircraftBehaviour for State {
+    fn state(&self) -> &crate::aircraft::AircraftState {
+        &self.aircraft
+    }
+
+    fn state_mut(&mut self) -> &mut crate::aircraft::AircraftState {
+        &mut self.aircraft
+    }
+
+    fn on_event(&mut self, event: crate::aircraft::AircraftEvent) -> crate::aircraft::AircraftOutcome {
+        use crate::aircraft::{AircraftEvent, AircraftOutcome, AircraftPhase};
+        match event {
+            AircraftEvent::IfrClearanceReceived => {
+                self.phase = PhaseCode::Clearance;
+                self.aircraft.phase = AircraftPhase::IfrClearance;
+                AircraftOutcome::Advanced(AircraftPhase::IfrClearance)
+            }
+            AircraftEvent::StartupComplete => {
+                self.aircraft.phase = AircraftPhase::Startup;
+                AircraftOutcome::Advanced(AircraftPhase::Startup)
+            }
+            AircraftEvent::PushbackComplete => {
+                self.phase = PhaseCode::Pushback;
+                self.pushback_approved = true;
+                self.aircraft.phase = AircraftPhase::Pushback;
+                AircraftOutcome::Advanced(AircraftPhase::Pushback)
+            }
+            AircraftEvent::Arrival => {
+                self.phase = PhaseCode::Arrival;
+                self.aircraft.phase = AircraftPhase::Arrival;
+                AircraftOutcome::Advanced(AircraftPhase::Arrival)
+            }
+            AircraftEvent::Departure => {
+                self.phase = PhaseCode::Departure;
+                self.aircraft.phase = AircraftPhase::Departure;
+                AircraftOutcome::Advanced(AircraftPhase::Departure)
+            }
+            AircraftEvent::Approach => {
+                self.phase = PhaseCode::Approach;
+                self.aircraft.phase = AircraftPhase::Approach;
+                AircraftOutcome::Advanced(AircraftPhase::Approach)
+            }
+            AircraftEvent::Cruise => {
+                self.phase = PhaseCode::Cruise;
+                self.aircraft.phase = AircraftPhase::Cruise;
+                AircraftOutcome::Advanced(AircraftPhase::Cruise)
+            }
+            AircraftEvent::Landed => {
+                self.phase = PhaseCode::Landed;
+                self.aircraft.phase = AircraftPhase::Landed;
+                AircraftOutcome::Advanced(AircraftPhase::Landed)
+            }
+            AircraftEvent::Taxi => {
+                self.phase = PhaseCode::Taxi;
+                self.aircraft.phase = AircraftPhase::Taxi;
+                AircraftOutcome::Advanced(AircraftPhase::Taxi)
+            }
+            AircraftEvent::TaxiIn => {
+                self.phase = PhaseCode::TaxiIn;
+                self.aircraft.phase = AircraftPhase::TaxiIn;
+                AircraftOutcome::Advanced(AircraftPhase::TaxiIn)
+            }
+            AircraftEvent::Finished => {
+                self.phase = PhaseCode::Finished;
+                self.aircraft.phase = AircraftPhase::Finished;
+                AircraftOutcome::Advanced(AircraftPhase::Finished)
+            }
+            AircraftEvent::Parked => {
+                self.phase = PhaseCode::Parked;
+                self.aircraft.phase = AircraftPhase::Parked;
+                AircraftOutcome::Advanced(AircraftPhase::Parked)
+            }
+            _ => AircraftOutcome::None,
+        }
+    }
+
+    fn advance(&mut self, seconds: f64) -> crate::aircraft::AircraftOutcome {
+        self.aircraft.last_progress_seconds = seconds;
+        crate::aircraft::AircraftOutcome::None
+    }
 }

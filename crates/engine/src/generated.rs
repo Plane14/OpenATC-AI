@@ -105,8 +105,6 @@ pub struct Runtime {
     network_pending: bool,
     /// Ground poses already described in the detail log.
     detail_logged: BTreeSet<(u32, usize, bool)>,
-    /// Rejoin retry time per (aircraft, recovery boundary).
-    rejoin_retry: BTreeMap<(u32, usize), f64>,
     frames: Vec<GeneratedTraffic>,
     visible: BTreeSet<u32>,
     world: openatc_core::traffic::motion::World,
@@ -144,6 +142,8 @@ pub struct Runtime {
     departure_sequence: u64,
     cancelled_landings: BTreeSet<(u32, usize)>,
     exchange: Option<radio::Exchange>,
+    /// A delivery clearance can proceed while Ground or Tower owns the primary exchange.
+    delivery_exchange: Option<radio::Exchange>,
     last_speed_check: Option<f64>,
     last_speed_aircraft: u32,
     reported_crossings: BTreeSet<(u32, usize)>,
@@ -153,7 +153,16 @@ pub struct Runtime {
     /// Last logged hold reason per clearance, so a changed cause is attributable without
     /// repeating the same line every tick.
     hold_reasons: BTreeMap<(u32, usize), String>,
+    /// Authoritative phase and liveness record for the new frequency runtime.
+    sessions: crate::traffic_runtime::SessionRegistry,
+    health: crate::traffic_runtime::TrafficHealth,
+    /// Last pose segment and position per session, used to detect real movement.
+    session_segments: BTreeMap<u32, usize>,
+    session_positions: BTreeMap<u32, (f64, f64)>,
     departure_waits: BTreeMap<u32, (String, Instant)>,
+    /// Last crossing reissue per (aircraft, segment), so a blocked crossing cannot consume
+    /// every controller exchange while it waits for traffic.
+    reissued_crossings: BTreeMap<(u32, usize), Instant>,
     tower_notified: BTreeSet<u32>,
     tower_ready: BTreeSet<u32>,
     flights: BTreeMap<u32, Arc<flight::Prepared>>,
@@ -2528,7 +2537,6 @@ impl Scene {
                 continue;
             };
             let route = &plan.route;
-            let start = route.start_position();
             let end = route.end_position();
             let ends_here =
                 openatc_core::arrival::distance_nm([end.latitude, end.longitude], reference) < 3.0;
@@ -4737,6 +4745,98 @@ fn external_targets(
     targets
 }
 
+fn session_phase(
+    stage: openatc_core::traffic::motion::Stage,
+) -> Option<crate::traffic_runtime::Phase> {
+    use crate::traffic_runtime::Phase;
+    use openatc_core::traffic::motion::Stage;
+    Some(match stage {
+        Stage::Parked => Phase::AtGate,
+        Stage::Pushback => Phase::Pushback,
+        Stage::TaxiOut => Phase::Taxi,
+        Stage::Crossing => Phase::Crossing,
+        Stage::LineUp => Phase::LineUp,
+        Stage::Takeoff => Phase::Takeoff,
+        Stage::Climb | Stage::Cruise | Stage::Descent | Stage::Holding => Phase::Airborne,
+        Stage::Approach | Stage::MissedApproach => Phase::Approach,
+        Stage::Rollout => Phase::Landing,
+        Stage::TaxiIn => Phase::TaxiIn,
+        Stage::Turnaround => Phase::AtGateIn,
+    })
+}
+
+fn update_sessions(runtime: &mut Runtime, seconds: f64) {
+    let poses = runtime.world.snapshot();
+    let ids: BTreeSet<u32> = runtime
+        .frames
+        .iter()
+        .filter(|frame| poses.iter().any(|pose| pose.id == frame.target.id))
+        .map(|frame| frame.target.id)
+        .collect();
+    runtime.sessions.retain(&ids);
+    runtime.session_positions.retain(|id, _| ids.contains(id));
+    for frame in &runtime.frames {
+        let Some(pose) = poses.iter().find(|pose| pose.id == frame.target.id) else {
+            continue;
+        };
+        let Some(phase) = session_phase(pose.stage) else {
+            continue;
+        };
+        let frequency = frame.target.com1_khz.unwrap_or(0);
+        if !runtime.sessions.contains(pose.id) {
+            runtime.sessions.add(pose.id, frequency, phase, seconds);
+        } else {
+            runtime.sessions.phase(pose.id, phase, seconds);
+            // A speed above zero is not progress: a stopped crossing can still vibrate or
+            // creep on the spot. Only a new segment or a real position change resets health.
+            let moved =
+                runtime
+                    .session_positions
+                    .get(&pose.id)
+                    .is_none_or(|(latitude, longitude)| {
+                        openatc_core::arrival::distance_nm(
+                            [*latitude, *longitude],
+                            [pose.position.latitude, pose.position.longitude],
+                        ) * 1852.0
+                            > 1.0
+                    });
+            if runtime.session_segments.get(&pose.id) != Some(&pose.segment) || moved {
+                runtime.sessions.progress(pose.id, seconds);
+            }
+        }
+        runtime.session_segments.insert(pose.id, pose.segment);
+        runtime
+            .session_positions
+            .insert(pose.id, (pose.position.latitude, pose.position.longitude));
+    }
+    // The selector runtime still owns movement grants. Retiring a session here removed a
+    // legitimate flight that the old crossing path later released, so health actions are
+    // logged only until the frequency runtime owns the grant.
+    let actions = runtime.health.check(&mut runtime.sessions, seconds);
+    for action in actions {
+        match action {
+            crate::traffic_runtime::HealthAction::Retrigger(id) => runtime.log(
+                openatc_settings::TrafficLog::Summary,
+                format!("traffic health: session {id} needs a phase retrigger"),
+            ),
+            crate::traffic_runtime::HealthAction::Release(id) => {
+                runtime.world.release_movement(id);
+                runtime
+                    .approved_orders
+                    .retain(|(aircraft, _)| *aircraft != id);
+                runtime.log(
+                    openatc_settings::TrafficLog::Summary,
+                    format!("traffic health: released movement authority for stalled session {id}"),
+                );
+            }
+            crate::traffic_runtime::HealthAction::Retire(id) => runtime.log(
+                openatc_settings::TrafficLog::Summary,
+                format!("traffic health: session {id} is beyond recovery"),
+            ),
+        }
+    }
+}
+
 fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) -> bool {
     let mut clock_changed = false;
     if let (Some(_airport), Some(seconds), Some(_policy)) = (
@@ -4935,6 +5035,7 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) ->
             flight::clock_changed(runtime);
         }
         flight::synchronise_recoveries(runtime);
+        update_sessions(runtime, seconds);
         let elapsed = runtime
             .previous_time
             .replace(seconds)
@@ -5166,7 +5267,13 @@ fn withhold_conflicting_departures(
         .snapshot()
         .into_iter()
         .filter(|pose| {
+            // Once the roll is established, a late arrival conflict must not cancel the
+            // take-off. The movement world already cleared the runway before the roll; the
+            // arrival or go-around is sequenced around the departing aircraft instead.
+            let rolling =
+                pose.stage == openatc_core::traffic::motion::Stage::Takeoff && pose.knots > 20.0;
             !pose.recovering
+                && !rolling
                 && runtime.active_flights.contains(&pose.id)
                 && matches!(
                     pose.stage,
@@ -6708,7 +6815,7 @@ mod tests {
             input.counts[index] = counts[index].div_ceil(2);
             inbound.counts[index] = counts[index] / 2;
         }
-        let mut scene = prepare_direction(input).unwrap();
+        let scene = prepare_direction(input).unwrap();
         scene.observe_prepared(&mut inbound);
         let mut scene = scene.merge(prepare_direction(inbound).unwrap()).unwrap();
         assert_eq!(scene.frames.len(), expected, "{:?}", scene.warnings);
@@ -6758,6 +6865,9 @@ mod tests {
         let mut stopped_since = None;
         for second in 0..8000 {
             if let Some(exchange) = &mut state.generated.exchange {
+                exchange.due = Instant::now();
+            }
+            if let Some(exchange) = &mut state.generated.delivery_exchange {
                 exchange.due = Instant::now();
             }
             radio_tick(&mut state);

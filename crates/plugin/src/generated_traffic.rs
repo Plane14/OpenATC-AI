@@ -322,9 +322,18 @@ struct DrawClock {
     last: Option<std::time::Instant>,
 }
 impl DrawClock {
+    /// Never let a slow user setting starve the animation below this cadence. The engine
+    /// snapshots remain at their own rate; this only controls how often the renderer samples
+    /// the interpolated timeline.
+    const MIN_RATE_HZ: f32 = 24.0;
+
     fn ready(&mut self, rate: openatc_settings::TrafficRate, now: std::time::Instant) -> bool {
         self.skipped += 1;
+        let floor_due = self
+            .last
+            .is_some_and(|last| now.duration_since(last).as_secs_f32() >= 1.0 / Self::MIN_RATE_HZ);
         let due = self.last.is_none()
+            || floor_due
             || if rate.frames() > 0 {
                 self.skipped >= rate.frames()
             } else {
@@ -923,7 +932,7 @@ mod tests {
         );
     }
     #[test]
-    fn hertz_gate_throttles_even_when_callbacks_are_faster() {
+    fn hertz_gate_never_falls_below_the_minimum_frame_rate() {
         let mut clock = DrawClock::default();
         let start = std::time::Instant::now();
         let draws: Vec<_> = (0..10)
@@ -934,7 +943,9 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(draws, [0, 2, 4, 6, 8]);
+        // 50 ms callbacks are already 20 Hz, below the 24 Hz floor; the floor draws every
+        // callback rather than dropping to the requested 10 Hz.
+        assert_eq!(draws, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
     #[test]
     fn ground_relocation_is_not_drawn_as_a_taxi_route() {

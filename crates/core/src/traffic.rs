@@ -286,7 +286,16 @@ pub fn taxi_conflict<'a>(airport: &Airport, telemetry: &'a Telemetry) -> Option<
             );
             let norm = ve * ve + vn * vn;
             let closing = e * ve + n * vn;
+            let own_track = telemetry.ground_track_degrees.unwrap_or(telemetry.heading_degrees);
             let ahead = e * heading.sin() + n * heading.cos();
+            let across = e * heading.cos() - n * heading.sin();
+            let same_direction = ((target.track_degrees - own_track + 180.0).rem_euclid(360.0) - 180.0).abs() < 45.0;
+            // Traffic ahead on the same route is a follow, not a collision: do not issue
+            // a hold for it. Use track alignment when available, and fall back to a narrow
+            // corridor ahead so noisy track data cannot make a follower stop.
+            if ahead > 0.0 && (same_direction || (e.hypot(n) < 300.0 && across.abs() < 50.0)) {
+                return false;
+            }
             if norm < 0.01 {
                 return ahead >= -10.0 && e.hypot(n) < width;
             }

@@ -8,6 +8,7 @@
     clippy::cast_sign_loss
 )]
 use crate::EngineState;
+use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::{
     apply::add_transmission,
     dialogue::say,
@@ -454,7 +455,7 @@ pub fn tick(state: &mut EngineState) {
         && destination < 45.0
         && destination < origin
     {
-        state.session.phase = PhaseCode::Arrival;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
     }
     if protect_final(state, &current) {
         return;
@@ -807,7 +808,7 @@ pub fn request(
         state.flow.landing_cleared = false;
         state.flow.landing_hold = false;
         state.flow.landing_retry = None;
-        state.session.phase = PhaseCode::Arrival;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
         state.flow.approach_cleared = false;
         let text = say(
             "arrival_expect_runway",
@@ -1267,7 +1268,7 @@ fn amend_airport(
         state.flow.approach_cleared = false;
         state.flow.landing_cleared = false;
         if state.session.phase == PhaseCode::Approach {
-            state.session.phase = PhaseCode::Arrival;
+            state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
         }
         let text = say(
             "amendment_expect_approach",
@@ -1329,7 +1330,7 @@ fn amend_airport(
         }
         state.session.plan.runway.clone_from(&value);
         state.session.taxi_clearance = Default::default();
-        state.session.phase = PhaseCode::Clearance;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::IfrClearanceReceived);
         if let Some(c) = state.session.clearance.as_mut() {
             c.runway.clone_from(&value);
             c.sequence = state.session.next_sequence;
@@ -1353,7 +1354,7 @@ fn amend_airport(
         state.flow.approach_cleared = false;
         state.flow.landing_cleared = false;
         if state.session.phase == PhaseCode::Approach {
-            state.session.phase = PhaseCode::Arrival;
+            state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
         }
     }
     openatc_core::navigation::enrich(&mut state.session.plan, &state.settings.simulator_root);
@@ -1416,7 +1417,7 @@ pub(crate) fn go_around(state: &mut EngineState) {
     state.flow.missed_approach = true;
     state.flow.landing_hold = false;
     state.flow.landing_retry = None;
-    state.session.phase = PhaseCode::Departure;
+    state.session.on_event(openatc_core::aircraft::AircraftEvent::Departure);
     state.session.phase_evidence = 0;
     state.pending_copilot_reply = None;
 }
@@ -1600,7 +1601,7 @@ fn arrival_tick(state: &mut EngineState, current: &Station) -> bool {
             ("runway", state.session.plan.arrival_runway.clone()),
         ];
         state.flow.approach_cleared = true;
-        state.session.phase = PhaseCode::Approach;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Approach);
         let speed_release = crate::traffic::clear_approach_speed(state);
         let mut text = say("arrival_approach_clearance", &slots);
         if let Some((controller, _)) = &speed_release {
@@ -1787,7 +1788,7 @@ mod ownership_tests {
         state.settings.simulator_root = root;
         state.settings.enforce_clearance_constraints = true;
         state.session.demo = false;
-        state.session.phase = PhaseCode::Parked;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Parked);
         let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
         assert!(
             crate::routes::post_plan(axum::extract::State(shared.clone()), axum::Json(plan))
@@ -1844,7 +1845,7 @@ mod ownership_tests {
             .unwrap();
         state.stations = vec![center.clone(), tower.clone()];
         state.session.has_departed = true;
-        state.session.phase = PhaseCode::Cruise;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Cruise);
         state.session.telemetry = Telemetry {
             on_ground: false,
             position_valid: true,
@@ -2189,7 +2190,7 @@ mod ownership_tests {
         let mut state = crate::test_state();
         state.session.demo = false;
         state.session.has_departed = true;
-        state.session.phase = PhaseCode::Arrival;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
         state.session.plan.destination = "KMCO".into();
         state.session.plan.arrival_runway = "36R".into();
         state.session.plan.approach = "I36R".into();
@@ -2283,7 +2284,7 @@ mod ownership_tests {
                 "No published Center owns FL350 at {label}; ceilings came from {root}"
             );
             let mut state = crate::test_state();
-            state.session.phase = PhaseCode::Cruise;
+            state.session.on_event(openatc_core::aircraft::AircraftEvent::Cruise);
             state.session.has_departed = true;
             state.session.plan.cruise_feet = 35000;
             state.session.telemetry = telemetry;
@@ -2306,7 +2307,7 @@ mod ownership_tests {
     #[test]
     fn a_climb_is_not_capped_by_the_current_low_sector_ceiling() {
         let mut state = crate::test_state();
-        state.session.phase = PhaseCode::Cruise;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Cruise);
         state.session.has_departed = true;
         state.session.plan.cruise_feet = 35000;
         state.session.telemetry = openatc_core::state::Telemetry {
@@ -2360,7 +2361,7 @@ mod ownership_tests {
     #[test]
     fn arrival_handoff_does_not_flap_at_the_approach_ceiling() {
         let mut state = crate::test_state();
-        state.session.phase = PhaseCode::Arrival;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
         state.session.plan.destination = "TEST".into();
         state.session.telemetry = openatc_core::state::Telemetry {
             position_valid: true,
@@ -2453,7 +2454,7 @@ mod ownership_tests {
     #[test]
     fn published_owner_wins_over_a_nearer_unrelated_airport() {
         let mut state = crate::test_state();
-        state.session.phase = PhaseCode::Departure;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Departure);
         state.session.has_departed = true;
         state.session.telemetry = openatc_core::state::Telemetry {
             on_ground: false,
@@ -2483,7 +2484,7 @@ mod ownership_tests {
     #[test]
     fn lookahead_transfers_before_the_boundary() {
         let mut state = crate::test_state();
-        state.session.phase = PhaseCode::Departure;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Departure);
         state.session.has_departed = true;
         state.session.telemetry = openatc_core::state::Telemetry {
             on_ground: false,
@@ -2513,7 +2514,7 @@ mod ownership_tests {
         state.session.plan.destination = "TEST".into();
         state.session.plan.arrival_runway = "36".into();
         state.session.plan.approach = "I36".into();
-        state.session.phase = PhaseCode::Arrival;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
         state.arrival_airport = Some(Airport {
             icao: "TEST".into(),
             runways: vec![Runway {
@@ -2985,7 +2986,7 @@ mod ownership_tests {
         state.stations = vec![tower.clone(), departure.clone()];
         state.session.demo = false;
         state.session.has_departed = true;
-        state.session.phase = PhaseCode::Approach;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Approach);
         let telemetry = openatc_core::state::Telemetry {
             on_ground: true,
             position_valid: true,
@@ -3021,7 +3022,7 @@ mod ownership_tests {
             state.settings.enforce_clearance_constraints = false;
             state.session.demo = false;
             state.session.has_departed = true;
-            state.session.phase = PhaseCode::Approach;
+            state.session.on_event(openatc_core::aircraft::AircraftEvent::Approach);
             state.session.plan.destination = "DEST".into();
             state.session.plan.arrival_runway = "36".into();
             state.arrival_airport = Some(Airport {
@@ -3216,7 +3217,7 @@ mod ownership_tests {
         let mut state = crate::test_state();
         state.session.demo = false;
         state.session.has_departed = true;
-        state.session.phase = PhaseCode::Landed;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Landed);
         state.session.plan.destination = "DEST".into();
         state.session.plan.arrival_runway = "36".into();
         state.arrival_airport = Some(destination);
@@ -3274,7 +3275,7 @@ mod ownership_tests {
         assert!(!state.flow.vacate_reported);
         state.session.telemetry.on_ground = true;
         state.session.telemetry.latitude = 0.005;
-        state.session.phase = PhaseCode::Landed;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Landed);
         tick(&mut state);
         assert!(state.flow.vacate_reported);
     }

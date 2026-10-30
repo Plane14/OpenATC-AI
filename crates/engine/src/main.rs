@@ -2,6 +2,7 @@
 
 #![allow(clippy::default_trait_access)]
 
+mod atc;
 mod cabin;
 mod config_cache;
 mod context;
@@ -27,6 +28,7 @@ mod surface;
 mod traffic;
 mod traffic_models;
 mod traffic_profiles;
+mod traffic_runtime;
 mod workers;
 
 use openatc_core::airport::Airport;
@@ -76,8 +78,14 @@ pub struct EngineState {
     pub initiative: initiative::Monitor,
     /// Arrival stand changes are retried at a bounded rate.
     pub parking: parking::Monitor,
+    /// Aircraft known to the engine, including the player's ownship.
+    pub aircraft: openatc_core::atc_manager::AircraftManager,
+    /// Active ATC frequencies and their aircraft membership.
+    pub atc: openatc_core::atc_manager::AtcManager,
     /// Bounded traffic history and active spacing instructions.
     pub traffic: traffic::Traffic,
+    /// Frequency station threads and their transmission queues.
+    pub(crate) station_bus: traffic_runtime::StationBus,
     /// Selected mission clock and branching outcomes.
     pub mission: missions::Runtime,
     /// Codes recently assigned by this engine, including previous flights.
@@ -119,6 +127,8 @@ pub struct EngineState {
     pub map_root: String,
     /// Root used by the station index.
     pub station_root: String,
+    /// True while the station index is being built on a worker.
+    pub station_indexing: bool,
     /// Latest simulator airport weather, timestamped at receipt.
     /// Information letter advances only when the rounded airport observation changes.
     pub atis_information: BTreeMap<String, (String, usize)>,
@@ -576,7 +586,10 @@ async fn main() {
         mission: Default::default(),
         parking: Default::default(),
         initiative: Default::default(),
+        aircraft: Default::default(),
+        atc: Default::default(),
         traffic: Default::default(),
+        station_bus: Default::default(),
         traffic_profiles,
         generated: Default::default(),
         session_generation: 0,
@@ -595,6 +608,7 @@ async fn main() {
         map_airports: Vec::new(),
         map_root: String::new(),
         station_root: String::new(),
+        station_indexing: false,
         sim_weather: BTreeMap::new(),
         atis_information: BTreeMap::new(),
         atis_runways: BTreeMap::new(),
@@ -619,6 +633,7 @@ async fn main() {
     };
     engine.apply_settings_callsign();
     let shared: Shared = Arc::new(RwLock::new(engine));
+    radio::warm_station_index(shared.clone());
     setup::start_initial(&shared).await;
     let weather = shared.clone();
     tokio::spawn(async move { weather_loop(weather).await });
@@ -630,6 +645,7 @@ async fn main() {
         .route("/voice-health", get(routes::voice_health))
         .route("/speech/voices", post(routes::post_voices))
         .route("/debug/map", post(radio::debug_map))
+        .route("/debug/atc", get(atc::debug_atc))
         .route("/state", get(routes::full_state))
         .route("/settings", post(routes::post_settings))
         .route("/missions/list", post(missions::list))
@@ -720,7 +736,10 @@ fn test_state() -> EngineState {
         mission: Default::default(),
         parking: Default::default(),
         initiative: Default::default(),
+        aircraft: Default::default(),
+        atc: Default::default(),
         traffic: Default::default(),
+        station_bus: Default::default(),
         traffic_profiles: Default::default(),
         generated: Default::default(),
         session_generation: 0,
@@ -739,6 +758,7 @@ fn test_state() -> EngineState {
         map_airports: Vec::new(),
         map_root: String::new(),
         station_root: String::new(),
+        station_indexing: false,
         sim_weather: BTreeMap::new(),
         atis_information: BTreeMap::new(),
         atis_runways: BTreeMap::new(),

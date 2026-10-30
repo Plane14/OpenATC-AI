@@ -5,6 +5,7 @@ use axum::{
     extract::State as AxumState,
     response::{IntoResponse, Response},
 };
+use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::{
     apply::add_transmission,
     dialogue::say,
@@ -450,11 +451,11 @@ mod tests {
             mission: Some(mission),
             ..Default::default()
         };
-        state.session.phase = PhaseCode::Taxi;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Taxi);
         advance(&mut state, 60.0);
         tick(&mut state);
         assert!(state.session.transcript.is_empty());
-        state.session.phase = PhaseCode::Departure;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Departure);
         state.session.telemetry.paused = true;
         advance(&mut state, 60.0);
         tick(&mut state);
@@ -472,7 +473,7 @@ mod tests {
         assert!(respond(&mut state, "coordinate").is_none());
         tick(&mut state);
         assert_eq!(state.session.mission.active_event, "arrival_handover");
-        state.session.phase = PhaseCode::Finished;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Finished);
         tick(&mut state);
         assert!(!state.session.mission.running);
         assert!(state.session.mission.incident.is_empty());
@@ -486,7 +487,7 @@ mod tests {
             mission: Some(zero),
             ..Default::default()
         };
-        state.session.phase = PhaseCode::Departure;
+        state.session.on_event(openatc_core::aircraft::AircraftEvent::Departure);
         advance(&mut state, 100.0);
         tick(&mut state);
         assert!(state.session.mission.active_event.is_empty());

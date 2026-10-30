@@ -1,5 +1,6 @@
 //! Stand availability can change between a taxi clearance and reaching the gate.
 use crate::EngineState;
+use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::{apply::add_transmission, dialogue::say, state::PhaseCode, stations};
 use std::time::{Duration, Instant};
 
@@ -132,7 +133,7 @@ mod tests {
         alternate.point.north += 200.0;
         airport.parking.push(alternate);
         s.session.demo = false;
-        s.session.phase = PhaseCode::TaxiIn;
+        s.session.on_event(openatc_core::aircraft::AircraftEvent::TaxiIn);
         s.session.plan.aircraft = "A320".into();
         s.session.plan.destination = "DEST".into();
         s.session.telemetry = openatc_core::state::Telemetry {

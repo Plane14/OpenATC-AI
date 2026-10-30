@@ -951,6 +951,15 @@ impl World {
             return false;
         }
         let current = aircraft.pose(id);
+        // Keep only the resources of the segment the aircraft is physically on. Older
+        // segments may still name the runway after an arrival or a completed taxi; those
+        // entries must not survive into the next departure.
+        let keep: BTreeSet<String> = aircraft
+            .route
+            .segments
+            .get(aircraft.segment)
+            .map(|segment| segment.resources.iter().cloned().collect())
+            .unwrap_or_default();
         let first = route.segments[0].points[0];
         if !aircraft.complete
             || !current.stage.on_ground()
@@ -975,6 +984,11 @@ impl World {
         aircraft.surface_reservation = None;
         aircraft.recoveries.clear();
         aircraft.recovery_from = None;
+        // A replaced route must not inherit surface owners from the old arrival or taxi
+        // route. A completed arrival can still name the runway in `owners` after turning
+        // around; keeping that entry blocks every following departure from lining up.
+        self.owners
+            .retain(|resource, owner| *owner != id || keep.contains(resource));
         true
     }
     /// Identify the reserved surface traffic preventing the next taxi clearance.
@@ -1088,6 +1102,21 @@ impl World {
             generation: self.generation.wrapping_add(1),
             ..Self::default()
         };
+    }
+
+    /// Withdraw all movement authority from a stalled aircraft without deleting it.
+    /// The health monitor uses this after the retrigger stage; a fresh grant is required.
+    pub fn release_movement(&mut self, id: u32) -> bool {
+        let Some(aircraft) = self.aircraft.get_mut(&id) else {
+            return false;
+        };
+        aircraft.authorised = false;
+        aircraft.next_authorised = false;
+        aircraft.airborne_authority = None;
+        aircraft.surface_reservation = None;
+        aircraft.holding = false;
+        self.owners.retain(|_, owner| *owner != id);
+        true
     }
 
     /// Remove one finished aircraft and release every surface resource it owns.
@@ -3038,6 +3067,66 @@ mod tests {
             world.snapshot()[0].position,
             before,
             "A reservation moved an aircraft before readback"
+        );
+    }
+
+    #[test]
+    fn replacing_a_finished_route_releases_stale_surface_owners() {
+        let segment = |stage, from, to, resource: &str| Segment {
+            stage,
+            points: vec![point(from, 0.0), point(to, 0.0)],
+            knots: 10.0,
+            resources: vec![resource.to_owned()],
+            dwell_seconds: 0.0,
+        };
+        let arrival = std::sync::Arc::new(
+            Route::compile(
+                vec![segment(Stage::TaxiIn, 0.0, 100.0, "STAND")],
+                1000.0,
+                1000.0,
+            )
+            .unwrap(),
+        );
+        let mut world = World::default();
+        assert!(world.insert(0, 1, arrival));
+        assert!(world.reserve(0, 1, 0, &BTreeSet::new()));
+        assert!(world.authorise(0, 1, 0, &BTreeSet::new()));
+        world.advance(0.0, false);
+        world.advance(30.0, false);
+        assert!(world.snapshot()[0].complete);
+        // A completed arrival can leave an older segment's runway entry behind. The
+        // aircraft is on its stand, so that entry must not survive the next route.
+        world.owners.insert("RUNWAY/LFMN/04R/22L".into(), 1);
+        let departure = std::sync::Arc::new(
+            Route::compile(
+                vec![segment(Stage::TaxiOut, 100.0, 200.0, "TAXI/A")],
+                1000.0,
+                1000.0,
+            )
+            .unwrap(),
+        );
+        assert!(world.continue_surface(0, 1, departure));
+        assert!(
+            !world.owners.contains_key("RUNWAY/LFMN/04R/22L"),
+            "the replaced arrival route must not leave the runway owned"
+        );
+        assert_eq!(
+            world.owners.get("STAND"),
+            Some(&1),
+            "the cell the aircraft is standing on stays reserved"
+        );
+        let follower = std::sync::Arc::new(
+            Route::compile(
+                vec![segment(Stage::TaxiOut, 0.0, 100.0, "RUNWAY/LFMN/04R/22L")],
+                1000.0,
+                1000.0,
+            )
+            .unwrap(),
+        );
+        assert!(world.insert(0, 2, follower));
+        assert!(
+            world.reserve(0, 2, 0, &BTreeSet::new()),
+            "the next departure must be able to reserve the runway"
         );
     }
 

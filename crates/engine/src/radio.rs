@@ -104,6 +104,23 @@ pub async fn ensure_index(shared: &Shared) -> Result<(), String> {
     Ok(())
 }
 
+/// Build the station index on a worker without making the first UI request wait for it.
+/// The station browser polls this route, so an indexing reply is better than a timed-out
+/// request that leaves the UI loading forever.
+pub fn warm_station_index(shared: Shared) {
+    tokio::spawn(async move {
+        {
+            let mut state = shared.write().await;
+            if state.station_indexing {
+                return;
+            }
+            state.station_indexing = true;
+        }
+        let _ = ensure_index(&shared).await;
+        shared.write().await.station_indexing = false;
+    });
+}
+
 /// Index scenery outside the state lock and return shared reception results.
 pub async fn nearby(AxumState(shared): AxumState<Shared>, Json(_): Json<Value>) -> Response {
     if shared.read().await.settings.simulator_root.is_empty() {
@@ -112,8 +129,22 @@ pub async fn nearby(AxumState(shared): AxumState<Shared>, Json(_): Json<Value>) 
         )
         .into_response();
     }
-    if let Err(message) = ensure_index(&shared).await {
-        return error(&message);
+    let (root, old, indexing) = {
+        let s = shared.read().await;
+        (
+            s.settings.simulator_root.clone(),
+            s.station_root.clone(),
+            s.station_indexing,
+        )
+    };
+    if root != old || indexing {
+        warm_station_index(shared.clone());
+        return Json(json!({
+            "stations": [],
+            "occupiedAirport": null,
+            "notice": "Indexing installed radio stations"
+        }))
+        .into_response();
     }
     let s = shared.read().await;
     let airport = openatc_core::stations::occupied_airport(&s.map_airports, &s.session.telemetry)

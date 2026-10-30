@@ -456,7 +456,7 @@ fn draw_map(
             ui.calc_text_size(&beam.label)[0],
         );
     }
-    if interface.taxi_traffic_visible {
+    if interface.taxi_traffic_visible && !state.plan.callsign.trim().is_empty() && !state.plan.departure.is_empty() {
         for target in crate::traffic::targets(state).take(126) {
             if !target.latitude.is_finite()
                 || !target.longitude.is_finite()
@@ -478,6 +478,70 @@ fn draw_map(
                 continue;
             }
             draw_traffic(ui, draw, screen, target);
+        }
+    }
+    if interface.settings.dev_mode && !state.plan.callsign.trim().is_empty() && !state.plan.departure.is_empty() {
+        let debug_targets: Vec<&openatc_core::state::TrafficTarget> =
+            crate::traffic::targets(state)
+                .take(126)
+                .filter(|target| {
+                    target.latitude.is_finite()
+                        && target.longitude.is_finite()
+                        && target.track_degrees.is_finite()
+                        && target.callsign != state.plan.callsign
+                })
+                .collect();
+        let mouse = ui.io().mouse_pos;
+        for target in &debug_targets {
+            let point = airport_point(airport, target.latitude, target.longitude);
+            if point.east.hypot(point.north) > 100_000.0 {
+                continue;
+            }
+            let screen = project(&point);
+            if screen[0] < canvas.cursor[0]
+                || screen[1] < canvas.cursor[1]
+                || screen[0] > canvas.cursor[0] + canvas.size[0]
+                || screen[1] > canvas.cursor[1] + canvas.size[1]
+            {
+                continue;
+            }
+            let held = target.on_ground && target.ground_speed_knots.unwrap_or(0.0) <= 1.0;
+            let color = if held {
+                rgba(220, 60, 60, 255)
+            } else {
+                rgba(60, 200, 80, 255)
+            };
+            draw.add_circle(screen, 7.0, color).filled(true).build();
+            draw.add_text(screen, color, &target.callsign);
+            if held {
+                let nearest = debug_targets
+                    .iter()
+                    .filter(|other| other.id != target.id)
+                    .min_by(|a, b| {
+                        let da = (a.latitude - target.latitude).hypot(a.longitude - target.longitude);
+                        let db = (b.latitude - target.latitude).hypot(b.longitude - target.longitude);
+                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                if let Some(other) = nearest {
+                    let other_point = airport_point(airport, other.latitude, other.longitude);
+                    if other_point.east.hypot(other_point.north) <= 100_000.0 {
+                        let other_screen = project(&other_point);
+                        draw.add_line(screen, other_screen, rgba(220, 60, 60, 160))
+                            .thickness(1.0)
+                            .build();
+                    }
+                }
+            }
+            let distance = (f64::from(screen[0]) - f64::from(mouse[0])).hypot(
+                f64::from(screen[1]) - f64::from(mouse[1]),
+            );
+            if distance <= 10.0 {
+                ui.tooltip_text(format!(
+                    "{}: {}",
+                    target.callsign,
+                    if held { "held" } else { "ok" }
+                ));
+            }
         }
     }
     if interface.settings.show_traffic_holding_points {
