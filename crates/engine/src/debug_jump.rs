@@ -194,7 +194,7 @@ mod tests {
             distance_metres: 20.0,
             turn_degrees: 0.0,
         });
-        state.crew.checklist = Some(("departure".into(), 1, false));
+        state.crew.checklist = Some(("departure".into(), 1, false, 0));
         let shared = Arc::new(RwLock::new(state));
         assert!(
             crate::routes::debug_cancel_actions(State(shared.clone()))

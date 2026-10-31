@@ -157,7 +157,8 @@ pub struct CrewSession {
     pub aircraft: String,
     pub profile: CrewProfile,
     pub values: BTreeMap<String, f64>,
-    pub checklist: Option<(String, usize, bool)>,
+    /// Checklist state: (name, index, perform, retry_count)
+    pub checklist: Option<(String, usize, bool, u8)>,
     pub sequence: u32,
     pub pushback: Option<openatc_core::crew::PushbackRequest>,
     pub observed_at: Option<std::time::Instant>,
@@ -372,11 +373,25 @@ fn control_state(c: &openatc_core::crew::Control, value: f64) -> String {
 
 fn phase_targets(phase: openatc_core::state::PhaseCode) -> &'static [(&'static str, f64)] {
     match phase {
+        openatc_core::state::PhaseCode::Parked => &[
+            ("chocks", 1.0),
+            ("external_power_switch", 1.0),
+            ("parking_brake", 1.0),
+            ("beacon", 0.0),
+            ("seatbelts", 0.0),
+        ],
         openatc_core::state::PhaseCode::Clearance => &[
             ("external_power_switch", 1.0),
             ("parking_brake", 1.0),
             ("seatbelts", 1.0),
             ("beacon", 1.0),
+        ],
+        openatc_core::state::PhaseCode::Pushback => &[
+            ("pushback_start", 1.0),
+            ("beacon", 1.0),
+            ("wing_lights", 1.0),
+            ("turnoff_lights", 1.0),
+            ("parking_brake", 0.0),
         ],
         openatc_core::state::PhaseCode::Taxi => &[("external_power_switch", 0.0)],
         openatc_core::state::PhaseCode::Departure => &[("wing_lights", 1.0), ("turnoff_lights", 1.0)],
@@ -387,10 +402,28 @@ fn phase_targets(phase: openatc_core::state::PhaseCode) -> &'static [(&'static s
             ("wing_lights", 0.0),
             ("turnoff_lights", 0.0),
         ],
+        openatc_core::state::PhaseCode::Arrival => &[
+            ("seatbelts", 1.0),
+            ("wing_lights", 1.0),
+            ("turnoff_lights", 1.0),
+            ("flaps", 1.0),
+        ],
         openatc_core::state::PhaseCode::Approach => &[
             ("seatbelts", 1.0),
             ("wing_lights", 1.0),
             ("turnoff_lights", 1.0),
+        ],
+        openatc_core::state::PhaseCode::Landed => &[
+            ("speedbrakes", 1.0),
+            ("wing_lights", 1.0),
+            ("turnoff_lights", 0.0),
+            ("flaps", 0.0),
+        ],
+        openatc_core::state::PhaseCode::TaxiIn => &[
+            ("wing_lights", 0.0),
+            ("turnoff_lights", 0.0),
+            ("flaps", 0.0),
+            ("speedbrakes", 0.0),
         ],
         openatc_core::state::PhaseCode::Finished => &[
             ("parking_brake", 1.0),
@@ -400,7 +433,6 @@ fn phase_targets(phase: openatc_core::state::PhaseCode) -> &'static [(&'static s
             ("wing_lights", 0.0),
             ("turnoff_lights", 0.0),
         ],
-        _ => &[],
     }
 }
 
@@ -560,7 +592,7 @@ fn schedule_autonomous_phase_actions(
     });
 }
 fn next_item(s: &mut crate::EngineState) -> Response {
-    let Some((name, index, perform)) = s.crew.checklist.clone() else {
+    let Some((name, index, perform, retry_count)) = s.crew.checklist.clone() else {
         return reply(s, "copilot", "crew_checklist_none", &[], false);
     };
     let Some(item) = s
@@ -588,13 +620,14 @@ fn next_item(s: &mut crate::EngineState) -> Response {
             item.value,
             say(&item.response, &[]),
         ) {
-            return reply(
-                s,
-                "copilot",
-                "crew_action_unavailable",
-                &[("item", say(&item.challenge, &[]))],
-                false,
-            );
+            if retry_count < 2 {
+                s.crew.checklist = Some((name, index, true, retry_count + 1));
+                eprintln!("Checklist item {} failed, retry {}/3", item.control, retry_count + 1);
+                return next_item(s);
+            }
+            eprintln!("Checklist item {} failed after 3 attempts, advancing", item.control);
+            s.crew.checklist = Some((name, index + 1, true, 0));
+            return next_item(s);
         }
         Json(json!({"result":{"accepted":true,"pending":true},"state":snapshot(&s.session,&s.settings)})).into_response()
     } else {
@@ -692,12 +725,30 @@ pub async fn acknowledge(AxumState(shared): AxumState<Shared>, Json(ack): Json<A
             s.request_memory.reply_for_action(action.sequence, &text);
             speak(&mut s, &action.role, &text);
         }
-        if let Some((_, index, true)) = s.crew.checklist.as_mut() {
+        if let Some((_, index, true, retry_count)) = s.crew.checklist.as_mut() {
             *index += 1;
+            *retry_count = 0;
             return next_item(&mut s);
         }
     } else {
         eprintln!("Crew action {} failed: {}", action.control, ack.detail);
+        if let Some((_name, index, _perform, retry_count)) = s.crew.checklist.as_mut() {
+            if *retry_count < 2 {
+                *retry_count += 1;
+                eprintln!("Checklist item {} failed, retry {}/3", action.control, *retry_count);
+                // Re-queue the same action
+                let c = s.crew.profile.controls.get(&action.control);
+                if let Some(control) = c {
+                    let response = control_state(control, action.value);
+                    let _ = queue(&mut s, &action.role, &action.control, action.value, response);
+                }
+                return Json(json!({"accepted":true,"state":snapshot(&s.session,&s.settings)})).into_response();
+            }
+            eprintln!("Checklist item {} failed after 3 attempts, advancing", action.control);
+            *index += 1;
+            *retry_count = 0;
+            return next_item(&mut s);
+        }
         if let Some(batch) = s.crew.batch.as_mut() {
             batch
                 .outcomes
@@ -1452,10 +1503,17 @@ pub fn tick(shared: Shared, state: &mut crate::EngineState) {
         state.crew.auto_ai_pending = false;
     }
     let checklist = match phase {
+        openatc_core::state::PhaseCode::Parked => Some("startup"),
         openatc_core::state::PhaseCode::Clearance => Some("before_start"),
+        openatc_core::state::PhaseCode::Pushback => Some("pushback"),
+        openatc_core::state::PhaseCode::Taxi => Some("before_taxi"),
+        openatc_core::state::PhaseCode::Departure => Some("before_takeoff"),
         openatc_core::state::PhaseCode::Cruise => Some("after_takeoff"),
+        openatc_core::state::PhaseCode::Arrival => Some("descent"),
+        openatc_core::state::PhaseCode::Approach => Some("approach"),
+        openatc_core::state::PhaseCode::Landed => Some("after_landing"),
+        openatc_core::state::PhaseCode::TaxiIn => Some("taxi_in"),
         openatc_core::state::PhaseCode::Finished => Some("parking"),
-        _ => None,
     };
     let Some(name) = checklist else {
         return;
@@ -1463,7 +1521,7 @@ pub fn tick(shared: Shared, state: &mut crate::EngineState) {
     if !state.crew.profile.checklists.contains_key(name) {
         return;
     }
-    state.crew.checklist = Some((name.into(), 0, true));
+    state.crew.checklist = Some((name.into(), 0, true, 0));
     speak(
         state,
         "copilot",
@@ -2021,7 +2079,7 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
             .find(|name| text.contains(&name.replace('_', " ")))
             .cloned();
         if let Some(name) = name {
-            s.crew.checklist = Some((name, 0, text.contains("perform") || text.contains("do the")));
+            s.crew.checklist = Some((name, 0, text.contains("perform") || text.contains("do the"), 0));
             return Some(next_item(&mut s));
         }
         return Some(reply(
@@ -2041,7 +2099,7 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         ));
     }
     if role == "copilot"
-        && let Some((name, index, false)) = s.crew.checklist.clone()
+        && let Some((name, index, false, _retry_count)) = s.crew.checklist.clone()
     {
         let item = profile
             .checklists
@@ -2059,7 +2117,7 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
                 .get(&item.control)
                 .is_some_and(|v| (*v - item.value).abs() <= 0.01);
             if checked {
-                s.crew.checklist = Some((name, index + 1, false));
+                s.crew.checklist = Some((name, index + 1, false, 0));
                 return Some(next_item(&mut s));
             }
             return Some(reply(
