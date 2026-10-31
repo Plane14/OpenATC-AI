@@ -4276,10 +4276,7 @@ pub async fn prepare(shared: Shared) {
             } else {
                 publish_scene(&mut state.generated, *scene, key, epoch);
             }
-            // The local scene is enough for surface movement. The surrounding network pass
-            // can spend minutes searching ground routes and starve the airport it is meant
-            // to support, so keep it off until it has a bounded budget.
-            state.generated.network_pending = false;
+            state.generated.network_pending = local_only;
             traffic_log(
                 openatc_settings::TrafficLog::Summary,
                 format!("{}", state.generated.status),
