@@ -99,6 +99,30 @@ impl AircraftState {
     }
 }
 
+/// Why an aircraft is waiting on the surface.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HoldReason {
+    /// Another aircraft is occupying the path ahead.
+    Traffic { blocker: u32, gap_meters: u32 },
+    /// A runway crossing or line-up needs a controller clearance.
+    Runway { runway: String },
+    /// The aircraft is waiting for a radio clearance.
+    Clearance,
+    /// The destination stand is occupied.
+    Parking,
+}
+
+/// Deterministic surface movement decision owned by the aircraft.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SurfaceDecision {
+    /// Proceed along the assigned route.
+    Continue,
+    /// Follow the aircraft ahead at a safe gap.
+    Follow { leader: u32, gap_meters: u32 },
+    /// Hold for traffic or a runway clearance.
+    Hold { reason: HoldReason },
+}
+
 /// Events that can be delivered to an aircraft.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AircraftEvent {
@@ -168,6 +192,11 @@ pub trait AircraftBehaviour {
     /// Whether the aircraft can proceed without AI.
     fn can_proceed_instantly(&self) -> bool {
         self.state().control_mode == ControlMode::Traffic
+    }
+
+    /// Deterministic surface decision for the traffic around this aircraft.
+    fn surface_decision(&self, _traffic: &[crate::state::TrafficTarget]) -> SurfaceDecision {
+        SurfaceDecision::Continue
     }
 }
 

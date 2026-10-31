@@ -20,7 +20,7 @@ pub mod wake;
 pub mod wake_policy;
 use crate::{
     airport::{Airport, airport_point},
-    state::{Telemetry, TrafficTarget},
+    state::{Point, TaxiClearance, Telemetry, TrafficTarget},
 };
 
 /// Conservative plan-view extents from the simulator's reference point.
@@ -271,7 +271,7 @@ pub fn taxi_conflict<'a>(airport: &Airport, telemetry: &'a Telemetry) -> Option<
                 return false;
             }
             let (e, n) = (p.east - own.east, p.north - own.north);
-            if e.hypot(n) > 300.0 {
+            if e.hypot(n) > 120.0 {
                 return false;
             }
             let width = f64::midpoint(
@@ -302,6 +302,68 @@ pub fn taxi_conflict<'a>(airport: &Airport, telemetry: &'a Telemetry) -> Option<
             let time = (-closing / norm).clamp(0.0, 20.0);
             closing < 0.0 && (e + ve * time).hypot(n + vn * time) < width
         })
+}
+
+/// True when the target is ahead on the same approved taxi route and travelling the same way.
+///
+/// A follower on the same taxiway does not need a controller hold; it only needs to maintain a
+/// gap. The test uses route-space order and a narrow lateral corridor, not a radius around the
+/// aircraft, so traffic on a nearby unrelated taxiway is ignored.
+#[must_use]
+pub fn ahead_on_same_taxi_route(
+    airport: &Airport,
+    route: &TaxiClearance,
+    telemetry: &Telemetry,
+    target: &TrafficTarget,
+) -> bool {
+    if route.points.len() < 2 || !telemetry.on_ground || !target.on_ground {
+        return false;
+    }
+    let own = airport_point(airport, telemetry.latitude, telemetry.longitude);
+    let goal = airport_point(airport, target.latitude, target.longitude);
+    let project = |point: Point| -> Option<(usize, f64, f64, f64)> {
+        let mut best: Option<(usize, f64, f64, f64, f64)> = None;
+        for (index, pair) in route.points.windows(2).enumerate() {
+            let a = pair[0];
+            let b = pair[1];
+            let dx = b.east - a.east;
+            let dn = b.north - a.north;
+            let length = dx.hypot(dn);
+            if length < 0.5 {
+                continue;
+            }
+            let ux = dx / length;
+            let un = dn / length;
+            let along = (point.east - a.east) * ux + (point.north - a.north) * un;
+            let across = ((point.east - a.east) * un - (point.north - a.north) * ux).abs();
+            let clamped = along.clamp(0.0, length);
+            let score = (along - clamped).abs() + across;
+            if best.is_none_or(|(_, _, _, _, best_score)| score < best_score) {
+                best = Some((index, clamped, across, ux.atan2(un).to_degrees().rem_euclid(360.0), score));
+            }
+        }
+        best.map(|(index, along, across, heading, _)| (index, along, across, heading))
+    };
+    let Some((own_segment, own_along, _, _)) = project(own) else {
+        return false;
+    };
+    let Some((target_segment, target_along, target_across, route_heading)) = project(goal) else {
+        return false;
+    };
+    if target_across > 45.0 || target_segment < own_segment {
+        return false;
+    }
+    if target_segment == own_segment && target_along <= own_along {
+        return false;
+    }
+    let gap = (own.east - goal.east).hypot(own.north - goal.north);
+    if gap > 150.0 {
+        return false;
+    }
+    let same_direction = ((target.track_degrees - route_heading + 180.0).rem_euclid(360.0) - 180.0)
+        .abs()
+        < 45.0;
+    same_direction
 }
 
 /// Magnitude and side of the surface crosswind, using true wind and true runway bearing.

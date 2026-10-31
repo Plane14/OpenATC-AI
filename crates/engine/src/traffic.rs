@@ -19,7 +19,6 @@ use axum::{
     extract::State as AxumState,
     response::{IntoResponse, Response},
 };
-use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::{
     apply::add_transmission,
     dialogue::say,
@@ -408,7 +407,15 @@ fn surface(state: &mut EngineState, station: &Station) -> bool {
     {
         return false;
     }
-    let conflict = openatc_core::traffic::taxi_conflict(airport, &state.session.telemetry);
+    let conflict = openatc_core::traffic::taxi_conflict(airport, &state.session.telemetry)
+        .filter(|target| {
+            !openatc_core::traffic::ahead_on_same_taxi_route(
+                airport,
+                route,
+                &state.session.telemetry,
+                target,
+            )
+        });
     if let Some(target) = conflict {
         state.traffic.clear_since = None;
         if route.traffic_hold {
