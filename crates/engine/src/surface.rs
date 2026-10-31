@@ -6,7 +6,6 @@ use axum::{
     extract::State as AxumState,
     response::{IntoResponse, Response},
 };
-use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::{
     apply::add_transmission,
     ops::update_flight_phase,
@@ -426,6 +425,7 @@ pub async fn post_telemetry(
 
 #[cfg(test)]
 mod tests {
+    use openatc_core::aircraft::AircraftBehaviour;
     use super::*;
     use openatc_core::{
         airport::Airport,

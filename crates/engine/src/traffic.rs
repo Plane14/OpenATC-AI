@@ -867,6 +867,7 @@ pub async fn talk(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
 
 #[cfg(test)]
 mod tests {
+    use openatc_core::aircraft::AircraftBehaviour;
     use super::*;
     use openatc_core::{
         airport::{Airport, Runway},

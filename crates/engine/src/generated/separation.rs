@@ -146,15 +146,11 @@ pub(super) fn parallel_other_runway(
     longitude: f64,
     track_degrees: f64,
 ) -> bool {
-    let Some((_, across, _, _)) =
+    let Some((_, _, _, _)) =
         openatc_core::traffic::runway_position(airport, runway, latitude, longitude)
     else {
         return false;
     };
-    // A target on the departure runway itself is never "parallel other runway".
-    if across.abs() <= 80.0 {
-        return false;
-    }
     let nearest = airport
         .runways
         .iter()
@@ -164,7 +160,7 @@ pub(super) fn parallel_other_runway(
                 runway_heading(candidate.first, candidate.second),
             )
             .abs()
-                < 20.0
+                < 25.0
             {
                 &candidate.first_name
             } else if openatc_core::navigation::turn(
@@ -172,23 +168,68 @@ pub(super) fn parallel_other_runway(
                 runway_heading(candidate.second, candidate.first),
             )
             .abs()
-                < 20.0
+                < 25.0
             {
                 &candidate.second_name
             } else {
                 return None;
             };
-            // Use the nearest aligned runway. A converging final can be within the wider
-            // localizer corridor of a nearby parallel strip; attributing it to that strip
-            // would wrongly dismiss it.
-            let across =
-                openatc_core::traffic::runway_position(airport, name, latitude, longitude)?
-                    .1
-                    .abs();
-            (across < 500.0).then_some((across, name))
+            let (_, across, _, _) =
+                openatc_core::traffic::runway_position(airport, name, latitude, longitude)?;
+            (across.abs() < 800.0).then_some((across.abs(), name))
         })
         .min_by(|(left, _), (right, _)| left.total_cmp(right));
-    nearest.is_some_and(|(_, name)| parallel_runways(airport, runway, name))
+    let Some((_, target_runway)) = nearest else {
+        return false;
+    };
+    if target_runway == runway {
+        // On the departure runway itself.
+        return false;
+    }
+    // A different parallel runway is never traffic for this runway. For a non-parallel
+    // runway, only dismiss it when the extended track does not cross this runway's path.
+    parallel_runways(airport, runway, target_runway)
+        || !track_crosses_runway(airport, runway, latitude, longitude, track_degrees)
+}
+
+/// True when the target's extended ground track crosses the runway centreline path.
+fn track_crosses_runway(
+    airport: &Airport,
+    runway: &str,
+    latitude: f64,
+    longitude: f64,
+    track_degrees: f64,
+) -> bool {
+    let Some((along, across, length, heading)) =
+        openatc_core::traffic::runway_position(airport, runway, latitude, longitude)
+    else {
+        return true;
+    };
+    let Some(width) = airport
+        .runways
+        .iter()
+        .find(|candidate| candidate.first_name == runway || candidate.second_name == runway)
+        .map(|candidate| candidate.width)
+    else {
+        return true;
+    };
+    let half_width = width / 2.0 + 45.0;
+    let angle = (track_degrees - heading).to_radians();
+    if angle.cos().abs() < 0.01 {
+        // Perpendicular crossing: the current lateral offset decides.
+        return across.abs() < half_width;
+    }
+    // Sample the runway path and a short extension past each end.
+    let start = -2.0 * 1852.0;
+    let end = length + 2.0 * 1852.0;
+    for step in 0..=40 {
+        let s = start + (end - start) * f64::from(step) / 40.0;
+        let projected = across + (s - along) * angle.tan();
+        if projected.abs() < half_width {
+            return true;
+        }
+    }
+    false
 }
 
 /// The forecast includes existing accepted scopes, their fallback holds and the proposed grant.

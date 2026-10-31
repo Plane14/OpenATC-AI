@@ -4515,6 +4515,23 @@ fn publish_scene(runtime: &mut Runtime, mut scene: Scene, key: String, epoch: u6
     runtime.nominal_arrivals = scene.nominal_arrivals;
     runtime.nominal_flights = scene.nominal_flights;
     runtime.flights = scene.flights;
+    // A generated flight starts with its surface route already cleared. Ordinary taxi
+    // movement does not wait for a controller exchange; runway crossings, line-up and
+    // takeoff still require their own grants.
+    for (id, flight) in &runtime.flights {
+        for index in 0..flight.route.segment_count() {
+            let Some(segment) = flight.route.segment(index) else {
+                break;
+            };
+            if matches!(
+                segment.stage,
+                openatc_core::traffic::motion::Stage::TaxiOut
+                    | openatc_core::traffic::motion::Stage::TaxiIn
+            ) {
+                runtime.approved_orders.insert((*id, index));
+            }
+        }
+    }
     let roster = runtime
         .world
         .snapshot()
@@ -4965,19 +4982,6 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) ->
                 );
             }
             if pose.awaiting_clearance {
-                // Taxiing traffic follows the surface route without waiting for a controller
-                // exchange. Movement still honours reservations, crossings and runway holds;
-                // only the radio clearance gate is removed for ordinary taxi segments.
-                if matches!(
-                    pose.stage,
-                    openatc_core::traffic::motion::Stage::TaxiOut
-                        | openatc_core::traffic::motion::Stage::TaxiIn
-                ) {
-                    runtime
-                        .world
-                        .authorise(generation, pose.id, pose.segment, &blocked);
-                    continue;
-                }
                 // Complete flights carry their own clearances after legacy ground orders are removed.
                 if runtime.active_flights.contains(&pose.id)
                     && pose.stage != openatc_core::traffic::motion::Stage::Turnaround
