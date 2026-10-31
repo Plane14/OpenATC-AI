@@ -996,7 +996,7 @@ impl World {
     pub fn surface_blocker(&self, id: u32) -> Option<u32> {
         let aircraft = self.aircraft.get(&id)?;
         let stage = aircraft.route.segments[aircraft.segment].stage;
-        aircraft
+        let blocker = aircraft
             .route
             .segments
             .iter()
@@ -1004,7 +1004,13 @@ impl World {
             .take_while(|segment| segment.stage == stage)
             .flat_map(|segment| &segment.resources)
             .filter_map(|resource| self.owners.get(resource).copied())
-            .find(|owner| *owner != id && !self.behind(id, *owner))
+            .find(|owner| *owner != id && !self.behind(id, *owner))?;
+        // Converging taxi routes can each hold a resource the other needs. Break the
+        // resulting two-aircraft deadlock deterministically: the lower id proceeds.
+        if id < blocker && self.surface_blocker(blocker) == Some(id) {
+            return None;
+        }
+        Some(blocker)
     }
 
     /// True when the other aircraft is behind this one on the same movement. A leader ignores

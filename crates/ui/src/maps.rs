@@ -456,11 +456,7 @@ fn draw_map(
             ui.calc_text_size(&beam.label)[0],
         );
     }
-    if interface.taxi_traffic_visible
-        && !interface.settings.show_traffic_debug
-        && !state.plan.callsign.trim().is_empty()
-        && !state.plan.departure.is_empty()
-    {
+    if interface.taxi_traffic_visible && !interface.settings.show_traffic_debug {
         for target in crate::traffic::targets(state).take(126) {
             if !target.latitude.is_finite()
                 || !target.longitude.is_finite()
@@ -484,10 +480,7 @@ fn draw_map(
             draw_traffic(ui, draw, screen, target);
         }
     }
-    if interface.settings.show_traffic_debug
-        && !state.plan.callsign.trim().is_empty()
-        && !state.plan.departure.is_empty()
-    {
+    if interface.settings.show_traffic_debug {
         let debug_targets: Vec<&openatc_core::state::TrafficTarget> =
             crate::traffic::targets(state)
                 .take(126)

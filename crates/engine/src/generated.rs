@@ -4273,7 +4273,10 @@ pub async fn prepare(shared: Shared) {
             } else {
                 publish_scene(&mut state.generated, *scene, key, epoch);
             }
-            state.generated.network_pending = local_only;
+            // The local scene is enough for surface movement. The surrounding network pass
+            // can spend minutes searching ground routes and starve the airport it is meant
+            // to support, so keep it off until it has a bounded budget.
+            state.generated.network_pending = false;
             traffic_log(
                 openatc_settings::TrafficLog::Summary,
                 format!("{}", state.generated.status),
@@ -4962,6 +4965,19 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) ->
                 );
             }
             if pose.awaiting_clearance {
+                // Taxiing traffic follows the surface route without waiting for a controller
+                // exchange. Movement still honours reservations, crossings and runway holds;
+                // only the radio clearance gate is removed for ordinary taxi segments.
+                if matches!(
+                    pose.stage,
+                    openatc_core::traffic::motion::Stage::TaxiOut
+                        | openatc_core::traffic::motion::Stage::TaxiIn
+                ) {
+                    runtime
+                        .world
+                        .authorise(generation, pose.id, pose.segment, &blocked);
+                    continue;
+                }
                 // Complete flights carry their own clearances after legacy ground orders are removed.
                 if runtime.active_flights.contains(&pose.id)
                     && pose.stage != openatc_core::traffic::motion::Stage::Turnaround
@@ -9160,6 +9176,9 @@ pub async fn debug_generated(
         "towerReady": runtime.tower_ready.iter().collect::<Vec<_>>(),
         "towerNotified": runtime.tower_notified.iter().collect::<Vec<_>>(),
         "activeFlights": runtime.active_flights.iter().collect::<Vec<_>>(),
+        "held": runtime.held.iter().map(|(id, blocker)| json!({"id": id, "blocker": blocker})).collect::<Vec<_>>(),
+        "surfaceBlockers": runtime.world.snapshot().into_iter().filter_map(|pose| runtime.world.surface_blocker(pose.id).map(|blocker| json!({"id": pose.id, "blocker": blocker}))).collect::<Vec<_>>(),
+        "networkPending": runtime.network_pending,
         "orders": runtime.orders.iter().map(|(id, orders)| json!({"id": id, "segments": orders.iter().map(|(segment, _)| *segment).collect::<Vec<_>>()})).collect::<Vec<_>>(),
     }))
 }
