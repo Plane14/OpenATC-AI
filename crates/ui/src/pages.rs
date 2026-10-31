@@ -1981,7 +1981,7 @@ pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
 /// Build information for the plugin, engine and AI server.
 fn settings_about(ui: &imgui::Ui, interface: &mut Interface) {
     widgets::section_title(ui, "BUILD INFORMATION");
-    ui.text(format!("Plugin: {}", env!("CARGO_PKG_VERSION")));
+    ui.text(format!("Plugin: {}", crate::VERSION));
     ui.text(format!(
         "Engine: {}",
         if interface.engine_version.is_empty() {

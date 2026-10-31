@@ -41,8 +41,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Product version.
-pub const VERSION: &str = "0.2.1";
+/// Product version with the compile timestamp.
+pub const VERSION: &str = concat!("0.2.1 (", env!("OPENATC_BUILD"), ")");
 
 /// A fresh, non-zero seed for one generated-traffic session.
 ///
