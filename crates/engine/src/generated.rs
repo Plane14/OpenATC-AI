@@ -5488,7 +5488,9 @@ pub fn step(state: &mut EngineState) {
         .map(|frame| {
             let pose = poses.iter().find(|pose| pose.id == frame.target.id);
             let blocker = state.generated.world.surface_blocker(frame.target.id);
-            let reason = if let Some(exchange) = state
+            let reason = if let Some(blocker) = blocker {
+                format!("blocked by {blocker}")
+            } else if let Some(exchange) = state
                 .generated
                 .exchange
                 .as_ref()
@@ -5499,8 +5501,6 @@ pub fn step(state: &mut EngineState) {
                 } else {
                     "holding: controller exchange".to_owned()
                 }
-            } else if let Some(blocker) = blocker {
-                format!("blocked by {blocker}")
             } else if pose.is_some_and(|pose| pose.awaiting_clearance) {
                 "awaiting clearance".to_owned()
             } else if pose.is_some_and(|pose| pose.knots < 0.5) {

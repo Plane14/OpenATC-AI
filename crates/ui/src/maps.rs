@@ -524,7 +524,31 @@ fn draw_map(
             if !parked {
                 draw.add_text([screen[0] + 7.0, screen[1] - 7.0], color, &target.callsign);
             }
-            if held
+            let detail = state
+                .generated_traffic_debug
+                .iter()
+                .find(|debug| debug.id == target.id);
+            let blocker_screen = detail
+                .and_then(|debug| debug.blocker)
+                .and_then(|blocker| debug_targets.iter().find(|other| other.id == blocker))
+                .and_then(|blocker| {
+                    let point = airport_point(
+                        airport,
+                        blocker.latitude,
+                        blocker.longitude,
+                    );
+                    (point.east.hypot(point.north) <= 100_000.0).then(|| project(&point))
+                });
+            if let Some(blocker_screen) = blocker_screen {
+                draw.add_line(screen, blocker_screen, rgba(220, 60, 60, 180))
+                    .thickness(1.5)
+                    .build();
+                draw.add_text(
+                    [blocker_screen[0] + 4.0, blocker_screen[1] + 4.0],
+                    rgba(220, 60, 60, 220),
+                    "blocker",
+                );
+            } else if held
                 && let Some([latitude, longitude]) = state.generated_holding_points.get(&target.id)
             {
                 let hold_point = airport_point(airport, *latitude, *longitude);
