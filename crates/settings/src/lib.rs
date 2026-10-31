@@ -421,6 +421,8 @@ pub struct Settings {
     /// Debug: ring each generated aircraft's next hold, before a crossing or at the
     /// departure runway.
     pub show_traffic_holding_points: bool,
+    /// Debug: colour traffic on the taxi map by movement state and draw blocker links.
+    pub show_traffic_debug: bool,
     /// Display the simulator's follow-me vehicle on the approved taxi route.
     pub show_follow_me: bool,
     /// ILS approach and glideslope volumes on the airport map.
@@ -589,6 +591,7 @@ impl Default for Settings {
             show_ground_taxi_arrows: false,
             show_holding_point: false,
             show_traffic_holding_points: false,
+            show_traffic_debug: false,
             show_follow_me: false,
             show_ils_beams: false,
             show_ownship: true,

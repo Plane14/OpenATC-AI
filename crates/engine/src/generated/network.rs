@@ -66,19 +66,25 @@ fn published_pair(
     ]
     .map(
         |(origin, destination, departure_runway, arrival_runway, departures, arrivals)| {
-            routing::candidates(&routing::Inputs {
-                origin,
-                destination,
-                departure_runway,
-                arrival_runway,
-                departures,
-                arrivals,
-                points: &points,
-                mora,
-                budget,
-                direct: false,
-            })
-            .map(|_| ())
+            let candidates = |direct| {
+                routing::candidates(&routing::Inputs {
+                    origin,
+                    destination,
+                    departure_runway,
+                    arrival_runway,
+                    departures,
+                    arrivals,
+                    points: &points,
+                    mora,
+                    budget,
+                    direct,
+                })
+            };
+            // Prefer a published STAR, but allow a direct approach entry when the destination
+            // has no STAR that joins the available approach.
+            candidates(false)
+                .or_else(|_| candidates(true))
+                .map(|_| ())
         },
     ))
 }

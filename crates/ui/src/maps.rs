@@ -480,7 +480,10 @@ fn draw_map(
             draw_traffic(ui, draw, screen, target);
         }
     }
-    if interface.settings.dev_mode && !state.plan.callsign.trim().is_empty() && !state.plan.departure.is_empty() {
+    if interface.settings.show_traffic_debug
+        && !state.plan.callsign.trim().is_empty()
+        && !state.plan.departure.is_empty()
+    {
         let debug_targets: Vec<&openatc_core::state::TrafficTarget> =
             crate::traffic::targets(state)
                 .take(126)
@@ -513,23 +516,16 @@ fn draw_map(
             };
             draw.add_circle(screen, 7.0, color).filled(true).build();
             draw.add_text(screen, color, &target.callsign);
-            if held {
-                let nearest = debug_targets
-                    .iter()
-                    .filter(|other| other.id != target.id)
-                    .min_by(|a, b| {
-                        let da = (a.latitude - target.latitude).hypot(a.longitude - target.longitude);
-                        let db = (b.latitude - target.latitude).hypot(b.longitude - target.longitude);
-                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                if let Some(other) = nearest {
-                    let other_point = airport_point(airport, other.latitude, other.longitude);
-                    if other_point.east.hypot(other_point.north) <= 100_000.0 {
-                        let other_screen = project(&other_point);
-                        draw.add_line(screen, other_screen, rgba(220, 60, 60, 160))
-                            .thickness(1.0)
-                            .build();
-                    }
+            if held
+                && let Some([latitude, longitude]) = state.generated_holding_points.get(&target.id)
+            {
+                let hold_point = airport_point(airport, *latitude, *longitude);
+                if hold_point.east.hypot(hold_point.north) <= 100_000.0 {
+                    let hold_screen = project(&hold_point);
+                    draw.add_line(screen, hold_screen, rgba(220, 60, 60, 180))
+                        .thickness(1.5)
+                        .build();
+                    draw.add_text(hold_screen, rgba(220, 60, 60, 220), "hold");
                 }
             }
             let distance = (f64::from(screen[0]) - f64::from(mouse[0])).hypot(

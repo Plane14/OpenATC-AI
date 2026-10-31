@@ -1483,6 +1483,7 @@ fn taxi_layers(ui: &imgui::Ui, interface: &mut Interface) {
         ("Aircraft", &mut interface.settings.show_ownship),
         ("Show traffic", &mut interface.taxi_traffic_visible),
         ("Labels", &mut interface.settings.show_labels),
+        ("Traffic debug", &mut interface.settings.show_traffic_debug),
     ]
     .into_iter()
     .enumerate()
