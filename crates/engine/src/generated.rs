@@ -2067,7 +2067,10 @@ fn prepare_scene(
                                         occupied_stand_cells: &occupied_arrival_cells,
                                         parking_exclusions: &surface_corridors,
                                         preference: &preference,
-                                        allow_direct: category == Category::GeneralAviation,
+                                        // Use a direct approach entry when no STAR joins the
+                                        // available approach. This keeps the local airport
+                                        // populated instead of rejecting the whole category.
+                                        allow_direct: true,
                                     }
                                     .arrival(departure_candidates, &usage_view)
                                 })();
