@@ -646,6 +646,7 @@ async fn main() {
         .route("/speech/voices", post(routes::post_voices))
         .route("/debug/map", post(radio::debug_map))
         .route("/debug/atc", get(atc::debug_atc))
+        .route("/debug/generated", get(generated::debug_generated))
         .route("/state", get(routes::full_state))
         .route("/settings", post(routes::post_settings))
         .route("/missions/list", post(missions::list))

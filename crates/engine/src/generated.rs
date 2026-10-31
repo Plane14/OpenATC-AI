@@ -9089,3 +9089,77 @@ mod tests {
         );
     }
 }
+
+/// Read-only generated-traffic state for diagnosing stalled aircraft.
+pub async fn debug_generated(
+    axum::extract::State(shared): axum::extract::State<Shared>,
+) -> axum::Json<serde_json::Value> {
+    use serde_json::json;
+    let state = shared.read().await;
+    let runtime = &state.generated;
+    let poses: Vec<serde_json::Value> = runtime
+        .world
+        .snapshot()
+        .into_iter()
+        .map(|pose| {
+            json!({
+                "id": pose.id,
+                "stage": format!("{:?}", pose.stage),
+                "segment": pose.segment,
+                "awaitingClearance": pose.awaiting_clearance,
+                "complete": pose.complete,
+                "knots": pose.knots,
+                "latitude": pose.position.latitude,
+                "longitude": pose.position.longitude,
+            })
+        })
+        .collect();
+    let sessions: Vec<serde_json::Value> = runtime
+        .sessions
+        .sessions()
+        .map(|(&id, session)| {
+            json!({
+                "id": id,
+                "frequency": session.frequency,
+                "phase": format!("{:?}", session.phase),
+                "lastProgress": session.last_progress,
+            })
+        })
+        .collect();
+    let exchange = runtime.exchange.as_ref().map(|exchange| {
+        json!({
+            "id": exchange.id,
+            "callsign": exchange.callsign,
+            "segment": exchange.segment,
+            "grant": exchange.grant,
+            "next": exchange.next,
+            "messages": exchange.messages,
+        })
+    });
+    let delivery_exchange = runtime.delivery_exchange.as_ref().map(|exchange| {
+        json!({
+            "id": exchange.id,
+            "callsign": exchange.callsign,
+            "segment": exchange.segment,
+            "grant": exchange.grant,
+            "next": exchange.next,
+        })
+    });
+    axum::Json(json!({
+        "epoch": runtime.epoch,
+        "sessionGeneration": state.session_generation,
+        "frames": runtime.frames.len(),
+        "flights": runtime.flights.len(),
+        "sessions": sessions,
+        "poses": poses,
+        "approvedOrders": runtime.approved_orders.iter().collect::<Vec<_>>(),
+        "reportedHolds": runtime.reported_holds.iter().collect::<Vec<_>>(),
+        "exchange": exchange,
+        "deliveryExchange": delivery_exchange,
+        "departureWaits": runtime.departure_waits.iter().map(|(id, (reason, at))| json!({"id": id, "reason": reason, "forSeconds": at.elapsed().as_secs_f64()})).collect::<Vec<_>>(),
+        "towerReady": runtime.tower_ready.iter().collect::<Vec<_>>(),
+        "towerNotified": runtime.tower_notified.iter().collect::<Vec<_>>(),
+        "activeFlights": runtime.active_flights.iter().collect::<Vec<_>>(),
+        "orders": runtime.orders.iter().map(|(id, orders)| json!({"id": id, "segments": orders.iter().map(|(segment, _)| *segment).collect::<Vec<_>>()})).collect::<Vec<_>>(),
+    }))
+}

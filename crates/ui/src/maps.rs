@@ -456,7 +456,11 @@ fn draw_map(
             ui.calc_text_size(&beam.label)[0],
         );
     }
-    if interface.taxi_traffic_visible && !state.plan.callsign.trim().is_empty() && !state.plan.departure.is_empty() {
+    if interface.taxi_traffic_visible
+        && !interface.settings.show_traffic_debug
+        && !state.plan.callsign.trim().is_empty()
+        && !state.plan.departure.is_empty()
+    {
         for target in crate::traffic::targets(state).take(126) {
             if !target.latitude.is_finite()
                 || !target.longitude.is_finite()
@@ -508,14 +512,23 @@ fn draw_map(
             {
                 continue;
             }
-            let held = target.on_ground && target.ground_speed_knots.unwrap_or(0.0) <= 1.0;
+            let stopped = target.on_ground && target.ground_speed_knots.unwrap_or(0.0) <= 1.0;
+            let has_hold = state.generated_holding_points.contains_key(&target.id);
+            let held = stopped && has_hold;
+            let parked = stopped && !has_hold;
             let color = if held {
                 rgba(220, 60, 60, 255)
+            } else if parked {
+                rgba(150, 165, 180, 220)
             } else {
                 rgba(60, 200, 80, 255)
             };
-            draw.add_circle(screen, 7.0, color).filled(true).build();
-            draw.add_text(screen, color, &target.callsign);
+            draw.add_circle(screen, if parked { 5.0 } else { 7.0 }, color)
+                .filled(true)
+                .build();
+            if !parked {
+                draw.add_text([screen[0] + 7.0, screen[1] - 7.0], color, &target.callsign);
+            }
             if held
                 && let Some([latitude, longitude]) = state.generated_holding_points.get(&target.id)
             {
@@ -525,7 +538,7 @@ fn draw_map(
                     draw.add_line(screen, hold_screen, rgba(220, 60, 60, 180))
                         .thickness(1.5)
                         .build();
-                    draw.add_text(hold_screen, rgba(220, 60, 60, 220), "hold");
+                    draw.add_text([hold_screen[0] + 4.0, hold_screen[1] + 4.0], rgba(220, 60, 60, 220), "hold");
                 }
             }
             let distance = (f64::from(screen[0]) - f64::from(mouse[0])).hypot(
@@ -535,7 +548,13 @@ fn draw_map(
                 ui.tooltip_text(format!(
                     "{}: {}",
                     target.callsign,
-                    if held { "held" } else { "ok" }
+                    if held {
+                        "held"
+                    } else if parked {
+                        "parked"
+                    } else {
+                        "moving"
+                    }
                 ));
             }
         }
