@@ -1045,7 +1045,10 @@ impl crate::aircraft::AircraftBehaviour for State {
         &mut self.aircraft
     }
 
-    fn on_event(&mut self, event: crate::aircraft::AircraftEvent) -> crate::aircraft::AircraftOutcome {
+    fn on_event(
+        &mut self,
+        event: crate::aircraft::AircraftEvent,
+    ) -> crate::aircraft::AircraftOutcome {
         use crate::aircraft::{AircraftEvent, AircraftOutcome, AircraftPhase};
         match event {
             AircraftEvent::IfrClearanceReceived => {

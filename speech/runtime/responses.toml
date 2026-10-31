@@ -1695,6 +1695,10 @@ say = ["Which checklist? Available: {checklist}.", "Choose a checklist: {checkli
 slots = []
 say = ["Checklist stopped.", "Stopping the checklist.", "Checklist cancelled."]
 
+[crew_checklist_auto_start]
+slots = ["checklist"]
+say = ["Starting the {checklist} checklist now.", "Beginning {checklist} checklist.", "I'll run the {checklist} checklist now, Captain."]
+
 [crew_slides_armed_checked]
 slots = []
 say = ["Slides armed and cross-checked.", "Slides armed. Cross-check complete.", "Confirmed, slides armed and cross-checked."]

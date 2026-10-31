@@ -28,6 +28,33 @@ flap_seconds = 5.0
 wheel_radius_meters = 0.25
 propeller_rpm = 2200.0
 
+[handling.rotorcraft]
+flare_height_feet = 12.0
+touchdown_sink_fpm = 90.0
+rotation_pitch_degrees = 6.0
+climb_pitch_bias_degrees = 3.0
+approach_pitch_bias_degrees = 2.0
+taxi_turn_knots = 10.0
+taxi_turn_radius_meters = 5.0
+wheelbase_meters = 1.8
+maximum_steering_degrees = 60.0
+takeoff_flaps = 0.0
+landing_flaps = 0.0
+engine_spool_seconds = 4.0
+touchdown_seconds = 0.4
+rollout_spoilers = false
+taxi_knots = 20.0
+rotation_knots = 45.0
+acceleration_knots_sec = 3.5
+braking_knots_sec = 4.0
+maximum_bank_degrees = 25.0
+bank_rate_degrees_sec = 15.0
+pitch_rate_degrees_sec = 6.0
+gear_seconds = 2.0
+flap_seconds = 1.0
+wheel_radius_meters = 0.18
+propeller_rpm = 380.0
+
 [handling.turboprop]
 flare_height_feet = 15.0
 touchdown_sink_fpm = 150.0

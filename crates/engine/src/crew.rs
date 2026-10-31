@@ -162,6 +162,9 @@ pub struct CrewSession {
     pub pushback: Option<openatc_core::crew::PushbackRequest>,
     pub observed_at: Option<std::time::Instant>,
     pub batch: Option<Batch>,
+    pub auto_phase: Option<openatc_core::state::PhaseCode>,
+    pub auto_ai_phase: Option<openatc_core::state::PhaseCode>,
+    pub auto_ai_pending: bool,
 }
 impl Default for CrewSession {
     fn default() -> Self {
@@ -179,6 +182,9 @@ impl Default for CrewSession {
             pushback: None,
             observed_at: None,
             batch: None,
+            auto_phase: None,
+            auto_ai_phase: None,
+            auto_ai_pending: false,
         }
     }
 }
@@ -232,6 +238,9 @@ pub async fn observe(
         s.request_memory.forget_crew();
         s.crew.checklist = None;
         s.crew.batch = None;
+        s.crew.auto_phase = None;
+        s.crew.auto_ai_phase = None;
+        s.crew.auto_ai_pending = false;
         s.session.crew_actions.clear();
     }
     s.crew.aircraft = input.aircraft;
@@ -338,6 +347,217 @@ fn queue(s: &mut crate::EngineState, role: &str, id: &str, value: f64, response:
         response,
     });
     true
+}
+
+fn control_state(c: &openatc_core::crew::Control, value: f64) -> String {
+    if c.momentary {
+        return say("crew_state_button", &[]);
+    }
+    c.states
+        .iter()
+        .find(|(_, state)| (**state - value).abs() < 0.01)
+        .map_or_else(
+            || {
+                if (value - c.off).abs() <= f64::EPSILON {
+                    say("crew_state_off", &[])
+                } else if (value - c.on).abs() <= f64::EPSILON {
+                    say("crew_state_on", &[])
+                } else {
+                    say("crew_state_value", &[("value", format!("{value:.0}"))])
+                }
+            },
+            |(name, _)| say(&format!("crew_state_{name}"), &[]),
+        )
+}
+
+fn phase_targets(phase: openatc_core::state::PhaseCode) -> &'static [(&'static str, f64)] {
+    match phase {
+        openatc_core::state::PhaseCode::Clearance => &[
+            ("external_power_switch", 1.0),
+            ("parking_brake", 1.0),
+            ("seatbelts", 1.0),
+            ("beacon", 1.0),
+        ],
+        openatc_core::state::PhaseCode::Taxi => &[("external_power_switch", 0.0)],
+        openatc_core::state::PhaseCode::Departure => &[("wing_lights", 1.0), ("turnoff_lights", 1.0)],
+        openatc_core::state::PhaseCode::Cruise => &[
+            ("gear", 0.0),
+            ("flaps", 0.0),
+            ("speedbrakes", 0.0),
+            ("wing_lights", 0.0),
+            ("turnoff_lights", 0.0),
+        ],
+        openatc_core::state::PhaseCode::Approach => &[
+            ("seatbelts", 1.0),
+            ("wing_lights", 1.0),
+            ("turnoff_lights", 1.0),
+        ],
+        openatc_core::state::PhaseCode::Finished => &[
+            ("parking_brake", 1.0),
+            ("beacon", 0.0),
+            ("seatbelts", 0.0),
+            ("external_power_switch", 1.0),
+            ("wing_lights", 0.0),
+            ("turnoff_lights", 0.0),
+        ],
+        _ => &[],
+    }
+}
+
+fn apply_phase_actions(state: &mut crate::EngineState, phase: openatc_core::state::PhaseCode) {
+    let targets = phase_targets(phase);
+    for (id, value) in targets {
+        let Some(control) = state.crew.profile.controls.get(*id) else {
+            continue;
+        };
+        if state
+            .crew
+            .values
+            .get(*id)
+            .is_some_and(|current| (*current - *value).abs() < control.tolerance.max(0.01))
+        {
+            continue;
+        }
+        let response = control_state(control, *value);
+        let _ = queue(state, "copilot", id, *value, response);
+    }
+}
+
+#[derive(Deserialize)]
+struct AutonomousAction {
+    control: String,
+    value: f64,
+}
+
+#[derive(Deserialize)]
+struct AutonomousDecision {
+    actions: Vec<AutonomousAction>,
+}
+
+fn autonomy_model(settings: &openatc_settings::Settings) -> Option<String> {
+    if !settings.ai_enabled {
+        return None;
+    }
+    let model = if settings.autonomous_user_management_model.trim().is_empty() {
+        settings.ai_model.trim()
+    } else {
+        settings.autonomous_user_management_model.trim()
+    };
+    (!model.is_empty()).then(|| model.to_owned())
+}
+
+fn schedule_autonomous_phase_actions(
+    shared: Shared,
+    state: &mut crate::EngineState,
+    phase: openatc_core::state::PhaseCode,
+) {
+    if state.crew.auto_ai_pending || state.crew.auto_ai_phase == Some(phase) {
+        return;
+    }
+    let Some(model) = autonomy_model(&state.settings) else {
+        apply_phase_actions(state, phase);
+        state.crew.auto_ai_phase = Some(phase);
+        return;
+    };
+    let targets = phase_targets(phase)
+        .iter()
+        .filter_map(|(id, value)| {
+            state.crew.profile.controls.get(*id).map(|control| {
+                serde_json::json!({
+                    "control": id,
+                    "target": value,
+                    "current": state.crew.values.get(*id).copied(),
+                    "on": control.on,
+                    "off": control.off,
+                    "tolerance": control.tolerance.max(0.01),
+                    "groundOnly": control.ground_only,
+                    "airborneOnly": control.airborne_only
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        state.crew.auto_ai_phase = Some(phase);
+        return;
+    }
+    state.crew.auto_ai_pending = true;
+    let generation = state.session_generation;
+    let aircraft = state.crew.aircraft.clone();
+    let ai_url = state.settings.ai_url.clone();
+    let context = serde_json::json!({
+        "phase": format!("{phase:?}"),
+        "candidates": targets
+    })
+    .to_string();
+    let schema = serde_json::json!({
+        "type":"object",
+        "additionalProperties":false,
+        "required":["actions"],
+        "properties":{
+            "actions":{
+                "type":"array",
+                "maxItems":8,
+                "items":{
+                    "type":"object",
+                    "additionalProperties":false,
+                    "required":["control","value"],
+                    "properties":{
+                        "control":{"type":"string"},
+                        "value":{"type":"number"}
+                    }
+                }
+            }
+        }
+    });
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        let decision = crate::llm::structured_format::<AutonomousDecision>(
+            &client,
+            &ai_url,
+            &model,
+            0.0,
+            "Select optional autonomous cockpit actions for this phase. Return only actions from the provided candidate controls. Keep each returned value exactly equal to that control's target value.",
+            &context,
+            Some(schema),
+        )
+        .await
+        .ok();
+        let mut state = shared.write().await;
+        if state.session_generation != generation
+            || state.crew.aircraft != aircraft
+            || state.session.phase != phase
+        {
+            state.crew.auto_ai_pending = false;
+            return;
+        }
+        let expected = phase_targets(phase)
+            .iter()
+            .map(|(id, value)| (*id, *value))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut applied = 0usize;
+        if let Some(decision) = decision {
+            for action in decision.actions {
+                let Some(target) = expected.get(action.control.as_str()) else {
+                    continue;
+                };
+                if (action.value - *target).abs() > 0.01 {
+                    continue;
+                }
+                let Some(control) = state.crew.profile.controls.get(action.control.as_str()) else {
+                    continue;
+                };
+                let response = control_state(control, *target);
+                if queue(&mut state, "copilot", &action.control, *target, response) {
+                    applied += 1;
+                }
+            }
+        }
+        if applied == 0 {
+            apply_phase_actions(&mut state, phase);
+        }
+        state.crew.auto_ai_phase = Some(phase);
+        state.crew.auto_ai_pending = false;
+    });
 }
 fn next_item(s: &mut crate::EngineState) -> Response {
     let Some((name, index, perform)) = s.crew.checklist.clone() else {
@@ -1159,11 +1379,12 @@ fn cross_check(s: &crate::EngineState) -> &'static str {
 
 /// The ramp headset is available during stand work and pushback, not during taxi or flight.
 pub fn update_ground_connection(state: &mut crate::EngineState) {
-        use openatc_core::state::PhaseCode;
+    use openatc_core::state::PhaseCode;
     let t = &state.session.telemetry;
     if !t.on_ground {
         state.session.ground_interphone_disconnected = true;
     }
+
     if t.on_ground && (!t.position_valid || t.paused) {
         return;
     }
@@ -1207,6 +1428,51 @@ pub fn update_ground_connection(state: &mut crate::EngineState) {
         state.crew.batch = None;
         state.crew.pushback = None;
     }
+}
+
+pub fn tick(shared: Shared, state: &mut crate::EngineState) {
+    update_ground_connection(state);
+    if !state.settings.copilot_replies
+        || state.crew.checklist.is_some()
+        || !state.session.crew_actions.is_empty()
+        || state.pending_copilot_reply.is_some()
+    {
+        return;
+    }
+    let phase = state.session.phase;
+    if state.crew.auto_phase == Some(phase) {
+        return;
+    }
+    state.crew.auto_phase = Some(phase);
+    if state.settings.autonomous_user_management {
+        schedule_autonomous_phase_actions(shared, state, phase);
+    } else {
+        apply_phase_actions(state, phase);
+        state.crew.auto_ai_phase = Some(phase);
+        state.crew.auto_ai_pending = false;
+    }
+    let checklist = match phase {
+        openatc_core::state::PhaseCode::Clearance => Some("before_start"),
+        openatc_core::state::PhaseCode::Cruise => Some("after_takeoff"),
+        openatc_core::state::PhaseCode::Finished => Some("parking"),
+        _ => None,
+    };
+    let Some(name) = checklist else {
+        return;
+    };
+    if !state.crew.profile.checklists.contains_key(name) {
+        return;
+    }
+    state.crew.checklist = Some((name.into(), 0, true));
+    speak(
+        state,
+        "copilot",
+        &say(
+            "crew_checklist_auto_start",
+            &[("checklist", name.replace('_', " "))],
+        ),
+    );
+    let _ = next_item(state);
 }
 
 pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
@@ -1852,22 +2118,7 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         let value = s.crew.values.get(id).copied();
         let item = say(&format!("crew_control_{id}"), &[]);
         return Some(if let Some(value) = value {
-            let state = c
-                .states
-                .iter()
-                .find(|(_, n)| (**n - value).abs() < 0.01)
-                .map_or_else(
-                    || {
-                        if (value - c.off).abs() <= f64::EPSILON {
-                            say("crew_state_off", &[])
-                        } else if (value - c.on).abs() <= f64::EPSILON {
-                            say("crew_state_on", &[])
-                        } else {
-                            say("crew_state_value", &[("value", format!("{value:.0}"))])
-                        }
-                    },
-                    |(name, _)| say(&format!("crew_state_{name}"), &[]),
-                );
+            let state = control_state(c, value);
             reply(
                 &mut s,
                 role,
@@ -1926,25 +2177,7 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
         for action in intent.actions {
             let (id, value) = (action.control, action.value);
             let c = profile.controls.get(&id)?;
-            let state = if c.momentary {
-                say("crew_state_button", &[])
-            } else {
-                c.states
-                    .iter()
-                    .find(|(_, v)| (**v - value).abs() < 0.01)
-                    .map_or_else(
-                        || {
-                            if (value - c.off).abs() <= f64::EPSILON {
-                                say("crew_state_off", &[])
-                            } else if (value - c.on).abs() <= f64::EPSILON {
-                                say("crew_state_on", &[])
-                            } else {
-                                say("crew_state_value", &[("value", format!("{value:.0}"))])
-                            }
-                        },
-                        |(name, _)| say(&format!("crew_state_{name}"), &[]),
-                    )
-            };
+            let state = control_state(c, value);
             let ok = queue(&mut s, role, &id, value, state);
             if !ok {
                 s.session.crew_actions.clear();
@@ -2075,7 +2308,9 @@ mod conversation_routing_tests {
         let mut state = crate::test_state();
         state.settings.ai_url = origin;
         state.settings.ai_model = "test".into();
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::TaxiIn);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::TaxiIn);
         state.session.telemetry.on_ground = true;
         state.session.plan.estimated_minutes = 43.0;
         let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
@@ -2830,15 +3065,18 @@ mod conversation_routing_tests {
 
     #[tokio::test]
     async fn ramp_interphone_disconnects_for_actual_taxi_and_flight_not_pushback_permission() {
-            use openatc_core::state::PhaseCode;
         let mut state = crate::test_state();
         state.session.telemetry.position_valid = true;
         state.session.telemetry.on_ground = true;
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::PushbackComplete);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::PushbackComplete);
         state.session.telemetry.ground_speed_knots = 3.0;
         update_ground_connection(&mut state);
         assert!(!state.session.ground_interphone_disconnected);
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::Taxi);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::Taxi);
         state.session.telemetry.ground_speed_knots = 0.0;
         update_ground_connection(&mut state);
         assert!(
@@ -2855,7 +3093,9 @@ mod conversation_routing_tests {
             state.session.ground_interphone_disconnected,
             "Stopping at a hold does not reconnect a ramp headset"
         );
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::Cruise);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::Cruise);
         state.session.telemetry.on_ground = false;
         state.settings.ai_enabled = true;
         let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
@@ -2880,12 +3120,61 @@ mod conversation_routing_tests {
             "Disconnected ramp staff must not speak from the air"
         );
         let mut state = shared.write().await;
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::Finished);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::Finished);
         state.session.telemetry.on_ground = true;
         state.session.taxi_clearance.to_parking = true;
         state.session.taxi_clearance.guidance_complete = true;
         update_ground_connection(&mut state);
         assert!(!state.session.ground_interphone_disconnected);
+    }
+
+    #[test]
+    fn copilot_auto_starts_phase_checklists_once_per_phase_transition() {
+        let mut state = crate::test_state();
+        state.settings.copilot_replies = true;
+        state.crew.profile = openatc_core::crew::standard_profile();
+        state.crew.aircraft = "TEST".into();
+        state.crew.observed_at = Some(std::time::Instant::now());
+        state.session.telemetry.position_valid = true;
+        state.session.telemetry.on_ground = true;
+        state.session.phase = openatc_core::state::PhaseCode::Clearance;
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(crate::test_state()));
+        tick(shared.clone(), &mut state);
+        assert!(state.crew.checklist.is_some());
+        assert!(!state.session.crew_actions.is_empty());
+        assert!(
+            state
+                .session
+                .crew_actions
+                .iter()
+                .any(|action| action.control == "seatbelts" || action.control == "beacon")
+        );
+
+        let queued = state.session.crew_actions.len();
+        tick(shared, &mut state);
+        assert_eq!(state.session.crew_actions.len(), queued);
+    }
+
+    #[test]
+    fn autonomous_management_model_override_uses_global_when_empty() {
+        let mut settings = openatc_settings::Settings::default();
+        settings.ai_model = "qwen2.5-7b".to_owned();
+        settings.autonomous_user_management_model.clear();
+        assert_eq!(
+            autonomy_model(&settings),
+            Some("qwen2.5-7b".to_owned())
+        );
+
+        settings.autonomous_user_management_model = "qwen3.5-4b".to_owned();
+        assert_eq!(
+            autonomy_model(&settings),
+            Some("qwen3.5-4b".to_owned())
+        );
+
+        settings.ai_enabled = false;
+        assert_eq!(autonomy_model(&settings), None);
     }
 
     #[tokio::test]
@@ -2999,7 +3288,9 @@ mod conversation_routing_tests {
         state.settings.ai_model = "test".into();
         state.settings.llm_phrase_variety = false;
         state.settings.ai_url = format!("http://{address}");
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::PushbackComplete);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::PushbackComplete);
         state.crew.observed_at = None;
         let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
         let response = request(

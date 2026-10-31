@@ -47,6 +47,7 @@ pub async fn post_telemetry(
     Json(telemetry): Json<Telemetry>,
 ) -> Response {
     let shared = state;
+    let telemetry = crate::traffic_adsb::merge(shared.clone(), telemetry).await;
     let (
         settings,
         pilot_report,
@@ -140,7 +141,7 @@ pub async fn post_telemetry(
                 super::generated::prepare_turnaround(worker_state).await;
             });
         }
-        super::crew::update_ground_connection(&mut state);
+        super::crew::tick(shared.clone(), &mut state);
         super::cabin::tick(&mut state);
         super::missions::clock(&mut state);
         super::traffic::observe(&mut state);
@@ -425,8 +426,8 @@ pub async fn post_telemetry(
 
 #[cfg(test)]
 mod tests {
-    use openatc_core::aircraft::AircraftBehaviour;
     use super::*;
+    use openatc_core::aircraft::AircraftBehaviour;
     use openatc_core::{
         airport::Airport,
         state::{PhaseCode, Point, TaxiClearance},
@@ -435,7 +436,9 @@ mod tests {
 
     fn fixture() -> crate::EngineState {
         let mut state = crate::test_state();
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::Taxi);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::Taxi);
         state.session.plan.departure = "TEST".into();
         state.session.plan.runway = "09".into();
         state.session.plan.callsign = "C-GTLT".into();

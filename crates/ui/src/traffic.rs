@@ -160,6 +160,51 @@ pub fn settings(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
     }
     widgets::section_title(ui, "TRAFFIC SOURCE");
     ui.text_wrapped("OpenATC generated traffic uses complete flight plans only. Prepare a flight from a gate, holding point or approach; there is no plan-less preview layer. Native X-Plane AI is optional; installing Bluebell models alone does not create flights.");
+    {
+        use openatc_settings::AdsbTrafficSource;
+        let preview = match interface.settings.adsb_traffic_source {
+            AdsbTrafficSource::Off => "Off",
+            AdsbTrafficSource::AdsbLol => "adsb.lol (full ATC participation)",
+        };
+        widgets::muted_wrapped(ui, "External ADS-B source");
+        ui.set_next_item_width(-1.0);
+        if let Some(_combo) = ui.begin_combo("##adsb-source", preview) {
+            if ui.selectable("Off") {
+                interface.settings.adsb_traffic_source = AdsbTrafficSource::Off;
+            }
+            if ui.selectable("adsb.lol (full ATC participation)") {
+                interface.settings.adsb_traffic_source = AdsbTrafficSource::AdsbLol;
+            }
+        }
+        let source_disabled =
+            ui.begin_disabled(interface.settings.adsb_traffic_source == AdsbTrafficSource::Off);
+        let mut poll = i32::from(interface.settings.adsb_poll_seconds);
+        widgets::muted_wrapped(ui, "Polling interval (seconds)");
+        ui.set_next_item_width(-1.0);
+        if ui.slider("##adsb-poll", 1, 60, &mut poll) {
+            interface.settings.adsb_poll_seconds = poll.clamp(1, 60) as u8;
+        }
+        let mut radius = i32::from(interface.settings.adsb_radius_nm);
+        widgets::muted_wrapped(ui, "Sampling radius (NM)");
+        ui.set_next_item_width(-1.0);
+        if ui.slider("##adsb-radius", 1, 250, &mut radius) {
+            interface.settings.adsb_radius_nm = radius.clamp(1, 250) as u16;
+        }
+        let mut limit = i32::from(interface.settings.adsb_max_targets);
+        widgets::muted_wrapped(ui, "Maximum merged targets");
+        ui.set_next_item_width(-1.0);
+        if ui.slider("##adsb-max-targets", 1, 126, &mut limit) {
+            interface.settings.adsb_max_targets = limit.clamp(1, 126) as u8;
+        }
+        let mut seen = i32::from(interface.settings.adsb_max_seen_seconds);
+        widgets::muted_wrapped(ui, "Maximum ADS-B sample age (seconds)");
+        ui.set_next_item_width(-1.0);
+        if ui.slider("##adsb-seen", 1, 60, &mut seen) {
+            interface.settings.adsb_max_seen_seconds = seen.clamp(1, 60) as u8;
+        }
+        source_disabled.end();
+        ui.text_wrapped("adsb.lol targets are merged into observed traffic only when fresh and valid. Qualifying tracks participate in normal ATC traffic logic.");
+    }
     if let Some(reply) = interface.engine.take_reply("/traffic/models/index") {
         interface.traffic_notice = if reply.success {
             format!(

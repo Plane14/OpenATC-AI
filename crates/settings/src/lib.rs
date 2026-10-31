@@ -80,6 +80,17 @@ pub enum TrafficLog {
     Detail,
 }
 
+/// Optional external ADS-B feed integration.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdsbTrafficSource {
+    /// Use simulator-reported traffic only.
+    #[default]
+    Off,
+    /// Merge adsb.lol traffic into observed traffic for full ATC logic when confidence gates pass.
+    AdsbLol,
+}
+
 impl TrafficRate {
     /// The draw interval in seconds, or zero when the rate is frame based.
     #[must_use]
@@ -232,6 +243,16 @@ pub struct Settings {
     pub hear_traffic_radio: bool,
     /// Allow conversations with simulated pilots for identified traffic.
     pub talk_to_traffic: bool,
+    /// Optional external ADS-B traffic source.
+    pub adsb_traffic_source: AdsbTrafficSource,
+    /// Polling period for the external ADS-B source, seconds.
+    pub adsb_poll_seconds: u8,
+    /// Radius around ownship for external ADS-B sampling, nautical miles.
+    pub adsb_radius_nm: u16,
+    /// Maximum external ADS-B targets merged into observed traffic.
+    pub adsb_max_targets: u8,
+    /// Maximum accepted `seen` age from ADS-B source responses, seconds.
+    pub adsb_max_seen_seconds: u8,
     /// Allow brief informal exchanges with identified simulated pilots.
     pub informal_pilot_chat: bool,
     /// Allow restrained humour in informal pilot replies.
@@ -359,6 +380,10 @@ pub struct Settings {
     /// Copilot sets autopilot targets (altitude, heading, speed) when the
     /// autopilot is engaged, announcing each change; advises only otherwise.
     pub copilot_flies_ap: bool,
+    /// Enable optional AI-managed autonomous user-aircraft system actions by phase.
+    pub autonomous_user_management: bool,
+    /// Optional model override for autonomous user-aircraft management; empty uses `ai_model`.
+    pub autonomous_user_management_model: String,
     /// Speak controller transmissions automatically.
     pub controller_speech: bool,
     /// Speak copilot readbacks automatically.
@@ -502,6 +527,11 @@ impl Default for Settings {
             wake_standard: "auto".into(),
             hear_traffic_radio: true,
             talk_to_traffic: false,
+            adsb_traffic_source: AdsbTrafficSource::Off,
+            adsb_poll_seconds: 5,
+            adsb_radius_nm: 80,
+            adsb_max_targets: 40,
+            adsb_max_seen_seconds: 20,
             informal_pilot_chat: false,
             pilot_chat_humour: false,
             pilots_call_me: false,
@@ -560,6 +590,8 @@ impl Default for Settings {
             auto_tune_handoff: true,
             copilot_auto_respond: true,
             copilot_flies_ap: false,
+            autonomous_user_management: false,
+            autonomous_user_management_model: String::new(),
             controller_speech: true,
             copilot_speech: true,
             pilot_speech: true,
@@ -703,6 +735,30 @@ impl Settings {
                 f32::from(self.native_traffic_count),
             ));
         }
+        if !(1..=60).contains(&self.adsb_poll_seconds) {
+            return Err(ValidationError::OutOfRange(
+                "adsb poll seconds",
+                f32::from(self.adsb_poll_seconds),
+            ));
+        }
+        if !(1..=250).contains(&self.adsb_radius_nm) {
+            return Err(ValidationError::OutOfRange(
+                "adsb radius nm",
+                self.adsb_radius_nm as f32,
+            ));
+        }
+        if self.adsb_max_targets == 0 || self.adsb_max_targets > 126 {
+            return Err(ValidationError::OutOfRange(
+                "adsb max targets",
+                f32::from(self.adsb_max_targets),
+            ));
+        }
+        if !(1..=60).contains(&self.adsb_max_seen_seconds) {
+            return Err(ValidationError::OutOfRange(
+                "adsb max seen seconds",
+                f32::from(self.adsb_max_seen_seconds),
+            ));
+        }
         let generated_count = [
             self.airline_traffic,
             self.regional_traffic,
@@ -740,6 +796,21 @@ impl Settings {
                 || !(url.starts_with("http://") || url.starts_with("https://"))
             {
                 return Err(ValidationError::BadUrl(url.clone()));
+            }
+        }
+        for (name, model, allow_empty) in [
+            ("AI model", self.ai_model.trim(), false),
+            (
+                "autonomous AI model",
+                self.autonomous_user_management_model.trim(),
+                true,
+            ),
+        ] {
+            if model.len() > 128
+                || (!allow_empty && model.is_empty())
+                || model.chars().any(|c| c.is_ascii_whitespace())
+            {
+                return Err(ValidationError::OutOfRange(name, model.len() as f32));
             }
         }
         for (name, value) in [
@@ -899,10 +970,12 @@ mod tests {
             assert!(value.hear_traffic_radio);
             assert!(
                 !value.copilot_flies_ap
+                    && !value.autonomous_user_management
                     && !value.generated_traffic
                     && !value.pilots_call_me
                     && !value.informal_pilot_chat
             );
+            assert!(value.autonomous_user_management_model.is_empty());
             assert!(
                 value.pilot_volume > 0.0
                     && value.copilot_volume > 0.0
@@ -1086,5 +1159,25 @@ mod layout_tests {
         let saved = serde_json::to_string(&settings).unwrap();
         let restored: Settings = serde_json::from_str(&saved).unwrap();
         assert_eq!(restored.traffic_rate, TrafficRate::Hertz(20));
+    }
+
+    #[test]
+    fn autonomous_management_model_override_round_trips_and_rejects_whitespace() {
+        let settings = super::Settings {
+            autonomous_user_management: true,
+            autonomous_user_management_model: "qwen3.5-4b".to_owned(),
+            ..super::Settings::default()
+        };
+        settings.validate().unwrap();
+        let restored: super::Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            restored.autonomous_user_management_model,
+            "qwen3.5-4b".to_owned()
+        );
+
+        let mut invalid = settings;
+        invalid.autonomous_user_management_model = "qwen 3.5-4b".to_owned();
+        assert!(invalid.validate().is_err());
     }
 }

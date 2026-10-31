@@ -1936,6 +1936,20 @@ pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
                 "Off: ATC uses the TOML phrases as written. On: AI uses the phrases as examples for natural wording. Instructions and values stay fixed; invalid wording falls back to TOML.",
             );
             ui.text_wrapped("With AI off, use the available request buttons or recognised standard phrases. The AI interprets requests and varies wording; the ATC engine checks clearances and permissions.");
+            ui.checkbox(
+                "AI autonomous user-aircraft management (optional)",
+                &mut interface.settings.autonomous_user_management,
+            );
+            {
+                let _disabled = ui.begin_disabled(!interface.settings.autonomous_user_management);
+                setting_input(
+                    ui,
+                    "Autonomous management model (optional override)",
+                    &mut interface.settings.autonomous_user_management_model,
+                    128,
+                );
+            }
+            ui.text_wrapped("When enabled, AI can select phase-appropriate cockpit system actions from mapped controls. Leave the override empty to use the main AI model. Built-in packaged models are qwen2.5-7b, qwen3-8b and qwen3.5-4b.");
             if ui.collapsing_header("Advanced AI connection", imgui::TreeNodeFlags::empty()) {
                 setting_input(ui, "AI server address", &mut interface.settings.ai_url, 256);
                 setting_input(ui, "AI model", &mut interface.settings.ai_model, 128);

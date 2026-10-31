@@ -281,6 +281,7 @@ mod tests {
         let mut distances = Vec::new();
         for (kind, knots) in [
             (animation::Kind::Piston, 65.0),
+            (animation::Kind::Rotorcraft, 60.0),
             (animation::Kind::Turboprop, 110.0),
             (animation::Kind::RegionalJet, 130.0),
             (animation::Kind::Jet, 140.0),
