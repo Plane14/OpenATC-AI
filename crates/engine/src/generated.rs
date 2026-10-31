@@ -5482,6 +5482,42 @@ pub fn step(state: &mut EngineState) {
         }
     }
     state.generated.visible = visible.iter().map(|frame| frame.target.id).collect();
+    let poses = state.generated.world.snapshot();
+    state.session.generated_traffic_debug = visible
+        .iter()
+        .map(|frame| {
+            let pose = poses.iter().find(|pose| pose.id == frame.target.id);
+            let blocker = state.generated.world.surface_blocker(frame.target.id);
+            let reason = if let Some(exchange) = state
+                .generated
+                .exchange
+                .as_ref()
+                .filter(|exchange| exchange.id == frame.target.id)
+            {
+                if exchange.grant {
+                    format!("clearing {:?}", pose.map(|pose| pose.stage))
+                } else {
+                    "holding: controller exchange".to_owned()
+                }
+            } else if let Some(blocker) = blocker {
+                format!("blocked by {blocker}")
+            } else if pose.is_some_and(|pose| pose.awaiting_clearance) {
+                "awaiting clearance".to_owned()
+            } else if pose.is_some_and(|pose| pose.knots < 0.5) {
+                "stopped".to_owned()
+            } else {
+                "moving".to_owned()
+            };
+            openatc_core::state::TrafficDebug {
+                id: frame.target.id,
+                callsign: frame.target.callsign.clone(),
+                stage: pose.map_or_else(|| "unknown".to_owned(), |pose| format!("{:?}", pose.stage)),
+                reason,
+                blocker,
+                awaiting_clearance: pose.is_some_and(|pose| pose.awaiting_clearance),
+            }
+        })
+        .collect();
     state.session.generated_traffic = visible;
     state.session.generated_traffic_clock = state
         .generated

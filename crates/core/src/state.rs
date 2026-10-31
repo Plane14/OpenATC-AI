@@ -85,6 +85,24 @@ pub struct GeneratedTraffic {
     pub animation: crate::traffic::animation::Animation,
 }
 
+/// Per-aircraft generated-traffic debug state for the map and Traffic page.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TrafficDebug {
+    /// Stable aircraft id.
+    pub id: u32,
+    /// Radio callsign.
+    pub callsign: String,
+    /// Current movement stage.
+    pub stage: String,
+    /// Human-readable reason for the current state.
+    pub reason: String,
+    /// Blocking aircraft id, when one exists.
+    pub blocker: Option<u32>,
+    /// The aircraft is waiting for movement authority.
+    pub awaiting_clearance: bool,
+}
+
 /// The traffic currently pointed out by the tuned controller.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -830,6 +848,9 @@ pub struct State {
     /// Bounded model and route diagnostics for the generated fleet.
     #[serde(default)]
     pub generated_traffic_diagnostics: Vec<String>,
+    /// Per-aircraft generated-traffic debug state.
+    #[serde(default)]
+    pub generated_traffic_debug: Vec<TrafficDebug>,
     /// Remaining observed departure wake delay; zero does not override runway occupancy.
     #[serde(default)]
     pub departure_wake_seconds: f64,
@@ -931,6 +952,7 @@ impl Default for State {
             generated_traffic_clock: None,
             generated_animation_channels: std::collections::BTreeMap::default(),
             generated_traffic_diagnostics: Vec::new(),
+            generated_traffic_debug: Vec::new(),
             traffic_call: None,
             departure_wake_seconds: 0.0,
             arrival_wake_conflict: false,

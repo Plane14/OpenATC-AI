@@ -362,6 +362,38 @@ pub fn tab(ui: &imgui::Ui, interface: &mut crate::interface::Interface, state: &
             });
         }
     }
+    if interface.settings.dev_mode
+        && interface.settings.show_traffic_debug
+        && !state.generated_traffic_debug.is_empty()
+    {
+        ui.separator();
+        widgets::section_title(ui, "TRAFFIC DEBUG");
+        if let Some(_table) = ui.begin_table_with_flags(
+            "GeneratedTrafficDebug",
+            4,
+            imgui::TableFlags::ROW_BG | imgui::TableFlags::BORDERS_INNER_H,
+        ) {
+            for column in ["Aircraft", "Stage", "Reason", "Blocker"] {
+                ui.table_setup_column(column);
+            }
+            ui.table_headers_row();
+            for debug in &state.generated_traffic_debug {
+                ui.table_next_row();
+                ui.table_next_column();
+                ui.text(&debug.callsign);
+                ui.table_next_column();
+                ui.text(&debug.stage);
+                ui.table_next_column();
+                ui.text(&debug.reason);
+                ui.table_next_column();
+                if let Some(blocker) = debug.blocker {
+                    ui.text(blocker.to_string());
+                } else {
+                    ui.text_disabled("-");
+                }
+            }
+        }
+    }
     if let Some(target) = targets
         .iter()
         .find(|t| t.id != 0 && t.id == interface.traffic_selected)

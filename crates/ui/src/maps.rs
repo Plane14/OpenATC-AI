@@ -456,7 +456,9 @@ fn draw_map(
             ui.calc_text_size(&beam.label)[0],
         );
     }
-    if interface.taxi_traffic_visible && !interface.settings.show_traffic_debug {
+    if interface.taxi_traffic_visible
+        && !(interface.settings.show_traffic_debug && interface.settings.dev_mode)
+    {
         for target in crate::traffic::targets(state).take(126) {
             if !target.latitude.is_finite()
                 || !target.longitude.is_finite()
@@ -480,7 +482,7 @@ fn draw_map(
             draw_traffic(ui, draw, screen, target);
         }
     }
-    if interface.settings.show_traffic_debug {
+    if interface.settings.show_traffic_debug && interface.settings.dev_mode {
         let debug_targets: Vec<&openatc_core::state::TrafficTarget> =
             crate::traffic::targets(state)
                 .take(126)
@@ -538,17 +540,32 @@ fn draw_map(
                 f64::from(screen[1]) - f64::from(mouse[1]),
             );
             if distance <= 10.0 {
-                ui.tooltip_text(format!(
-                    "{}: {}",
-                    target.callsign,
-                    if held {
-                        "held"
-                    } else if parked {
-                        "parked"
-                    } else {
-                        "moving"
-                    }
-                ));
+                let detail = state
+                    .generated_traffic_debug
+                    .iter()
+                    .find(|debug| debug.id == target.id);
+                let reason = detail.map_or_else(
+                    || {
+                        if held {
+                            "held".to_owned()
+                        } else if parked {
+                            "parked".to_owned()
+                        } else {
+                            "moving".to_owned()
+                        }
+                    },
+                    |debug| {
+                        format!(
+                            "{} / {}{}",
+                            debug.stage,
+                            debug.reason,
+                            debug
+                                .blocker
+                                .map_or_else(String::new, |blocker| format!(" ({blocker})"))
+                        )
+                    },
+                );
+                ui.tooltip_text(format!("{}: {reason}", target.callsign));
             }
         }
     }
