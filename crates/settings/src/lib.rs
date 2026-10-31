@@ -482,7 +482,7 @@ impl Default for Settings {
             manage_native_traffic: false,
             suppress_native_traffic: true,
             mute_native_radio: true,
-            native_traffic_count: 4,
+            native_traffic_count: 0,
             generated_traffic: false,
             traffic_rate: TrafficRate::EveryFrame,
             traffic_log: TrafficLog::Summary,

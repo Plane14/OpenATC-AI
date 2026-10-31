@@ -1,6 +1,20 @@
 //! Optional native AI count control. X-Plane continues to fly the aircraft.
 use xplane_sys as xp;
 
+/// Decide whether OpenATC should own X-Plane's native AI and how many to request.
+///
+/// Generated traffic always forces native AI to zero. Otherwise a configured native count is
+/// used only when the user manages native traffic explicitly.
+pub(crate) fn native_plan(
+    suppress_native: bool,
+    generated_traffic: bool,
+    manage_native: bool,
+    configured_count: u8,
+) -> (bool, u8) {
+    let suppress = suppress_native || generated_traffic;
+    (manage_native || suppress, if suppress { 0 } else { configured_count })
+}
+
 #[derive(Default)]
 pub struct NativeTraffic {
     owned: bool,
@@ -87,5 +101,32 @@ impl NativeTraffic {
 impl Drop for NativeTraffic {
     fn drop(&mut self) {
         self.release(true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_plan;
+
+    #[test]
+    fn generated_traffic_forces_native_ai_off() {
+        assert_eq!(native_plan(false, true, false, 19), (true, 0));
+        assert_eq!(native_plan(false, true, true, 19), (true, 0));
+    }
+
+    #[test]
+    fn suppression_forces_native_ai_off() {
+        assert_eq!(native_plan(true, false, false, 19), (true, 0));
+        assert_eq!(native_plan(true, true, true, 19), (true, 0));
+    }
+
+    #[test]
+    fn explicit_native_management_keeps_the_configured_count() {
+        assert_eq!(native_plan(false, false, true, 6), (true, 6));
+    }
+
+    #[test]
+    fn native_ai_stays_off_when_unmanaged_and_not_suppressed() {
+        assert_eq!(native_plan(false, false, false, 19), (false, 19));
     }
 }

@@ -702,10 +702,14 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     let holding_enabled = interface.settings.show_holding_point;
     let traffic_holding_enabled = interface.settings.show_traffic_holding_points;
     let follow_me_enabled = interface.settings.show_follow_me;
-    let native_enabled = interface.settings.manage_native_traffic;
     let suppress_native =
         interface.engine.connected() && interface.settings.suppress_native_traffic;
-    let native_count = interface.settings.native_traffic_count;
+    let (native_enabled, native_count) = traffic::native_plan(
+        suppress_native,
+        !state.generated_traffic.is_empty(),
+        interface.settings.manage_native_traffic,
+        interface.settings.native_traffic_count,
+    );
     let arrival_target = openatc_core::arrival::target(
         &interface.arrival,
         &state.plan.arrival_runway,
@@ -750,10 +754,7 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
     }
     let status = locked
         .native_traffic
-        .update(
-            (native_enabled || suppress_native) && state.generated_traffic.is_empty(),
-            if suppress_native { 0 } else { native_count },
-        )
+        .update(native_enabled, native_count)
         .to_owned();
     if let Some(interface) = locked.interface.as_mut() {
         interface.native_traffic_status = status;
