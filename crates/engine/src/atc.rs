@@ -70,6 +70,15 @@ fn sync_aircraft(
             if frequency <= 0 || keep.contains(&frequency) {
                 continue;
             }
+            // The station index can hold tens of thousands of airports. Skip the scan when
+            // the aircraft is already joined with the same identity.
+            if atc
+                .aircraft_from_id(frequency, PILOT_ID)
+                .is_some_and(|joined| joined.callsign() == callsign)
+            {
+                keep.push(frequency);
+                continue;
+            }
             let Some(station) = stations
                 .iter()
                 .find(|station| station.khz == frequency)
@@ -112,6 +121,15 @@ fn sync_traffic_aircraft(
         let mut keep = Vec::new();
         for frequency in [target.com1_khz, target.com2_khz].into_iter().flatten() {
             if frequency <= 0 || keep.contains(&frequency) {
+                continue;
+            }
+            // The station index can hold tens of thousands of airports. Skip the scan when
+            // the aircraft is already joined with the same identity.
+            if atc
+                .aircraft_from_id(frequency, target.id)
+                .is_some_and(|joined| joined.callsign() == target.callsign)
+            {
+                keep.push(frequency);
                 continue;
             }
             let Some(station) = stations

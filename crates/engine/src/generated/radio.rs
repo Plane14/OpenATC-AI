@@ -1144,6 +1144,39 @@ fn reissue_stopped_crossing(state: &mut EngineState) -> Option<Exchange> {
 }
 
 fn advance_exchange(state: &mut EngineState, mut exchange: Exchange) -> Option<Exchange> {
+    // An exchange belongs to the phase that created it. If the aircraft has already moved on,
+    // drop the message instead of holding the controller queue for a stale clearance.
+    let exchange_stage = state
+        .generated
+        .flights
+        .get(&exchange.id)
+        .and_then(|flight| flight.route.segment(exchange.segment))
+        .map(|segment| segment.stage);
+    let live_stage = state
+        .generated
+        .world
+        .snapshot()
+        .into_iter()
+        .find(|pose| pose.id == exchange.id)
+        .map(|pose| pose.stage);
+    if matches!(
+        exchange_stage,
+        Some(
+            openatc_core::traffic::motion::Stage::Takeoff
+                | openatc_core::traffic::motion::Stage::LineUp
+        )
+    ) && matches!(
+        live_stage,
+        Some(
+            openatc_core::traffic::motion::Stage::TaxiIn
+                | openatc_core::traffic::motion::Stage::Rollout
+                | openatc_core::traffic::motion::Stage::Turnaround
+                | openatc_core::traffic::motion::Stage::Parked
+        )
+    ) {
+        state.generated.cancelled_takeoffs.remove(&exchange.id);
+        return None;
+    }
     // The player's microphone only blocks a controller on the frequency being used. Ground,
     // Tower and Delivery are separate positions and may work different aircraft at once.
     if state.session.telemetry.radio_busy

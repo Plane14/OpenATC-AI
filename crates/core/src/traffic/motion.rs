@@ -994,9 +994,22 @@ impl World {
     /// Identify the reserved surface traffic preventing the next taxi clearance.
     #[must_use]
     pub fn surface_blocker(&self, id: u32) -> Option<u32> {
+        let blocker = self.raw_surface_blocker(id)?;
+        // Converging taxi routes can each hold a resource the other needs. Break the
+        // resulting two-aircraft deadlock by yielding to traffic on the right.
+        if self.raw_surface_blocker(blocker) == Some(id) {
+            if self.yields_to_right(id, blocker) {
+                return Some(blocker);
+            }
+            return None;
+        }
+        Some(blocker)
+    }
+
+    fn raw_surface_blocker(&self, id: u32) -> Option<u32> {
         let aircraft = self.aircraft.get(&id)?;
         let stage = aircraft.route.segments[aircraft.segment].stage;
-        let blocker = aircraft
+        aircraft
             .route
             .segments
             .iter()
@@ -1004,13 +1017,28 @@ impl World {
             .take_while(|segment| segment.stage == stage)
             .flat_map(|segment| &segment.resources)
             .filter_map(|resource| self.owners.get(resource).copied())
-            .find(|owner| *owner != id && !self.behind(id, *owner))?;
-        // Converging taxi routes can each hold a resource the other needs. Break the
-        // resulting two-aircraft deadlock deterministically: the lower id proceeds.
-        if id < blocker && self.surface_blocker(blocker) == Some(id) {
-            return None;
+            .find(|owner| *owner != id && !self.behind(id, *owner))
+    }
+
+    /// True when the other aircraft is on this aircraft's right, so this aircraft yields.
+    fn yields_to_right(&self, id: u32, other: u32) -> bool {
+        let (Some(a), Some(b)) = (self.aircraft.get(&id), self.aircraft.get(&other)) else {
+            return false;
+        };
+        let pa = a.pose(id);
+        let pb = b.pose(other);
+        let dlon = (pb.position.longitude - pa.position.longitude).to_radians()
+            * pa.position.latitude.to_radians().cos();
+        let dlat = (pb.position.latitude - pa.position.latitude).to_radians();
+        if dlon.hypot(dlat) < 1.0e-9 {
+            return id < other;
         }
-        Some(blocker)
+        let bearing = dlon.atan2(dlat).to_degrees().rem_euclid(360.0);
+        let relative = crate::navigation::turn(pa.heading, bearing);
+        if relative.abs() < 1.0 || (relative.abs() - 180.0).abs() < 1.0 {
+            return id < other;
+        }
+        relative > 0.0
     }
 
     /// True when the other aircraft is behind this one on the same movement. A leader ignores
