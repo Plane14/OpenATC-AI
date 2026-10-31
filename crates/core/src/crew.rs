@@ -512,6 +512,87 @@ fn build_standard_profile() -> CrewProfile {
             },
         );
     }
+    profile.checklists.insert(
+        "before_start".into(),
+        vec![
+            ChecklistItem {
+                control: "external_power_switch".into(),
+                challenge: "crew_control_external_power_switch".into(),
+                response: "crew_state_on".into(),
+                value: 1.0,
+            },
+            ChecklistItem {
+                control: "parking_brake".into(),
+                challenge: "crew_control_parking_brake".into(),
+                response: "crew_state_set".into(),
+                value: 1.0,
+            },
+            ChecklistItem {
+                control: "seatbelts".into(),
+                challenge: "checklist_seatbelts".into(),
+                response: "crew_state_on".into(),
+                value: 1.0,
+            },
+            ChecklistItem {
+                control: "beacon".into(),
+                challenge: "checklist_beacon".into(),
+                response: "crew_state_on".into(),
+                value: 1.0,
+            },
+        ],
+    );
+    profile.checklists.insert(
+        "after_takeoff".into(),
+        vec![
+            ChecklistItem {
+                control: "gear".into(),
+                challenge: "checklist_gear".into(),
+                response: "crew_state_up".into(),
+                value: 0.0,
+            },
+            ChecklistItem {
+                control: "flaps".into(),
+                challenge: "crew_control_flaps".into(),
+                response: "crew_state_up".into(),
+                value: 0.0,
+            },
+            ChecklistItem {
+                control: "speedbrakes".into(),
+                challenge: "crew_control_speedbrakes".into(),
+                response: "crew_state_retract".into(),
+                value: 0.0,
+            },
+        ],
+    );
+    profile.checklists.insert(
+        "parking".into(),
+        vec![
+            ChecklistItem {
+                control: "parking_brake".into(),
+                challenge: "crew_control_parking_brake".into(),
+                response: "crew_state_set".into(),
+                value: 1.0,
+            },
+            ChecklistItem {
+                control: "beacon".into(),
+                challenge: "checklist_beacon".into(),
+                response: "crew_state_off".into(),
+                value: 0.0,
+            },
+            ChecklistItem {
+                control: "seatbelts".into(),
+                challenge: "checklist_seatbelts".into(),
+                response: "crew_state_off".into(),
+                value: 0.0,
+            },
+            ChecklistItem {
+                control: "external_power_switch".into(),
+                challenge: "crew_control_external_power_switch".into(),
+                response: "crew_state_on".into(),
+                value: 1.0,
+            },
+        ],
+    );
     profile
 }
 

@@ -5511,7 +5511,8 @@ pub fn step(state: &mut EngineState) {
             openatc_core::state::TrafficDebug {
                 id: frame.target.id,
                 callsign: frame.target.callsign.clone(),
-                stage: pose.map_or_else(|| "unknown".to_owned(), |pose| format!("{:?}", pose.stage)),
+                stage: pose
+                    .map_or_else(|| "unknown".to_owned(), |pose| format!("{:?}", pose.stage)),
                 reason,
                 blocker,
                 awaiting_clearance: pose.is_some_and(|pose| pose.awaiting_clearance),

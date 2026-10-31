@@ -1,0 +1,93 @@
+[aircraft]
+name = "Devinci 2707"
+match_author = "devinci"
+match_icao = ["D270"]
+
+[aircraft.comms]
+attendant_refs = []
+ground_refs = []
+emer_action = "ignore"
+
+[aircraft.electrical]
+bat_volts_ref = "sim/cockpit2/electrical/bus_volts[0]"
+min_volts = 22.0
+battery_refs = ["sim/cockpit2/electrical/battery_on[0]"]
+gpu_refs = ["sim/cockpit2/electrical/GPU_generator_on"]
+apu_refs = ["sim/cockpit/electrical/generator_apu_on"]
+rmp_refs = []
+avionics_refs = ["sim/cockpit2/switches/avionics_power_on"]
+
+[aircraft.autopilot]
+mode_ref = "sim/cockpit/autopilot/autopilot_mode"
+altitude_ref = "sim/cockpit/autopilot/altitude"
+heading_ref = "sim/cockpit/autopilot/heading_mag"
+speed_ref = "sim/cockpit/autopilot/airspeed"
+
+[aircraft.radio]
+com1_active_ref = "sim/cockpit2/radios/actuators/com1_frequency_hz_833"
+
+[[aircraft.crew.checklists.before_start]]
+control = "external_power_switch"
+challenge = "crew_control_external_power_switch"
+response = "crew_state_on"
+value = 1
+
+[[aircraft.crew.checklists.before_start]]
+control = "parking_brake"
+challenge = "crew_control_parking_brake"
+response = "crew_state_set"
+value = 1
+
+[[aircraft.crew.checklists.before_start]]
+control = "seatbelts"
+challenge = "checklist_seatbelts"
+response = "crew_state_on"
+value = 1
+
+[[aircraft.crew.checklists.before_start]]
+control = "beacon"
+challenge = "checklist_beacon"
+response = "crew_state_on"
+value = 1
+
+[[aircraft.crew.checklists.after_takeoff]]
+control = "gear"
+challenge = "checklist_gear"
+response = "crew_state_up"
+value = 0
+
+[[aircraft.crew.checklists.after_takeoff]]
+control = "flaps"
+challenge = "crew_control_flaps"
+response = "crew_state_up"
+value = 0
+
+[[aircraft.crew.checklists.after_takeoff]]
+control = "speedbrakes"
+challenge = "crew_control_speedbrakes"
+response = "crew_state_retract"
+value = 0
+
+[[aircraft.crew.checklists.parking]]
+control = "parking_brake"
+challenge = "crew_control_parking_brake"
+response = "crew_state_set"
+value = 1
+
+[[aircraft.crew.checklists.parking]]
+control = "beacon"
+challenge = "checklist_beacon"
+response = "crew_state_off"
+value = 0
+
+[[aircraft.crew.checklists.parking]]
+control = "seatbelts"
+challenge = "checklist_seatbelts"
+response = "crew_state_off"
+value = 0
+
+[[aircraft.crew.checklists.parking]]
+control = "external_power_switch"
+challenge = "crew_control_external_power_switch"
+response = "crew_state_on"
+value = 1

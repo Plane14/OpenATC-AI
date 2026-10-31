@@ -1008,10 +1008,18 @@ impl Interface {
                 } else {
                     "Voice: TTS down".to_owned()
                 };
-                if let Some(version) = reply.data.get("aiVersion").and_then(serde_json::Value::as_str) {
+                if let Some(version) = reply
+                    .data
+                    .get("aiVersion")
+                    .and_then(serde_json::Value::as_str)
+                {
                     version.clone_into(&mut self.ai_version);
                 }
-                if let Some(version) = reply.data.get("engineVersion").and_then(serde_json::Value::as_str) {
+                if let Some(version) = reply
+                    .data
+                    .get("engineVersion")
+                    .and_then(serde_json::Value::as_str)
+                {
                     version.clone_into(&mut self.engine_version);
                 }
             } else {
@@ -1112,11 +1120,13 @@ impl Interface {
         use openatc_core::intents::speech_worth_sending;
         if self.last_com1_khz != 0 && self.last_com1_khz != state.telemetry.com1_khz {
             self.speech.stop_speech();
-            self.speech_queue.retain(|q| q.radio != Some(openatc_core::state::Radio::Com1));
+            self.speech_queue
+                .retain(|q| q.radio != Some(openatc_core::state::Radio::Com1));
         }
         if self.last_com2_khz != state.telemetry.com2_khz {
             self.speech_com2.stop_speech();
-            self.speech_queue.retain(|q| q.radio != Some(openatc_core::state::Radio::Com2));
+            self.speech_queue
+                .retain(|q| q.radio != Some(openatc_core::state::Radio::Com2));
         }
         self.last_com1_khz = state.telemetry.com1_khz;
         self.last_com2_khz = state.telemetry.com2_khz;

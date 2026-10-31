@@ -1556,7 +1556,10 @@ pub fn tick(state: &mut EngineState) {
             .generated
             .sessions
             .phase(trigger.session, trigger.phase, trigger.at);
-        state.generated.sessions.progress(trigger.session, trigger.at);
+        state
+            .generated
+            .sessions
+            .progress(trigger.session, trigger.at);
     }
     if !triggers.is_empty() {
         state.generated.log(

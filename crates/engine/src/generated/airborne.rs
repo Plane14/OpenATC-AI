@@ -51,9 +51,6 @@ pub(super) fn resolve(input: &Request<'_>) -> Result<Decoded, String> {
     {
         return Err("Terminal planning has an invalid aerodrome vertical bound".into());
     }
-    if !input.aircraft.rnav {
-        return Err("Generated terminal planning needs supported navigation equipment".into());
-    }
     let departure_ceiling = input
         .departure_weather
         .atmosphere

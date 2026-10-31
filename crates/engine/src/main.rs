@@ -26,6 +26,7 @@ mod squawk;
 mod support;
 mod surface;
 mod traffic;
+mod traffic_adsb;
 mod traffic_models;
 mod traffic_profiles;
 mod traffic_runtime;
@@ -84,6 +85,8 @@ pub struct EngineState {
     pub atc: openatc_core::atc_manager::AtcManager,
     /// Bounded traffic history and active spacing instructions.
     pub traffic: traffic::Traffic,
+    /// Optional ADS-B feed cache and polling guards.
+    pub adsb: traffic_adsb::Runtime,
     /// Frequency station threads and their transmission queues.
     pub(crate) station_bus: traffic_runtime::StationBus,
     /// Selected mission clock and branching outcomes.
@@ -589,6 +592,7 @@ async fn main() {
         aircraft: Default::default(),
         atc: Default::default(),
         traffic: Default::default(),
+        adsb: Default::default(),
         station_bus: Default::default(),
         traffic_profiles,
         generated: Default::default(),
@@ -740,6 +744,7 @@ fn test_state() -> EngineState {
         aircraft: Default::default(),
         atc: Default::default(),
         traffic: Default::default(),
+        adsb: Default::default(),
         station_bus: Default::default(),
         traffic_profiles: Default::default(),
         generated: Default::default(),

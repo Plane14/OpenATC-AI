@@ -532,11 +532,7 @@ fn draw_map(
                 .and_then(|debug| debug.blocker)
                 .and_then(|blocker| debug_targets.iter().find(|other| other.id == blocker))
                 .and_then(|blocker| {
-                    let point = airport_point(
-                        airport,
-                        blocker.latitude,
-                        blocker.longitude,
-                    );
+                    let point = airport_point(airport, blocker.latitude, blocker.longitude);
                     (point.east.hypot(point.north) <= 100_000.0).then(|| project(&point))
                 });
             if let Some(blocker_screen) = blocker_screen {
@@ -557,12 +553,15 @@ fn draw_map(
                     draw.add_line(screen, hold_screen, rgba(220, 60, 60, 180))
                         .thickness(1.5)
                         .build();
-                    draw.add_text([hold_screen[0] + 4.0, hold_screen[1] + 4.0], rgba(220, 60, 60, 220), "hold");
+                    draw.add_text(
+                        [hold_screen[0] + 4.0, hold_screen[1] + 4.0],
+                        rgba(220, 60, 60, 220),
+                        "hold",
+                    );
                 }
             }
-            let distance = (f64::from(screen[0]) - f64::from(mouse[0])).hypot(
-                f64::from(screen[1]) - f64::from(mouse[1]),
-            );
+            let distance = (f64::from(screen[0]) - f64::from(mouse[0]))
+                .hypot(f64::from(screen[1]) - f64::from(mouse[1]));
             if distance <= 10.0 {
                 let detail = state
                     .generated_traffic_debug

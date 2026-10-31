@@ -230,7 +230,7 @@ callsign = ""
 category = "general_aviation"
 home_prefixes = []
 serves = []
-fleet = { C172 = 20, PA28 = 20, BE58 = 15, C208 = 10, PC12 = 15, B350 = 10, C25C = 8, GLF6 = 2 }
+fleet = { C172 = 18, PA28 = 17, R44 = 15, H125 = 10, BE58 = 13, C208 = 8, PC12 = 10, B350 = 6, C25C = 2, GLF6 = 1 }
 
 [airline.AFR]
 name = "Air France"

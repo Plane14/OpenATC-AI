@@ -407,8 +407,8 @@ fn surface(state: &mut EngineState, station: &Station) -> bool {
     {
         return false;
     }
-    let conflict = openatc_core::traffic::taxi_conflict(airport, &state.session.telemetry)
-        .filter(|target| {
+    let conflict =
+        openatc_core::traffic::taxi_conflict(airport, &state.session.telemetry).filter(|target| {
             !openatc_core::traffic::ahead_on_same_taxi_route(
                 airport,
                 route,
@@ -867,8 +867,8 @@ pub async fn talk(AxumState(shared): AxumState<Shared>, Json(body): Json<Value>)
 
 #[cfg(test)]
 mod tests {
-    use openatc_core::aircraft::AircraftBehaviour;
     use super::*;
+    use openatc_core::aircraft::AircraftBehaviour;
     use openatc_core::{
         airport::{Airport, Runway},
         state::{Point, TaxiClearance, Telemetry},
@@ -896,7 +896,8 @@ mod tests {
             icao: "TEST".into(),
             ..Default::default()
         });
-        s.session.on_event(openatc_core::aircraft::AircraftEvent::Taxi);
+        s.session
+            .on_event(openatc_core::aircraft::AircraftEvent::Taxi);
         s.session.taxi_clearance = TaxiClearance {
             airport: "TEST".into(),
             approved: true,
@@ -962,7 +963,9 @@ mod tests {
         let mut port = airport();
         port.icao = "KTEST".into();
         state.arrival_airport = Some(port);
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::Arrival);
         state.session.plan.arrival_runway = "36".into();
         state.session.plan.aircraft = code.into();
         state.session.telemetry = Telemetry {

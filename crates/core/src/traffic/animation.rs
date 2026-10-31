@@ -16,6 +16,8 @@ use std::collections::BTreeMap;
 pub enum Kind {
     /// Light reciprocating aircraft.
     Piston,
+    /// Rotorcraft and tiltrotor traffic.
+    Rotorcraft,
     /// Propeller aircraft driven by turbine engines.
     Turboprop,
     /// Regional and business jets.
@@ -122,8 +124,8 @@ pub fn parse(text: &str) -> Result<BTreeMap<Kind, Handling>, String> {
     let file: File = value
         .try_into()
         .map_err(|error: toml::de::Error| error.to_string())?;
-    if file.version != 1 || file.handling.len() != 5 {
-        return Err("Handling catalogue requires version 1 and all five envelopes".into());
+    if file.version != 1 || file.handling.len() != 6 {
+        return Err("Handling catalogue requires version 1 and all six envelopes".into());
     }
     let bounded =
         |value: f64, low: f64, high: f64| value.is_finite() && (low..=high).contains(&value);

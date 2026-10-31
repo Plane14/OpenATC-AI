@@ -222,28 +222,29 @@ fn object_path(root: &Path, exports: &BTreeMap<String, PathBuf>, text: &str) -> 
 fn definitions(text: &str) -> Vec<Definition> {
     let mut models = Vec::new();
     let mut current = Definition::default();
-    for line in text.lines().map(str::trim).filter(|s| !s.starts_with('#')) {
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.starts_with('#'))
+    {
         let fields: Vec<_> = line.split_whitespace().collect();
-        match fields.as_slice() {
-            ["OBJ8_AIRCRAFT", name @ ..] => {
+        let keyword = fields.first().map(|value| value.to_ascii_uppercase());
+        match (keyword.as_deref(), fields.as_slice()) {
+            (Some("OBJ8_AIRCRAFT"), [_, name @ ..]) => {
                 if !current.name.is_empty() {
                     models.push(std::mem::take(&mut current));
                 }
                 current.name = name.join(" ");
             }
-            ["OBJ8", _, _, path] => current.paths.push((*path).into()),
-            ["OBJ8", ..] => current.unsupported = true,
-            ["VERT_OFFSET", value] | ["OFFSET", _, _, value] => {
+            (Some("OBJ8"), [_, _, _, path, ..]) => current.paths.push((*path).into()),
+            (Some("OBJ8"), [_, ..]) => current.unsupported = true,
+            (Some("VERT_OFFSET"), [_, value]) | (Some("OFFSET"), [_, _, _, value]) => {
                 current.offset = value
                     .parse::<f64>()
                     .ok()
                     .filter(|v| v.is_finite() && (-10.0..=50.0).contains(v));
             }
-            [
-                "ICAO" | "AIRLINE" | "LIVERY" | "MATCHES",
-                aircraft,
-                rest @ ..,
-            ] => {
+            (Some("ICAO" | "AIRLINE" | "LIVERY" | "MATCHES"), [_, aircraft, rest @ ..]) => {
                 if current
                     .matches
                     .first()
@@ -279,7 +280,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("openatc-csl-{}", std::process::id()));
         std::fs::create_dir_all(root.join("models")).unwrap();
         std::fs::write(root.join("models/aircraft.obj"), "A\n800\nOBJ\n").unwrap();
-        std::fs::write(root.join("models/xsb_aircraft.txt"), "EXPORT_NAME planes\nOBJ8_AIRCRAFT A320_QFA\nOBJ8 SOLID YES planes/aircraft.obj\nVERT_OFFSET 2.1\nAIRLINE A320 QFA\nOBJ8_AIRCRAFT A320_plain\nOBJ8 SOLID YES planes/aircraft.obj\nICAO A320\nOBJ8_AIRCRAFT bad\nOBJ8 SOLID YES planes/../outside.obj\nICAO PA28\n").unwrap();
+        std::fs::write(root.join("models/xsb_aircraft.txt"), "EXPORT_NAME planes\nobj8_aircraft A320_QFA\nobj8 SOLID YES planes/aircraft.obj\nVERT_OFFSET 2.1\nairline A320 QFA\nOBJ8_AIRCRAFT A320_plain\nOBJ8 SOLID YES planes/aircraft.obj extra ignored\nICAO A320\nOBJ8_AIRCRAFT bad\nOBJ8 SOLID YES planes/../outside.obj\nICAO PA28\n").unwrap();
         let c = Catalogue::scan(&root).unwrap();
         assert_eq!(c.models.len(), 2);
         assert!(

@@ -934,7 +934,7 @@ Initial IFR clearances retain the full filed route internally but speak abbrevia
 - **Guidance visibility:** map arrows, ground arrows and holding-point marker are independent.
 - **Developer mode:** exposes the sector Map, detailed errors and controlled surface test jumps. It defaults off for new settings files; existing explicit choices are preserved. Enable it under Appearance → Developer tools.
 
-Optional live-session traffic speech is tied to identified simulator aircraft and observed events. Scripted demo chatter stays in demo sessions. Runway protection can only see traffic provided through the simulator interface; aircraft missing from that interface remain invisible to this check. Complete traffic management, wake sequencing and separation are still in development.
+Optional live-session traffic speech is tied to identified aircraft and observed events. Scripted demo chatter stays in demo sessions. By default, runway protection sees only simulator-provided traffic; when the external ADS-B source is enabled it may merge fresh validated tracks from adsb.lol into the same traffic logic. The built-in traffic catalogues now include a dedicated rotorcraft handling envelope and GA fleet mixes that include helicopter profiles. Complete traffic management, wake sequencing and separation are still in development.
 
 **Allow ATC to offer en-route shortcuts** is an optional Realism setting, off by default, with a minimum interval of 2–60 minutes. Offers require suitable downstream fixes, known terrain clearance, no skipped published restrictions and enough distance left for descent. Use **Accept direct…** or **Keep planned route** in the ATC page. Acceptance requests a new clearance and readback; copilot mode does not accept optional changes for you. Simulated runway closures and broader ATC scenario amendments are still planned. Safety instructions and required handoffs do not depend on this switch.
 
@@ -994,6 +994,12 @@ The developer fast-forward icon offers explicit test checkpoints rather than cyc
 | `models.toml`, `models-kitten.toml` | Built-in model download manifests, embedded when the server is compiled. |
 
 All spoken phrase alternatives belong in the speech library. Aircraft profiles describe controls and checklist data; they should not contain a separate collection of pilot/copilot response scripts. See [Speech editing](speech/README.md), [Runtime templates](speech/runtime/README.md) and [Situation index](speech/INDEX.md).
+
+Bundled aircraft profiles now include ToLiss A320neo, Zibo 737-800X and Devinci 2707 templates. When a matched profile provides `before_start`, `after_takeoff` and `parking` checklists, the copilot now runs those lists automatically at clearance, cruise and shutdown/finished phases. Automatic phase actions also drive core cockpit items (for example external power, parking brake, lights, flaps, gear and speed brakes) using mapped commands/datarefs and readback confirmation.
+
+Optional **Autonomous user aircraft management** in Settings → AI lets the copilot ask the configured language model to choose phase-appropriate cockpit actions, with strict fallback to deterministic phase defaults when the model is unavailable or returns invalid output. You can use the global AI model or override it per autonomy flow; bundled choices are `qwen2.5-7b`, `qwen3-8b` and `qwen3.5-4b`.
+
+For third-party aircraft mapping, DataRefTool’s `drt_last_run_datarefs.txt` export is the practical source for discovering writable refs and commands. In X-Plane 12 this file is written under `Output/preferences/`; use it to build or refine an aircraft-local `openatc.toml` profile beside the `.acf`.
 
 Alternatives must retain required placeholders and operational facts. With wording variety enabled, matching phrases become examples for the LLM, together with its role and context. Repetition can still occur for standard phraseology. The engine remembers phrase selections and protects route, altitude, runway, frequency and other cleared values; a rewrite changing protected facts is discarded.
 

@@ -41,7 +41,7 @@ approach_knots = 65
 climb_fpm = 650
 descent_fpm = 500
 propeller = true
-rnav = true
+rnav = false
 
 [aircraft.PA28]
 spacing_speed = { minimum_knots = 80.0, maximum_knots = 110.0 }
@@ -62,7 +62,47 @@ approach_knots = 70
 climb_fpm = 700
 descent_fpm = 500
 propeller = true
-rnav = true
+rnav = false
+
+[aircraft.R44]
+spacing_speed = { minimum_knots = 70.0, maximum_knots = 110.0 }
+fixed_gear = true
+handling = "rotorcraft"
+cwt = "I"
+name = "Robinson R44"
+wingspan = 10.1
+length = 11.7
+wake = "L"
+approach_category = "A"
+runway = 350
+range_nm = 280
+cruise_knots = 110
+ceiling = 14000
+approach_knots = 60
+climb_fpm = 1000
+descent_fpm = 900
+propeller = true
+rnav = false
+
+[aircraft.H125]
+spacing_speed = { minimum_knots = 80.0, maximum_knots = 125.0 }
+fixed_gear = true
+handling = "rotorcraft"
+cwt = "I"
+name = "Airbus H125"
+wingspan = 10.7
+length = 12.9
+wake = "L"
+approach_category = "A"
+runway = 400
+range_nm = 340
+cruise_knots = 125
+ceiling = 23000
+approach_knots = 70
+climb_fpm = 1300
+descent_fpm = 1000
+propeller = true
+rnav = false
 
 [aircraft.BE58]
 spacing_speed = { minimum_knots = 105.0, maximum_knots = 145.0 }
@@ -81,7 +121,7 @@ approach_knots = 90
 climb_fpm = 1000
 descent_fpm = 800
 propeller = true
-rnav = true
+rnav = false
 
 [aircraft.C208]
 spacing_speed = { minimum_knots = 100.0, maximum_knots = 140.0 }

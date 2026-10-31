@@ -82,9 +82,7 @@ fn published_pair(
             };
             // Prefer a published STAR, but allow a direct approach entry when the destination
             // has no STAR that joins the available approach.
-            candidates(false)
-                .or_else(|_| candidates(true))
-                .map(|_| ())
+            candidates(false).or_else(|_| candidates(true)).map(|_| ())
         },
     ))
 }
