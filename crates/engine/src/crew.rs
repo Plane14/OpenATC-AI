@@ -6,19 +6,21 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
-use crate::{Shared, routes::snapshot};
+use crate::{Shared, autonomous_flights::{generate_flight_plan, AutonomousFlightsState}, routes::snapshot};
 use axum::{
     Json,
     extract::State as AxumState,
     response::{IntoResponse, Response},
 };
 use openatc_core::aircraft::AircraftBehaviour;
+use openatc_core::traffic::profiles::Profiles;
 use openatc_core::{
     apply::add_transmission,
     crew::{Action, CrewProfile},
     dialogue::say,
     state::{Request, SpeechTag},
 };
+use log;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -1502,6 +1504,31 @@ pub fn tick(shared: Shared, state: &mut crate::EngineState) {
         state.crew.auto_ai_phase = Some(phase);
         state.crew.auto_ai_pending = false;
     }
+
+    // Handle autonomous randomized flights
+    if state.settings.autonomous_random_flights && state.settings.autonomous_user_management {
+        // Update autonomous flights state with current settings
+        state.autonomous_flights.update_settings(&state.settings);
+        
+        // Check if we should start the next flight
+        if state.autonomous_flights.should_start_next_flight() {
+            let shared_clone = shared.clone();
+            tokio::spawn(async move {
+                let mut state = shared_clone.write().await;
+                if let Err(e) = start_next_autonomous_flight(&mut state).await {
+                    log::error!("Failed to start autonomous flight: {}", e);
+                }
+            });
+        }
+        
+        // If we just finished a flight (landed and parked), start the turnaround timer
+        if phase == openatc_core::state::PhaseCode::Finished && !state.autonomous_flights.turnaround_started {
+            state.autonomous_flights.start_turnaround();
+            state.autonomous_flights.current_leg += 1;
+            log::info!("Autonomous flight leg {} completed, turnaround started", state.autonomous_flights.current_leg);
+        }
+    }
+    
     let checklist = match phase {
         openatc_core::state::PhaseCode::Parked => Some("startup"),
         openatc_core::state::PhaseCode::Clearance => Some("before_start"),
@@ -3438,6 +3465,48 @@ mod conversation_routing_tests {
         }
         server.abort();
     }
+}
+
+async fn start_next_autonomous_flight(state: &mut crate::EngineState) -> Result<(), String> {
+    use openatc_core::traffic::profiles::Profiles;
+    
+    let current_airport = state.session.plan.destination.clone();
+    if current_airport.is_empty() {
+        return Err("No current airport".to_string());
+    }
+    
+    let aircraft_icao = state.session.plan.aircraft.clone();
+    if aircraft_icao.is_empty() {
+        return Err("No aircraft type in plan".to_string());
+    }
+    
+    // Load aircraft profiles
+    let profiles = Profiles::builtin().map_err(|e| format!("Failed to load profiles: {}", e))?;
+    
+    // Find a compatible destination
+    let destination = state.autonomous_flights.find_compatible_destination(
+        &current_airport,
+        &aircraft_icao,
+        &profiles,
+        &state.settings.simulator_root,
+    ).ok_or("No compatible destination found")?;
+    
+    log::info!("Autonomous flight: {} -> {} in {}", current_airport, destination, aircraft_icao);
+    
+    // Get aircraft performance
+    let aircraft = state.autonomous_flights.get_aircraft_performance(&aircraft_icao).await;
+    
+    // Generate new flight plan
+    let new_plan = generate_flight_plan(&state.session, &destination, &aircraft, &state.settings.simulator_root)?;
+    
+    // Post the new plan to the engine
+    state.session.plan = new_plan;
+    
+    // Reset the autonomous flights state for the new flight
+    state.autonomous_flights.reset();
+    
+    // The next crew tick will handle the startup checklist and clearance request
+    Ok(())
 }
 
 #[cfg(test)]

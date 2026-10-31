@@ -107,7 +107,7 @@ fn names_to_devices(names: &[[c_char; 256]], count: c_int) -> Vec<AudioDevice> {
         let bytes: Vec<u8> = name
             .iter()
             .take_while(|value| **value != 0)
-            .map(|value| (*value).cast_unsigned())
+            .map(|value| *value as u8)
             .collect();
         let name = String::from_utf8_lossy(&bytes).into_owned();
         if name.is_empty() {
@@ -765,10 +765,10 @@ impl Speech {
                 gain,
                 &cancelled,
             );
-            if let Err(error) = result
-                && let Ok(mut status) = status.lock()
-            {
-                *status = format!("Callout output failed: {error}");
+            if let Err(error) = result {
+                if let Ok(mut status) = status.lock() {
+                    *status = format!("Callout output failed: {error}");
+                }
             }
             playing.store(false, Ordering::SeqCst);
             busy.store(false, Ordering::SeqCst);

@@ -384,6 +384,14 @@ pub struct Settings {
     pub autonomous_user_management: bool,
     /// Optional model override for autonomous user-aircraft management; empty uses `ai_model`.
     pub autonomous_user_management_model: String,
+    /// Enable optional randomized flights for the user aircraft (continuous cycle of departures/arrivals).
+    pub autonomous_random_flights: bool,
+    /// Minimum turnaround time in minutes between flights (when randomized flights enabled).
+    pub autonomous_min_turnaround_minutes: u16,
+    /// Maximum turnaround time in minutes between flights (when randomized flights enabled).
+    pub autonomous_max_turnaround_minutes: u16,
+    /// Use Eurocontrol ATPCFDB for aircraft performance data when available.
+    pub use_eurocontrol_performance: bool,
     /// Speak controller transmissions automatically.
     pub controller_speech: bool,
     /// Speak copilot readbacks automatically.
@@ -592,6 +600,10 @@ impl Default for Settings {
             copilot_flies_ap: false,
             autonomous_user_management: false,
             autonomous_user_management_model: String::new(),
+            autonomous_random_flights: false,
+            autonomous_min_turnaround_minutes: 30,
+            autonomous_max_turnaround_minutes: 90,
+            use_eurocontrol_performance: false,
             controller_speech: true,
             copilot_speech: true,
             pilot_speech: true,
@@ -811,6 +823,20 @@ impl Settings {
                 || model.chars().any(|c| c.is_ascii_whitespace())
             {
                 return Err(ValidationError::OutOfRange(name, model.len() as f32));
+            }
+        }
+        if self.autonomous_random_flights {
+            if self.autonomous_min_turnaround_minutes > self.autonomous_max_turnaround_minutes {
+                return Err(ValidationError::OutOfRange(
+                    "autonomous min turnaround > max turnaround",
+                    self.autonomous_min_turnaround_minutes as f32,
+                ));
+            }
+            if self.autonomous_max_turnaround_minutes > 1440 {
+                return Err(ValidationError::OutOfRange(
+                    "autonomous max turnaround minutes",
+                    self.autonomous_max_turnaround_minutes as f32,
+                ));
             }
         }
         for (name, value) in [

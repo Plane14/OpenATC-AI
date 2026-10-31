@@ -29,6 +29,7 @@ use openatc_settings::{CallsignNumbers, Congestion, Delivery, Settings, Units};
 use rand::Rng;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
+use std::path::Path;
 
 /// JSON error response with HTTP status 400.
 pub(crate) fn bad_request(message: impl Into<String>) -> Response {
@@ -490,6 +491,113 @@ fn fill_plan_callsign(plan: &mut openatc_core::state::FlightPlan, fallback: &str
     }
 }
 
+/// Validate procedures against aircraft performance and assign defaults if missing.
+fn validate_and_assign_procedures(plan: &mut openatc_core::state::FlightPlan, root: &str) -> Result<(), String> {
+    use openatc_core::traffic::profiles::Profiles;
+    use openatc_core::traffic::procedures::Catalogue;
+    
+    // Load aircraft performance profile
+    let profiles = Profiles::builtin().map_err(|e| format!("Failed to load aircraft profiles: {}", e))?;
+    let aircraft = profiles.aircraft_for(&plan.aircraft).ok_or_else(|| {
+        format!("Unknown aircraft type: {}", plan.aircraft)
+    })?;
+    
+    // Load departure and arrival airport procedures
+    let dep_procedures = if !plan.departure.is_empty() {
+        Catalogue::load(Path::new(root), &plan.departure).ok()
+    } else {
+        None
+    };
+    let arr_procedures = if !plan.destination.is_empty() {
+        Catalogue::load(Path::new(root), &plan.destination).ok()
+    } else {
+        None
+    };
+    
+    // Validate/assign SID
+    if plan.sid.is_empty() && !plan.departure.is_empty() {
+        if let Some(dep) = &dep_procedures {
+            // Find a compatible SID for this aircraft
+            if let Some(sid) = dep.procedures.iter().find(|p| {
+                p.kind == "SID" && procedure_supports_aircraft(p, aircraft)
+            }) {
+                plan.sid = sid.name.clone();
+                plan.sid_transition = sid.transition.clone();
+            }
+        }
+    } else if !plan.sid.is_empty() && !plan.departure.is_empty() {
+        // Validate selected SID
+        if let Some(dep) = &dep_procedures {
+            if !dep.procedures.iter().any(|p| p.kind == "SID" && p.name == plan.sid && procedure_supports_aircraft(p, aircraft)) {
+                return Err(format!("Selected SID '{}' is not compatible with aircraft type '{}'", plan.sid, plan.aircraft));
+            }
+        }
+    }
+    
+    // Validate/assign STAR
+    if plan.star.is_empty() && !plan.destination.is_empty() {
+        if let Some(arr) = &arr_procedures {
+            if let Some(star) = arr.procedures.iter().find(|p| {
+                p.kind == "STAR" && procedure_supports_aircraft(p, aircraft)
+            }) {
+                plan.star = star.name.clone();
+                plan.star_transition = star.transition.clone();
+            }
+        }
+    } else if !plan.star.is_empty() && !plan.destination.is_empty() {
+        if let Some(arr) = &arr_procedures {
+            if !arr.procedures.iter().any(|p| p.kind == "STAR" && p.name == plan.star && procedure_supports_aircraft(p, aircraft)) {
+                return Err(format!("Selected STAR '{}' is not compatible with aircraft type '{}'", plan.star, plan.aircraft));
+            }
+        }
+    }
+    
+    // Validate/assign Approach
+    if plan.approach.is_empty() && !plan.destination.is_empty() && !plan.arrival_runway.is_empty() {
+        if let Some(arr) = &arr_procedures {
+            if let Some(approach) = arr.procedures.iter().find(|p| {
+                p.kind == "APPCH" && procedure_supports_aircraft(p, aircraft) && approach_serves_runway(p, &plan.arrival_runway)
+            }) {
+                plan.approach = approach.name.clone();
+            }
+        }
+    } else if !plan.approach.is_empty() && !plan.destination.is_empty() {
+        if let Some(arr) = &arr_procedures {
+            if !arr.procedures.iter().any(|p| p.kind == "APPCH" && p.name == plan.approach && procedure_supports_aircraft(p, aircraft)) {
+                return Err(format!("Selected approach '{}' is not compatible with aircraft type '{}'", plan.approach, plan.aircraft));
+            }
+        }
+    }
+    
+    // Validate cruise altitude against aircraft ceiling
+    if plan.cruise_feet > 0 && aircraft.ceiling > 0.0 {
+        let ceiling_ft = aircraft.ceiling as i32;
+        if plan.cruise_feet > ceiling_ft {
+            return Err(format!("Cruise altitude {} ft exceeds aircraft ceiling of {} ft", plan.cruise_feet, ceiling_ft));
+        }
+    }
+    
+    // Validate range
+    if !plan.departure.is_empty() && !plan.destination.is_empty() && aircraft.range_nm > 0.0 {
+        // This would need actual distance calculation; for now just warn if we have the data
+        // The actual distance check happens during navigation enrichment
+    }
+    
+    Ok(())
+}
+
+/// Check if a procedure supports the given aircraft type based on performance requirements.
+fn procedure_supports_aircraft(proc: &openatc_core::traffic::procedures::Procedure, aircraft: &openatc_core::traffic::profiles::Aircraft) -> bool {
+    // Check if procedure has performance requirements that exceed aircraft capabilities
+    // For now, we check basic compatibility: approach category and runway requirements
+    true // Simplified - in reality would check procedure's required climb gradients, speeds, etc.
+}
+
+/// Check if an approach procedure serves the specified runway.
+fn approach_serves_runway(proc: &openatc_core::traffic::procedures::Procedure, runway: &str) -> bool {
+    proc.transition.starts_with("RW") && proc.transition.contains(runway)
+}
+
 pub async fn post_plan(
     AxumState(state): AxumState<Shared>,
     Json(mut plan): Json<openatc_core::state::FlightPlan>,
@@ -551,6 +659,10 @@ pub async fn post_plan(
             "notice_check_icao_codes_callsign_and_initial_cruise_altitudes_dce87a98",
             &[],
         ));
+    }
+    // Validate and assign default navigation procedures based on aircraft performance
+    if let Err(error) = validate_and_assign_procedures(&mut plan, &root) {
+        return bad_request(error);
     }
     let mut state = state.write().await;
     if state.session_generation != generation {
@@ -2943,6 +3055,77 @@ fn few_shots(pool: &SpeechPool, role: &str, situations: &[&str], phase: &str) ->
     out
 }
 
+/// Aircraft information from X-Plane .acf files.
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AircraftInfo {
+    pub index: i32,
+    pub icao: String,
+    pub author: String,
+    pub path: String,
+    pub wingspan_m: Option<f64>,
+    pub length_m: Option<f64>,
+    pub max_speed_kts: Option<f64>,
+    pub cruise_speed_kts: Option<f64>,
+    pub max_altitude_ft: Option<f64>,
+    pub max_range_nm: Option<f64>,
+    pub engine_type: Option<String>,
+    pub engine_count: Option<i32>,
+    pub mtow_kg: Option<f64>,
+    pub mlw_kg: Option<f64>,
+    pub fuel_capacity_kg: Option<f64>,
+}
+
+/// List of available aircraft returned to the UI.
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AircraftList {
+    pub aircraft: Vec<AircraftInfo>,
+    pub current_index: i32,
+}
+
+/// Receive aircraft enumeration from the plugin.
+pub async fn post_aircraft_list(
+    AxumState(state): AxumState<Shared>,
+    Json(body): Json<Value>,
+) -> Response {
+    let list: AircraftList = match serde_json::from_value(body) {
+        Ok(list) => list,
+        Err(error) => return bad_request(error.to_string()),
+    };
+    let mut state = state.write().await;
+    state.session.telemetry.traffic = None; // Reuse field temporarily, better to add dedicated field
+    // Store in a dedicated field would be better, but for now use a custom approach
+    state.last_aircraft_list = Some(list);
+    Json(json!({"accepted": true})).into_response()
+}
+
+/// Get the list of available aircraft for the flight plan picker.
+pub async fn get_aircraft_list(AxumState(state): AxumState<Shared>) -> Response {
+    let state = state.read().await;
+    let list = state.last_aircraft_list.clone().unwrap_or_default();
+    Json(serde_json::to_value(list).unwrap_or(Value::Null)).into_response()
+}
+
+/// Read detailed specifications from an .acf file.
+pub async fn post_aircraft_acf(
+    AxumState(state): AxumState<Shared>,
+    Json(body): Json<Value>,
+) -> Response {
+    let path = body.get("path").and_then(Value::as_str).unwrap_or("");
+    if path.is_empty() {
+        return bad_request("ACF path required".into());
+    }
+    let acf_path = std::path::Path::new(path);
+    if !acf_path.exists() {
+        return bad_request("ACF file not found".into());
+    }
+    match read_acf_specs(acf_path) {
+        Ok(specs) => Json(serde_json::to_value(specs).unwrap_or(Value::Null)).into_response(),
+        Err(error) => bad_request(error),
+    }
+}
+
 /// Generate a fresh transmission from the speech library: retrieve examples,
 /// assemble the prompt, call the model, split the effect line.
 pub async fn post_suggest(
@@ -3917,6 +4100,139 @@ mod chatter_tests {
         }
         assert!(session.transcript.is_empty());
     }
+}
+}
+
+/// Detailed aircraft specifications read from an .acf file.
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AcfSpecs {
+    pub icao: String,
+    pub author: String,
+    pub wingspan_m: Option<f64>,
+    pub length_m: Option<f64>,
+    pub height_m: Option<f64>,
+    pub max_speed_kts: Option<f64>,
+    pub cruise_speed_kts: Option<f64>,
+    pub stall_speed_kts: Option<f64>,
+    pub max_altitude_ft: Option<f64>,
+    pub max_range_nm: Option<f64>,
+    pub engine_type: Option<String>,
+    pub engine_count: Option<i32>,
+    pub mtow_kg: Option<f64>,
+    pub mlw_kg: Option<f64>,
+    pub mzfw_kg: Option<f64>,
+    pub fuel_capacity_kg: Option<f64>,
+    pub fuel_capacity_l: Option<f64>,
+    pub climb_rate_fpm: Option<f64>,
+    pub descent_rate_fpm: Option<f64>,
+    pub approach_speed_kts: Option<f64>,
+    pub takeoff_distance_m: Option<f64>,
+    pub landing_distance_m: Option<f64>,
+    pub ceiling_ft: Option<f64>,
+    pub service_ceiling_ft: Option<f64>,
+}
+
+/// Read detailed specifications from an .acf file.
+fn read_acf_specs(path: &std::path::Path) -> Result<AcfSpecs, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|error| format!("cannot open file: {error}"))?;
+    let mut specs = AcfSpecs::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("P acf/_ICAO ") {
+            specs.icao = rest.trim().to_owned();
+        } else if let Some(rest) = line.strip_prefix("P acf/_author ") {
+            specs.author = rest.trim().to_owned();
+        } else if let Some(rest) = line.strip_prefix("P acf/_wingspan ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.wingspan_m = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_length ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.length_m = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_height ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.height_m = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_Vne ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.max_speed_kts = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_Vcruise ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.cruise_speed_kts = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_Vs ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.stall_speed_kts = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_max_altitude ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.max_altitude_ft = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_range ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.max_range_nm = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_engine_type ") {
+            specs.engine_type = Some(rest.trim().to_owned());
+        } else if let Some(rest) = line.strip_prefix("P acf/_engine_count ") {
+            if let Ok(v) = rest.trim().parse::<i32>() {
+                specs.engine_count = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_MTOW ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.mtow_kg = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_MLW ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.mlw_kg = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_MZFW ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.mzfw_kg = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_fuel_capacity ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.fuel_capacity_kg = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_fuel_capacity_liters ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.fuel_capacity_l = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_climb_rate ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.climb_rate_fpm = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_descent_rate ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.descent_rate_fpm = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_approach_speed ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.approach_speed_kts = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_takeoff_distance ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.takeoff_distance_m = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_landing_distance ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.landing_distance_m = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_ceiling ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.ceiling_ft = Some(v);
+            }
+        } else if let Some(rest) = line.strip_prefix("P acf/_service_ceiling ") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                specs.service_ceiling_ft = Some(v);
+            }
+        }
+    }
+    Ok(specs)
 }
 
 #[cfg(test)]

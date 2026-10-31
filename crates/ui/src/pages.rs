@@ -16,6 +16,7 @@ use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::ops::{phase_name, request_available};
 use openatc_core::state::{Request, State};
 use openatc_core::{altitude_text, feet_to_meters, meters_to_feet, resolve_units};
+use openatc_engine::routes::{AircraftInfo, AircraftList};
 use std::fmt::Write as _;
 
 /// Definition titles needing the altitude/waypoint modal.
@@ -1950,6 +1951,38 @@ pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
                 );
             }
             ui.text_wrapped("When enabled, AI can select phase-appropriate cockpit system actions from mapped controls. Leave the override empty to use the main AI model. Built-in packaged models are qwen2.5-7b, qwen3-8b and qwen3.5-4b.");
+            
+            // Randomized flights settings
+            ui.checkbox(
+                "AI randomized user flights (continuous cycle)",
+                &mut interface.settings.autonomous_random_flights,
+            );
+            {
+                let _disabled = ui.begin_disabled(!interface.settings.autonomous_random_flights);
+                setting_integer(
+                    ui,
+                    "Minimum turnaround time (minutes)",
+                    &mut interface.settings.autonomous_min_turnaround_minutes,
+                    5,
+                    1440,
+                );
+                setting_integer(
+                    ui,
+                    "Maximum turnaround time (minutes)",
+                    &mut interface.settings.autonomous_max_turnaround_minutes,
+                    5,
+                    1440,
+                );
+            }
+            ui.text_wrapped("When enabled, after landing and parking the AI will select a compatible destination airport, file a flight plan, and manage the turnaround cycle. Turnaround time is randomized between the min/max values. Requires autonomous user management to be enabled.");
+            
+            // Eurocontrol performance data
+            ui.checkbox(
+                "Use Eurocontrol ATPCFDB for aircraft performance",
+                &mut interface.settings.use_eurocontrol_performance,
+            );
+            ui.text_wrapped("When enabled, aircraft performance data will be fetched from Eurocontrol's Aircraft Type Performance Database (ATCPFDB) for more accurate procedure validation and planning. Requires internet access.");
+            
             if ui.collapsing_header("Advanced AI connection", imgui::TreeNodeFlags::empty()) {
                 setting_input(ui, "AI server address", &mut interface.settings.ai_url, 256);
                 setting_input(ui, "AI model", &mut interface.settings.ai_model, 128);
@@ -3128,7 +3161,41 @@ fn flight_tab(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
             let (a, b) = (ui.item_rect_min(), ui.item_rect_max());
             interface.plan_callsign_bounds = [a[0], a[1], b[0], b[1]];
         }
-        form_text(ui, "Aircraft ICAO", &mut interface.draft.aircraft, 12);
+        
+        // Aircraft selection from available X-Plane aircraft
+        ui.table_next_column();
+        widgets::muted_wrapped(ui, "Aircraft");
+        ui.set_next_item_width(-1.0);
+        if ui.begin_combo("##aircraft_selector", if interface.draft.aircraft.is_empty() { "Select aircraft..." } else { &interface.draft.aircraft }) {
+            // Add a "Manual entry" option
+            if ui.selectable_config("Manual entry").build() {
+                // Keep current manual entry
+            }
+            ui.separator();
+            // Refresh button
+            if ui.selectable_config("🔄 Refresh aircraft list").build() {
+                interface.aircraft_list_loading = true;
+                interface.engine.post("/aircraft/list", serde_json::json!({"refresh": true}));
+            }
+            ui.separator();
+            for (idx, aircraft) in interface.available_aircraft.iter().enumerate() {
+                let label = if aircraft.author.is_empty() {
+                    format!("{} ({})", aircraft.icao, aircraft.path)
+                } else {
+                    format!("{} — {}", aircraft.icao, aircraft.author)
+                };
+                let _id = ui.push_id(idx);
+                if ui.selectable_config(&label).build() {
+                    interface.draft.aircraft.clone_from(&aircraft.icao);
+                    // Auto-fill registration if empty
+                    if interface.draft.registration.trim().is_empty() {
+                        interface.draft.registration.clone_from(&aircraft.icao);
+                    }
+                }
+            }
+            ui.end_combo();
+        }
+        
         form_text(ui, "Registration", &mut interface.draft.registration, 32);
         form_text(ui, "Departure ICAO", &mut interface.draft.departure, 8);
         form_text(ui, "Destination ICAO", &mut interface.draft.destination, 8);

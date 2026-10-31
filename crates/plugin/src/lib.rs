@@ -93,6 +93,172 @@ fn debug_log(text: &str) {
     }
 }
 
+/// Enumerate all X-Plane aircraft and send their details to the engine.
+async fn enumerate_and_send_aircraft(engine: &openatc_ui::client::EngineClient) -> Result<(), String> {
+    use xplane_sys::{XPLMCountAircraft, XPLMGetNthAircraftModel};
+    use std::ffi::CString;
+    use std::path::Path;
+
+    let mut total = 0i32;
+    let mut active = 0i32;
+    let mut controller = 0i32;
+    unsafe {
+        XPLMCountAircraft(&mut total, &mut active, &mut controller);
+    }
+
+    if total == 0 {
+        return Ok(());
+    }
+
+    #[derive(serde::Serialize)]
+    struct AircraftInfo {
+        index: i32,
+        icao: String,
+        author: String,
+        path: String,
+        wingspan_m: Option<f64>,
+        length_m: Option<f64>,
+        max_speed_kts: Option<f64>,
+        cruise_speed_kts: Option<f64>,
+        max_altitude_ft: Option<f64>,
+        max_range_nm: Option<f64>,
+        engine_type: Option<String>,
+        engine_count: Option<i32>,
+        mtow_kg: Option<f64>,
+        mlw_kg: Option<f64>,
+        fuel_capacity_kg: Option<f64>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct AircraftList {
+        aircraft: Vec<AircraftInfo>,
+        current_index: i32,
+    }
+
+    let mut aircraft_list = Vec::new();
+    let mut current_index = 0;
+
+    // Find the current aircraft index (index 0 is the user's aircraft)
+    unsafe {
+        XPLMCountAircraft(&mut total, &mut active, &mut controller);
+    }
+
+    for i in 0..total {
+        let mut filename = vec![0u8; 256];
+        let mut path = vec![0u8; 512];
+        unsafe {
+            XPLMGetNthAircraftModel(i, filename.as_mut_ptr() as *mut i8, path.as_mut_ptr() as *mut i8);
+        }
+
+        let filename_str = String::from_utf8_lossy(&filename)
+            .trim_end_matches('\0')
+            .trim()
+            .to_owned();
+        let path_str = String::from_utf8_lossy(&path)
+            .trim_end_matches('\0')
+            .trim()
+            .to_owned();
+
+        if path_str.is_empty() {
+            continue;
+        }
+
+        // Read .acf file for detailed specs
+        let acf_path = Path::new(&path_str);
+        let mut info = AircraftInfo {
+            index: i,
+            icao: String::new(),
+            author: String::new(),
+            path: path_str.clone(),
+            wingspan_m: None,
+            length_m: None,
+            max_speed_kts: None,
+            cruise_speed_kts: None,
+            max_altitude_ft: None,
+            max_range_nm: None,
+            engine_type: None,
+            engine_count: None,
+            mtow_kg: None,
+            mlw_kg: None,
+            fuel_capacity_kg: None,
+        };
+
+        if let Ok(text) = std::fs::read_to_string(acf_path) {
+            for line in text.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("P acf/_ICAO ") {
+                    info.icao = rest.trim().to_owned();
+                } else if let Some(rest) = line.strip_prefix("P acf/_author ") {
+                    info.author = rest.trim().to_owned();
+                } else if let Some(rest) = line.strip_prefix("P acf/_wingspan ") {
+                    if let Ok(v) = rest.trim().parse::<f64>() {
+                        info.wingspan_m = Some(v);
+                    }
+                } else if let Some(rest) = line.strip_prefix("P acf/_length ") {
+                    if let Ok(v) = rest.trim().parse::<f64>() {
+                        info.length_m = Some(v);
+                    }
+                } else if let Some(rest) = line.strip_prefix("P acf/_Vne ") {
+                    if let Ok(v) = rest.trim().parse::<f64>() {
+                        info.max_speed_kts = Some(v);
+                    }
+                } else if let Some(rest) = line.strip_prefix("P acf/_Vcruise ") {
+                    if let Ok(v) = rest.trim().parse::<f64>() {
+                        info.cruise_speed_kts = Some(v);
+                    }
+                } else if let Some(rest) = line.strip_prefix("P acf/_max_altitude ") {
+                    if let Ok(v) = rest.trim().parse::<f64>() {
+                        info.max_altitude_ft = Some(v);
+                    }
+                } else if let Some(rest) = line.strip_prefix("P acf/_range ") {
+                    if let Ok(v) = rest.trim().parse::<f64>() {
+                        info.max_range_nm = Some(v);
+                    }
+                } else if let Some(rest) = line.strip_prefix("P acf/_engine_type ") {
+                    info.engine_type = Some(rest.trim().to_owned());
+                } else if let Some(rest) = line.strip_prefix("P acf/_engine_count ") {
+                    if let Ok(v) = rest.trim().parse::<i32>() {
+                        info.engine_count = Some(v);
+                    }
+                } else if let Some(rest) = line.strip_prefix("P acf/_MTOW ") {
+                    if let Ok(v) = rest.trim().parse::<f64>() {
+                        info.mtow_kg = Some(v);
+                    }
+                } else if let Some(rest) = line.strip_prefix("P acf/_MLW ") {
+                    if let Ok(v) = rest.trim().parse::<f64>() {
+                        info.mlw_kg = Some(v);
+                    }
+                } else if let Some(rest) = line.strip_prefix("P acf/_fuel_capacity ") {
+                    if let Ok(v) = rest.trim().parse::<f64>() {
+                        info.fuel_capacity_kg = Some(v);
+                    }
+                }
+            }
+        }
+
+        // If no ICAO in .acf, try to get it from the filename
+        if info.icao.is_empty() {
+            if let Some(stem) = Path::new(&filename_str).file_stem() {
+                info.icao = stem.to_string_lossy().to_uppercase();
+            }
+        }
+
+        if i == 0 {
+            current_index = i;
+        }
+
+        aircraft_list.push(info);
+    }
+
+    let list = AircraftList {
+        aircraft: aircraft_list,
+        current_index,
+    };
+
+    engine.post("/aircraft/list", serde_json::to_value(list).unwrap_or_default());
+    Ok(())
+}
+
 /// Panel role, power and talk-to logging for one tick.
 fn update_panel(
     shared: &Arc<Mutex<Shared>>,
@@ -1182,6 +1348,18 @@ impl TalkHandler {
             work(interface);
         }
     }
+
+    fn enumerate_aircraft(&self) {
+        self.with_interface(|interface| {
+            // Enumerate aircraft on a worker thread to avoid blocking the simulator
+            let engine = interface.engine.clone();
+            tokio::spawn(async move {
+                if let Err(e) = enumerate_and_send_aircraft(&engine).await {
+                    eprintln!("OpenATC AI: failed to enumerate aircraft: {}", e);
+                }
+            });
+        });
+    }
 }
 
 impl TalkHandler {
@@ -1248,6 +1426,10 @@ impl xplane::command::CommandHandler for TalkHandler {
                     }
                 ));
             }),
+            Some(Action::EnumerateAircraft) => {
+                debug_log("OpenATC AI: enumerating aircraft");
+                self.enumerate_aircraft();
+            }
             // Every registered binding maps to an action; an unknown name cannot reach here
             // because setup only registers the commands listed in COMMANDS.
             None => {}
@@ -1312,6 +1494,7 @@ enum Action {
     Transmit,
     MicPushToTalk,
     CopyError,
+    EnumerateAircraft,
 }
 
 fn action_for(name: &str) -> Option<Action> {
@@ -1322,12 +1505,13 @@ fn action_for(name: &str) -> Option<Action> {
         "openatc/transmit_com1" | "openatc/transmit_com2" => Action::Transmit,
         "openatc/mic_push_to_talk" => Action::MicPushToTalk,
         "openatc/copy_error" => Action::CopyError,
+        "openatc/enumerate_aircraft" => Action::EnumerateAircraft,
         _ => return None,
     })
 }
 
 /// Every simulator binding this plugin registers, with its user-facing description.
-const COMMANDS: [(&str, &str); 7] = [
+const COMMANDS: [(&str, &str); 8] = [
     ("openatc/toggle_window", "Toggle OpenATC AI window"),
     (
         "openatc/transmit_com1",
@@ -1350,6 +1534,7 @@ const COMMANDS: [(&str, &str); 7] = [
         "Hold to record microphone, release to transcribe",
     ),
     ("openatc/copy_error", "Write the current error to Log.txt"),
+    ("openatc/enumerate_aircraft", "Enumerate available X-Plane aircraft for flight plan selection"),
 ];
 
 /// Register radio, crew and window bindings plus the Plugins menu entry.

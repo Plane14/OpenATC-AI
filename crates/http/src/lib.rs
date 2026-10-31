@@ -96,15 +96,16 @@ fn round_trip_cancelled(
             Ok(count) => {
                 raw.extend_from_slice(&buffer[..count]);
                 // Content-Length completes the response without waiting for EOF.
-                if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n")
-                    && let Ok(head) = std::str::from_utf8(&raw[..end])
-                    && let Some(length) = head
-                        .lines()
-                        .filter_map(|line| line.split_once(':'))
-                        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-                    && raw.len().saturating_sub(end + 4) >= length
-                {
+                let end_opt = raw.windows(4).position(|w| w == b"\r\n\r\n");
+                let Some(end) = end_opt else { continue; };
+                let Ok(head) = std::str::from_utf8(&raw[..end]) else { continue; };
+                let Some(length) = head
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                else { continue; };
+                if raw.len().saturating_sub(end + 4) >= length {
                     break;
                 }
             }

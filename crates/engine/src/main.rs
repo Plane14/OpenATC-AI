@@ -3,6 +3,7 @@
 #![allow(clippy::default_trait_access)]
 
 mod atc;
+mod autonomous_flights;
 mod cabin;
 mod config_cache;
 mod context;
@@ -167,6 +168,10 @@ pub struct EngineState {
     pub speech: openatc_core::speech::SpeechPool,
     /// Speech dir path, empty when missing.
     pub speech_source: String,
+    /// Cached list of available X-Plane aircraft for flight plan selection.
+    pub last_aircraft_list: Option<routes::AircraftList>,
+    /// Autonomous randomized flights state for the user aircraft.
+    pub autonomous_flights: autonomous_flights::AutonomousFlightsState,
     /// Config directory holding settings/controllers/session JSON.
     pub config_dir: PathBuf,
     /// Directory holding the engine executable, used to resolve shipped prompts.
@@ -705,6 +710,9 @@ async fn main() {
         .route("/speech/transcribe", post(routes::post_transcribe))
         .route("/speech/speak", post(routes::post_speak))
         .route("/suggest", post(routes::post_suggest))
+        .route("/aircraft/list", post(routes::post_aircraft_list))
+        .route("/aircraft/list", get(routes::get_aircraft_list))
+        .route("/aircraft/acf", post(routes::post_aircraft_acf))
         .route("/telemetry", post(routes::post_telemetry))
         .route("/plugin/shutdown", post(lifecycle::request_shutdown))
         .route("/plugin/heartbeat", post(lifecycle::heartbeat))
@@ -780,8 +788,10 @@ fn test_state() -> EngineState {
         pronunciation: Arc::new(Default::default()),
         regions: BTreeMap::new(),
         regions_path: String::new(),
-        speech: Default::default(),
+speech: Default::default(),
         speech_source: String::new(),
+        last_aircraft_list: None,
+        autonomous_flights: autonomous_flights::AutonomousFlightsState::default(),
         exe_dir: config_dir.clone(),
         config_dir,
         expectations: Vec::new(),

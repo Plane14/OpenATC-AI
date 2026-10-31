@@ -18,7 +18,15 @@ use openatc_core::arrival::{ArrivalAirport, TerrainProfile};
 use openatc_core::identify::interpret_text;
 use openatc_core::intents::{can_transmit, resolve_crew_role};
 use openatc_core::state::{FlightPlan, State, Transmission};
+use openatc_engine::routes::{AircraftList, AircraftInfo};
 use openatc_settings::Settings;
+
+fn now_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
 
 /// Local notice shown under the transcript (power refusals and the like).
 pub struct LocalNotice {
@@ -263,6 +271,12 @@ pub struct Interface {
     pub radio_power: bool,
     /// Matched aircraft profile reported by the simulator plugin.
     pub aircraft_profile: String,
+    /// Available X-Plane aircraft for flight plan selection.
+    pub available_aircraft: Vec<crate::pages::AircraftInfo>,
+    /// Aircraft list loading state.
+    pub aircraft_list_loading: bool,
+    /// Aircraft list last updated.
+    pub aircraft_list_updated: f64,
     /// Bus power state.
     pub bus_power: bool,
     /// Local notices under the transcript.
@@ -509,6 +523,9 @@ impl Interface {
             engine_fault: String::new(),
             radio_power: true,
             aircraft_profile: String::new(),
+            available_aircraft: Vec::new(),
+            aircraft_list_loading: false,
+            aircraft_list_updated: 0.0,
             bus_power: true,
             local_notices: Vec::new(),
             last_power_refusal: String::new(),
@@ -986,6 +1003,15 @@ impl Interface {
             } else {
                 reply.error
             };
+        }
+        if let Some(reply) = self.engine.take_reply("/aircraft/list") {
+            self.aircraft_list_loading = false;
+            if reply.success {
+                if let Ok(list) = serde_json::from_value::<AircraftList>(reply.data) {
+                    self.available_aircraft = list.aircraft;
+                    self.aircraft_list_updated = now_seconds();
+                }
+            }
         }
         if let Some(reply) = self.engine.take_reply("/voice-health") {
             if reply.success {

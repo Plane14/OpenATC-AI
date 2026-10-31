@@ -100,6 +100,15 @@ fn wake_standard(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
 
 pub fn settings(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
     scenery_setup(ui, interface);
+    widgets::section_title(ui, "GENERATED TRAFFIC");
+    let mut changed = ui.checkbox(
+        "Enable generated traffic",
+        &mut interface.settings.generated_traffic,
+    );
+    ui.text_wrapped("Enables OpenATC's lightweight generated traffic system with complete flight plans. Requires Bluebell models and scenery index.");
+    if changed {
+        interface.save_settings();
+    }
     widgets::section_title(ui, "TRAFFIC MOTION");
     traffic_rate(ui, interface);
     wake_standard(ui, interface);
