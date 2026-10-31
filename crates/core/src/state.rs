@@ -804,6 +804,9 @@ pub struct WeatherAirport {
 #[serde(rename_all = "camelCase")]
 #[allow(clippy::struct_excessive_bools)] // Independent saved permissions and flight flags.
 pub struct State {
+    /// Version of the engine that produced this snapshot.
+    #[serde(default)]
+    pub version: String,
     /// Bounded airport weather requests serviced by the simulator main thread.
     #[serde(default)]
     pub weather_airports: Vec<WeatherAirport>,
@@ -920,6 +923,7 @@ fn default_sequence() -> u32 {
 impl Default for State {
     fn default() -> Self {
         Self {
+            version: String::new(),
             weather_airports: Vec::new(),
             control_radio: Radio::Com1,
             generated_traffic: Vec::new(),

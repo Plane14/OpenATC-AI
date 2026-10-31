@@ -8,6 +8,9 @@
 //! dedicated thread. HTTP handlers post jobs to it and await oneshot replies;
 //! only owned data (`String`, numbers) ever crosses threads.
 
+/// Product version reported by `/health`.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 mod compute;
 mod config;
 mod json_mode;
@@ -778,6 +781,7 @@ async fn tokenize(
 async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
+        "version": VERSION,
         "components":{"llm":state.inference.is_some(),"stt":state.stt.is_some(),"tts":state.tts.is_some()},
         "backend": state.backend,
         "stt": state.stt_backend,

@@ -127,9 +127,27 @@ pub async fn voice_health(AxumState(state): AxumState<Shared>) -> Json<Value> {
             state.settings.tts_url.clone(),
         )
     };
+    let ai_version = if stt.trim().is_empty() {
+        Value::Null
+    } else {
+        match client
+            .get(format!("{}/health", stt.trim_end_matches('/')))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(reply) => match reply.json::<Value>().await {
+                Ok(body) => body.get("version").cloned().unwrap_or(Value::Null),
+                Err(_) => Value::Null,
+            },
+            Err(_) => Value::Null,
+        }
+    };
     Json(json!({
         "stt": service_ok(&client, &stt).await,
         "tts": service_ok(&client, &tts).await,
+        "engineVersion": super::VERSION,
+        "aiVersion": ai_version,
     }))
 }
 
@@ -190,6 +208,7 @@ async fn refresh_voices(shared: &Shared, force: bool) -> Result<(), String> {
 pub async fn full_state(AxumState(state): AxumState<Shared>) -> Json<Value> {
     let state = state.read().await;
     let mut result = snapshot(&state.session, &state.settings);
+    result["version"] = json!(super::VERSION);
     let mut airports = Vec::new();
     if state.station_root == state.settings.simulator_root {
         let nearby = openatc_core::stations::nearby(&state.stations, &state.session.telemetry);

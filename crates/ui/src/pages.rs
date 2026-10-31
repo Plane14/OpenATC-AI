@@ -1834,7 +1834,7 @@ pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
     } else {
         &interface.settings_notice
     });
-    const SECTIONS: [&str; 11] = [
+    const SECTIONS: [&str; 12] = [
         "General",
         "Appearance",
         "Copilot",
@@ -1846,6 +1846,7 @@ pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
         "Traffic",
         "Realism",
         "Sessions",
+        "About",
     ];
     interface.settings_section = interface.settings_section.min(SECTIONS.len() - 1);
     widgets::section_tabs(ui, &SECTIONS, &mut interface.settings_section);
@@ -1970,6 +1971,39 @@ pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
         if interface.settings_section == 10 {
             session_tab(ui, interface, state);
         }
+        if interface.settings_section == 11 {
+            settings_about(ui, interface);
+        }
+    }
+}
+
+/// Build information for the plugin, engine and AI server.
+fn settings_about(ui: &imgui::Ui, interface: &mut Interface) {
+    widgets::section_title(ui, "BUILD INFORMATION");
+    ui.text(format!("Plugin: {}", env!("CARGO_PKG_VERSION")));
+    ui.text(format!(
+        "Engine: {}",
+        if interface.engine_version.is_empty() {
+            "unknown"
+        } else {
+            &interface.engine_version
+        }
+    ));
+    ui.text(format!(
+        "AI server: {}",
+        if interface.ai_version.is_empty() {
+            "unknown"
+        } else {
+            &interface.ai_version
+        }
+    ));
+    ui.text_wrapped(
+        "The plugin version is compiled into this interface. The engine and AI server versions come from the running processes, so they show whether an older build is still active.",
+    );
+    if ui.button("Refresh versions") {
+        interface
+            .engine
+            .post("/voice-health", serde_json::Value::Null);
     }
 }
 

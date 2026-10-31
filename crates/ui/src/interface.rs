@@ -271,6 +271,10 @@ pub struct Interface {
     pub last_power_refusal: String,
     /// Voice health line.
     pub voice_health: String,
+    /// AI server version reported by the engine.
+    pub ai_version: String,
+    /// Engine version reported by the latest state snapshot.
+    pub engine_version: String,
     /// Last voice check time.
     pub last_voice_check: f64,
     /// Last action line for dev mode.
@@ -509,6 +513,8 @@ impl Interface {
             local_notices: Vec::new(),
             last_power_refusal: String::new(),
             voice_health: String::new(),
+            ai_version: String::new(),
+            engine_version: String::new(),
             last_voice_check: 0.0,
             last_action: String::new(),
             auto_reply_pending: false,
@@ -1002,6 +1008,12 @@ impl Interface {
                 } else {
                     "Voice: TTS down".to_owned()
                 };
+                if let Some(version) = reply.data.get("aiVersion").and_then(serde_json::Value::as_str) {
+                    version.clone_into(&mut self.ai_version);
+                }
+                if let Some(version) = reply.data.get("engineVersion").and_then(serde_json::Value::as_str) {
+                    version.clone_into(&mut self.engine_version);
+                }
             } else {
                 "Voice: unreachable".clone_into(&mut self.voice_health);
             }
@@ -1108,6 +1120,9 @@ impl Interface {
         }
         self.last_com1_khz = state.telemetry.com1_khz;
         self.last_com2_khz = state.telemetry.com2_khz;
+        if !state.version.is_empty() {
+            self.engine_version.clone_from(&state.version);
+        }
         self.speech.configure(
             &self.settings.input_device.clone(),
             &self.settings.output_device.clone(),
