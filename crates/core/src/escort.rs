@@ -1,4 +1,5 @@
 //! Follow-me movement along an acknowledged surface route.
+use crate::aircraft::AircraftBehaviour;
 use crate::state::{PhaseCode, Point, State};
 
 /// Cached route and vehicle progress in metres along it.
