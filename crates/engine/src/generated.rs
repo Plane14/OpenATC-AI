@@ -4517,6 +4517,15 @@ fn publish_scene(runtime: &mut Runtime, mut scene: Scene, key: String, epoch: u6
     runtime.nominal_arrivals = scene.nominal_arrivals;
     runtime.nominal_flights = scene.nominal_flights;
     runtime.flights = scene.flights;
+    // A new scene must not inherit the previous scene's active-flight ids. Otherwise the
+    // controller skips the new aircraft and they sit at the gate or pushback forever.
+    runtime.active_flights.clear();
+    runtime
+        .active_flights
+        .extend(runtime.flights.keys().copied());
+    runtime
+        .active_flights
+        .extend(runtime.apron_ids.iter().copied());
     // Startup dressing is departure traffic only. A TaxiIn aircraft exists only after a
     // landing, so remove any arrival that the scene seeded already taxiing to a stand.
     let seeded_taxi_in: BTreeSet<u32> = runtime
