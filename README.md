@@ -1216,8 +1216,11 @@ the painted hold-line geometry and set back on the approach side, and the aircra
 stops there rather than at the nearest graph node. The takeoff run starts at the
 runway end nearest that hold, so the aircraft enters at the near threshold and rolls
 away from it. Takeoff uses a ground roll to rotation speed followed by a three-degree
-climb. CSL models animate through taxi-out, line-up, takeoff, climb, approach,
-rollout and taxi-in; the phase states and runway-lighting policy are detailed in
+climb. Ambient departures and arrivals use separate same-flow runways when the
+airport has a usable parallel; runway occupancy is tracked per physical runway, so
+traffic on 04R does not block 04L. CSL models animate through taxi-out, line-up,
+takeoff, climb, approach, rollout and taxi-in; the phase states and runway-lighting
+policy are detailed in
 [CSL animation and runway lights](#csl-animation-and-runway-lights) below. Startup,
 cruise and shutdown phases belong to the complete-flight generated layer. Startup
 never creates `TaxiIn` traffic; `TaxiIn` exists only after a landing. Surface
