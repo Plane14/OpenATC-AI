@@ -4517,6 +4517,27 @@ fn publish_scene(runtime: &mut Runtime, mut scene: Scene, key: String, epoch: u6
     runtime.nominal_arrivals = scene.nominal_arrivals;
     runtime.nominal_flights = scene.nominal_flights;
     runtime.flights = scene.flights;
+    // Startup dressing is departure traffic only. A TaxiIn aircraft exists only after a
+    // landing, so remove any arrival that the scene seeded already taxiing to a stand.
+    let seeded_taxi_in: BTreeSet<u32> = runtime
+        .world
+        .snapshot()
+        .into_iter()
+        .filter(|pose| pose.stage == openatc_core::traffic::motion::Stage::TaxiIn)
+        .map(|pose| pose.id)
+        .collect();
+    for id in seeded_taxi_in {
+        runtime.world.remove(id);
+        runtime.frames.retain(|frame| frame.target.id != id);
+        runtime.flights.remove(&id);
+        runtime.orders.remove(&id);
+        runtime.movement.remove(&id);
+        Arc::make_mut(&mut runtime.turnaround_inputs).remove(&id);
+        runtime.seeded_stations.remove(&id);
+        runtime.advisories.remove(&id);
+        runtime.fixed_gear.remove(&id);
+        runtime.approved_orders.retain(|(aircraft, _)| *aircraft != id);
+    }
     // A generated flight that begins the scene already taxiing has, by definition, already
     // received its taxi clearance. Approve its surface route now; runway crossings, line-up
     // and takeoff still require their own grants.
