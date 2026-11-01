@@ -3,8 +3,8 @@
 #![allow(clippy::default_trait_access)]
 
 mod atc;
+mod automation;
 mod cabin;
-mod chatter;
 mod config_cache;
 mod context;
 mod crew;
@@ -82,8 +82,6 @@ pub struct EngineState {
     pub parking: parking::Monitor,
     /// Persistent ambient airport traffic.
     pub ambient: traffic_ops::TrafficManager,
-    /// Audio-only simulated airport chatter.
-    pub chatter: chatter::ChatterManager,
     /// CSL animation channel names shared by generated and ambient traffic.
     pub traffic_channels: BTreeMap<String, openatc_core::traffic::animation::Channel>,
     /// Animation rates shared by generated and ambient traffic.
@@ -122,6 +120,8 @@ pub struct EngineState {
     pub crew: crew::CrewSession,
     /// Automatic station transitions and arrival permissions.
     pub flow: flight::FlightFlow,
+    /// AI automation engine for full flight automation.
+    pub automation: automation::AutomationEngine,
     /// Live session (plan, telemetry, phase, transcript, ...).
     pub session: State,
     /// Operator settings.
@@ -600,7 +600,6 @@ async fn main() {
         parking: Default::default(),
         initiative: Default::default(),
         ambient: Default::default(),
-        chatter: Default::default(),
         traffic_channels: generated::animation_channels(&config_dir),
         traffic_handling: generated::animation_handling(&config_dir),
         aircraft: Default::default(),
@@ -766,7 +765,6 @@ fn test_state() -> EngineState {
         parking: Default::default(),
         initiative: Default::default(),
         ambient: Default::default(),
-        chatter: Default::default(),
         traffic_channels: generated::animation_channels(&config_dir),
         traffic_handling: generated::animation_handling(&config_dir),
         aircraft: Default::default(),

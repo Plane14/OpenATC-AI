@@ -197,9 +197,6 @@ pub struct Settings {
     pub mute_native_radio: bool,
     /// Native AI aircraft excluding ownship, limited to nineteen SDK slots.
     pub native_traffic_count: u8,
-    /// Simulated airport radio chatter when flying above a receivable station.
-    #[serde(default = "yes")]
-    pub airport_chatter: bool,
     /// Enable `OpenATC`'s lightweight generated model instances.
     pub generated_traffic: bool,
     /// How often the generated traffic is drawn. A higher rate moves the traffic more smoothly
@@ -243,6 +240,16 @@ pub struct Settings {
     pub pilots_call_me: bool,
     /// Percent chance of a pilot call after checking weather, phase and radio availability.
     pub pilot_chat_chance_percent: u8,
+    /// Enable ADSB.lol real-time traffic source.
+    pub adsb_lol_enabled: bool,
+    /// ADSB.lol API base URL.
+    pub adsb_lol_url: String,
+    /// ADSB.lol API key (optional).
+    pub adsb_lol_api_key: String,
+    /// ADSB.lol query radius in nautical miles.
+    pub adsb_lol_radius_nm: f64,
+    /// ADSB.lol update interval in seconds.
+    pub adsb_lol_update_interval_sec: u64,
     /// Numeric `SimBrief` pilot ID for OFP import.
     pub simbrief_id: String,
     /// Default pilot callsign used when a flight plan does not provide one.
@@ -362,6 +369,18 @@ pub struct Settings {
     /// Copilot sets autopilot targets (altitude, heading, speed) when the
     /// autopilot is engaged, announcing each change; advises only otherwise.
     pub copilot_flies_ap: bool,
+    /// Enable full flight automation from startup to shutdown.
+    pub automation_enabled: bool,
+    /// VFR mode for automation (visual flight rules, skip IFR clearances).
+    pub automation_vfr_mode: bool,
+    /// Rotorcraft operations mode for automation.
+    pub automation_rotorcraft_mode: bool,
+    /// Randomized multi-leg flights for automation.
+    pub automation_randomized_flights: bool,
+    /// Minimum interval between randomized flights in minutes.
+    pub automation_min_flight_interval_min: u16,
+    /// Maximum interval between randomized flights in minutes.
+    pub automation_max_flight_interval_min: u16,
     /// Speak controller transmissions automatically.
     pub controller_speech: bool,
     /// Speak copilot readbacks automatically.
@@ -488,7 +507,6 @@ impl Default for Settings {
             suppress_native_traffic: true,
             mute_native_radio: true,
             native_traffic_count: 0,
-            airport_chatter: true,
             generated_traffic: false,
             traffic_rate: TrafficRate::EveryFrame,
             traffic_log: TrafficLog::Summary,
@@ -564,6 +582,17 @@ impl Default for Settings {
             auto_tune_handoff: true,
             copilot_auto_respond: true,
             copilot_flies_ap: false,
+            automation_enabled: false,
+            automation_vfr_mode: false,
+            automation_rotorcraft_mode: false,
+            automation_randomized_flights: false,
+            automation_min_flight_interval_min: 10,
+            automation_max_flight_interval_min: 30,
+            adsb_lol_enabled: false,
+            adsb_lol_url: "https://api.adsb.lol".to_string(),
+            adsb_lol_api_key: String::new(),
+            adsb_lol_radius_nm: 50.0,
+            adsb_lol_update_interval_sec: 30,
             controller_speech: true,
             copilot_speech: true,
             pilot_speech: true,

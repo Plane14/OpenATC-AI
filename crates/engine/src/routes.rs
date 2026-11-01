@@ -1428,6 +1428,44 @@ pub async fn post_copilot_reply(
     record_response(&shared, id, generation, response).await
 }
 
+/// Automation control endpoint.
+pub async fn post_automation(
+    AxumState(shared): AxumState<Shared>,
+    Json(body): Json<Value>,
+) -> Response {
+    let action = body["action"].as_str().unwrap_or("");
+    let mut state = shared.write().await;
+
+    match action {
+        "start" => {
+            state.automation.start(&mut state);
+            ok("Automation started")
+        }
+        "stop" => {
+            state.automation.stop();
+            ok("Automation stopped")
+        }
+        "toggle_stop_after_flight" => {
+            state.automation.toggle_stop_after_flight();
+            ok_json(json!({
+                "stop_after_flight": state.automation.config.stop_after_flight
+            }))
+        }
+        "status" => {
+            ok_json(json!({
+                "active": state.automation.status.active,
+                "phase": state.automation.status.phase,
+                "stop_after_flight": state.automation.status.stop_after_flight,
+                "current_flight": state.automation.status.current_flight,
+                "total_flights": state.automation.status.total_flights,
+                "last_action": state.automation.status.last_action,
+                "next_action": state.automation.status.next_action,
+            }))
+        }
+        _ => bad_request("Invalid automation action"),
+    }
+}
+
 /// Shared request handling: station roles, controller and crew replies, and readbacks.
 pub async fn post_request(
     AxumState(shared): AxumState<Shared>,
@@ -2167,8 +2205,6 @@ pub(crate) fn assign_airspace_controller(
     let position = airspace.split(':').nth(1).unwrap_or(airspace).to_owned();
     SpeechTag {
         radio: None,
-        frequency: None,
-        gap_ms: 0,
         position,
         voice: controller.voice.clone(),
         delivery: controller.delivery.clone(),

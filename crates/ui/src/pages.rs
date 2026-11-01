@@ -12,9 +12,10 @@
 
 use crate::interface::Interface;
 use crate::widgets;
-use openatc_core::ops::{phase_name, request_available};
+use openatc_core::ops::{phase_name, request_available, AcfSpecs, acf_specs_to_aircraft, select_best_approach, select_best_sid, select_best_star, validate_approach_performance, validate_sid_performance, validate_star_performance};
 use openatc_core::state::{Request, State};
 use openatc_core::{altitude_text, feet_to_meters, meters_to_feet, resolve_units};
+use openatc_settings::Settings;
 use std::fmt::Write as _;
 
 /// Definition titles needing the altitude/waypoint modal.
@@ -600,9 +601,7 @@ fn transcript_badge(
                 format!("ATC - {name}")
             }
         }
-        _ if entry.position == "Traffic" || entry.position == "Chatter" => {
-            format!("TFC · {}", entry.speaker)
-        }
+        _ if entry.position == "Traffic" => format!("TFC · {}", entry.speaker),
         _ => "YOU".to_owned(),
     }
 }
@@ -1298,6 +1297,27 @@ fn load_airport(interface: &mut Interface, icao: &str) {
     );
 }
 
+/// Load procedures catalogue for an airport from the simulator navdata.
+fn load_procedures_catalogue(icao: &str) -> Option<openatc_core::traffic::procedures::Catalogue> {
+    if icao.is_empty() || icao.len() != 4 {
+        return None;
+    }
+    let settings = openatc_settings::Settings::default();
+    let root = &settings.simulator_root;
+    if root.is_empty() {
+        return None;
+    }
+    let custom = format!("{root}/Custom Data/CIFP/{icao}.dat");
+    let path = if std::path::Path::new(&custom).is_file() {
+        custom
+    } else {
+        format!("{root}/Resources/default data/CIFP/{icao}.dat")
+    };
+    std::fs::read_to_string(&path).ok().and_then(|text| {
+        openatc_core::traffic::procedures::Catalogue::parse(&text).ok()
+    })
+}
+
 /// Labelled text field inside a form table.
 fn form_text(ui: &imgui::Ui, label: &str, value: &mut String, capacity: usize) {
     ui.table_next_column();
@@ -1830,7 +1850,7 @@ pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
     } else {
         &interface.settings_notice
     });
-    const SECTIONS: [&str; 12] = [
+    const SECTIONS: [&str; 13] = [
         "General",
         "Appearance",
         "Copilot",
@@ -1841,6 +1861,7 @@ pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
         "Audio",
         "Traffic",
         "Realism",
+        "Automation",
         "Sessions",
         "About",
     ];
@@ -1965,9 +1986,12 @@ pub fn settings_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
             realism_tab(ui, interface);
         }
         if interface.settings_section == 10 {
-            session_tab(ui, interface, state);
+            automation_tab(ui, interface);
         }
         if interface.settings_section == 11 {
+            session_tab(ui, interface, state);
+        }
+        if interface.settings_section == 12 {
             settings_about(ui, interface);
         }
     }
@@ -2567,8 +2591,6 @@ fn voice_popup(ui: &imgui::Ui, interface: &mut Interface) {
                     if ui.button("Listen") {
                         interface.speak_entry(&openatc_core::state::Transmission {
                             radio: None,
-                            frequency: None,
-                            gap_ms: 0,
                             information_only: false,
                             speaker: "ATC".into(),
                             text: interface.voice_preview_text.clone(),
@@ -2732,8 +2754,6 @@ fn audio_levels_row(ui: &imgui::Ui, interface: &mut Interface) {
     if ui.button("Test controller voice") {
         interface.speak_entry(&openatc_core::state::Transmission {
             radio: None,
-            frequency: None,
-            gap_ms: 0,
             information_only: false,
             pilot_reply: String::new(),
             background: false,
@@ -2865,6 +2885,86 @@ fn realism_tab(ui: &imgui::Ui, interface: &mut Interface) {
         &mut interface.settings.show_follow_me,
     );
     ui.text_wrapped("Uses an installed X-Plane scenery vehicle. The guide stops before each clearance limit; following it does not authorize a runway crossing.");
+}
+
+/// Automation tab: full flight automation controls.
+fn automation_tab(ui: &imgui::Ui, interface: &mut Interface) {
+    widgets::section_title(ui, "FLIGHT AUTOMATION");
+    let _disabled = ui.begin_disabled(!interface.engine.connected());
+
+    // Automation status display
+    let state = interface.engine.state();
+    let automation = &state.automation.status;
+    ui.text_colored(
+        if automation.active {
+            widgets::accent(ui)
+        } else {
+            widgets::warning(ui)
+        },
+        format!("Status: {}", if automation.active { "ACTIVE" } else { "IDLE" })
+    );
+    ui.text(format!("Phase: {:?}", automation.phase));
+    ui.text(format!("Flight: {} / {}", automation.current_flight, automation.total_flights));
+    ui.text(format!("Last action: {}", automation.last_action));
+    ui.text(format!("Next action: {}", automation.next_action));
+    ui.spacing();
+
+    // Controls
+    if !automation.active {
+        if ui.button("Start Automation") {
+            interface.engine.post("/automation", serde_json::json!({"action": "start"}));
+        }
+    } else {
+        if ui.button("Stop Automation") {
+            interface.engine.post("/automation", serde_json::json!({"action": "stop"}));
+        }
+        ui.same_line();
+        if ui.button("Stop After This Flight") {
+            interface.engine.post("/automation", serde_json::json!({"action": "toggle_stop_after_flight"}));
+        }
+        ui.text_wrapped(if automation.stop_after_flight {
+            "Will stop after current flight completes."
+        } else {
+            "Will continue to next flight (if randomized flights enabled)."
+        });
+    }
+
+    ui.spacing();
+    ui.separator();
+    ui.spacing();
+
+    // Configuration
+    ui.checkbox(
+        "Enable full flight automation (startup to shutdown)",
+        &mut interface.settings.automation_enabled,
+    );
+    ui.checkbox(
+        "VFR mode (visual flight rules)",
+        &mut interface.settings.automation_vfr_mode,
+    );
+    ui.checkbox(
+        "Rotorcraft operations mode",
+        &mut interface.settings.automation_rotorcraft_mode,
+    );
+    ui.checkbox(
+        "Randomized multi-leg flights",
+        &mut interface.settings.automation_randomized_flights,
+    );
+    if interface.settings.automation_randomized_flights {
+        let mut min_interval = i32::from(interface.settings.automation_min_flight_interval_min);
+        widgets::muted_wrapped(ui, "Min interval between flights (minutes)");
+        ui.set_next_item_width(-1.0);
+        if ui.slider("##auto-min-interval", 5, 120, &mut min_interval) {
+            interface.settings.automation_min_flight_interval_min = min_interval as u16;
+        }
+        let mut max_interval = i32::from(interface.settings.automation_max_flight_interval_min);
+        widgets::muted_wrapped(ui, "Max interval between flights (minutes)");
+        ui.set_next_item_width(-1.0);
+        if ui.slider("##auto-max-interval", 5, 180, &mut max_interval) {
+            interface.settings.automation_max_flight_interval_min = max_interval as u16;
+        }
+    }
+    ui.text_wrapped("Automation controls the autopilot, radios, and checklists. Requires copilot_flies_ap enabled in Copilot settings. VFR mode skips IFR clearances. Rotorcraft mode adjusts profiles for vertical flight. Randomized flights select compatible airports based on aircraft range and runway requirements.");
 }
 
 /// Discipline preset picker.
@@ -3106,6 +3206,35 @@ fn session_tab(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
 
 fn flight_tab(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
     widgets::section_title(ui, "FLIGHT DETAILS");
+
+    // Show loaded aircraft info and allow using it
+    if let Some(specs) = &interface.loaded_aircraft_specs {
+        ui.text_colored(widgets::accent(ui), "Loaded Aircraft (from simulator):");
+        ui.text_wrapped(format!(
+            "{} ({}) - Wingspan: {:.1}m, Length: {:.1}m, MTOW: {:.0}kg, Ceiling: {}ft, Engine: {} ({}x)",
+            specs.description,
+            specs.icao,
+            specs.wingspan_meters.unwrap_or(0.0),
+            specs.length_meters.unwrap_or(0.0),
+            specs.max_takeoff_weight_kg.unwrap_or(0.0),
+            specs.ceiling_feet.unwrap_or(0),
+            specs.engine_type,
+            specs.engine_count.unwrap_or(0)
+        ));
+        if ui.button("Use loaded aircraft for flight plan") {
+            interface.draft.aircraft = specs.icao.clone();
+            if let Some(wingspan) = specs.wingspan_meters {
+                interface.draft.registration = format!("WS{:.0}m", wingspan);
+            }
+            if let Some(ceiling) = specs.ceiling_feet {
+                interface.draft.cruise_feet = ceiling.min(41000).max(10000);
+            }
+        }
+        ui.spacing();
+        ui.separator();
+        ui.spacing();
+    }
+
     if let Some(_table) = ui.begin_table("FlightFields", widgets::form_columns(ui)) {
         form_text(ui, "Callsign", &mut interface.draft.callsign, 32);
         #[cfg(test)]
@@ -3170,6 +3299,31 @@ fn flight_tab(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
 /// Procedures tab: SID/STAR picker backed by loaded CIFP data.
 fn procedures_tab(ui: &imgui::Ui, interface: &mut Interface) {
     widgets::section_title(ui, "DEPARTURE & ARRIVAL");
+
+    // Auto-select procedures based on aircraft performance
+    if let Some(specs) = &interface.loaded_aircraft_specs {
+        let aircraft = acf_specs_to_aircraft(specs);
+        if ui.button("Auto-select procedures for loaded aircraft") {
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.departure) {
+                if let Some(sid) = select_best_sid(&catalogue, &interface.draft.runway, &aircraft) {
+                    interface.draft.sid = sid;
+                }
+            }
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination) {
+                if let Some(star) = select_best_star(&catalogue, &interface.draft.arrival_runway, &aircraft) {
+                    interface.draft.star = star;
+                }
+                if let Some(approach) = select_best_approach(&catalogue, &aircraft) {
+                    interface.draft.approach = approach;
+                }
+            }
+        }
+        ui.text_disabled("Selects SID/STAR/Approach based on aircraft climb/descent performance and RNAV capability.");
+        ui.spacing();
+        ui.separator();
+        ui.spacing();
+    }
+
     if let Some(_table) = ui.begin_table("ProcedureFields", widgets::form_columns(ui).min(2)) {
         form_text(ui, "SID", &mut interface.draft.sid, 32);
         form_text(
@@ -3206,6 +3360,39 @@ fn procedures_tab(ui: &imgui::Ui, interface: &mut Interface) {
         "Click a procedure from {} to use its name and transition.",
         interface.airport.icao
     ));
+
+    // Show performance validation warnings
+    if let Some(specs) = &interface.loaded_aircraft_specs {
+        let aircraft = acf_specs_to_aircraft(specs);
+        if !interface.draft.sid.is_empty() && !interface.draft.runway.is_empty() {
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.departure) {
+                if let Ok(warnings) = validate_sid_performance(&catalogue, &interface.draft.sid, &interface.draft.runway, &interface.draft.sid_transition, &aircraft) {
+                    for warning in warnings {
+                        ui.text_colored(widgets::warning(ui), format!("⚠ {}", warning));
+                    }
+                }
+            }
+        }
+        if !interface.draft.star.is_empty() && !interface.draft.arrival_runway.is_empty() {
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination) {
+                if let Ok(warnings) = validate_star_performance(&catalogue, &interface.draft.star, &interface.draft.arrival_runway, &interface.draft.star_transition, &aircraft) {
+                    for warning in warnings {
+                        ui.text_colored(widgets::warning(ui), format!("⚠ {}", warning));
+                    }
+                }
+            }
+        }
+        if !interface.draft.approach.is_empty() {
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination) {
+                if let Ok(warnings) = validate_approach_performance(&catalogue, &interface.draft.approach, &interface.draft.approach, &aircraft) {
+                    for warning in warnings {
+                        ui.text_colored(widgets::warning(ui), format!("⚠ {}", warning));
+                    }
+                }
+            }
+        }
+    }
+
     if let Some(_table) = ui.begin_table_with_flags(
         "ProcedureList",
         3,
@@ -3256,8 +3443,8 @@ fn procedures_tab(ui: &imgui::Ui, interface: &mut Interface) {
         }
     }
     ui.text_wrapped(
-                "Procedure names are read from installed CIFP data. Leg constraints and aircraft performance are not calculated here.",
-            );
+        "Procedure names are read from installed CIFP data. Leg constraints and aircraft performance are not calculated here.",
+    );
 }
 
 /// Fuel tab: the load sheet in kilograms.
@@ -3316,8 +3503,6 @@ fn sort_table<T>(ui: &imgui::Ui, rows: &mut [T], key: impl Fn(&T, usize) -> Stri
 
 #[cfg(test)]
 mod tests {
-    use openatc_core::aircraft::AircraftBehaviour;
-
     #[test]
     fn squawk_links_accept_reminders_and_reject_altitudes_and_invalid_digits() {
         for text in [
@@ -3709,8 +3894,6 @@ mod tests {
         let transcript = vec![
             Transmission {
                 radio: Some(openatc_core::state::Radio::Com1),
-                frequency: None,
-                gap_ms: 0,
                 information_only: false,
                 pilot_reply: String::new(),
                 background: false,
@@ -3725,8 +3908,6 @@ mod tests {
             },
             Transmission {
                 radio: Some(openatc_core::state::Radio::Com1),
-                frequency: None,
-                gap_ms: 0,
                 information_only: false,
                 pilot_reply: String::new(),
                 background: false,
@@ -3960,8 +4141,6 @@ mod tests {
     #[test]
     fn traffic_pilot_badges_preserve_identity_instead_of_showing_you() {
         let mut entry = openatc_core::state::Transmission {
-            frequency: None,
-            gap_ms: 0,
             speaker: "SIA1975".into(),
             text: "Taxi via Alpha, Singapore one nine seven five.".into(),
             position: "Traffic".into(),

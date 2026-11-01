@@ -135,6 +135,15 @@ impl Aircraft {
             .position(|limit| self.wingspan < *limit)
             .map_or('F', |n| char::from(b'A' + n as u8))
     }
+
+    /// Check if this aircraft is a rotorcraft based on handling type.
+    #[must_use]
+    pub fn is_rotorcraft(&self) -> bool {
+        matches!(
+            self.handling,
+            Some(crate::traffic::animation::Kind::Rotorcraft)
+        )
+    }
 }
 
 /// How an operator's partial route catalogue limits simulated city pairs.

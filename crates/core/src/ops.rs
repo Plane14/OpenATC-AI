@@ -901,6 +901,565 @@ pub fn read_acf_identity(path: &std::path::Path) -> Result<(String, String), Str
     Ok((author, icao))
 }
 
+/// Detailed aircraft specifications parsed from an ACF file.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcfSpecs {
+    /// Aircraft author string.
+    pub author: String,
+    /// ICAO aircraft type designator.
+    pub icao: String,
+    /// Aircraft description/name.
+    pub description: String,
+    /// Wingspan in meters.
+    pub wingspan_meters: Option<f64>,
+    /// Length in meters.
+    pub length_meters: Option<f64>,
+    /// Height in meters.
+    pub height_meters: Option<f64>,
+    /// Maximum takeoff weight in kg.
+    pub max_takeoff_weight_kg: Option<f64>,
+    /// Maximum landing weight in kg.
+    pub max_landing_weight_kg: Option<f64>,
+    /// Maximum zero fuel weight in kg.
+    pub max_zero_fuel_weight_kg: Option<f64>,
+    /// Maximum fuel capacity in kg.
+    pub max_fuel_kg: Option<f64>,
+    /// Service ceiling in feet MSL.
+    pub ceiling_feet: Option<i32>,
+    /// Cruise speed in knots (TAS).
+    pub cruise_speed_knots: Option<f64>,
+    /// Maximum operating speed (Vmo) in knots.
+    pub vmo_knots: Option<f64>,
+    /// Maximum operating Mach number (Mmo).
+    pub mmo: Option<f64>,
+    /// Approach speed (Vref) in knots.
+    pub vref_knots: Option<f64>,
+    /// Stall speed in landing configuration in knots.
+    pub vs0_knots: Option<f64>,
+    /// Stall speed in clean configuration in knots.
+    pub vs1_knots: Option<f64>,
+    /// Maximum climb rate in fpm.
+    pub max_climb_rate_fpm: Option<f64>,
+    /// Maximum descent rate in fpm.
+    pub max_descent_rate_fpm: Option<f64>,
+    /// Engine type: "jet", "turboprop", "piston", "electric", "rotorcraft".
+    pub engine_type: String,
+    /// Number of engines.
+    pub engine_count: Option<u8>,
+    /// Wake turbulence category: L, M, H, J.
+    pub wake_category: Option<char>,
+    /// ICAO approach category: A, B, C, D, E.
+    pub approach_category: Option<char>,
+    /// Whether the aircraft has retractable gear.
+    pub retractable_gear: bool,
+    /// Whether the aircraft is a rotorcraft.
+    pub is_rotorcraft: bool,
+    /// Whether the aircraft is a seaplane/amphibian.
+    pub is_seaplane: bool,
+    /// Minimum runway length in meters (dry, sea level, ISA).
+    pub min_runway_length_meters: Option<f64>,
+    /// Typical turn-around time in minutes.
+    pub turnaround_minutes: Option<u16>,
+}
+
+/// Parse detailed aircraft specifications from an ACF file.
+pub fn read_acf_specs(path: &std::path::Path) -> Result<AcfSpecs, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|error| format!("cannot open file: {error}"))?;
+
+    let mut specs = AcfSpecs::default();
+    let mut in_aircraft_section = false;
+
+    for line in text.lines() {
+        let line = line.trim();
+
+        if line == "ACF" || line == "AIRCRAFT" {
+            in_aircraft_section = true;
+            continue;
+        }
+
+        if line.starts_with("P acf/_author ") {
+            specs.author = line["P acf/_author ".len()..].trim().to_string();
+        } else if line.starts_with("P acf/_ICAO ") {
+            specs.icao = line["P acf/_ICAO ".len()..].trim().to_string().to_ascii_uppercase();
+        } else if line.starts_with("P acf/_descrip ") {
+            specs.description = line["P acf/_descrip ".len()..].trim().to_string();
+        } else if line.starts_with("P acf/_wing_span ") {
+            specs.wingspan_meters = parse_f64(&line["P acf/_wing_span ".len()..]);
+        } else if line.starts_with("P acf/_length ") {
+            specs.length_meters = parse_f64(&line["P acf/_length ".len()..]);
+        } else if line.starts_with("P acf/_height ") {
+            specs.height_meters = parse_f64(&line["P acf/_height ".len()..]);
+        } else if line.starts_with("P acf/_max_takeoff_weight ") {
+            specs.max_takeoff_weight_kg = parse_f64(&line["P acf/_max_takeoff_weight ".len()..]);
+        } else if line.starts_with("P acf/_max_landing_weight ") {
+            specs.max_landing_weight_kg = parse_f64(&line["P acf/_max_landing_weight ".len()..]);
+        } else if line.starts_with("P acf/_max_zero_fuel_weight ") {
+            specs.max_zero_fuel_weight_kg = parse_f64(&line["P acf/_max_zero_fuel_weight ".len()..]);
+        } else if line.starts_with("P acf/_max_fuel ") {
+            specs.max_fuel_kg = parse_f64(&line["P acf/_max_fuel ".len()..]);
+        } else if line.starts_with("P acf/_ceiling ") {
+            specs.ceiling_feet = parse_i32(&line["P acf/_ceiling ".len()..]);
+        } else if line.starts_with("P acf/_cruise_speed ") {
+            specs.cruise_speed_knots = parse_f64(&line["P acf/_cruise_speed ".len()..]);
+        } else if line.starts_with("P acf/_vmo ") {
+            specs.vmo_knots = parse_f64(&line["P acf/_vmo ".len()..]);
+        } else if line.starts_with("P acf/_mmo ") {
+            specs.mmo = parse_f64(&line["P acf/_mmo ".len()..]);
+        } else if line.starts_with("P acf/_vref ") {
+            specs.vref_knots = parse_f64(&line["P acf/_vref ".len()..]);
+        } else if line.starts_with("P acf/_vs0 ") {
+            specs.vs0_knots = parse_f64(&line["P acf/_vs0 ".len()..]);
+        } else if line.starts_with("P acf/_vs1 ") {
+            specs.vs1_knots = parse_f64(&line["P acf/_vs1 ".len()..]);
+        } else if line.starts_with("P acf/_max_climb_rate ") {
+            specs.max_climb_rate_fpm = parse_f64(&line["P acf/_max_climb_rate ".len()..]);
+        } else if line.starts_with("P acf/_max_descent_rate ") {
+            specs.max_descent_rate_fpm = parse_f64(&line["P acf/_max_descent_rate ".len()..]);
+        } else if line.starts_with("P acf/_engine_type ") {
+            specs.engine_type = line["P acf/_engine_type ".len()..].trim().to_string();
+        } else if line.starts_with("P acf/_engine_count ") {
+            specs.engine_count = parse_u8(&line["P acf/_engine_count ".len()..]);
+        } else if line.starts_with("P acf/_wake_category ") {
+            specs.wake_category = line["P acf/_wake_category ".len()..].trim().chars().next();
+        } else if line.starts_with("P acf/_approach_category ") {
+            specs.approach_category = line["P acf/_approach_category ".len()..].trim().chars().next();
+        } else if line.starts_with("P acf/_retractable_gear ") {
+            specs.retractable_gear = line["P acf/_retractable_gear ".len()..].trim() == "1";
+        } else if line.starts_with("P acf/_rotorcraft ") {
+            specs.is_rotorcraft = line["P acf/_rotorcraft ".len()..].trim() == "1";
+        } else if line.starts_with("P acf/_seaplane ") {
+            specs.is_seaplane = line["P acf/_seaplane ".len()..].trim() == "1";
+        } else if line.starts_with("P acf/_min_runway ") {
+            specs.min_runway_length_meters = parse_f64(&line["P acf/_min_runway ".len()..]);
+        } else if line.starts_with("P acf/_turnaround ") {
+            specs.turnaround_minutes = parse_u16(&line["P acf/_turnaround ".len()..]);
+        }
+    }
+
+    if specs.author.is_empty() && specs.icao.is_empty() {
+        return Err("no aircraft identity found".to_owned());
+    }
+
+    Ok(specs)
+}
+
+fn parse_f64(s: &str) -> Option<f64> {
+    s.trim().parse().ok().filter(|v| v.is_finite() && *v > 0.0)
+}
+
+fn parse_i32(s: &str) -> Option<i32> {
+    s.trim().parse().ok().filter(|v| *v > 0)
+}
+
+fn parse_u8(s: &str) -> Option<u8> {
+    s.trim().parse().ok().filter(|v| *v > 0)
+}
+
+fn parse_u16(s: &str) -> Option<u16> {
+    s.trim().parse().ok().filter(|v| *v > 0)
+}
+
+/// Convert AcfSpecs to a traffic profile Aircraft for performance validation.
+pub fn acf_specs_to_aircraft(specs: &AcfSpecs) -> openatc_core::traffic::profiles::Aircraft {
+    let wake = specs.wake_category.unwrap_or('M');
+    let approach_category = specs.approach_category.unwrap_or('C');
+    let engine_type = specs.engine_type.to_ascii_lowercase();
+    let is_jet = engine_type.contains("jet") || engine_type.contains("turbofan");
+    let is_turboprop = engine_type.contains("turboprop") || engine_type.contains("turboshaft");
+    let is_piston = engine_type.contains("piston") || engine_type.contains("recip");
+    let is_electric = engine_type.contains("electric");
+    let is_rotorcraft = specs.is_rotorcraft;
+
+    let (propeller, rnav) = if is_jet {
+        (false, true)
+    } else if is_turboprop {
+        (true, true)
+    } else if is_piston {
+        (true, true)
+    } else if is_electric {
+        (false, true)
+    } else if is_rotorcraft {
+        (false, true)
+    } else {
+        (true, true)
+    };
+
+    let wingspan = specs.wingspan_meters.unwrap_or(15.0);
+    let length = specs.length_meters.unwrap_or(wingspan * 0.8);
+    let ceiling = specs.ceiling_feet.unwrap_or(25000) as f64;
+    let cruise_knots = specs.cruise_speed_knots.unwrap_or(300.0);
+    let approach_knots = specs.vref_knots.unwrap_or_else(|| {
+        if is_rotorcraft { 60.0 } else if is_jet { 130.0 } else { 90.0 }
+    });
+    let climb_fpm = specs.max_climb_rate_fpm.unwrap_or(if is_jet { 2500.0 } else { 1000.0 });
+    let descent_fpm = specs.max_descent_rate_fpm.unwrap_or(if is_jet { 2000.0 } else { 1000.0 });
+    let range_nm = if let (Some(fuel), Some(cruise)) = (specs.max_fuel_kg, specs.cruise_speed_knots) {
+        let consumption = if is_jet { cruise * 0.8 } else { cruise * 0.3 };
+        (fuel / consumption * 0.8 * 60.0).min(5000.0)
+    } else if is_jet { 3000.0 } else if is_turboprop { 1000.0 } else { 600.0 };
+
+    let runway = if is_rotorcraft { 0.0 } else {
+        specs.min_runway_length_meters.unwrap_or_else(|| {
+            if is_jet { 1800.0 } else if is_turboprop { 1000.0 } else { 600.0 }
+        })
+    };
+
+    openatc_core::traffic::profiles::Aircraft {
+        spacing_speed: None,
+        model_aliases: vec![specs.icao.clone()],
+        handling: if is_rotorcraft {
+            Some(openatc_core::traffic::animation::Kind::Rotorcraft)
+        } else if is_jet {
+            Some(openatc_core::traffic::animation::Kind::Jet)
+        } else if is_turboprop {
+            Some(openatc_core::traffic::animation::Kind::Turboprop)
+        } else {
+            Some(openatc_core::traffic::animation::Kind::Piston)
+        },
+        fixed_gear: !specs.retractable_gear,
+        name: specs.description.clone(),
+        wingspan,
+        length,
+        wake,
+        cwt: None,
+        approach_category,
+        runway,
+        range_nm,
+        cruise_knots,
+        ceiling,
+        approach_knots,
+        climb_fpm,
+        descent_fpm,
+        propeller,
+        rnav,
+    }
+}
+
+/// Validate a SID against aircraft performance (climb gradient, speed restrictions).
+pub fn validate_sid_performance(
+    catalogue: &openatc_core::traffic::procedures::Catalogue,
+    sid_name: &str,
+    runway: &str,
+    transition: &str,
+    aircraft: &openatc_core::traffic::profiles::Aircraft,
+) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+    let departure = catalogue.departure(sid_name, runway, transition);
+    match departure {
+        Ok(segments) => {
+            for segment in segments {
+                for leg in segment {
+                    // Check climb gradient requirements
+                    if let (Some(alt1), Some(alt2)) = (leg.altitude_one, leg.altitude_two) {
+                        if alt2 > alt1 {
+                            let climb_required = alt2 - alt1;
+                            // Assume 3 NM per 1000 ft for standard climb gradient
+                            let distance_nm = leg.distance_time.parse::<f64>().unwrap_or(10.0);
+                            let gradient_ft_per_nm = climb_required as f64 / distance_nm;
+                            let aircraft_gradient = aircraft.climb_fpm / (aircraft.cruise_knots / 60.0);
+                            if gradient_ft_per_nm > aircraft_gradient * 1.2 {
+                                warnings.push(format!(
+                                    "SID {} leg {}: climb gradient {:.0} ft/NM exceeds aircraft capability ({:.0} ft/NM)",
+                                    sid_name, leg.identifier, gradient_ft_per_nm, aircraft_gradient
+                                ));
+                            }
+                        }
+                    }
+                    // Check speed restrictions
+                    if let Some(speed) = leg.speed_knots {
+                        if speed > aircraft.cruise_knots * 1.1 {
+                            warnings.push(format!(
+                                "SID {} leg {}: speed restriction {} kts exceeds aircraft cruise {} kts",
+                                sid_name, leg.identifier, speed, aircraft.cruise_knots
+                            ));
+                        }
+                    }
+                    // Check altitude constraints
+                    if let Some(alt) = leg.altitude_one {
+                        if alt as f64 > aircraft.ceiling {
+                            warnings.push(format!(
+                                "SID {} leg {}: altitude {} ft exceeds aircraft ceiling {} ft",
+                                sid_name, leg.identifier, alt, aircraft.ceiling as i32
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => warnings.push(format!("SID {} unavailable: {}", sid_name, e)),
+    }
+    Ok(warnings)
+}
+
+/// Validate a STAR against aircraft performance (descent gradient, speed restrictions).
+pub fn validate_star_performance(
+    catalogue: &openatc_core::traffic::procedures::Catalogue,
+    star_name: &str,
+    runway: &str,
+    transition: &str,
+    aircraft: &openatc_core::traffic::profiles::Aircraft,
+) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+    let arrival = catalogue.arrival(star_name, runway, transition);
+    match arrival {
+        Ok(segments) => {
+            for segment in segments {
+                for leg in segment {
+                    // Check descent gradient requirements
+                    if let (Some(alt1), Some(alt2)) = (leg.altitude_one, leg.altitude_two) {
+                        if alt1 > alt2 {
+                            let descent_required = alt1 - alt2;
+                            let distance_nm = leg.distance_time.parse::<f64>().unwrap_or(10.0);
+                            let gradient_ft_per_nm = descent_required as f64 / distance_nm;
+                            let aircraft_gradient = aircraft.descent_fpm / (aircraft.cruise_knots / 60.0);
+                            if gradient_ft_per_nm > aircraft_gradient * 1.5 {
+                                warnings.push(format!(
+                                    "STAR {} leg {}: descent gradient {:.0} ft/NM exceeds aircraft capability ({:.0} ft/NM)",
+                                    star_name, leg.identifier, gradient_ft_per_nm, aircraft_gradient
+                                ));
+                            }
+                        }
+                    }
+                    // Check speed restrictions
+                    if let Some(speed) = leg.speed_knots {
+                        if speed < aircraft.approach_knots * 0.8 {
+                            warnings.push(format!(
+                                "STAR {} leg {}: speed restriction {} kts below aircraft approach speed {} kts",
+                                star_name, leg.identifier, speed, aircraft.approach_knots
+                            ));
+                        }
+                        if speed > aircraft.cruise_knots * 1.1 {
+                            warnings.push(format!(
+                                "STAR {} leg {}: speed restriction {} kts exceeds aircraft cruise {} kts",
+                                star_name, leg.identifier, speed, aircraft.cruise_knots
+                            ));
+                        }
+                    }
+                    // Check altitude constraints
+                    if let Some(alt) = leg.altitude_one {
+                        if alt as f64 > aircraft.ceiling {
+                            warnings.push(format!(
+                                "STAR {} leg {}: altitude {} ft exceeds aircraft ceiling {} ft",
+                                star_name, leg.identifier, alt, aircraft.ceiling as i32
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => warnings.push(format!("STAR {} unavailable: {}", star_name, e)),
+    }
+    Ok(warnings)
+}
+
+/// Validate an approach against aircraft performance (glideslope, minimums, speed).
+pub fn validate_approach_performance(
+    catalogue: &openatc_core::traffic::procedures::Catalogue,
+    approach_name: &str,
+    transition: &str,
+    aircraft: &openatc_core::traffic::profiles::Aircraft,
+) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+    let approach = catalogue.approach(approach_name, transition);
+    match approach {
+        Ok(approach) => {
+            for leg in approach.landing {
+                // Check glideslope angle
+                if let Some(angle) = leg.vertical_angle_degrees {
+                    if angle > 3.5 && !aircraft.is_rotorcraft() {
+                        warnings.push(format!(
+                            "Approach {} leg {}: glideslope angle {:.1}° exceeds standard 3.0°",
+                            approach_name, leg.identifier, angle
+                        ));
+                    }
+                }
+                // Check speed restrictions
+                if let Some(speed) = leg.speed_knots {
+                    if speed < aircraft.approach_knots * 0.8 {
+                        warnings.push(format!(
+                            "Approach {} leg {}: speed restriction {} kts below aircraft approach speed {} kts",
+                            approach_name, leg.identifier, speed, aircraft.approach_knots
+                        ));
+                    }
+                    if speed > aircraft.cruise_knots * 1.1 {
+                        warnings.push(format!(
+                            "Approach {} leg {}: speed restriction {} kts exceeds aircraft cruise {} kts",
+                            approach_name, leg.identifier, speed, aircraft.cruise_knots
+                        ));
+                    }
+                }
+                // Check altitude constraints
+                if let Some(alt) = leg.altitude_one {
+                    if alt as f64 > aircraft.ceiling {
+                        warnings.push(format!(
+                            "Approach {} leg {}: altitude {} ft exceeds aircraft ceiling {} ft",
+                            approach_name, leg.identifier, alt, aircraft.ceiling as i32
+                        ));
+                    }
+                }
+            }
+            // Check missed approach
+            for leg in approach.missed {
+                if let Some(alt) = leg.altitude_one {
+                    if alt as f64 > aircraft.ceiling {
+                        warnings.push(format!(
+                            "Approach {} missed leg {}: altitude {} ft exceeds aircraft ceiling {} ft",
+                            approach_name, leg.identifier, alt, aircraft.ceiling as i32
+                        ));
+                    }
+                }
+            }
+        }
+        Err(e) => warnings.push(format!("Approach {} unavailable: {}", approach_name, e)),
+    }
+    Ok(warnings)
+}
+
+/// Auto-select the best SID for an aircraft based on performance.
+pub fn select_best_sid(
+    catalogue: &openatc_core::traffic::procedures::Catalogue,
+    runway: &str,
+    aircraft: &openatc_core::traffic::profiles::Aircraft,
+) -> Option<String> {
+    let routes: Vec<_> = catalogue
+        .0
+        .iter()
+        .filter(|(key, _)| key.kind == "SID" && key.transition.starts_with("RW"))
+        .collect();
+
+    let mut best_sid = None;
+    let mut best_score = i32::MAX;
+
+    for (key, legs) in routes {
+        if !key.transition.contains(&runway.trim_end_matches(['L', 'R', 'C'])) {
+            continue;
+        }
+        let mut score = 0;
+        for leg in legs {
+            // Prefer lower climb gradients
+            if let (Some(alt1), Some(alt2)) = (leg.altitude_one, leg.altitude_two) {
+                if alt2 > alt1 {
+                    let climb = alt2 - alt1;
+                    let distance = leg.distance_time.parse::<f64>().unwrap_or(10.0);
+                    let gradient = climb as f64 / distance;
+                    let aircraft_gradient = aircraft.climb_fpm / (aircraft.cruise_knots / 60.0);
+                    if gradient > aircraft_gradient {
+                        score += 100;
+                    } else {
+                        score += (gradient / aircraft_gradient * 50.0) as i32;
+                    }
+                }
+            }
+            // Prefer RNAV-capable SIDs for RNAV aircraft
+            if aircraft.rnav && legs.iter().any(|l| ["DF", "TF", "RF"].contains(&l.terminator.as_str())) {
+                score -= 10;
+            }
+            // Prefer SIDs matching aircraft type
+            if legs.iter().any(|l| l.identifier.contains("JET") && aircraft.propeller) {
+                score += 50;
+            }
+            if legs.iter().any(|l| l.identifier.contains("PROP") && !aircraft.propeller) {
+                score += 50;
+            }
+        }
+        if score < best_score {
+            best_score = score;
+            best_sid = Some(key.name.clone());
+        }
+    }
+    best_sid
+}
+
+/// Auto-select the best STAR for an aircraft based on performance.
+pub fn select_best_star(
+    catalogue: &openatc_core::traffic::procedures::Catalogue,
+    runway: &str,
+    aircraft: &openatc_core::traffic::profiles::Aircraft,
+) -> Option<String> {
+    let routes: Vec<_> = catalogue
+        .0
+        .iter()
+        .filter(|(key, _)| key.kind == "STAR" && key.transition.starts_with("RW"))
+        .collect();
+
+    let mut best_star = None;
+    let mut best_score = i32::MAX;
+
+    for (key, legs) in routes {
+        if !key.transition.contains(&runway.trim_end_matches(['L', 'R', 'C'])) {
+            continue;
+        }
+        let mut score = 0;
+        for leg in legs {
+            // Prefer lower descent gradients
+            if let (Some(alt1), Some(alt2)) = (leg.altitude_one, leg.altitude_two) {
+                if alt1 > alt2 {
+                    let descent = alt1 - alt2;
+                    let distance = leg.distance_time.parse::<f64>().unwrap_or(10.0);
+                    let gradient = descent as f64 / distance;
+                    let aircraft_gradient = aircraft.descent_fpm / (aircraft.cruise_knots / 60.0);
+                    if gradient > aircraft_gradient {
+                        score += 100;
+                    } else {
+                        score += (gradient / aircraft_gradient * 50.0) as i32;
+                    }
+                }
+            }
+            // Prefer RNAV-capable STARs for RNAV aircraft
+            if aircraft.rnav && legs.iter().any(|l| ["DF", "TF", "RF"].contains(&l.terminator.as_str())) {
+                score -= 10;
+            }
+        }
+        if score < best_score {
+            best_score = score;
+            best_star = Some(key.name.clone());
+        }
+    }
+    best_star
+}
+
+/// Auto-select the best approach for an aircraft based on performance.
+pub fn select_best_approach(
+    catalogue: &openatc_core::traffic::procedures::Catalogue,
+    aircraft: &openatc_core::traffic::profiles::Aircraft,
+) -> Option<String> {
+    let routes: Vec<_> = catalogue
+        .0
+        .iter()
+        .filter(|(key, _)| key.kind == "APPCH" && key.route_type == "Z")
+        .collect();
+
+    let mut best_approach = None;
+    let mut best_score = i32::MAX;
+
+    for (key, legs) in routes {
+        let mut score = 0;
+        for leg in legs {
+            // Prefer ILS for precision approach capability
+            if leg.terminator == "ILS" || leg.terminator == "GLS" {
+                score -= 20;
+            }
+            // Prefer RNAV approaches for RNAV aircraft
+            if aircraft.rnav && ["RF", "TF", "DF"].contains(&leg.terminator.as_str()) {
+                score -= 10;
+            }
+            // Check glideslope
+            if let Some(angle) = leg.vertical_angle_degrees {
+                if angle > 3.2 {
+                    score += 50;
+                }
+            }
+        }
+        if score < best_score {
+            best_score = score;
+            best_approach = Some(key.name.clone());
+        }
+    }
+    best_approach
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

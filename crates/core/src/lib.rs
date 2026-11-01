@@ -14,6 +14,7 @@ pub mod crew;
 pub mod debug_jump;
 pub mod dialogue;
 pub mod escort;
+pub mod eurocontrol;
 pub mod hazards;
 pub mod identify;
 pub mod intents;
@@ -32,6 +33,7 @@ pub mod speech;
 pub mod state;
 pub mod stations;
 pub mod voices;
+pub mod adsb;
 
 /// Effective display/speech units. Hybrid flies feet aloft.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
