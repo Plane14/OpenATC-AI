@@ -873,7 +873,7 @@ Click an underlined frequency in the conversation to tune COM1 through the same 
 
 Taxi map arrows and simulator-ground arrows are separate settings. Only acknowledged routes produce ground arrows, and unverified stand connectors are not drawn on simulator ground. Guidance stops at the current clearance limit. Terrain probe misses, water and unsafe discontinuities are skipped.
 
-The optional **Holding point marker** is off by default. It draws a translucent amber circle on the map and simulator ground, set back on the approach side of available hold-line geometry. It disappears when the relevant crossing or takeoff permission permits entry. It is plugin guidance, not a replacement for painted markings or native airport lights. Existing scenery runway guard lights are preserved; individual native stop-bar control has not been established.
+The optional **Show holding point on map and simulator ground** setting is off by default. It draws a translucent amber circle on the map and simulator ground, set back on the approach side of available hold-line geometry. It disappears when the relevant crossing or takeoff permission permits entry. It is plugin guidance, not a replacement for painted markings or native airport lights. Existing scenery runway guard lights are preserved; individual native stop-bar control has not been established.
 
 - The Arrival profile is a geometric aid, not a complete STAR/VNAV solver.
 - Missing terrain stays unknown.
@@ -1197,20 +1197,25 @@ The renderer applies terrain placement separately from the worker's nominal path
 
 A separate persistent ambient layer supplies the opening airport with ground traffic.
 It starts aircraft on the taxiway graph, builds a graph route to the active departure
-runway, and gives each aircraft a stand-to-runway-to-takeoff profile. Aircraft hold
-short of the runway, contact Tower when the player is tuned to the frequency, receive
-line-up and takeoff clearances, and only then enter the runway. Takeoff uses a ground
-roll to rotation speed followed by a three-degree climb. Startup never creates
-`TaxiIn` traffic; `TaxiIn` exists only after a landing. Surface movement follows the
-taxiway graph, keeps a gap behind the leader, gives way to traffic on the right, and
-allows only one aircraft on the runway at a time. The older complete-flight generated
-layer remains available but is disabled in the opening scene.
+runway, and gives each aircraft a stand-to-runway-to-takeoff profile. Taxi speed is
+25 knots on straight sections and 10 knots through turns. Aircraft hold short of the
+runway, contact Tower when the player is tuned to the frequency, receive line-up and
+takeoff clearances, and only then enter the runway. The hold point is derived from
+the painted hold-line geometry and set back on the approach side, and the aircraft
+stops there rather than at the nearest graph node. The takeoff run starts at the
+runway end nearest that hold, so the aircraft enters at the near threshold and rolls
+away from it. Takeoff uses a ground roll to rotation speed followed by a three-degree
+climb. Startup never creates `TaxiIn` traffic; `TaxiIn` exists only after a landing.
+Surface movement follows the taxiway graph, keeps a gap behind the leader, gives way
+to traffic on the right, and allows only one aircraft on the runway at a time. The
+older complete-flight generated layer remains available but is disabled in the
+opening scene.
 
 **Settings → Traffic → Traffic debug** shows the exact planned hold point for each
 ambient departure, the published airport hold lines, the current blocker and the
-phase reason on the taxi map. `/debug/ambient` reports the graph route and taxiway
-sampling for the ambient layer; `/debug/generated` reports the legacy generated
-layer.
+phase reason on the taxi map. `/debug/ambient` reports the graph route, hold distance,
+chosen runway and taxiway sampling for the ambient layer; `/debug/generated` reports
+the legacy generated layer.
 
 Movement requires the appropriate controller clearance and readback. Taxi limits,
 runway crossings, takeoff, airborne scopes, approach and landing keep separate

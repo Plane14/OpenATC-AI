@@ -1430,12 +1430,6 @@ pub fn taxi_page(ui: &imgui::Ui, interface: &mut Interface, state: &State) {
     ) {
         interface.save_settings();
     }
-    if ui.checkbox(
-        "Holding point marker",
-        &mut interface.settings.show_holding_point,
-    ) {
-        interface.save_settings();
-    }
     if ui.checkbox("Follow-me car", &mut interface.settings.show_follow_me) {
         interface.save_settings();
     }

@@ -13,7 +13,8 @@ use openatc_core::traffic::profiles::Aircraft as Profile;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const TAXI_METERS_PER_SECOND: f64 = 5.0;
+const TAXI_STRAIGHT_METERS_PER_SECOND: f64 = 25.0 * 0.514_444;
+const TAXI_TURN_METERS_PER_SECOND: f64 = 10.0 * 0.514_444;
 const TAKEOFF_METERS_PER_SECOND: f64 = 60.0;
 const CLIMB_METERS_PER_SECOND: f64 = 80.0;
 
@@ -34,6 +35,8 @@ struct AmbientAircraft {
     ground_start: f64,
     ground_end: f64,
     taxi_end: f64,
+    hold_distance: f64,
+    hold: Option<[f64; 2]>,
     distance: f64,
     cleared: bool,
     hold_since: Option<Instant>,
@@ -177,7 +180,7 @@ impl TrafficManager {
                         yields && self.aircraft[index].id > other.id
                     });
             let hold_for_clearance = self.aircraft[index].kind == AmbientKind::Departure
-                && distance >= self.aircraft[index].taxi_end - 15.0
+                && distance >= self.aircraft[index].hold_distance
                 && !self.aircraft[index].cleared;
             if hold_for_clearance && self.aircraft[index].hold_since.is_none() {
                 self.aircraft[index].hold_since = Some(now);
@@ -194,6 +197,7 @@ impl TrafficManager {
             let aircraft = &mut self.aircraft[index];
             aircraft.last = now;
             aircraft.blocked = blocked;
+            let taxi = taxi_speed(&aircraft.points, &aircraft.cumulative, aircraft.distance);
             aircraft.speed = if blocked {
                 0.0
             } else if aircraft.kind == AmbientKind::Departure
@@ -207,12 +211,11 @@ impl TrafficManager {
                 } else {
                     1.0
                 };
-                TAXI_METERS_PER_SECOND
-                    + fraction * (TAKEOFF_METERS_PER_SECOND - TAXI_METERS_PER_SECOND)
+                taxi + fraction * (TAKEOFF_METERS_PER_SECOND - taxi)
             } else if aircraft.kind == AmbientKind::Departure
                 && aircraft.distance < aircraft.taxi_end
             {
-                TAXI_METERS_PER_SECOND
+                taxi
             } else if aircraft.kind == AmbientKind::Departure {
                 CLIMB_METERS_PER_SECOND
             } else if aircraft.kind == AmbientKind::Arrival
@@ -224,7 +227,7 @@ impl TrafficManager {
             {
                 TAKEOFF_METERS_PER_SECOND
             } else {
-                TAXI_METERS_PER_SECOND
+                taxi
             };
             aircraft.distance += aircraft.speed * dt;
         }
@@ -239,7 +242,7 @@ impl TrafficManager {
             .filter(|aircraft| {
                 aircraft.kind == AmbientKind::Departure
                     && !aircraft.cleared
-                    && aircraft.distance >= aircraft.taxi_end - 15.0
+                    && aircraft.distance >= aircraft.hold_distance
             })
             .map(|aircraft| aircraft.id)
             .min();
@@ -252,7 +255,7 @@ impl TrafficManager {
                 continue;
             };
             let phase = match aircraft.kind {
-                AmbientKind::Departure if aircraft.distance < aircraft.taxi_end - 15.0 => continue,
+                AmbientKind::Departure if aircraft.distance < aircraft.hold_distance => continue,
                 AmbientKind::Departure if aircraft.cleared => "takeoff",
                 AmbientKind::Departure if Some(aircraft.id) == lead_holding => "contact",
                 AmbientKind::Departure => "lineup",
@@ -353,15 +356,7 @@ impl TrafficManager {
                 },
                 blocker: None,
                 awaiting_clearance: false,
-                hold: if aircraft.kind == AmbientKind::Departure {
-                    let stop = (aircraft.taxi_end - 15.0).max(0.0);
-                    Some([
-                        position_at(&aircraft.points, &aircraft.cumulative, stop).0,
-                        position_at(&aircraft.points, &aircraft.cumulative, stop).1,
-                    ])
-                } else {
-                    None
-                },
+                hold: aircraft.hold,
             })
             .collect();
         // Replace the ambient portion only; keep frames produced by other layers.
@@ -413,6 +408,10 @@ impl TrafficManager {
                         AmbientKind::Arrival => "arrival",
                     },
                     "distance": aircraft.distance,
+                    "runway": aircraft.runway,
+                    "taxiEnd": aircraft.taxi_end,
+                    "holdDistance": aircraft.hold_distance,
+                    "hold": aircraft.hold,
                     "points": aircraft.points.len(),
                     "onTaxiway": points.iter().filter(|on| **on).count(),
                     "first": aircraft.points.first(),
@@ -522,6 +521,40 @@ impl TrafficManager {
             if total < 100.0 {
                 continue;
             }
+            let hold_marker = if kind == AmbientKind::Departure {
+                openatc_core::airport::holding_marker_position(airport, &surface_points).map(
+                    |point| {
+                        [
+                            airport.reference_latitude + point.north / 111_320.0,
+                            airport.reference_longitude
+                                + point.east
+                                    / (111_320.0
+                                        * (airport.reference_latitude.to_radians().cos())
+                                            .max(0.01)),
+                        ]
+                    },
+                )
+            } else {
+                None
+            };
+            let hold_distance = if kind == AmbientKind::Departure {
+                hold_marker.map_or(taxi_end - 15.0, |[latitude, longitude]| {
+                    let target = Waypoint {
+                        latitude,
+                        longitude,
+                        altitude_feet: airport.elevation_feet,
+                    };
+                    let projected = route_distance_to(&points, &cumulative, target, taxi_end)
+                        .clamp(0.0, taxi_end);
+                    hold_clear_of_runway(airport, &points, &cumulative, projected)
+                })
+            } else {
+                taxi_end
+            };
+            let hold = hold_marker.map(|_| {
+                let (latitude, longitude) = position_at(&points, &cumulative, hold_distance);
+                [latitude, longitude]
+            });
             let distance = match kind {
                 AmbientKind::Arrival => 0.0,
                 AmbientKind::Departure => {
@@ -530,7 +563,7 @@ impl TrafficManager {
                     } else {
                         (slot as f64 + 1.0) / (target as f64 + 1.0)
                     };
-                    (total * fraction).min(taxi_end * 0.8)
+                    (total * fraction).min(hold_distance * 0.8)
                 }
             };
             let candidate = position_at(&points, &cumulative, distance);
@@ -559,11 +592,13 @@ impl TrafficManager {
                 ground_start,
                 ground_end,
                 taxi_end,
+                hold_distance,
+                hold,
                 distance,
                 cleared: false,
                 hold_since: None,
                 requested: false,
-                speed: TAXI_METERS_PER_SECOND,
+                speed: TAXI_STRAIGHT_METERS_PER_SECOND,
                 blocked: false,
                 last: Instant::now(),
                 frequency_khz: frequency,
@@ -588,7 +623,7 @@ impl AmbientAircraft {
     }
 
     fn approaching_runway(&self, seconds: f64) -> bool {
-        let next = self.distance + self.speed.max(TAXI_METERS_PER_SECOND) * seconds;
+        let next = self.distance + self.speed.max(TAXI_STRAIGHT_METERS_PER_SECOND) * seconds;
         match self.kind {
             AmbientKind::Departure => {
                 self.distance < self.ground_end - 120.0 && next >= self.ground_end - 120.0
@@ -774,16 +809,41 @@ fn surface_waypoints(airport: &Airport, points: &[Point]) -> Vec<Waypoint> {
 fn runway_ends(
     airport: &Airport,
     runway: &str,
+    near: Option<Waypoint>,
 ) -> Option<(openatc_core::airport::Runway, Waypoint, Waypoint)> {
     let runway_data = airport
         .runways
         .iter()
         .find(|candidate| candidate.first_name == runway || candidate.second_name == runway)?
         .clone();
-    let (threshold_point, far_point) = if runway_data.first_name == runway {
+    let (first, second) = if runway_data.first_name == runway {
         (runway_data.first, runway_data.second)
     } else {
         (runway_data.second, runway_data.first)
+    };
+    let (threshold_point, far_point) = if let Some(near) = near {
+        let cos = (airport.reference_latitude.to_radians().cos()).max(0.01);
+        let here = Point {
+            east: (near.longitude - airport.reference_longitude) * 111_320.0 * cos,
+            north: (near.latitude - airport.reference_latitude) * 111_320.0,
+            height: airport.elevation_feet,
+        };
+        let distance = |point: Point| (point.east - here.east).hypot(point.north - here.north);
+        // A takeoff run has to start from an end the aircraft can reach without
+        // backtracking down the runway, so prefer the end behind the route.
+        let behind = |threshold: Point, far: Point| {
+            (here.east - threshold.east) * (far.east - threshold.east)
+                + (here.north - threshold.north) * (far.north - threshold.north)
+                < 0.0
+        };
+        match (behind(first, second), behind(second, first)) {
+            (true, false) => (first, second),
+            (false, true) => (second, first),
+            _ if distance(first) <= distance(second) => (first, second),
+            _ => (second, first),
+        }
+    } else {
+        (first, second)
     };
     let waypoint = |point: Point, altitude: f64| Waypoint {
         latitude: airport.reference_latitude + point.north / 111_320.0,
@@ -835,18 +895,13 @@ fn departure_path(
     runway: &str,
     stand: Waypoint,
 ) -> Option<(Vec<Waypoint>, f64, f64, f64)> {
-    let (_, threshold, far) = runway_ends(airport, runway)?;
     let mut path = surface_waypoints(airport, points);
     if path.is_empty() {
         return None;
     }
+    let last = path.last().copied();
+    let (_, threshold, far) = runway_ends(airport, runway, last)?;
     let _ = stand;
-    if let Some(entry) = points
-        .last()
-        .and_then(|point| entry_waypoint(airport, runway, *point))
-    {
-        path.push(entry);
-    }
     let taxi_end = cumulative_distances(&path).last().copied().unwrap_or(0.0);
     let heading = openatc_core::arrival::bearing(
         [threshold.latitude, threshold.longitude],
@@ -882,7 +937,7 @@ fn arrival_path(
     runway: &str,
     stand: Waypoint,
 ) -> Option<(Vec<Waypoint>, f64, f64, f64)> {
-    let (_, threshold, far) = runway_ends(airport, runway)?;
+    let (_, threshold, far) = runway_ends(airport, runway, None)?;
     let bearing = openatc_core::arrival::bearing(
         [threshold.latitude, threshold.longitude],
         [far.latitude, far.longitude],
@@ -929,6 +984,59 @@ fn cumulative_distances(points: &[Waypoint]) -> Vec<f64> {
     result
 }
 
+/// Along-track distance from the start of the route to the point on it closest
+/// to `target`, limited to the taxi portion of the route.
+fn route_distance_to(points: &[Waypoint], cumulative: &[f64], target: Waypoint, limit: f64) -> f64 {
+    let mut nearest = f64::INFINITY;
+    let mut along = limit;
+    for (index, pair) in points.windows(2).enumerate() {
+        let start_distance = cumulative[index];
+        let end_distance = cumulative[index + 1];
+        if end_distance > limit + 0.001 {
+            break;
+        }
+        let cos = (pair[0].latitude.to_radians().cos()).max(0.01);
+        let east = (pair[1].longitude - pair[0].longitude) * 111_320.0 * cos;
+        let north = (pair[1].latitude - pair[0].latitude) * 111_320.0;
+        let east_to_target = (target.longitude - pair[0].longitude) * 111_320.0 * cos;
+        let north_to_target = (target.latitude - pair[0].latitude) * 111_320.0;
+        let length_squared = east * east + north * north;
+        let fraction = if length_squared > 0.0 {
+            ((east_to_target * east + north_to_target * north) / length_squared).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let offset_east = east * fraction - east_to_target;
+        let offset_north = north * fraction - north_to_target;
+        let offset = offset_east.hypot(offset_north);
+        if offset < nearest {
+            nearest = offset;
+            along = start_distance + (end_distance - start_distance) * fraction;
+        }
+    }
+    along
+}
+
+/// Pull a planned stop back until it is clear of the runway pavement, so a
+/// departure cannot come to rest with its nose on the active runway.
+fn hold_clear_of_runway(
+    airport: &Airport,
+    points: &[Waypoint],
+    cumulative: &[f64],
+    distance: f64,
+) -> f64 {
+    let mut stop = distance.max(0.0);
+    while stop > 0.0 {
+        let (latitude, longitude) = position_at(points, cumulative, stop);
+        let local = openatc_core::airport::airport_point(airport, latitude, longitude);
+        if !openatc_core::airport::within_runway(airport, &local) {
+            break;
+        }
+        stop = (stop - 5.0).max(0.0);
+    }
+    stop
+}
+
 fn position_heading_at(points: &[Waypoint], cumulative: &[f64], distance: f64) -> (f64, f64, f64) {
     let (latitude, longitude) = position_at(points, cumulative, distance);
     let index = cumulative
@@ -970,6 +1078,36 @@ fn position_at(points: &[Waypoint], cumulative: &[f64], distance: f64) -> (f64, 
         start.latitude + (end.latitude - start.latitude) * fraction,
         start.longitude + (end.longitude - start.longitude) * fraction,
     )
+}
+
+fn taxi_speed(points: &[Waypoint], cumulative: &[f64], distance: f64) -> f64 {
+    let index = cumulative
+        .iter()
+        .position(|value| *value >= distance)
+        .unwrap_or(points.len().saturating_sub(1))
+        .max(1);
+    let Some(previous) = points.get(index.saturating_sub(1)) else {
+        return TAXI_STRAIGHT_METERS_PER_SECOND;
+    };
+    let Some(current) = points.get(index) else {
+        return TAXI_STRAIGHT_METERS_PER_SECOND;
+    };
+    let Some(next) = points.get(index + 1) else {
+        return TAXI_STRAIGHT_METERS_PER_SECOND;
+    };
+    let first = openatc_core::arrival::bearing(
+        [previous.latitude, previous.longitude],
+        [current.latitude, current.longitude],
+    );
+    let second = openatc_core::arrival::bearing(
+        [current.latitude, current.longitude],
+        [next.latitude, next.longitude],
+    );
+    if openatc_core::navigation::turn(first, second).abs() > 15.0 {
+        TAXI_TURN_METERS_PER_SECOND
+    } else {
+        TAXI_STRAIGHT_METERS_PER_SECOND
+    }
 }
 
 fn ambient_frame(aircraft: &AmbientAircraft) -> Option<GeneratedTraffic> {
@@ -1025,4 +1163,40 @@ fn ambient_frame(aircraft: &AmbientAircraft) -> Option<GeneratedTraffic> {
         model: aircraft.model.clone(),
         animation: Default::default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn point(latitude: f64, longitude: f64) -> Waypoint {
+        Waypoint {
+            latitude,
+            longitude,
+            altitude_feet: 0.0,
+        }
+    }
+
+    #[test]
+    fn hold_distance_projects_onto_the_route_segment() {
+        let points = [point(0.0, 0.0), point(0.0, 0.001), point(0.0, 0.002)];
+        let cumulative = cumulative_distances(&points);
+        let marker = point(0.000_05, 0.001_5);
+        let along = route_distance_to(&points, &cumulative, marker, f64::INFINITY);
+        let expected = 0.001_5 * 111_320.0;
+        assert!(
+            (along - expected).abs() < 1.0,
+            "expected {expected} m along the route, got {along} m"
+        );
+    }
+
+    #[test]
+    fn hold_distance_stays_inside_the_taxi_portion() {
+        let points = [point(0.0, 0.0), point(0.0, 0.001), point(0.0, 0.002)];
+        let cumulative = cumulative_distances(&points);
+        let marker = point(0.0, 0.001_5);
+        let limit = cumulative[1];
+        let along = route_distance_to(&points, &cumulative, marker, limit);
+        assert_eq!(along, limit);
+    }
 }
