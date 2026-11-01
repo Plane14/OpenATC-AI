@@ -8,9 +8,10 @@
     clippy::cast_sign_loss
 )]
 
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Base URL for Eurocontrol ATPCFDB.
 const EUROCONTROL_BASE_URL: &str = "https://learningzone.eurocontrol.int/ilp/customs/ATCPFDB";
@@ -19,7 +20,7 @@ const EUROCONTROL_BASE_URL: &str = "https://learningzone.eurocontrol.int/ilp/cus
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct EurocontrolCache {
     pub aircraft_data: HashMap<String, AircraftPerformance>,
-    pub last_updated: Option<Instant>,
+    pub last_updated: Option<DateTime<Utc>>,
     pub cache_duration: Duration,
 }
 
@@ -79,7 +80,9 @@ impl EurocontrolClient {
         // Check cache first
         if let Some(cached) = self.cache.aircraft_data.get(&icao) {
             if let Some(last) = self.cache.last_updated {
-                if last.elapsed() < self.cache.cache_duration {
+                let age = Utc::now() - last;
+                let cache_duration = TimeDelta::from_std(self.cache.cache_duration).unwrap_or(TimeDelta::zero());
+                if age < cache_duration {
                     return Ok(cached.clone());
                 }
             }
@@ -91,7 +94,7 @@ impl EurocontrolClient {
         match self.fetch_and_parse(&url, &icao).await {
             Ok(perf) => {
                 self.cache.aircraft_data.insert(icao.clone(), perf.clone());
-                self.cache.last_updated = Some(Instant::now());
+                self.cache.last_updated = Some(Utc::now());
                 Ok(perf)
             }
             Err(e) => {

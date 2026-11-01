@@ -2730,6 +2730,15 @@ fn audio_levels_row(ui: &imgui::Ui, interface: &mut Interface) {
     );
     labeled_slider(
         ui,
+        "Traffic sound volume",
+        &mut interface.settings.traffic_sound_volume,
+        0.0,
+        1.0,
+        "%.2f",
+    );
+    ui.text_wrapped("Traffic sound volume controls the volume of AI-generated aircraft engine, gear, flaps, tire roll, and reverser sounds. Set to 0 to disable traffic sounds entirely.");
+    labeled_slider(
+        ui,
         "Input gain",
         &mut interface.settings.input_gain,
         0.0,

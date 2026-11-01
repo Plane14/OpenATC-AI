@@ -463,6 +463,8 @@ pub struct Settings {
     pub controller_volume: f32,
     /// Copilot speech volume.
     pub copilot_volume: f32,
+    /// Generated traffic sound volume (engine, gear, flaps, tire roll, reverser).
+    pub traffic_sound_volume: f32,
     /// Microphone input gain multiplier.
     pub input_gain: f32,
     /// Master speech speed multiplier.
@@ -635,6 +637,7 @@ impl Default for Settings {
             master_volume: 0.8,
             controller_volume: 1.0,
             copilot_volume: 0.8,
+            traffic_sound_volume: 1.0,
             pilot_volume: 0.8,
             input_gain: 1.0,
             tts_speed: 1.0,
@@ -779,6 +782,7 @@ impl Settings {
             ("master volume", self.master_volume),
             ("controller volume", self.controller_volume),
             ("copilot volume", self.copilot_volume),
+            ("traffic sound volume", self.traffic_sound_volume),
             ("pilot volume", self.pilot_volume),
             ("attendant volume", self.attendant_volume),
             ("ground volume", self.ground_volume),

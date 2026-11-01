@@ -11,6 +11,95 @@ use std::{
 use xplane::data::DataType;
 use xplane_sys as xp;
 
+mod traffic_sound;
+use traffic_sound::{TrafficSound, EngineSoundType, is_sound_api_available};
+
+/// Determine engine sound type from model ID (e.g., "A320", "B738", "C172").
+fn determine_engine_type(model_id: &str) -> EngineSoundType {
+    let id = model_id.to_uppercase();
+    // Jet aircraft (ICAO codes starting with J, or common airliner types)
+    if id.starts_with('J')
+        || id.starts_with("A3")
+        || id.starts_with("A2")
+        || id.starts_with("B7")
+        || id.starts_with("B74")
+        || id.starts_with("B77")
+        || id.starts_with("B78")
+        || id.starts_with("CRJ")
+        || id.starts_with("E17")
+        || id.starts_with("E19")
+        || id.starts_with("E29")
+        || id.starts_with("GLF")
+        || id.starts_with("C25")
+        || id.starts_with("C5")
+        || id.starts_with("C6")
+        || id.starts_with("CL6")
+        || id.starts_with("CL3")
+        || id.starts_with("F2T")
+        || id.starts_with("F90")
+        || id.starts_with("FA7")
+        || id.starts_with("FA5")
+        || id.starts_with("GAL")
+        || id.starts_with("HA4")
+        || id.starts_with("HDJ")
+        || id.starts_with("LJ")
+        || id.starts_with("PRM")
+        || id.starts_with("WW2")
+    {
+        // Multi-engine jets (most airliners)
+        if id.starts_with("B74")
+            || id.starts_with("B77")
+            || id.starts_with("B78")
+            || id.starts_with("A38")
+            || id.starts_with("A35")
+            || id.starts_with("A34")
+            || id.starts_with("A33")
+            || id.starts_with("B76")
+            || id.starts_with("A30")
+        {
+            EngineSoundType::JetMulti
+        } else {
+            EngineSoundType::JetSingle
+        }
+    }
+    // Turboprop
+    else if id.starts_with('T')
+        || id.starts_with("DH8")
+        || id.starts_with("AT7")
+        || id.starts_with("AT4")
+        || id.starts_with("BE2")
+        || id.starts_with("BE3")
+        || id.starts_with("BE4")
+        || id.starts_with("B19")
+        || id.starts_with("B35")
+        || id.starts_with("C13")
+        || id.starts_with("CN3")
+        || id.starts_with("CVL")
+        || id.starts_with("D22")
+        || id.starts_with("D32")
+        || id.starts_with("E11")
+        || id.starts_with("E12")
+        || id.starts_with("F27")
+        || id.starts_with("F50")
+        || id.starts_with("J32")
+        || id.starts_with("JS3")
+        || id.starts_with("JS4")
+        || id.starts_with("SH3")
+        || id.starts_with("SW3")
+        || id.starts_with("SW4")
+        || id.starts_with("PC1")
+        || id.starts_with("C20")
+        || id.starts_with("C44")
+        || id.starts_with("TBM")
+    {
+        EngineSoundType::Turboprop
+    }
+    // Default to piston for GA aircraft
+    else {
+        EngineSoundType::Piston
+    }
+}
+
 unsafe extern "C-unwind" fn unused_value(_cookie: *mut c_void) -> f32 {
     0.0
 }
@@ -351,6 +440,7 @@ impl DrawClock {
 pub struct Renderer {
     assets: BTreeMap<std::path::PathBuf, Asset>,
     aircraft: BTreeMap<u32, Drawn>,
+    sounds: BTreeMap<u32, TrafficSound>,
     channels: Vec<(CString, openatc_core::traffic::animation::Channel)>,
     owned_refs: Vec<usize>,
     timeline: Timeline,
@@ -361,12 +451,15 @@ pub struct Renderer {
     mappings: BTreeMap<String, openatc_core::traffic::animation::Channel>,
     probe_cursor: u32,
     draw_clock: DrawClock,
+    sound_enabled: bool,
+    sound_volume: f32,
 }
 impl Default for Renderer {
     fn default() -> Self {
         Self {
             assets: BTreeMap::new(),
             aircraft: BTreeMap::new(),
+            sounds: BTreeMap::new(),
             channels: Vec::new(),
             owned_refs: Vec::new(),
             timeline: Timeline::default(),
@@ -377,6 +470,8 @@ impl Default for Renderer {
             mappings: BTreeMap::new(),
             probe_cursor: 0,
             draw_clock: DrawClock::default(),
+            sound_enabled: is_sound_api_available(),
+            sound_volume: 1.0,
         }
     }
 }
@@ -412,6 +507,17 @@ impl Renderer {
         if !frames.is_empty() && !self.root_checked {
             self.root_checked = true;
             self.root = root.canonicalize().unwrap_or_default();
+        }
+    }
+    /// Configure traffic sound volume (0.0 to 1.0).
+    pub fn set_sound_volume(&mut self, volume: f32) {
+        self.sound_volume = volume.clamp(0.0, 1.0);
+        // Update volume for all active engine sounds
+        for sound in self.sounds.values_mut() {
+            sound.volume_multiplier = self.sound_volume;
+            if !sound.engine_channel.is_null() {
+                unsafe { xp::XPLMSetAudioVolume(sound.engine_channel, sound.volume_multiplier) };
+            }
         }
     }
     /// Interpolate snapshots without inventing progress beyond a clearance limit.
@@ -616,6 +722,18 @@ impl Renderer {
                     instances: Vec::new(),
                     terrain: None,
                 });
+            // Create sound for new aircraft
+            if self.sound_enabled && !self.sounds.contains_key(&frame.target.id) {
+                let engine_type = determine_engine_type(&frame.model.id);
+                if let Ok(sound) = TrafficSound::new(
+                    frame.target.id,
+                    engine_type,
+                    [x as f32, y as f32, z as f32],
+                    self.sound_volume,
+                ) {
+                    self.sounds.insert(frame.target.id, sound);
+                }
+            }
             let (mut x, mut y, mut z) = (0.0, 0.0, 0.0);
             unsafe {
                 xp::XPLMWorldToLocal(
@@ -734,6 +852,27 @@ impl Renderer {
                     )
                 };
             }
+            // Update sound position and engine power
+            if self.sound_enabled {
+                if let Some(sound) = self.sounds.get_mut(&frame.target.id) {
+                    sound.update_position([x as f32, y as f32, z as f32]);
+                    sound.set_engine_power(frame.animation.channel(openatc_core::traffic::animation::Channel::Engine));
+                    // Estimate knots from vertical speed and on_ground state
+                    let knots = if frame.target.on_ground {
+                        // On ground: estimate taxi speed from animation
+                        10.0
+                    } else {
+                        // Airborne: rough estimate from vertical speed
+                        (frame.target.vertical_speed_fpm.abs() / 100.0).clamp(100.0, 500.0)
+                    };
+                    let stage = if frame.target.on_ground {
+                        openatc_core::traffic::motion::Stage::TaxiOut
+                    } else {
+                        openatc_core::traffic::motion::Stage::Climb
+                    };
+                    sound.check_discrete_events(&frame.animation, frame.target.on_ground, knots, stage);
+                }
+            }
         }
     }
     fn retire(&mut self, id: u32) {
@@ -741,6 +880,9 @@ impl Renderer {
             for instance in drawn.instances {
                 unsafe { xp::XPLMDestroyInstance(instance as xp::XPLMInstanceRef) };
             }
+        }
+        if let Some(mut sound) = self.sounds.remove(&id) {
+            sound.stop();
         }
     }
 }
@@ -756,6 +898,10 @@ impl Drop for Renderer {
         }
         for reference in self.owned_refs.drain(..) {
             unsafe { xp::XPLMUnregisterDataAccessor(reference as xp::XPLMDataRef) };
+        }
+        // Stop all remaining sounds
+        for (_, mut sound) in self.sounds.drain() {
+            sound.stop();
         }
     }
 }

@@ -1046,11 +1046,11 @@ pub fn read_acf_specs(path: &std::path::Path) -> Result<AcfSpecs, String> {
 }
 
 fn parse_f64(s: &str) -> Option<f64> {
-    s.trim().parse().ok().filter(|v| v.is_finite() && *v > 0.0)
+    s.trim().parse::<f64>().ok().filter(|v: &f64| v.is_finite() && *v > 0.0)
 }
 
 fn parse_i32(s: &str) -> Option<i32> {
-    s.trim().parse().ok().filter(|v| *v > 0)
+    s.trim().parse::<i32>().ok().filter(|v: &i32| *v > 0)
 }
 
 fn parse_u8(s: &str) -> Option<u8> {
@@ -1062,7 +1062,7 @@ fn parse_u16(s: &str) -> Option<u16> {
 }
 
 /// Convert AcfSpecs to a traffic profile Aircraft for performance validation.
-pub fn acf_specs_to_aircraft(specs: &AcfSpecs) -> openatc_core::traffic::profiles::Aircraft {
+pub fn acf_specs_to_aircraft(specs: &AcfSpecs) -> crate::traffic::profiles::Aircraft {
     let wake = specs.wake_category.unwrap_or('M');
     let approach_category = specs.approach_category.unwrap_or('C');
     let engine_type = specs.engine_type.to_ascii_lowercase();
@@ -1106,17 +1106,17 @@ pub fn acf_specs_to_aircraft(specs: &AcfSpecs) -> openatc_core::traffic::profile
         })
     };
 
-    openatc_core::traffic::profiles::Aircraft {
+    crate::traffic::profiles::Aircraft {
         spacing_speed: None,
         model_aliases: vec![specs.icao.clone()],
         handling: if is_rotorcraft {
-            Some(openatc_core::traffic::animation::Kind::Rotorcraft)
+            Some(crate::traffic::animation::Kind::Rotorcraft)
         } else if is_jet {
-            Some(openatc_core::traffic::animation::Kind::Jet)
+            Some(crate::traffic::animation::Kind::Jet)
         } else if is_turboprop {
-            Some(openatc_core::traffic::animation::Kind::Turboprop)
+            Some(crate::traffic::animation::Kind::Turboprop)
         } else {
-            Some(openatc_core::traffic::animation::Kind::Piston)
+            Some(crate::traffic::animation::Kind::Piston)
         },
         fixed_gear: !specs.retractable_gear,
         name: specs.description.clone(),
@@ -1139,11 +1139,11 @@ pub fn acf_specs_to_aircraft(specs: &AcfSpecs) -> openatc_core::traffic::profile
 
 /// Validate a SID against aircraft performance (climb gradient, speed restrictions).
 pub fn validate_sid_performance(
-    catalogue: &openatc_core::traffic::procedures::Catalogue,
+    catalogue: &crate::traffic::procedures::Catalogue,
     sid_name: &str,
     runway: &str,
     transition: &str,
-    aircraft: &openatc_core::traffic::profiles::Aircraft,
+    aircraft: &crate::traffic::profiles::Aircraft,
 ) -> Result<Vec<String>, String> {
     let mut warnings = Vec::new();
     let departure = catalogue.departure(sid_name, runway, transition);
@@ -1195,11 +1195,11 @@ pub fn validate_sid_performance(
 
 /// Validate a STAR against aircraft performance (descent gradient, speed restrictions).
 pub fn validate_star_performance(
-    catalogue: &openatc_core::traffic::procedures::Catalogue,
+    catalogue: &crate::traffic::procedures::Catalogue,
     star_name: &str,
     runway: &str,
     transition: &str,
-    aircraft: &openatc_core::traffic::profiles::Aircraft,
+    aircraft: &crate::traffic::profiles::Aircraft,
 ) -> Result<Vec<String>, String> {
     let mut warnings = Vec::new();
     let arrival = catalogue.arrival(star_name, runway, transition);
@@ -1256,10 +1256,10 @@ pub fn validate_star_performance(
 
 /// Validate an approach against aircraft performance (glideslope, minimums, speed).
 pub fn validate_approach_performance(
-    catalogue: &openatc_core::traffic::procedures::Catalogue,
+    catalogue: &crate::traffic::procedures::Catalogue,
     approach_name: &str,
     transition: &str,
-    aircraft: &openatc_core::traffic::profiles::Aircraft,
+    aircraft: &crate::traffic::profiles::Aircraft,
 ) -> Result<Vec<String>, String> {
     let mut warnings = Vec::new();
     let approach = catalogue.approach(approach_name, transition);
@@ -1319,9 +1319,9 @@ pub fn validate_approach_performance(
 
 /// Auto-select the best SID for an aircraft based on performance.
 pub fn select_best_sid(
-    catalogue: &openatc_core::traffic::procedures::Catalogue,
+    catalogue: &crate::traffic::procedures::Catalogue,
     runway: &str,
-    aircraft: &openatc_core::traffic::profiles::Aircraft,
+    aircraft: &crate::traffic::profiles::Aircraft,
 ) -> Option<String> {
     let routes: Vec<_> = catalogue
         .0
@@ -1374,9 +1374,9 @@ pub fn select_best_sid(
 
 /// Auto-select the best STAR for an aircraft based on performance.
 pub fn select_best_star(
-    catalogue: &openatc_core::traffic::procedures::Catalogue,
+    catalogue: &crate::traffic::procedures::Catalogue,
     runway: &str,
-    aircraft: &openatc_core::traffic::profiles::Aircraft,
+    aircraft: &crate::traffic::profiles::Aircraft,
 ) -> Option<String> {
     let routes: Vec<_> = catalogue
         .0
@@ -1422,8 +1422,8 @@ pub fn select_best_star(
 
 /// Auto-select the best approach for an aircraft based on performance.
 pub fn select_best_approach(
-    catalogue: &openatc_core::traffic::procedures::Catalogue,
-    aircraft: &openatc_core::traffic::profiles::Aircraft,
+    catalogue: &crate::traffic::procedures::Catalogue,
+    aircraft: &crate::traffic::profiles::Aircraft,
 ) -> Option<String> {
     let routes: Vec<_> = catalogue
         .0

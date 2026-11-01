@@ -1008,6 +1008,10 @@ impl Plugin for OpenAtc {
                         state.telemetry.paused,
                         state.generated_traffic_clock,
                     );
+                    // Update traffic sound volume from settings
+                    if let Some(interface) = shared.interface.as_ref() {
+                        shared.generated_traffic.set_sound_volume(interface.settings.traffic_sound_volume);
+                    }
                 }
                 shared.generated_traffic.step(traffic_rate);
                 let Shared {

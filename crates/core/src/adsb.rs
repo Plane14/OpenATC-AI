@@ -8,6 +8,7 @@
     clippy::cast_sign_loss
 )]
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
@@ -200,7 +201,7 @@ impl AdsbClient {
             vertical_speed_fpm: vertical_speed,
             squawk: aircraft.squawk.clone().unwrap_or_default(),
             emergency: aircraft.emergency.clone().unwrap_or_default(),
-            last_update: Instant::now(),
+            last_update: Utc::now(),
         })
     }
 }
@@ -219,7 +220,7 @@ pub struct AdsbTraffic {
     pub vertical_speed_fpm: f64,
     pub squawk: String,
     pub emergency: String,
-    pub last_update: Instant,
+    pub last_update: DateTime<Utc>,
 }
 
 /// ADSB.lol traffic source for generated traffic.
@@ -271,37 +272,6 @@ impl AdsbTrafficSource {
 impl Default for AdsbTrafficSource {
     fn default() -> Self {
         Self::new(AdsbClientConfig::default())
-    }
-}
-
-/// Merge ADS-B traffic with generated traffic.
-pub fn merge_adsb_traffic(
-    generated: &mut crate::generated::Runtime,
-    adsb_traffic: &[AdsbTraffic],
-    ownship_lat: f64,
-    ownship_lon: f64,
-    max_range_nm: f64,
-) {
-    for traffic in adsb_traffic {
-        // Calculate distance from ownship
-        let distance = openatc_core::ops::distance_nm(
-            ownship_lat, ownship_lon,
-            traffic.lat, traffic.lon,
-        );
-
-        if distance > max_range_nm {
-            continue;
-        }
-
-        // Check if this traffic already exists in generated
-        let exists = generated.flights.iter().any(|f| {
-            f.callsign.trim().eq_ignore_ascii_case(&traffic.callsign)
-        });
-
-        if !exists {
-            // Add as generated traffic (would need proper flight plan creation)
-            // This is a simplified integration point
-        }
     }
 }
 

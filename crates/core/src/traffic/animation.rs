@@ -24,6 +24,8 @@ pub enum Kind {
     Jet,
     /// Larger transport jets.
     HeavyJet,
+    /// Rotary-wing aircraft.
+    Rotorcraft,
 }
 
 /// Editable nominal rates and speeds used by the generated-traffic planner.
