@@ -547,6 +547,12 @@ pub struct Transmission {
     /// Receiving radio; absent on interphone and legacy entries.
     #[serde(default)]
     pub radio: Option<Radio>,
+    /// Tuned frequency for background airport chatter.
+    #[serde(default)]
+    pub frequency: Option<i32>,
+    /// Silence after this line before the next background chatter line.
+    #[serde(default)]
+    pub gap_ms: u32,
     /// An advisory may interrupt speech without replacing a pending instruction.
     #[serde(default)]
     pub information_only: bool,
@@ -643,6 +649,10 @@ pub struct Request {
 pub struct SpeechTag {
     /// Radio carrying the exchange, or no radio for crew interphone.
     pub radio: Option<Radio>,
+    /// Tuned frequency for background airport chatter.
+    pub frequency: Option<i32>,
+    /// Silence after this line before the next background chatter line.
+    pub gap_ms: u32,
     /// ATC position, empty when none.
     pub position: String,
     /// Voice id.
@@ -659,6 +669,8 @@ impl Default for SpeechTag {
     fn default() -> Self {
         Self {
             radio: None,
+            frequency: None,
+            gap_ms: 0,
             position: String::new(),
             voice: String::new(),
             delivery: "standard".to_owned(),
@@ -848,6 +860,9 @@ pub struct State {
     #[serde(default)]
     pub generated_animation_channels:
         std::collections::BTreeMap<String, crate::traffic::animation::Channel>,
+    /// Frequencies with a live synthetic airport-chatter session.
+    #[serde(default)]
+    pub chatter_frequencies: std::collections::BTreeSet<i32>,
     /// Bounded model and route diagnostics for the generated fleet.
     #[serde(default)]
     pub generated_traffic_diagnostics: Vec<String>,
@@ -954,6 +969,7 @@ impl Default for State {
             generated_holding_points: std::collections::BTreeMap::new(),
             generated_traffic_clock: None,
             generated_animation_channels: std::collections::BTreeMap::default(),
+            chatter_frequencies: std::collections::BTreeSet::new(),
             generated_traffic_diagnostics: Vec::new(),
             generated_traffic_debug: Vec::new(),
             traffic_call: None,

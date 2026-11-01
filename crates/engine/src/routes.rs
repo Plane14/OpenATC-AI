@@ -2167,6 +2167,8 @@ pub(crate) fn assign_airspace_controller(
     let position = airspace.split(':').nth(1).unwrap_or(airspace).to_owned();
     SpeechTag {
         radio: None,
+        frequency: None,
+        gap_ms: 0,
         position,
         voice: controller.voice.clone(),
         delivery: controller.delivery.clone(),

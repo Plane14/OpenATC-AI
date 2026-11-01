@@ -351,6 +351,8 @@ fn update_autopilot(shared: &Arc<Mutex<Shared>>) {
     }
     let entry = openatc_core::state::Transmission {
         radio: None,
+        frequency: None,
+        gap_ms: 0,
         information_only: false,
         pilot_reply: String::new(),
         background: false,

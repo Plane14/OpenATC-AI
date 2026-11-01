@@ -197,6 +197,9 @@ pub struct Settings {
     pub mute_native_radio: bool,
     /// Native AI aircraft excluding ownship, limited to nineteen SDK slots.
     pub native_traffic_count: u8,
+    /// Simulated airport radio chatter when flying above a receivable station.
+    #[serde(default = "yes")]
+    pub airport_chatter: bool,
     /// Enable `OpenATC`'s lightweight generated model instances.
     pub generated_traffic: bool,
     /// How often the generated traffic is drawn. A higher rate moves the traffic more smoothly
@@ -485,6 +488,7 @@ impl Default for Settings {
             suppress_native_traffic: true,
             mute_native_radio: true,
             native_traffic_count: 0,
+            airport_chatter: true,
             generated_traffic: false,
             traffic_rate: TrafficRate::EveryFrame,
             traffic_log: TrafficLog::Summary,

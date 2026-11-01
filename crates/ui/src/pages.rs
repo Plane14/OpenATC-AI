@@ -600,7 +600,9 @@ fn transcript_badge(
                 format!("ATC - {name}")
             }
         }
-        _ if entry.position == "Traffic" => format!("TFC · {}", entry.speaker),
+        _ if entry.position == "Traffic" || entry.position == "Chatter" => {
+            format!("TFC · {}", entry.speaker)
+        }
         _ => "YOU".to_owned(),
     }
 }
@@ -2565,6 +2567,8 @@ fn voice_popup(ui: &imgui::Ui, interface: &mut Interface) {
                     if ui.button("Listen") {
                         interface.speak_entry(&openatc_core::state::Transmission {
                             radio: None,
+                            frequency: None,
+                            gap_ms: 0,
                             information_only: false,
                             speaker: "ATC".into(),
                             text: interface.voice_preview_text.clone(),
@@ -2728,6 +2732,8 @@ fn audio_levels_row(ui: &imgui::Ui, interface: &mut Interface) {
     if ui.button("Test controller voice") {
         interface.speak_entry(&openatc_core::state::Transmission {
             radio: None,
+            frequency: None,
+            gap_ms: 0,
             information_only: false,
             pilot_reply: String::new(),
             background: false,
@@ -3310,6 +3316,8 @@ fn sort_table<T>(ui: &imgui::Ui, rows: &mut [T], key: impl Fn(&T, usize) -> Stri
 
 #[cfg(test)]
 mod tests {
+    use openatc_core::aircraft::AircraftBehaviour;
+
     #[test]
     fn squawk_links_accept_reminders_and_reject_altitudes_and_invalid_digits() {
         for text in [
@@ -3701,6 +3709,8 @@ mod tests {
         let transcript = vec![
             Transmission {
                 radio: Some(openatc_core::state::Radio::Com1),
+                frequency: None,
+                gap_ms: 0,
                 information_only: false,
                 pilot_reply: String::new(),
                 background: false,
@@ -3715,6 +3725,8 @@ mod tests {
             },
             Transmission {
                 radio: Some(openatc_core::state::Radio::Com1),
+                frequency: None,
+                gap_ms: 0,
                 information_only: false,
                 pilot_reply: String::new(),
                 background: false,
@@ -3948,6 +3960,8 @@ mod tests {
     #[test]
     fn traffic_pilot_badges_preserve_identity_instead_of_showing_you() {
         let mut entry = openatc_core::state::Transmission {
+            frequency: None,
+            gap_ms: 0,
             speaker: "SIA1975".into(),
             text: "Taxi via Alpha, Singapore one nine seven five.".into(),
             position: "Traffic".into(),

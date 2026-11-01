@@ -25,6 +25,8 @@ pub struct RequestOutcome {
 pub fn add_transmission(state: &mut State, speaker: &str, text: &str, tag: &SpeechTag) {
     let entry = Transmission {
         radio: tag.radio,
+        frequency: tag.frequency,
+        gap_ms: tag.gap_ms,
         information_only: false,
         pilot_reply: String::new(),
         background: false,

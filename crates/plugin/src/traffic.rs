@@ -12,7 +12,10 @@ pub(crate) fn native_plan(
     configured_count: u8,
 ) -> (bool, u8) {
     let suppress = suppress_native || generated_traffic;
-    (manage_native || suppress, if suppress { 0 } else { configured_count })
+    (
+        manage_native || suppress,
+        if suppress { 0 } else { configured_count },
+    )
 }
 
 #[derive(Default)]
