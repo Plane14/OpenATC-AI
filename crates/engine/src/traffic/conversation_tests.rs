@@ -1,6 +1,6 @@
 #![allow(clippy::default_trait_access)]
-use openatc_core::aircraft::AircraftBehaviour;
 use super::*;
+use openatc_core::aircraft::AircraftBehaviour;
 
 fn prepared(aircraft: &str) -> EngineState {
     let mut state = crate::test_state();
@@ -8,7 +8,9 @@ fn prepared(aircraft: &str) -> EngineState {
     state.settings.informal_pilot_chat = true;
     state.settings.pilot_chat_humour = true;
     state.settings.pilots_call_me = true;
-    state.session.on_event(openatc_core::aircraft::AircraftEvent::Cruise);
+    state
+        .session
+        .on_event(openatc_core::aircraft::AircraftEvent::Cruise);
     state.session.telemetry.position_valid = true;
     state.session.telemetry.radio_power = true;
     state.session.telemetry.altitude_feet = 10000.0;

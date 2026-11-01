@@ -47,6 +47,28 @@ pub async fn post_telemetry(
     Json(telemetry): Json<Telemetry>,
 ) -> Response {
     let shared = state;
+    // Load the CSL catalogue once so the ambient traffic layer can spawn models.
+    let needs_models = {
+        let state = shared.read().await;
+        state.ambient.needs_models() && !state.settings.simulator_root.is_empty()
+    };
+    if needs_models {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            let (root, workers, installer) = {
+                let state = shared.read().await;
+                (
+                    state.settings.simulator_root.clone(),
+                    state.workers.clone(),
+                    state.model_installer.clone(),
+                )
+            };
+            if let Ok(models) = installer.models(&root, &workers).await {
+                let mut state = shared.write().await;
+                state.ambient.set_models(models);
+            }
+        });
+    }
     let (
         settings,
         pilot_report,
@@ -132,6 +154,9 @@ pub async fn post_telemetry(
         }
         state.session.demo = false;
         super::generated::step(&mut state);
+        let mut ambient = std::mem::take(&mut state.ambient);
+        ambient.tick(&mut state);
+        state.ambient = ambient;
         if state.settings.generated_traffic {
             let worker_state = shared.clone();
             tokio::spawn(async move {
@@ -425,8 +450,8 @@ pub async fn post_telemetry(
 
 #[cfg(test)]
 mod tests {
-    use openatc_core::aircraft::AircraftBehaviour;
     use super::*;
+    use openatc_core::aircraft::AircraftBehaviour;
     use openatc_core::{
         airport::Airport,
         state::{PhaseCode, Point, TaxiClearance},
@@ -435,7 +460,9 @@ mod tests {
 
     fn fixture() -> crate::EngineState {
         let mut state = crate::test_state();
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::Taxi);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::Taxi);
         state.session.plan.departure = "TEST".into();
         state.session.plan.runway = "09".into();
         state.session.plan.callsign = "C-GTLT".into();

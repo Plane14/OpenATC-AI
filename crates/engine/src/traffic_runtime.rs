@@ -1069,7 +1069,10 @@ impl openatc_core::aircraft::AircraftBehaviour for SessionState {
         &mut self.aircraft
     }
 
-    fn on_event(&mut self, event: openatc_core::aircraft::AircraftEvent) -> openatc_core::aircraft::AircraftOutcome {
+    fn on_event(
+        &mut self,
+        event: openatc_core::aircraft::AircraftEvent,
+    ) -> openatc_core::aircraft::AircraftOutcome {
         use openatc_core::aircraft::{AircraftEvent, AircraftOutcome, AircraftPhase};
         match event {
             AircraftEvent::IfrClearanceReceived => {

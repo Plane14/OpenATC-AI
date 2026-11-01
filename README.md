@@ -1195,6 +1195,23 @@ unresolved. Vegetation uses conservative area bounds; the version 2 cache retain
 clipped terrain maxima so unrelated triangle vertices cannot inflate those bounds.
 The renderer applies terrain placement separately from the worker's nominal path.
 
+A separate persistent ambient layer supplies the opening airport with ground traffic.
+It starts aircraft on the taxiway graph, builds a graph route to the active departure
+runway, and gives each aircraft a stand-to-runway-to-takeoff profile. Aircraft hold
+short of the runway, contact Tower when the player is tuned to the frequency, receive
+line-up and takeoff clearances, and only then enter the runway. Takeoff uses a ground
+roll to rotation speed followed by a three-degree climb. Startup never creates
+`TaxiIn` traffic; `TaxiIn` exists only after a landing. Surface movement follows the
+taxiway graph, keeps a gap behind the leader, gives way to traffic on the right, and
+allows only one aircraft on the runway at a time. The older complete-flight generated
+layer remains available but is disabled in the opening scene.
+
+**Settings → Traffic → Traffic debug** shows the exact planned hold point for each
+ambient departure, the published airport hold lines, the current blocker and the
+phase reason on the taxi map. `/debug/ambient` reports the graph route and taxiway
+sampling for the ambient layer; `/debug/generated` reports the legacy generated
+layer.
+
 Movement requires the appropriate controller clearance and readback. Taxi limits,
 runway crossings, takeoff, airborne scopes, approach and landing keep separate
 authority. Traffic is rechecked before a proposed airborne grant, after readback

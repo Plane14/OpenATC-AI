@@ -113,6 +113,43 @@ pub(crate) fn zoom_toward_cursor(
     *zoom = new;
 }
 
+fn nearest_hold_point(airport: &openatc_core::airport::Airport, point: Point) -> Option<Point> {
+    let mut best: Option<(f64, Point)> = None;
+    for line in &airport.taxi_hold_lines {
+        let a = line[0];
+        let b = line[1];
+        let dx = b.east - a.east;
+        let dn = b.north - a.north;
+        let length = dx.hypot(dn);
+        if length < 0.5 {
+            continue;
+        }
+        let along = (((point.east - a.east) * dx + (point.north - a.north) * dn) / length)
+            .clamp(0.0, length);
+        let projected = Point {
+            east: a.east + dx / length * along,
+            north: a.north + dn / length * along,
+            height: point.height,
+        };
+        let distance = (point.east - projected.east).hypot(point.north - projected.north);
+        if best.is_none_or(|(previous, _)| distance < previous) {
+            // Keep the marker just before the painted line, on the aircraft's approach side.
+            let offset = distance.min(20.0) * 0.5;
+            let marker = if distance > 0.1 {
+                Point {
+                    east: projected.east + (point.east - projected.east) / distance * offset,
+                    north: projected.north + (point.north - projected.north) / distance * offset,
+                    height: projected.height,
+                }
+            } else {
+                projected
+            };
+            best = Some((distance, marker));
+        }
+    }
+    best.map(|(_, point)| point)
+}
+
 /// Airport canvas: grid, runways, taxiways, approved route, stands, buildings,
 /// navaids, ownship, scale bar. `on_airports` selects the orbit behavior that
 /// only the Airports page gets.
@@ -456,9 +493,7 @@ fn draw_map(
             ui.calc_text_size(&beam.label)[0],
         );
     }
-    if interface.taxi_traffic_visible
-        && !(interface.settings.show_traffic_debug && interface.settings.dev_mode)
-    {
+    if interface.taxi_traffic_visible && !interface.settings.show_traffic_debug {
         for target in crate::traffic::targets(state).take(126) {
             if !target.latitude.is_finite()
                 || !target.longitude.is_finite()
@@ -482,7 +517,15 @@ fn draw_map(
             draw_traffic(ui, draw, screen, target);
         }
     }
-    if interface.settings.show_traffic_debug && interface.settings.dev_mode {
+    if interface.settings.show_traffic_debug {
+        // Airport-published hold lines, not inferred points.
+        for line in &airport.taxi_hold_lines {
+            let first = project(&line[0]);
+            let second = project(&line[1]);
+            draw.add_line(first, second, rgba(255, 192, 87, 235))
+                .thickness(3.0)
+                .build();
+        }
         let debug_targets: Vec<&openatc_core::state::TrafficTarget> =
             crate::traffic::targets(state)
                 .take(126)
@@ -507,8 +550,13 @@ fn draw_map(
             {
                 continue;
             }
+            let detail = state
+                .generated_traffic_debug
+                .iter()
+                .find(|debug| debug.id == target.id);
             let stopped = target.on_ground && target.ground_speed_knots.unwrap_or(0.0) <= 1.0;
-            let has_hold = state.generated_holding_points.contains_key(&target.id);
+            let has_hold = detail.and_then(|debug| debug.hold).is_some()
+                || state.generated_holding_points.contains_key(&target.id);
             let held = stopped && has_hold;
             let parked = stopped && !has_hold;
             let color = if held {
@@ -524,19 +572,11 @@ fn draw_map(
             if !parked {
                 draw.add_text([screen[0] + 7.0, screen[1] - 7.0], color, &target.callsign);
             }
-            let detail = state
-                .generated_traffic_debug
-                .iter()
-                .find(|debug| debug.id == target.id);
             let blocker_screen = detail
                 .and_then(|debug| debug.blocker)
                 .and_then(|blocker| debug_targets.iter().find(|other| other.id == blocker))
                 .and_then(|blocker| {
-                    let point = airport_point(
-                        airport,
-                        blocker.latitude,
-                        blocker.longitude,
-                    );
+                    let point = airport_point(airport, blocker.latitude, blocker.longitude);
                     (point.east.hypot(point.north) <= 100_000.0).then(|| project(&point))
                 });
             if let Some(blocker_screen) = blocker_screen {
@@ -548,21 +588,33 @@ fn draw_map(
                     rgba(220, 60, 60, 220),
                     "blocker",
                 );
-            } else if held
-                && let Some([latitude, longitude]) = state.generated_holding_points.get(&target.id)
-            {
-                let hold_point = airport_point(airport, *latitude, *longitude);
-                if hold_point.east.hypot(hold_point.north) <= 100_000.0 {
-                    let hold_screen = project(&hold_point);
+            }
+            let target_point = airport_point(airport, target.latitude, target.longitude);
+            let hold_point = detail
+                .and_then(|debug| debug.hold)
+                .map(|[latitude, longitude]| airport_point(airport, latitude, longitude))
+                .or_else(|| nearest_hold_point(airport, target_point));
+            if let Some(hold_point) = hold_point {
+                let hold_screen = project(&hold_point);
+                draw.add_circle(hold_screen, 9.0, rgba(255, 192, 87, 235))
+                    .thickness(2.0)
+                    .build();
+                draw.add_circle(hold_screen, 3.0, rgba(255, 192, 87, 255))
+                    .filled(true)
+                    .build();
+                if held {
                     draw.add_line(screen, hold_screen, rgba(220, 60, 60, 180))
                         .thickness(1.5)
                         .build();
-                    draw.add_text([hold_screen[0] + 4.0, hold_screen[1] + 4.0], rgba(220, 60, 60, 220), "hold");
+                    draw.add_text(
+                        [hold_screen[0] + 4.0, hold_screen[1] + 4.0],
+                        rgba(220, 60, 60, 220),
+                        "hold",
+                    );
                 }
             }
-            let distance = (f64::from(screen[0]) - f64::from(mouse[0])).hypot(
-                f64::from(screen[1]) - f64::from(mouse[1]),
-            );
+            let distance = (f64::from(screen[0]) - f64::from(mouse[0]))
+                .hypot(f64::from(screen[1]) - f64::from(mouse[1]));
             if distance <= 10.0 {
                 let detail = state
                     .generated_traffic_debug
@@ -591,35 +643,6 @@ fn draw_map(
                 );
                 ui.tooltip_text(format!("{}: {reason}", target.callsign));
             }
-        }
-    }
-    if interface.settings.show_traffic_holding_points {
-        // Where each ground aircraft's next hold lies: before a crossing or at the departure
-        // runway. Drawn separately from the aircraft so a wrong holding point is visible
-        // rather than implied by the aircraft's stopped position.
-        for point in state.generated_holding_points.values().take(126) {
-            let [latitude, longitude] = *point;
-            if !latitude.is_finite() || !longitude.is_finite() {
-                continue;
-            }
-            let point = airport_point(airport, latitude, longitude);
-            if point.east.hypot(point.north) > 100_000.0 {
-                continue;
-            }
-            let screen = project(&point);
-            if screen[0] < canvas.cursor[0]
-                || screen[1] < canvas.cursor[1]
-                || screen[0] > canvas.cursor[0] + canvas.size[0]
-                || screen[1] > canvas.cursor[1] + canvas.size[1]
-            {
-                continue;
-            }
-            draw.add_circle(screen, 10.0, rgba(255, 192, 87, 235))
-                .thickness(2.0)
-                .build();
-            draw.add_circle(screen, 3.0, rgba(255, 192, 87, 255))
-                .filled(true)
-                .build();
         }
     }
     draw_ownship(ui, draw, interface, state, airport, canvas.cursor, &project);

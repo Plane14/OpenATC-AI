@@ -12,7 +12,6 @@
 
 use crate::interface::Interface;
 use crate::widgets;
-use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::ops::{phase_name, request_available};
 use openatc_core::state::{Request, State};
 use openatc_core::{altitude_text, feet_to_meters, meters_to_feet, resolve_units};

@@ -1209,6 +1209,17 @@ impl World {
         );
         true
     }
+    /// Clear inherited movement authority without changing the aircraft's position.
+    pub fn clear_authority(&mut self, id: u32) {
+        if let Some(aircraft) = self.aircraft.get_mut(&id) {
+            aircraft.authorised = false;
+            aircraft.next_authorised = false;
+            aircraft.complete = false;
+            aircraft.airborne_authority = None;
+            aircraft.surface_reservation = None;
+        }
+    }
+
     /// Move an inserted aircraft to a different surface segment without advancing time.
     ///
     /// Used when dressing the airport at startup so taxiing traffic can begin between a
@@ -1217,7 +1228,8 @@ impl World {
         let Some(aircraft) = self.aircraft.get_mut(&id) else {
             return false;
         };
-        if segment >= aircraft.route.segment_count() || !aircraft.route.segments[segment].stage.on_ground()
+        if segment >= aircraft.route.segment_count()
+            || !aircraft.route.segments[segment].stage.on_ground()
         {
             return false;
         }

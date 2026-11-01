@@ -453,7 +453,9 @@ pub(crate) fn tick(state: &mut EngineState, station: &Station) -> bool {
         {
             state.flow.monitor.next_fix = hold.fix + 1;
             state.flow.monitor.previous = None;
-            state.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
+            state
+                .session
+                .on_event(openatc_core::aircraft::AircraftEvent::Arrival);
             state.traffic.spacing_path_required = false;
             return false;
         }
@@ -610,7 +612,8 @@ mod tests {
                 ..Default::default()
             },
         ];
-        s.session.on_event(openatc_core::aircraft::AircraftEvent::Arrival);
+        s.session
+            .on_event(openatc_core::aircraft::AircraftEvent::Arrival);
         s.session.has_departed = true;
         s.session.clearance = Some(Clearance {
             altitude_feet: 6000,

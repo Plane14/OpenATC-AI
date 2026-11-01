@@ -27,6 +27,7 @@ mod support;
 mod surface;
 mod traffic;
 mod traffic_models;
+mod traffic_ops;
 mod traffic_profiles;
 mod traffic_runtime;
 mod workers;
@@ -78,6 +79,8 @@ pub struct EngineState {
     pub initiative: initiative::Monitor,
     /// Arrival stand changes are retried at a bounded rate.
     pub parking: parking::Monitor,
+    /// Persistent ambient airport traffic.
+    pub ambient: traffic_ops::TrafficManager,
     /// Aircraft known to the engine, including the player's ownship.
     pub aircraft: openatc_core::atc_manager::AircraftManager,
     /// Active ATC frequencies and their aircraft membership.
@@ -586,6 +589,7 @@ async fn main() {
         mission: Default::default(),
         parking: Default::default(),
         initiative: Default::default(),
+        ambient: Default::default(),
         aircraft: Default::default(),
         atc: Default::default(),
         traffic: Default::default(),
@@ -646,6 +650,7 @@ async fn main() {
         .route("/speech/voices", post(routes::post_voices))
         .route("/debug/map", post(radio::debug_map))
         .route("/debug/atc", get(atc::debug_atc))
+        .route("/debug/ambient", get(debug_ambient))
         .route("/debug/generated", get(generated::debug_generated))
         .route("/state", get(routes::full_state))
         .route("/settings", post(routes::post_settings))
@@ -716,6 +721,16 @@ async fn main() {
     lifecycle::serve(listener, app, lifetime).await;
 }
 
+async fn debug_ambient(
+    axum::extract::State(shared): axum::extract::State<Shared>,
+) -> axum::Json<serde_json::Value> {
+    let state = shared.read().await;
+    let Some(airport) = state.airport.as_ref() else {
+        return axum::Json(serde_json::json!({"error": "airport not loaded"}));
+    };
+    axum::Json(state.ambient.debug(airport))
+}
+
 #[cfg(test)]
 fn test_state() -> EngineState {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -737,6 +752,7 @@ fn test_state() -> EngineState {
         mission: Default::default(),
         parking: Default::default(),
         initiative: Default::default(),
+        ambient: Default::default(),
         aircraft: Default::default(),
         atc: Default::default(),
         traffic: Default::default(),

@@ -3245,7 +3245,9 @@ mod chatter_tests {
                 state.voices_refreshed = Some(std::time::Instant::now());
                 state.session.plan = FlightPlan::default();
                 state.session.clearance = None;
-                state.session.on_event(openatc_core::aircraft::AircraftEvent::Parked);
+                state
+                    .session
+                    .on_event(openatc_core::aircraft::AircraftEvent::Parked);
                 state.session.telemetry.on_ground = true;
                 state.session.telemetry.radio_power = true;
                 state.session.telemetry.position_valid = true;
@@ -3550,7 +3552,9 @@ mod chatter_tests {
         state.settings.ai_enabled = false;
         state.session.demo = false;
         state.session.has_departed = true;
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::Departure);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::Departure);
         state.session.plan.callsign = "TOL1975".into();
         state.session.plan.departure = "KLAX".into();
         state.session.plan.destination = "KONT".into();
@@ -3817,7 +3821,8 @@ mod chatter_tests {
             assert_eq!(s.session.next_sequence, sequence);
             assert_eq!(s.session.transcript.len(), 1);
             assert_eq!(s.session.mission.id, "preflight-story");
-            s.session.on_event(openatc_core::aircraft::AircraftEvent::Finished);
+            s.session
+                .on_event(openatc_core::aircraft::AircraftEvent::Finished);
             s.session.emergency_declared = true;
         }
         assert!(

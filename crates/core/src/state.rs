@@ -101,6 +101,9 @@ pub struct TrafficDebug {
     pub blocker: Option<u32>,
     /// The aircraft is waiting for movement authority.
     pub awaiting_clearance: bool,
+    /// Exact planned stop point before a departure clearance, latitude/longitude.
+    #[serde(default)]
+    pub hold: Option<[f64; 2]>,
 }
 
 /// The traffic currently pointed out by the tuned controller.
@@ -1045,7 +1048,10 @@ impl crate::aircraft::AircraftBehaviour for State {
         &mut self.aircraft
     }
 
-    fn on_event(&mut self, event: crate::aircraft::AircraftEvent) -> crate::aircraft::AircraftOutcome {
+    fn on_event(
+        &mut self,
+        event: crate::aircraft::AircraftEvent,
+    ) -> crate::aircraft::AircraftOutcome {
         use crate::aircraft::{AircraftEvent, AircraftOutcome, AircraftPhase};
         match event {
             AircraftEvent::IfrClearanceReceived => {

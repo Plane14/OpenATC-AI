@@ -297,7 +297,8 @@ mod tests {
         let mut s = crate::test_state();
         s.settings.atc_shortcut_offers = true;
         s.settings.atc_shortcut_chance_percent = 100;
-        s.session.on_event(openatc_core::aircraft::AircraftEvent::Cruise);
+        s.session
+            .on_event(openatc_core::aircraft::AircraftEvent::Cruise);
         s.session.telemetry = openatc_core::state::Telemetry {
             latitude: 0.1,
             longitude: 0.1,

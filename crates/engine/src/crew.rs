@@ -1159,7 +1159,7 @@ fn cross_check(s: &crate::EngineState) -> &'static str {
 
 /// The ramp headset is available during stand work and pushback, not during taxi or flight.
 pub fn update_ground_connection(state: &mut crate::EngineState) {
-        use openatc_core::state::PhaseCode;
+    use openatc_core::state::PhaseCode;
     let t = &state.session.telemetry;
     if !t.on_ground {
         state.session.ground_interphone_disconnected = true;
@@ -2075,7 +2075,9 @@ mod conversation_routing_tests {
         let mut state = crate::test_state();
         state.settings.ai_url = origin;
         state.settings.ai_model = "test".into();
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::TaxiIn);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::TaxiIn);
         state.session.telemetry.on_ground = true;
         state.session.plan.estimated_minutes = 43.0;
         let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
@@ -2830,15 +2832,19 @@ mod conversation_routing_tests {
 
     #[tokio::test]
     async fn ramp_interphone_disconnects_for_actual_taxi_and_flight_not_pushback_permission() {
-            use openatc_core::state::PhaseCode;
+        use openatc_core::state::PhaseCode;
         let mut state = crate::test_state();
         state.session.telemetry.position_valid = true;
         state.session.telemetry.on_ground = true;
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::PushbackComplete);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::PushbackComplete);
         state.session.telemetry.ground_speed_knots = 3.0;
         update_ground_connection(&mut state);
         assert!(!state.session.ground_interphone_disconnected);
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::Taxi);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::Taxi);
         state.session.telemetry.ground_speed_knots = 0.0;
         update_ground_connection(&mut state);
         assert!(
@@ -2855,7 +2861,9 @@ mod conversation_routing_tests {
             state.session.ground_interphone_disconnected,
             "Stopping at a hold does not reconnect a ramp headset"
         );
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::Cruise);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::Cruise);
         state.session.telemetry.on_ground = false;
         state.settings.ai_enabled = true;
         let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
@@ -2880,7 +2888,9 @@ mod conversation_routing_tests {
             "Disconnected ramp staff must not speak from the air"
         );
         let mut state = shared.write().await;
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::Finished);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::Finished);
         state.session.telemetry.on_ground = true;
         state.session.taxi_clearance.to_parking = true;
         state.session.taxi_clearance.guidance_complete = true;
@@ -2999,7 +3009,9 @@ mod conversation_routing_tests {
         state.settings.ai_model = "test".into();
         state.settings.llm_phrase_variety = false;
         state.settings.ai_url = format!("http://{address}");
-        state.session.on_event(openatc_core::aircraft::AircraftEvent::PushbackComplete);
+        state
+            .session
+            .on_event(openatc_core::aircraft::AircraftEvent::PushbackComplete);
         state.crew.observed_at = None;
         let shared = std::sync::Arc::new(tokio::sync::RwLock::new(state));
         let response = request(
