@@ -210,7 +210,7 @@ impl EurocontrolClient {
     }
 
     /// Get built-in performance data for common aircraft types.
-    fn get_builtin_performance(&self, icao: &str) -> Option<AircraftPerformance> {
+    pub fn get_builtin_performance(&self, icao: &str) -> Option<AircraftPerformance> {
         let perf = match icao {
             "A320" | "A20N" | "A319" | "A321" => AircraftPerformance {
                 icao_code: icao.to_string(),
@@ -308,6 +308,23 @@ impl EurocontrolClient {
 impl Default for EurocontrolClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Clone for EurocontrolClient {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            cache: self.cache.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for EurocontrolClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EurocontrolClient")
+            .field("cache", &self.cache)
+            .finish_non_exhaustive()
     }
 }
 

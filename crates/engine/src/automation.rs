@@ -9,11 +9,12 @@
 
 use crate::EngineState;
 use openatc_core::{
+    airport::Airport,
     apply::add_transmission,
     dialogue::say,
     eurocontrol::{AircraftPerformance, EurocontrolClient, merge_performance_data},
     ops::{distance_nm, AcfSpecs},
-    state::{PhaseCode, Request, SpeechTag},
+    state::{PhaseCode, Request, SpeechTag, State},
     stations::{Station, nearby, tuned},
 };
 use openatc_settings::Settings;
@@ -44,7 +45,7 @@ pub enum AutomationPhase {
 }
 
 /// Automation configuration loaded from settings.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AutomationConfig {
     /// Enable full automation.
     pub enabled: bool,
@@ -146,7 +147,9 @@ pub struct RandomFlightState {
     pub enabled: bool,
     pub current_leg: u32,
     pub flight_history: Vec<AutomatedFlightPlan>,
+    #[serde(skip)]
     pub last_flight_end: Option<Instant>,
+    #[serde(skip)]
     pub next_departure_time: Option<Instant>,
 }
 
@@ -156,7 +159,9 @@ pub struct AutomationEngine {
     pub config: AutomationConfig,
     pub status: AutomationStatus,
     pub phase: AutomationPhase,
+    #[serde(skip)]
     pub phase_start_time: Option<Instant>,
+    #[serde(skip)]
     pub phase_timer: Option<Instant>,
     pub current_flight_plan: Option<AutomatedFlightPlan>,
     pub random_flight_state: RandomFlightState,
@@ -178,13 +183,14 @@ impl AutomationEngine {
         Self::default()
     }
 
-    /// Update configuration from settings.
-    pub fn update_config(&mut self, settings: &Settings) {
-        self.config = AutomationConfig::from_settings(settings);
-    }
-
     /// Start automation for the current flight plan.
-    pub fn start(&mut self, state: &mut EngineState) {
+    pub fn start(
+        &mut self,
+        session: &mut State,
+        loaded_aircraft_specs: &mut Option<AcfSpecs>,
+        settings: &Settings,
+        arrival_airport: &Option<Airport>,
+    ) {
         if !self.config.enabled {
             return;
         }
@@ -196,32 +202,31 @@ impl AutomationEngine {
         self.status.next_action = "Run preflight checklist".to_string();
         
         // Fetch aircraft performance data
-        self.fetch_aircraft_performance(state);
+        self.fetch_aircraft_performance(session, loaded_aircraft_specs);
         
         // Build flight plan and calculate fuel
-        self.build_current_flight_plan(state);
-        self.calculate_fuel_plan(state);
-        self.select_alternate_airports(state);
+        self.build_current_flight_plan(session);
+        self.calculate_fuel_plan(session, settings);
+        self.select_alternate_airports(session, settings);
         
         // Apply VFR/rotorcraft adjustments
-        apply_vfr_rotorcraft_adjustments(state);
+        apply_vfr_rotorcraft_adjustments(session, settings);
         
         // Select optimal cruise altitude
+        let cruise_feet = self.select_cruise_altitude(session, arrival_airport);
         if let Some(flight_plan) = &mut self.current_flight_plan {
-            flight_plan.cruise_feet = self.select_cruise_altitude(state);
+            flight_plan.cruise_feet = cruise_feet;
         }
     }
 
     /// Fetch aircraft performance data from Eurocontrol ATPCFDB.
-    fn fetch_aircraft_performance(&mut self, state: &EngineState) {
-        let icao = state.session.plan.aircraft.clone();
+    fn fetch_aircraft_performance(&mut self, session: &State, loaded_aircraft_specs: &Option<AcfSpecs>) {
+        let icao = session.plan.aircraft.clone();
         if !icao.is_empty() {
             // Try to get from ACF specs first
-            if let Some(interface) = &state.interface {
-                if let Some(acf_specs) = &interface.loaded_aircraft_specs {
-                    // We'll merge with Eurocontrol data when we have it
-                    // For now, just store the ACF specs
-                }
+            if let Some(acf_specs) = loaded_aircraft_specs {
+                // We'll merge with Eurocontrol data when we have it
+                // For now, just store the ACF specs
             }
             
             // Fetch from Eurocontrol (async - would need to be handled differently in real impl)
@@ -246,8 +251,8 @@ impl AutomationEngine {
     }
 
     /// Build flight plan from current state.
-    fn build_current_flight_plan(&mut self, state: &EngineState) {
-        let plan = &state.session.plan;
+    fn build_current_flight_plan(&mut self, session: &State) {
+        let plan = &session.plan;
         if plan.departure.is_empty() || plan.destination.is_empty() {
             return;
         }
@@ -325,24 +330,6 @@ impl AutomationEngine {
         }
     }
 
-    fn generate_next_random_flight(&mut self, state: &mut EngineState) {
-        // This would select a suitable airport based on aircraft range and capabilities
-        // For now, we just log the intent
-        self.status.last_action = "Generating next random flight...".to_string();
-        self.status.next_action = "Select destination airport".to_string();
-
-        // Add current flight to history
-        if let Some(plan) = &self.current_flight_plan {
-            self.random_flight_state.flight_history.push(plan.clone());
-        }
-
-        // Reset for next flight
-        self.phase = AutomationPhase::Preflight;
-        self.status.phase = AutomationPhase::Preflight;
-        self.random_flight_state.current_leg += 1;
-        self.random_flight_state.last_flight_end = None;
-    }
-
     fn preflight_phase(&mut self, state: &mut EngineState) {
         self.status.last_action = "Running preflight checks".to_string();
         self.status.next_action = "Check fuel, weight, weather, and aircraft systems".to_string();
@@ -355,7 +342,7 @@ impl AutomationEngine {
         }
 
         // Check weight limits
-        if let Some(specs) = &state.interface.as_ref().and_then(|i| i.loaded_aircraft_specs.clone()) {
+        if let Some(specs) = &state.loaded_aircraft_specs {
             if state.session.plan.takeoff_weight_kg > specs.max_takeoff_weight_kg.unwrap_or(f64::MAX) {
                 self.automation_errors.push(format!(
                     "Takeoff weight {:.0} kg exceeds MTOW {:.0} kg",
@@ -456,10 +443,8 @@ impl AutomationEngine {
         self.status.next_action = format!("Level off at {} ft", state.session.plan.cruise_feet);
 
         // Set autopilot altitude
-        if let Some(interface) = &mut state.interface {
-            if interface.settings.copilot_flies_ap {
-                // Copilot will handle altitude via autopilot
-            }
+        if state.settings.copilot_flies_ap {
+            // Copilot will handle altitude via autopilot
         }
 
         if state.session.phase == PhaseCode::Cruise {
@@ -574,8 +559,8 @@ impl AutomationEngine {
     }
 
     /// Calculate fuel plan: trip + alternate + 5% contingency + 30/45 min final reserve.
-    fn calculate_fuel_plan(&mut self, state: &EngineState) {
-        let plan = &state.session.plan;
+    fn calculate_fuel_plan(&mut self, session: &State, settings: &Settings) {
+        let plan = &session.plan;
         let perf = self.aircraft_performance.as_ref();
         
         let trip_fuel = plan.trip_fuel_kg.max(0.0);
@@ -617,8 +602,8 @@ impl AutomationEngine {
     }
 
     /// Select alternate airports for the destination.
-    fn select_alternate_airports(&mut self, state: &EngineState) {
-        let destination = &state.session.plan.destination;
+    fn select_alternate_airports(&mut self, session: &State, _settings: &Settings) {
+        let destination = &session.plan.destination;
         let perf = self.aircraft_performance.as_ref();
         
         // In a real implementation, this would query a database of airports
@@ -665,16 +650,16 @@ impl AutomationEngine {
     }
 
     /// Select cruise altitude per leg (aircraft ceiling, distance, semi-circular rule, MORA).
-    fn select_cruise_altitude(&self, state: &EngineState) -> i32 {
+    fn select_cruise_altitude(&self, session: &State, arrival_airport: &Option<Airport>) -> i32 {
         let perf = self.aircraft_performance.as_ref();
-        let plan = &state.session.plan;
+        let plan = &session.plan;
         
         let ceiling = perf.map(|p| p.ceiling_ft).unwrap_or(plan.cruise_feet);
         let distance_nm = openatc_core::ops::distance_nm(
-            state.session.telemetry.latitude,
-            state.session.telemetry.longitude,
-            state.arrival_airport.as_ref().map(|a| a.reference_latitude).unwrap_or(0.0),
-            state.arrival_airport.as_ref().map(|a| a.reference_longitude).unwrap_or(0.0),
+            session.telemetry.latitude,
+            session.telemetry.longitude,
+            arrival_airport.as_ref().map(|a| a.reference_latitude).unwrap_or(0.0),
+            arrival_airport.as_ref().map(|a| a.reference_longitude).unwrap_or(0.0),
         );
         
         // Optimal altitude based on distance
@@ -689,7 +674,7 @@ impl AutomationEngine {
         };
         
         // Apply semi-circular rule (eastbound: odd FL, westbound: even FL)
-        let track = state.session.telemetry.ground_track_degrees.unwrap_or(state.session.telemetry.heading_degrees);
+        let track = session.telemetry.ground_track_degrees.unwrap_or(session.telemetry.heading_degrees);
         let is_eastbound = (0.0..180.0).contains(&track);
         
         let mut cruise_fl = (optimal_altitude / 100) * 100;
@@ -761,7 +746,7 @@ impl AutomationEngine {
                 destination: next_dest.icao.clone(),
                 alternate: next_dest.alternates.first().map(|a| a.icao.clone()).unwrap_or_default(),
                 route: "DCT".to_string(), // Would be calculated properly
-                cruise_feet: self.select_cruise_altitude(state),
+                cruise_feet: self.select_cruise_altitude(&state.session, &state.arrival_airport),
                 estimated_minutes: 60.0, // Would be calculated based on distance
                 fuel_plan_kg: 0.0, // Will be calculated
             };
@@ -815,58 +800,28 @@ pub struct DestinationCandidate {
     pub alternates: Vec<AlternateAirport>,
 }
 
-/// X-Plane refuel integration via datarefs.
-pub fn refuel_aircraft(xpapi: &mut xplane::XPAPI, fuel_kg: f64) -> Result<(), String> {
-    // X-Plane fuel datarefs are typically:
-    // sim/flightmodel/weight/m_fuel[0..n] - fuel in each tank (kg)
-    // sim/flightmodel/weight/m_fuel_total - total fuel (kg)
-    
-    // Note: Writing to fuel datarefs requires the aircraft to support it
-    // and may not work with all aircraft (especially complex add-ons)
-    
-    let fuel_lbs = fuel_kg * 2.20462;
-    
-    // Try to set total fuel
-    if let Ok(mut fuel_ref) = xpapi.data.find::<f32, _>("sim/flightmodel/weight/m_fuel_total") {
-        fuel_ref.set(fuel_lbs as f32);
-        return Ok(());
-    }
-    
-    // Try individual tanks
-    for i in 0..8 {
-        let ref_name = format!("sim/flightmodel/weight/m_fuel[{}]", i);
-        if let Ok(mut fuel_ref) = xpapi.data.find::<f32, _>(&ref_name) {
-            // Distribute fuel evenly among available tanks
-            let per_tank = fuel_lbs / 8.0;
-            fuel_ref.set(per_tank as f32);
-        }
-    }
-    
-    Ok(())
-}
-
-/// VFR operations support.
-pub fn is_vfr_flight(state: &EngineState) -> bool {
-    state.automation.config.vfr_mode
-}
-
-/// Rotorcraft operations support.
-pub fn is_rotorcraft_flight(state: &EngineState) -> bool {
-    state.automation.config.rotorcraft_mode
-}
-
 /// Apply VFR/rotorcraft adjustments to flight plan.
-pub fn apply_vfr_rotorcraft_adjustments(state: &mut EngineState) {
-    if is_vfr_flight(state) {
+pub fn apply_vfr_rotorcraft_adjustments(session: &mut State, settings: &Settings) {
+    if is_vfr_flight_via_settings(settings) {
         // VFR: lower altitudes, visual navigation
-        state.session.plan.cruise_feet = state.session.plan.cruise_feet.min(10000);
-        state.session.ifr = false;
+        session.plan.cruise_feet = session.plan.cruise_feet.min(10000);
+        session.ifr = false;
     }
     
-    if is_rotorcraft_flight(state) {
+    if is_rotorcraft_flight_via_settings(settings) {
         // Rotorcraft: lower speeds, different profiles
-        state.session.plan.cruise_feet = state.session.plan.cruise_feet.min(8000);
+        session.plan.cruise_feet = session.plan.cruise_feet.min(8000);
     }
+}
+
+/// Check VFR mode via settings.
+fn is_vfr_flight_via_settings(settings: &Settings) -> bool {
+    settings.automation_vfr_mode
+}
+
+/// Check rotorcraft mode via settings.
+fn is_rotorcraft_flight_via_settings(settings: &Settings) -> bool {
+    settings.automation_rotorcraft_mode
 }
 
 /// Engine endpoint to control automation.
@@ -879,7 +834,14 @@ pub async fn automation_control(
 
     match action {
         "start" => {
-            state.automation.start(state);
+            let mut automation = std::mem::take(&mut state.automation);
+            let state_mut = &mut *state;
+            let session = &mut state_mut.session;
+            let loaded_aircraft_specs = &mut state_mut.loaded_aircraft_specs;
+            let settings = &state_mut.settings;
+            let arrival_airport = &state_mut.arrival_airport;
+            automation.start(session, loaded_aircraft_specs, settings, arrival_airport);
+            state.automation = automation;
             crate::routes::ok("Automation started")
         }
         "stop" => {

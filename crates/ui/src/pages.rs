@@ -2228,7 +2228,7 @@ fn intercom_overrides(ui: &imgui::Ui, interface: &mut Interface) {
 }
 
 /// Labelled settings text field.
-fn setting_input(ui: &imgui::Ui, title: &str, value: &mut String, capacity: usize) {
+pub fn setting_input(ui: &imgui::Ui, title: &str, value: &mut String, capacity: usize) {
     ui.text_disabled(title);
     ui.set_next_item_width(-1.0);
     widgets::edit_text(ui, &format!("##{title}"), value, capacity);
@@ -2591,6 +2591,8 @@ fn voice_popup(ui: &imgui::Ui, interface: &mut Interface) {
                     if ui.button("Listen") {
                         interface.speak_entry(&openatc_core::state::Transmission {
                             radio: None,
+                            frequency: None,
+                            gap_ms: 0,
                             information_only: false,
                             speaker: "ATC".into(),
                             text: interface.voice_preview_text.clone(),
@@ -2763,6 +2765,8 @@ fn audio_levels_row(ui: &imgui::Ui, interface: &mut Interface) {
     if ui.button("Test controller voice") {
         interface.speak_entry(&openatc_core::state::Transmission {
             radio: None,
+            frequency: None,
+            gap_ms: 0,
             information_only: false,
             pilot_reply: String::new(),
             background: false,
@@ -2901,25 +2905,40 @@ fn automation_tab(ui: &imgui::Ui, interface: &mut Interface) {
     widgets::section_title(ui, "FLIGHT AUTOMATION");
     let _disabled = ui.begin_disabled(!interface.engine.connected());
 
+    // Fetch automation status
+    if let Some(reply) = interface.engine.take_reply("/automation") {
+        if reply.success {
+            interface.automation_status = reply.data;
+        }
+    }
+    if interface.automation_status["lastRequested"] != "status" {
+        interface.engine.post("/automation", serde_json::json!({"action": "status"}));
+        interface.automation_status["lastRequested"] = "status".into();
+    }
+
     // Automation status display
-    let state = interface.engine.state();
-    let automation = &state.automation.status;
+    let automation = &interface.automation_status;
+    let active = automation["active"].as_bool().unwrap_or(false);
     ui.text_colored(
-        if automation.active {
+        if active {
             widgets::accent(ui)
         } else {
             widgets::warning(ui)
         },
-        format!("Status: {}", if automation.active { "ACTIVE" } else { "IDLE" })
+        format!("Status: {}", if active { "ACTIVE" } else { "IDLE" })
     );
-    ui.text(format!("Phase: {:?}", automation.phase));
-    ui.text(format!("Flight: {} / {}", automation.current_flight, automation.total_flights));
-    ui.text(format!("Last action: {}", automation.last_action));
-    ui.text(format!("Next action: {}", automation.next_action));
+    ui.text(format!("Phase: {:?}", automation["phase"].as_str().unwrap_or("Idle")));
+    ui.text(format!(
+        "Flight: {} / {}",
+        automation["current_flight"].as_u64().unwrap_or(0),
+        automation["total_flights"].as_u64().unwrap_or(0)
+    ));
+    ui.text(format!("Last action: {}", automation["last_action"].as_str().unwrap_or("")));
+    ui.text(format!("Next action: {}", automation["next_action"].as_str().unwrap_or("")));
     ui.spacing();
 
     // Controls
-    if !automation.active {
+    if !active {
         if ui.button("Start Automation") {
             interface.engine.post("/automation", serde_json::json!({"action": "start"}));
         }
@@ -2931,7 +2950,8 @@ fn automation_tab(ui: &imgui::Ui, interface: &mut Interface) {
         if ui.button("Stop After This Flight") {
             interface.engine.post("/automation", serde_json::json!({"action": "toggle_stop_after_flight"}));
         }
-        ui.text_wrapped(if automation.stop_after_flight {
+        let stop_after_flight = automation["stop_after_flight"].as_bool().unwrap_or(false);
+        ui.text_wrapped(if stop_after_flight {
             "Will stop after current flight completes."
         } else {
             "Will continue to next flight (if randomized flights enabled)."

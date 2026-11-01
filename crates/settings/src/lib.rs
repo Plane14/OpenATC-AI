@@ -240,6 +240,8 @@ pub struct Settings {
     pub pilots_call_me: bool,
     /// Percent chance of a pilot call after checking weather, phase and radio availability.
     pub pilot_chat_chance_percent: u8,
+    /// Enable airport chatter on tuned frequencies.
+    pub airport_chatter: bool,
     /// Enable ADSB.lol real-time traffic source.
     pub adsb_lol_enabled: bool,
     /// ADSB.lol API base URL.
@@ -530,6 +532,7 @@ impl Default for Settings {
             pilot_chat_humour: false,
             pilots_call_me: false,
             pilot_chat_chance_percent: 2,
+            airport_chatter: false,
             // Services.
             simbrief_id: String::new(),
             callsign: "VH-BIL".to_owned(),

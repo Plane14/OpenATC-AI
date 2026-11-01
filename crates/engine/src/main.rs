@@ -33,6 +33,7 @@ mod traffic_ops;
 mod traffic_profiles;
 mod traffic_runtime;
 mod workers;
+mod chatter;
 
 use openatc_core::airport::Airport;
 use openatc_core::regions::{Region, load_regions};
@@ -98,6 +99,8 @@ pub struct EngineState {
     pub traffic: traffic::Traffic,
     /// Frequency station threads and their transmission queues.
     pub(crate) station_bus: traffic_runtime::StationBus,
+    /// Audio-only airport chatter sessions.
+    pub chatter: chatter::ChatterManager,
     /// Selected mission clock and branching outcomes.
     pub mission: missions::Runtime,
     /// Codes recently assigned by this engine, including previous flights.
@@ -119,6 +122,8 @@ pub struct EngineState {
     pub phrase_history: radio::PhraseHistory,
     /// Aircraft crew controls, live readbacks and checklist progress.
     pub crew: crew::CrewSession,
+    /// Loaded aircraft specifications from the simulator.
+    pub loaded_aircraft_specs: Option<openatc_core::ops::AcfSpecs>,
     /// Automatic station transitions and arrival permissions.
     pub flow: flight::FlightFlow,
     /// AI automation engine for full flight automation.
@@ -617,7 +622,10 @@ async fn main() {
         pending_copilot_reply: None,
         phrase_history: radio::PhraseHistory::load(&config_dir),
         crew: crew::CrewSession::default(),
+        loaded_aircraft_specs: None,
         flow: flight::FlightFlow::default(),
+        automation: Default::default(),
+        chatter: Default::default(),
         session: State::default(),
         settings,
         stations: Vec::new(),
@@ -783,7 +791,10 @@ fn test_state() -> EngineState {
         pending_copilot_reply: None,
         phrase_history: radio::PhraseHistory::load(&config_dir),
         crew: crew::CrewSession::default(),
+        loaded_aircraft_specs: None,
         flow: flight::FlightFlow::default(),
+        automation: Default::default(),
+        chatter: Default::default(),
         session: State::default(),
         settings,
         stations: Vec::new(),

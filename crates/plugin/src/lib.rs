@@ -20,6 +20,7 @@ mod taxi;
 mod tcas;
 mod telemetry;
 mod traffic;
+mod traffic_sound;
 mod transponder;
 mod weather;
 mod window;
