@@ -12,6 +12,7 @@
 
 use crate::interface::Interface;
 use crate::widgets;
+use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::ops::{phase_name, request_available, AcfSpecs, acf_specs_to_aircraft, select_best_approach, select_best_sid, select_best_star, validate_approach_performance, validate_sid_performance, validate_star_performance};
 use openatc_core::state::{Request, State};
 use openatc_core::{altitude_text, feet_to_meters, meters_to_feet, resolve_units};
@@ -3923,6 +3924,8 @@ mod tests {
         let transcript = vec![
             Transmission {
                 radio: Some(openatc_core::state::Radio::Com1),
+                frequency: None,
+                gap_ms: 0,
                 information_only: false,
                 pilot_reply: String::new(),
                 background: false,
@@ -3937,6 +3940,8 @@ mod tests {
             },
             Transmission {
                 radio: Some(openatc_core::state::Radio::Com1),
+                frequency: None,
+                gap_ms: 0,
                 information_only: false,
                 pilot_reply: String::new(),
                 background: false,
@@ -4182,6 +4187,8 @@ mod tests {
             pilot_reply: String::new(),
             urgent: false,
             information_only: false,
+            frequency: None,
+            gap_ms: 0,
         };
         let entry = &mut entry;
         let airport = openatc_core::airport::Airport::default();

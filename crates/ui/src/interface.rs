@@ -2518,6 +2518,8 @@ mod radio_busy_tests {
             .speech_queue
             .push_back(openatc_core::state::Transmission {
                 radio: Some(openatc_core::state::Radio::Com2),
+                frequency: None,
+                gap_ms: 0,
                 speaker: "ATC".into(),
                 information_only: false,
                 pilot_reply: String::new(),

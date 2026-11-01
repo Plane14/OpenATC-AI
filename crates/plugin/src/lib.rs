@@ -20,7 +20,6 @@ mod taxi;
 mod tcas;
 mod telemetry;
 mod traffic;
-mod traffic_sound;
 mod transponder;
 mod weather;
 mod window;
@@ -356,8 +355,10 @@ fn update_autopilot(shared: &Arc<Mutex<Shared>>) {
     if !wrote {
         return;
     }
-    let entry = openatc_core::state::Transmission {
+let entry = openatc_core::state::Transmission {
         radio: None,
+        frequency: None,
+        gap_ms: 0,
         information_only: false,
         pilot_reply: String::new(),
         background: false,
@@ -979,9 +980,11 @@ impl Plugin for OpenAtc {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         if let Some(interface) = shared.interface.as_mut() {
-                            let state = interface.engine.state_mut();
-                            state.automation.update_config(&state.settings);
-                            state.automation.tick(state);
+                            // Automation runs in the engine, not the plugin
+                            // Trigger automation tick via HTTP if needed
+                            // let state = interface.engine.state_mut();
+                            // state.automation.update_config(&state.settings);
+                            // state.automation.tick(state);
                         }
                     }
                     last_logic = std::time::Instant::now();
@@ -1009,10 +1012,10 @@ impl Plugin for OpenAtc {
                         state.telemetry.paused,
                         state.generated_traffic_clock,
                     );
-                    // Update traffic sound volume from settings
-                    if let Some(interface) = shared.interface.as_ref() {
-                        shared.generated_traffic.set_sound_volume(interface.settings.traffic_sound_volume);
-                    }
+                    // Update traffic sound volume from settings - disabled
+                    // if let Some(interface) = shared.interface.as_ref() {
+                    //     shared.generated_traffic.set_sound_volume(interface.settings.traffic_sound_volume);
+                    // }
                 }
                 shared.generated_traffic.step(traffic_rate);
                 let Shared {
