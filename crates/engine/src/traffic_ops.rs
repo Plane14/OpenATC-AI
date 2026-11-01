@@ -28,6 +28,7 @@ enum AmbientKind {
 struct AmbientAircraft {
     id: u32,
     callsign: String,
+    airport: String,
     runway: String,
     model: Arc<Model>,
     kind: AmbientKind,
@@ -103,6 +104,21 @@ impl TrafficManager {
         let Some(airport) = state.airport.clone() else {
             return;
         };
+        let own = state.session.telemetry.position_valid.then_some([
+            state.session.telemetry.latitude,
+            state.session.telemetry.longitude,
+        ]);
+        let away = own.is_some_and(|own| {
+            openatc_core::arrival::distance_nm(
+                own,
+                [airport.reference_latitude, airport.reference_longitude],
+            ) > 60.0
+        });
+        if away && self.aircraft.is_empty() {
+            state.airports.prune(own, 60.0);
+            return;
+        }
+        state.airports.ensure(Arc::new(airport.clone()));
         let target = usize::from(
             state
                 .settings
@@ -113,6 +129,7 @@ impl TrafficManager {
         let now = Instant::now();
         let missing = target.saturating_sub(self.aircraft.len());
         if missing > 0
+            && !away
             && self
                 .last_spawn
                 .is_none_or(|at| at.elapsed() >= Duration::from_secs(4))
@@ -147,12 +164,19 @@ impl TrafficManager {
                             && other.distance > distance
                             && other.distance - distance < 80.0
                     });
-            let runway_occupied = self
-                .aircraft
-                .iter()
-                .enumerate()
-                .any(|(other_index, other)| other_index != index && other.on_runway());
-            let runway_blocked = runway_occupied && self.aircraft[index].approaching_runway(5.0);
+            let own_runway = self.aircraft[index].runway.clone();
+            let own_airport = self.aircraft[index].airport.clone();
+            let own_id = self.aircraft[index].id;
+            if self.aircraft[index].on_runway() {
+                state.airports.claim(&own_airport, &own_runway, own_id);
+            } else {
+                state.airports.release(&own_airport, &own_runway, own_id);
+            }
+            let runway_blocked =
+                state
+                    .airports
+                    .occupied_by_other(&own_airport, &own_runway, own_id)
+                    && self.aircraft[index].approaching_runway(5.0);
             // Give way to traffic on the right at a converging taxiway. The higher id yields
             // when both aircraft see each other, which breaks the mutual-yield case.
             let right_blocked = on_ground
@@ -271,6 +295,11 @@ impl TrafficManager {
         self.aircraft.retain(|aircraft| {
             aircraft.distance < aircraft.cumulative.last().copied().unwrap_or(0.0)
         });
+        state.airports.sync_users(
+            &airport.icao,
+            self.aircraft.iter().map(|aircraft| aircraft.id),
+        );
+        state.airports.prune(own, 60.0);
 
         // Speak only when the player is tuned to the aircraft's frequency.
         let lead_holding = self
@@ -294,7 +323,7 @@ impl TrafficManager {
             let phase = match aircraft.kind {
                 AmbientKind::Departure if aircraft.distance < aircraft.hold_distance => continue,
                 AmbientKind::Departure if aircraft.cleared => "takeoff",
-                AmbientKind::Departure if Some(aircraft.id) == lead_holding => "contact",
+                AmbientKind::Departure if Some(aircraft.id) == lead_holding => "hold",
                 AmbientKind::Departure => "lineup",
                 AmbientKind::Arrival if aircraft.distance >= aircraft.ground_start => "landing",
                 AmbientKind::Arrival => continue,
@@ -303,7 +332,11 @@ impl TrafficManager {
                 continue;
             }
             let text = match phase {
-                "contact" => format!("{}, contact Tower.", aircraft.callsign),
+                // The aircraft is already on the Tower frequency; a handoff here would be circular.
+                "hold" => format!(
+                    "{}, runway {}, hold short.",
+                    aircraft.callsign, aircraft.runway
+                ),
                 "lineup" => format!(
                     "{}, runway {}, line up and wait.",
                     aircraft.callsign, aircraft.runway
@@ -318,7 +351,10 @@ impl TrafficManager {
                 ),
             };
             let pilot_reply = match phase {
-                "contact" => format!("{}, with you.", aircraft.callsign),
+                "hold" => format!(
+                    "Holding short runway {}, {}.",
+                    aircraft.runway, aircraft.callsign
+                ),
                 "lineup" => format!(
                     "Line up and wait, runway {}, {}.",
                     aircraft.runway, aircraft.callsign
@@ -477,16 +513,40 @@ impl TrafficManager {
         state: &crate::EngineState,
         target: usize,
     ) {
-        let runway = if state.session.plan.runway.is_empty() {
-            airport
-                .runways
-                .first()
-                .map(|runway| runway.first_name.clone())
-                .unwrap_or_default()
-        } else {
-            state.session.plan.runway.clone()
-        };
-        if runway.is_empty() {
+        let (wind_from, wind_knots) = state
+            .sim_weather
+            .get(&airport.icao)
+            .map(|(sample, _)| {
+                (
+                    sample["windDegrees"].as_f64().unwrap_or(0.0),
+                    sample["windKnots"].as_f64().unwrap_or(0.0),
+                )
+            })
+            .unwrap_or((0.0, 0.0));
+        let fallback = airport
+            .runways
+            .first()
+            .map(|runway| runway.first_name.clone())
+            .unwrap_or_default();
+        let assignment = state.airports.assignment(
+            &airport.icao,
+            &state.session.plan.runway,
+            &state.session.plan.arrival_runway,
+            wind_from,
+            wind_knots,
+            1_200.0,
+        );
+        let departure_runway = assignment
+            .as_ref()
+            .map(|assignment| assignment.departure.clone())
+            .filter(|runway| !runway.is_empty())
+            .unwrap_or_else(|| fallback.clone());
+        let arrival_runway = assignment
+            .as_ref()
+            .map(|assignment| assignment.arrival.clone())
+            .filter(|runway| !runway.is_empty())
+            .unwrap_or_else(|| departure_runway.clone());
+        if departure_runway.is_empty() && arrival_runway.is_empty() {
             return;
         }
         let frequency = state
@@ -516,19 +576,24 @@ impl TrafficManager {
             }) else {
                 continue;
             };
-            let latitude = airport.reference_latitude + node.point.north / 111_320.0;
-            let longitude = airport.reference_longitude
-                + node.point.east
-                    / (111_320.0 * (airport.reference_latitude.to_radians().cos()).max(0.01));
-            let Some(surface_points) = plan_taxi(airport, node.id, &runway, size) else {
-                self.rejected_route = self.rejected_route.saturating_add(1);
-                self.last_error = format!("no taxi graph route from node {}", node.id);
-                continue;
-            };
             let kind = if target >= 3 && slot == target - 1 {
                 AmbientKind::Arrival
             } else {
                 AmbientKind::Departure
+            };
+            let route_runway = if kind == AmbientKind::Departure {
+                &departure_runway
+            } else {
+                &arrival_runway
+            };
+            let latitude = airport.reference_latitude + node.point.north / 111_320.0;
+            let longitude = airport.reference_longitude
+                + node.point.east
+                    / (111_320.0 * (airport.reference_latitude.to_radians().cos()).max(0.01));
+            let Some(surface_points) = plan_taxi(airport, node.id, route_runway, size) else {
+                self.rejected_route = self.rejected_route.saturating_add(1);
+                self.last_error = format!("no taxi graph route from node {}", node.id);
+                continue;
             };
             let stand_waypoint = Waypoint {
                 latitude,
@@ -537,10 +602,10 @@ impl TrafficManager {
             };
             let path = match kind {
                 AmbientKind::Departure => {
-                    departure_path(airport, &surface_points, &runway, stand_waypoint)
+                    departure_path(airport, &surface_points, &departure_runway, stand_waypoint)
                 }
                 AmbientKind::Arrival => {
-                    arrival_path(airport, &surface_points, &runway, stand_waypoint)
+                    arrival_path(airport, &surface_points, &arrival_runway, stand_waypoint)
                 }
             };
             let Some((points, ground_start, ground_end, taxi_end, runway_start, runway_end)) = path
@@ -634,7 +699,12 @@ impl TrafficManager {
             self.aircraft.push(AmbientAircraft {
                 id: 0x00e0_0000 + self.next_id,
                 callsign,
-                runway: runway.clone(),
+                airport: airport.icao.clone(),
+                runway: if kind == AmbientKind::Departure {
+                    departure_runway.clone()
+                } else {
+                    arrival_runway.clone()
+                },
                 model: Arc::new(model),
                 kind,
                 points,
@@ -1331,6 +1401,7 @@ mod phase_tests {
         AmbientAircraft {
             id: 1,
             callsign: "TEST1".to_owned(),
+            airport: "TEST".to_owned(),
             runway: "04L".to_owned(),
             model: Arc::new(Model {
                 id: "test".to_owned(),

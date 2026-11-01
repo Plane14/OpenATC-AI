@@ -2,6 +2,7 @@
 
 #![allow(clippy::default_trait_access)]
 
+mod airport_ops;
 mod atc;
 mod automation;
 mod cabin;
@@ -155,6 +156,8 @@ pub struct EngineState {
     pub sim_weather: BTreeMap<String, (serde_json::Value, std::time::Instant)>,
     /// Loaded airport, if any.
     pub airport: Option<Airport>,
+    /// Airport-local data and runway resources.
+    pub airports: airport_ops::AirportManager,
     /// Destination geometry retained while departure surface data is in use.
     pub arrival_airport: Option<Airport>,
     /// Published approach entry levels used to plan descent before final approach.
@@ -631,6 +634,7 @@ async fn main() {
         atis_last_runway: BTreeMap::new(),
         atis_logged: BTreeMap::new(),
         airport: None,
+        airports: Default::default(),
         arrival_airport: None,
         arrival_profile: None,
         vertical_policy: Default::default(),
@@ -796,6 +800,7 @@ fn test_state() -> EngineState {
         atis_last_runway: BTreeMap::new(),
         atis_logged: BTreeMap::new(),
         airport: None,
+        airports: Default::default(),
         arrival_airport: None,
         arrival_profile: None,
         vertical_policy: Default::default(),
