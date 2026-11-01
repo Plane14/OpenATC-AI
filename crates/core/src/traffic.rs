@@ -169,7 +169,11 @@ pub fn landing_blocked(
         return Some("holding_standby");
     };
     if wake::supported(&airport.icao) && own.0 < 0.0 {
-        for target in targets.iter().take(126).filter(|t| !t.on_ground) {
+        for target in targets
+            .iter()
+            .take(126)
+            .filter(|t| !t.on_ground && !crate::holding::on_other_parallel_runway(airport, runway, t))
+        {
             let Some(lead_runway) = wake::approach_runway(airport, runway, target) else {
                 continue;
             };
@@ -230,6 +234,9 @@ pub fn landing_blocked(
         airport,
         runway,
         targets.iter().take(126).filter(|target| {
+            if crate::holding::on_other_parallel_runway(airport, runway, target) {
+                return false;
+            }
             let Some(position) =
                 approach_position(airport, runway, target.latitude, target.longitude)
             else {

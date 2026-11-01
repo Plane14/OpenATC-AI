@@ -111,6 +111,11 @@ fn blocked_final<'a>(
             return Some("holding_standby");
         }
         let p = airport_point(airport, target.latitude, target.longitude);
+        // Ground traffic on a parallel taxiway is not runway occupancy even when it sits
+        // inside the wider footprint used to protect a low final.
+        if target.on_ground && !crate::airport::within_runway(airport, &p) {
+            continue;
+        }
         let east = p.east - frame.start.east;
         let north = p.north - frame.start.north;
         let along = (east * frame.dx + north * frame.dn) / frame.length;
@@ -216,6 +221,88 @@ pub fn blocked_during<'a>(
     }
     blocked_final_timing(airport, runway, targets, seconds)
 }
+
+/// True when the target is established on a different parallel runway.
+pub(crate) fn on_other_parallel_runway(
+    airport: &Airport,
+    runway: &str,
+    target: &crate::state::TrafficTarget,
+) -> bool {
+    for candidate in &airport.runways {
+        for (name, start, end) in [
+            (&candidate.first_name, candidate.first, candidate.second),
+            (&candidate.second_name, candidate.second, candidate.first),
+        ] {
+            if name == runway {
+                continue;
+            }
+            let heading = runway_heading(start, end);
+            if crate::navigation::turn(target.track_degrees, heading).abs() > 25.0 {
+                continue;
+            }
+            let Some((along, across, length, _)) =
+                crate::traffic::runway_position(airport, name, target.latitude, target.longitude)
+            else {
+                continue;
+            };
+            if across.abs() > 200.0 || along < -2.0 * 1852.0 || along > length + 2.0 * 1852.0 {
+                continue;
+            }
+            if parallel_runways(airport, runway, name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn runway_heading(start: crate::state::Point, end: crate::state::Point) -> f64 {
+    (end.east - start.east)
+        .atan2(end.north - start.north)
+        .to_degrees()
+        .rem_euclid(360.0)
+}
+
+fn runway_endpoints(airport: &Airport, name: &str) -> Option<(crate::state::Point, crate::state::Point)> {
+    airport.runways.iter().find_map(|runway| {
+        if runway.first_name == name {
+            Some((runway.first, runway.second))
+        } else if runway.second_name == name {
+            Some((runway.second, runway.first))
+        } else {
+            None
+        }
+    })
+}
+
+fn parallel_runways(airport: &Airport, first: &str, second: &str) -> bool {
+    if first == second {
+        return false;
+    }
+    let (Some((start, end)), Some((other_start, other_end))) = (
+        runway_endpoints(airport, first),
+        runway_endpoints(airport, second),
+    ) else {
+        return false;
+    };
+    let angle = crate::navigation::turn(runway_heading(start, end), runway_heading(other_start, other_end)).abs();
+    if angle.min((180.0 - angle).abs()) >= 20.0 {
+        return false;
+    }
+    let dx = end.east - start.east;
+    let dn = end.north - start.north;
+    let length = dx.hypot(dn);
+    if length < 100.0 {
+        return false;
+    }
+    let across = |point: crate::state::Point| {
+        ((point.east - start.east) * dn - (point.north - start.north) * dx) / length
+    };
+    let near = across(other_start);
+    let far = across(other_end);
+    near * far > 0.0 && near.abs() > 250.0 && far.abs() > 250.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
