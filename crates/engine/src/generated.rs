@@ -5363,7 +5363,7 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) ->
                             != openatc_core::traffic::motion::Stage::Pushback
                             || runtime.approved_orders.contains(&(pose.id, pose.segment))),
                         fixed_gear: runtime.fixed_gear.contains(&pose.id),
-                        landing_lights: false,
+                        landing_lights: pose.stage.landing_lights(),
                     },
                     handling,
                     if telemetry.paused {
@@ -5604,6 +5604,22 @@ fn withhold_conflicting_landings(
         }
         flight::revoke_landing(runtime, id, start);
     }
+}
+
+/// Validated CSL animation channel names shared by every traffic layer.
+#[must_use]
+pub fn animation_channels(config: &std::path::Path) -> BTreeMap<String, animation::Channel> {
+    policy::channels(config)
+}
+
+/// Validated animation rates shared by every traffic layer.
+#[must_use]
+pub fn animation_handling(
+    config: &std::path::Path,
+) -> BTreeMap<animation::Kind, animation::Handling> {
+    policy::load(config)
+        .map(|(handling, _, _)| handling)
+        .unwrap_or_else(|_| animation::builtin().unwrap_or_default())
 }
 
 /// Publish the most recent complete worker sample without waiting for simulation.

@@ -81,6 +81,13 @@ pub struct EngineState {
     pub parking: parking::Monitor,
     /// Persistent ambient airport traffic.
     pub ambient: traffic_ops::TrafficManager,
+    /// CSL animation channel names shared by generated and ambient traffic.
+    pub traffic_channels: BTreeMap<String, openatc_core::traffic::animation::Channel>,
+    /// Animation rates shared by generated and ambient traffic.
+    pub traffic_handling: BTreeMap<
+        openatc_core::traffic::animation::Kind,
+        openatc_core::traffic::animation::Handling,
+    >,
     /// Aircraft known to the engine, including the player's ownship.
     pub aircraft: openatc_core::atc_manager::AircraftManager,
     /// Active ATC frequencies and their aircraft membership.
@@ -590,6 +597,8 @@ async fn main() {
         parking: Default::default(),
         initiative: Default::default(),
         ambient: Default::default(),
+        traffic_channels: generated::animation_channels(&config_dir),
+        traffic_handling: generated::animation_handling(&config_dir),
         aircraft: Default::default(),
         atc: Default::default(),
         traffic: Default::default(),
@@ -753,6 +762,8 @@ fn test_state() -> EngineState {
         parking: Default::default(),
         initiative: Default::default(),
         ambient: Default::default(),
+        traffic_channels: generated::animation_channels(&config_dir),
+        traffic_handling: generated::animation_handling(&config_dir),
         aircraft: Default::default(),
         atc: Default::default(),
         traffic: Default::default(),

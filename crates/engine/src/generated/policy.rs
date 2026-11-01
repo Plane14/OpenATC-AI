@@ -8,6 +8,28 @@ pub(super) type Loaded = (
     BTreeMap<String, animation::Channel>,
 );
 
+/// Read the CSL animation channel catalogue without preparing a full scene.
+/// Ambient traffic renders through the same catalogue while the legacy layer is off.
+pub(super) fn channels(config: &Path) -> BTreeMap<String, animation::Channel> {
+    let mut channels =
+        animation::channels(include_str!("../../../../traffic/animation-channels.toml"))
+            .unwrap_or_default();
+    for directory in crate::traffic_profiles::directories(config) {
+        let path = directory.join("animation-channels.toml");
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let mut text = String::new();
+        if file.take(65537).read_to_string(&mut text).is_err() {
+            continue;
+        }
+        if let Ok(loaded) = animation::channels(&text) {
+            channels = loaded;
+        }
+    }
+    channels
+}
+
 pub(super) fn load(config: &Path) -> Result<Loaded, String> {
     let mut handling = animation::builtin()?;
     let mut operations = parse_operations(include_str!("../../../../traffic/operations.toml"))?;
@@ -46,6 +68,16 @@ pub(super) fn load(config: &Path) -> Result<Loaded, String> {
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+    #[test]
+    fn bundled_channels_cover_gear_animation() {
+        let directory =
+            std::env::temp_dir().join(format!("openatc-channels-{}", std::process::id()));
+        let channels = channels(&directory);
+        assert_eq!(
+            channels.get("libxplanemp/controls/gear_ratio"),
+            Some(&animation::Channel::Gear)
+        );
+    }
     #[test]
     fn personal_policy_changes_rates_and_rejects_invalid_geometry() {
         let directory =

@@ -348,8 +348,11 @@ impl Animation {
         self.landing_lights = input.landing_lights;
         self.beacon = input.engines_running;
         self.navigation_lights = !matches!(input.stage, Stage::Parked | Stage::Turnaround);
-        self.strobes =
-            !ground || matches!(input.stage, Stage::LineUp | Stage::Takeoff | Stage::Rollout);
+        self.strobes = !ground
+            || matches!(
+                input.stage,
+                Stage::LineUp | Stage::Crossing | Stage::Takeoff | Stage::Rollout
+            );
     }
 }
 

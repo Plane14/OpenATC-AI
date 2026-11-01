@@ -6,8 +6,9 @@
 
 use openatc_core::airport::Airport;
 use openatc_core::state::{GeneratedTraffic, Point, TrafficDebug, TrafficTarget};
+use openatc_core::traffic::animation::{self, Animation, Handling, Kind};
 use openatc_core::traffic::csl::{Catalogue, Model};
-use openatc_core::traffic::motion::Waypoint;
+use openatc_core::traffic::motion::{Stage, Waypoint};
 use openatc_core::traffic::profiles;
 use openatc_core::traffic::profiles::Aircraft as Profile;
 use std::sync::Arc;
@@ -35,8 +36,12 @@ struct AmbientAircraft {
     ground_start: f64,
     ground_end: f64,
     taxi_end: f64,
+    runway_start: f64,
+    runway_end: f64,
     hold_distance: f64,
     hold: Option<[f64; 2]>,
+    animation: Animation,
+    handling: Arc<Handling>,
     distance: f64,
     cleared: bool,
     hold_since: Option<Instant>,
@@ -88,6 +93,10 @@ impl TrafficManager {
 
     /// Advance ambient traffic and publish frames. Called once per telemetry update.
     pub fn tick(&mut self, state: &mut crate::EngineState) {
+        state
+            .session
+            .generated_animation_channels
+            .clone_from(&state.traffic_channels);
         let Some(models) = self.models.clone() else {
             return;
         };
@@ -198,22 +207,23 @@ impl TrafficManager {
             aircraft.last = now;
             aircraft.blocked = blocked;
             let taxi = taxi_speed(&aircraft.points, &aircraft.cumulative, aircraft.distance);
+            let rotation_speed = aircraft.handling.rotation_knots * 0.514_444;
             aircraft.speed = if blocked {
                 0.0
             } else if aircraft.kind == AmbientKind::Departure
-                && aircraft.distance >= aircraft.taxi_end
+                && aircraft.distance >= aircraft.runway_start
                 && aircraft.distance < aircraft.ground_end
             {
                 // Takeoff roll: accelerate to rotation speed down the runway.
-                let roll = aircraft.ground_end - aircraft.taxi_end;
+                let roll = aircraft.ground_end - aircraft.runway_start;
                 let fraction = if roll > 1.0 {
-                    ((aircraft.distance - aircraft.taxi_end) / roll).clamp(0.0, 1.0)
+                    ((aircraft.distance - aircraft.runway_start) / roll).clamp(0.0, 1.0)
                 } else {
                     1.0
                 };
-                taxi + fraction * (TAKEOFF_METERS_PER_SECOND - taxi)
+                taxi + fraction * (rotation_speed - taxi)
             } else if aircraft.kind == AmbientKind::Departure
-                && aircraft.distance < aircraft.taxi_end
+                && aircraft.distance < aircraft.runway_start
             {
                 taxi
             } else if aircraft.kind == AmbientKind::Departure {
@@ -223,13 +233,40 @@ impl TrafficManager {
             {
                 CLIMB_METERS_PER_SECOND
             } else if aircraft.kind == AmbientKind::Arrival
-                && aircraft.distance < aircraft.ground_start + 1_000.0
+                && aircraft.distance < aircraft.runway_end
             {
                 TAKEOFF_METERS_PER_SECOND
             } else {
                 taxi
             };
+            let heading_before =
+                position_heading_at(&aircraft.points, &aircraft.cumulative, aircraft.distance).2;
             aircraft.distance += aircraft.speed * dt;
+            let heading_after =
+                position_heading_at(&aircraft.points, &aircraft.cumulative, aircraft.distance).2;
+            let turn_rate = if dt > 0.0 {
+                openatc_core::navigation::turn(heading_before, heading_after) / dt
+            } else {
+                0.0
+            };
+            let stage = aircraft.stage();
+            aircraft.animation.advance(
+                animation::Input {
+                    stage,
+                    knots: aircraft.speed * 1.943_844,
+                    turn_degrees_sec: turn_rate,
+                    vertical_fpm: match stage {
+                        Stage::Climb => 1_800.0,
+                        Stage::Approach => -700.0,
+                        _ => 0.0,
+                    },
+                    engines_running: true,
+                    fixed_gear: false,
+                    landing_lights: stage.landing_lights(),
+                },
+                &aircraft.handling,
+                dt,
+            );
         }
         self.aircraft.retain(|aircraft| {
             aircraft.distance < aircraft.cumulative.last().copied().unwrap_or(0.0)
@@ -408,8 +445,11 @@ impl TrafficManager {
                         AmbientKind::Arrival => "arrival",
                     },
                     "distance": aircraft.distance,
+                    "stage": format!("{:?}", aircraft.stage()),
                     "runway": aircraft.runway,
                     "taxiEnd": aircraft.taxi_end,
+                    "runwayStart": aircraft.runway_start,
+                    "runwayEnd": aircraft.runway_end,
                     "holdDistance": aircraft.hold_distance,
                     "hold": aircraft.hold,
                     "points": aircraft.points.len(),
@@ -503,9 +543,19 @@ impl TrafficManager {
                     arrival_path(airport, &surface_points, &runway, stand_waypoint)
                 }
             };
-            let Some((points, ground_start, ground_end, taxi_end)) = path else {
+            let Some((points, ground_start, ground_end, taxi_end, runway_start, runway_end)) = path
+            else {
                 self.rejected_route = self.rejected_route.saturating_add(1);
                 self.last_error = format!("path build failed for node {}", node.id);
+                continue;
+            };
+            let Some(handling) = state
+                .traffic_handling
+                .get(&Kind::Jet)
+                .cloned()
+                .map(Arc::new)
+            else {
+                self.last_error = "no jet animation handling".to_owned();
                 continue;
             };
             let Some(model) = models
@@ -592,8 +642,19 @@ impl TrafficManager {
                 ground_start,
                 ground_end,
                 taxi_end,
+                runway_start,
+                runway_end,
                 hold_distance,
                 hold,
+                animation: {
+                    let mut animation = Animation::default();
+                    animation.engine = 1.0;
+                    animation.propeller_rpm = handling.propeller_rpm;
+                    animation.beacon = true;
+                    animation.navigation_lights = true;
+                    animation
+                },
+                handling,
                 distance,
                 cleared: false,
                 hold_since: None,
@@ -610,14 +671,39 @@ impl TrafficManager {
 }
 
 impl AmbientAircraft {
+    fn stage(&self) -> Stage {
+        match self.kind {
+            AmbientKind::Departure => {
+                if self.distance >= self.runway_end {
+                    Stage::Climb
+                } else if self.distance >= self.runway_start {
+                    Stage::Takeoff
+                } else if self.cleared && self.distance >= self.hold_distance {
+                    Stage::LineUp
+                } else {
+                    Stage::TaxiOut
+                }
+            }
+            AmbientKind::Arrival => {
+                if self.distance < self.ground_start {
+                    Stage::Approach
+                } else if self.distance < self.runway_end {
+                    Stage::Rollout
+                } else {
+                    Stage::TaxiIn
+                }
+            }
+        }
+    }
+
     fn on_runway(&self) -> bool {
         match self.kind {
             AmbientKind::Departure => {
-                self.distance >= self.ground_end - 120.0 && self.distance <= self.ground_end + 600.0
+                self.distance >= self.runway_start && self.distance <= self.runway_end + 600.0
             }
             AmbientKind::Arrival => {
                 self.distance >= self.ground_start - 500.0
-                    && self.distance <= self.ground_start + 600.0
+                    && self.distance <= self.runway_end + 60.0
             }
         }
     }
@@ -626,7 +712,7 @@ impl AmbientAircraft {
         let next = self.distance + self.speed.max(TAXI_STRAIGHT_METERS_PER_SECOND) * seconds;
         match self.kind {
             AmbientKind::Departure => {
-                self.distance < self.ground_end - 120.0 && next >= self.ground_end - 120.0
+                self.distance < self.runway_start && next >= self.runway_start
             }
             AmbientKind::Arrival => {
                 self.distance < self.ground_start - 500.0 && next >= self.ground_start - 500.0
@@ -894,7 +980,7 @@ fn departure_path(
     points: &[Point],
     runway: &str,
     stand: Waypoint,
-) -> Option<(Vec<Waypoint>, f64, f64, f64)> {
+) -> Option<(Vec<Waypoint>, f64, f64, f64, f64, f64)> {
     let mut path = surface_waypoints(airport, points);
     if path.is_empty() {
         return None;
@@ -921,6 +1007,10 @@ fn departure_path(
     let rotation = offset(0.5, 0.0);
     let climb = offset(5.0, 1_500.0);
     path.push(threshold);
+    let runway_start = cumulative_distances(&path)
+        .last()
+        .copied()
+        .unwrap_or(taxi_end);
     path.push(rotation);
     path.push(climb);
     let cumulative = cumulative_distances(&path);
@@ -928,7 +1018,7 @@ fn departure_path(
         .get(path.len().saturating_sub(2))
         .copied()
         .unwrap_or(0.0);
-    Some((path, 0.0, ground_end, taxi_end))
+    Some((path, 0.0, ground_end, taxi_end, runway_start, ground_end))
 }
 
 fn arrival_path(
@@ -936,7 +1026,7 @@ fn arrival_path(
     points: &[Point],
     runway: &str,
     stand: Waypoint,
-) -> Option<(Vec<Waypoint>, f64, f64, f64)> {
+) -> Option<(Vec<Waypoint>, f64, f64, f64, f64, f64)> {
     let (_, threshold, far) = runway_ends(airport, runway, None)?;
     let bearing = openatc_core::arrival::bearing(
         [threshold.latitude, threshold.longitude],
@@ -961,13 +1051,22 @@ fn arrival_path(
     {
         path.push(entry);
     }
+    let exit_index = path.len().saturating_sub(1);
     let surface = surface_waypoints(airport, points);
     path.extend(surface.into_iter().rev().skip(1));
     path.push(stand);
     let cumulative = cumulative_distances(&path);
     let ground_start = cumulative.get(3).copied().unwrap_or(0.0);
     let ground_end = cumulative.last().copied().unwrap_or(0.0);
-    Some((path, ground_start, ground_end, ground_start))
+    let runway_end = cumulative.get(exit_index).copied().unwrap_or(ground_start);
+    Some((
+        path,
+        ground_start,
+        ground_end,
+        ground_start,
+        ground_start,
+        runway_end,
+    ))
 }
 
 fn cumulative_distances(points: &[Waypoint]) -> Vec<f64> {
@@ -1161,7 +1260,7 @@ fn ambient_frame(aircraft: &AmbientAircraft) -> Option<GeneratedTraffic> {
             ..Default::default()
         },
         model: aircraft.model.clone(),
-        animation: Default::default(),
+        animation: aircraft.animation,
     })
 }
 
@@ -1198,5 +1297,178 @@ mod tests {
         let limit = cumulative[1];
         let along = route_distance_to(&points, &cumulative, marker, limit);
         assert_eq!(along, limit);
+    }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+    use openatc_core::traffic::csl::Model;
+
+    fn jet_handling() -> Arc<Handling> {
+        let mut handling = animation::builtin().expect("bundled handling catalogue");
+        Arc::new(handling.remove(&Kind::Jet).expect("jet handling"))
+    }
+
+    fn ambient(
+        kind: AmbientKind,
+        distance: f64,
+        ground_start: f64,
+        ground_end: f64,
+    ) -> AmbientAircraft {
+        let points = vec![
+            Waypoint {
+                latitude: 0.0,
+                longitude: 0.0,
+                altitude_feet: 0.0,
+            },
+            Waypoint {
+                latitude: 0.0,
+                longitude: 0.01,
+                altitude_feet: 0.0,
+            },
+        ];
+        AmbientAircraft {
+            id: 1,
+            callsign: "TEST1".to_owned(),
+            runway: "04L".to_owned(),
+            model: Arc::new(Model {
+                id: "test".to_owned(),
+                objects: Vec::new(),
+                vertical_offset: None,
+                matches: Vec::new(),
+            }),
+            kind,
+            cumulative: cumulative_distances(&points),
+            points,
+            ground_start,
+            ground_end,
+            taxi_end: ground_start,
+            runway_start: ground_start,
+            runway_end: ground_end,
+            hold_distance: 0.0,
+            hold: None,
+            animation: Animation::default(),
+            handling: jet_handling(),
+            distance,
+            cleared: true,
+            hold_since: None,
+            requested: false,
+            speed: TAXI_STRAIGHT_METERS_PER_SECOND,
+            blocked: false,
+            last: Instant::now(),
+            frequency_khz: None,
+        }
+    }
+
+    #[test]
+    fn departure_stages_follow_the_runway() {
+        let mut aircraft = ambient(AmbientKind::Departure, 100.0, 0.0, 900.0);
+        aircraft.runway_start = 700.0;
+        aircraft.hold_distance = 600.0;
+        aircraft.cleared = false;
+        assert_eq!(aircraft.stage(), Stage::TaxiOut);
+        aircraft.cleared = true;
+        aircraft.distance = 650.0;
+        assert_eq!(aircraft.stage(), Stage::LineUp);
+        aircraft.distance = 750.0;
+        assert_eq!(aircraft.stage(), Stage::Takeoff);
+        aircraft.distance = 950.0;
+        assert_eq!(aircraft.stage(), Stage::Climb);
+    }
+
+    #[test]
+    fn arrival_stages_follow_the_runway() {
+        let mut aircraft = ambient(AmbientKind::Arrival, 100.0, 500.0, 2_000.0);
+        aircraft.runway_end = 1_200.0;
+        assert_eq!(aircraft.stage(), Stage::Approach);
+        aircraft.distance = 700.0;
+        assert_eq!(aircraft.stage(), Stage::Rollout);
+        aircraft.distance = 1_600.0;
+        assert_eq!(aircraft.stage(), Stage::TaxiIn);
+    }
+
+    #[test]
+    fn departure_occupies_the_runway_from_the_threshold() {
+        let mut aircraft = ambient(AmbientKind::Departure, 650.0, 0.0, 900.0);
+        aircraft.runway_start = 700.0;
+        assert!(!aircraft.on_runway());
+        aircraft.distance = 700.0;
+        assert!(aircraft.on_runway());
+    }
+
+    #[test]
+    fn landing_lights_follow_runway_phases() {
+        for stage in [
+            Stage::Crossing,
+            Stage::Takeoff,
+            Stage::Climb,
+            Stage::Approach,
+            Stage::MissedApproach,
+            Stage::Rollout,
+        ] {
+            assert!(stage.landing_lights(), "{stage:?} needs landing lights");
+        }
+        for stage in [
+            Stage::LineUp,
+            Stage::TaxiOut,
+            Stage::TaxiIn,
+            Stage::Cruise,
+            Stage::Parked,
+        ] {
+            assert!(
+                !stage.landing_lights(),
+                "{stage:?} keeps landing lights off"
+            );
+        }
+    }
+
+    #[test]
+    fn line_up_extends_flaps_and_takeoff_switches_landing_lights_on() {
+        let mut animation = Animation::default();
+        let line_up = animation::Input {
+            stage: Stage::LineUp,
+            knots: 10.0,
+            turn_degrees_sec: 0.0,
+            vertical_fpm: 0.0,
+            engines_running: true,
+            fixed_gear: false,
+            landing_lights: Stage::LineUp.landing_lights(),
+        };
+        for _ in 0..30 {
+            animation.advance(line_up, &jet_handling(), 0.5);
+        }
+        assert!(animation.flaps > 0.0);
+        assert!(!animation.landing_lights);
+        assert!(animation.strobes);
+        assert_eq!(animation.gear, 1.0);
+        let takeoff = animation::Input {
+            stage: Stage::Takeoff,
+            landing_lights: Stage::Takeoff.landing_lights(),
+            ..line_up
+        };
+        animation.advance(takeoff, &jet_handling(), 0.5);
+        assert!(animation.landing_lights);
+    }
+
+    #[test]
+    fn climb_retracts_gear_after_rotation() {
+        let mut animation = Animation::default();
+        let input = animation::Input {
+            stage: Stage::Climb,
+            knots: 160.0,
+            turn_degrees_sec: 0.0,
+            vertical_fpm: 1_800.0,
+            engines_running: true,
+            fixed_gear: false,
+            landing_lights: Stage::Climb.landing_lights(),
+        };
+        for _ in 0..40 {
+            animation.advance(input, &jet_handling(), 0.5);
+        }
+        assert!(animation.gear < 0.1);
+        assert!(animation.landing_lights);
+        assert!(animation.beacon);
+        assert!(animation.navigation_lights);
     }
 }

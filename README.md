@@ -385,7 +385,7 @@ Automatic crossing requests reuse the active airport data and cached controller 
 
 A Ground taxi request made from physical runway pavement identifies the occupied runway and directs the pilot to Tower for exit instructions, rather than suggesting an unrelated departure-runway backtrack. Ordinary gate taxi routing remains subject to the same runway protection.
 
-Each intervening runway is a separate clearance limit. The controller can issue a crossing instruction when you approach the hold and traffic information permits it. A crossing clearance names the runway being crossed, which may differ from the departure runway. Read back the crossing before entering. Unknown traffic information does not count as a clear runway.
+Each intervening runway is a separate clearance limit. The controller can issue a crossing instruction when you approach the hold and traffic information permits it. A crossing clearance names the runway being crossed, which may differ from the departure runway. Read back the crossing before entering. Unknown traffic information does not count as a clear runway. Generated traffic crosses at the taxi-turn speed (8 kt with the jet envelope) and switches its landing lights on for the crossing.
 
 After the crossing, the copilot can report vacated at the observed completion point. The next taxi instruction replaces the route and requires its own readback. In manual mode physical completion can advance the crossing workflow; a vacated report is not treated as an altitude readback.
 
@@ -643,6 +643,15 @@ traffic reports altitude even with its engine stopped. OpenATC yields TCAS owner
 to another traffic provider and waits for availability before retrying. These are
 the requirements of the [TCAS override API](https://developer.x-plane.com/article/overriding-tcas-and-providing-traffic-information/)
 and [X-Plane 12.4.1 TCAS II guidance](https://developer.x-plane.com/article/tcas-resolution-advisories-and-plugin-traffic/).
+
+Generated CSL models animate through every movement phase. Gear, flaps, spoilers,
+steering, wheel rotation, pitch and bank follow the current stage; beacon and
+navigation lights run with the engines, and landing lights follow the Airservices
+runway-safety guidance: on for runway crossings, approach, landing and takeoff, off
+for line-up and ordinary taxiing. That crossing practice is national guidance rather
+than an ICAO-wide rule. See
+[CSL animation and runway lights](#csl-animation-and-runway-lights) for the phase
+table, configuration keys and the speed used by generated runway crossings.
 
 Generated Ground, Tower and Delivery positions work independently. A player
 transmission blocks a controller only on the frequency in use, not every generated
@@ -1205,9 +1214,13 @@ the painted hold-line geometry and set back on the approach side, and the aircra
 stops there rather than at the nearest graph node. The takeoff run starts at the
 runway end nearest that hold, so the aircraft enters at the near threshold and rolls
 away from it. Takeoff uses a ground roll to rotation speed followed by a three-degree
-climb. Startup never creates `TaxiIn` traffic; `TaxiIn` exists only after a landing.
-Surface movement follows the taxiway graph, keeps a gap behind the leader, gives way
-to traffic on the right, and allows only one aircraft on the runway at a time. The
+climb. CSL models animate through taxi-out, line-up, takeoff, climb, approach,
+rollout and taxi-in; the phase states and runway-lighting policy are detailed in
+[CSL animation and runway lights](#csl-animation-and-runway-lights) below. Startup,
+cruise and shutdown phases belong to the complete-flight generated layer. Startup
+never creates `TaxiIn` traffic; `TaxiIn` exists only after a landing. Surface
+movement follows the taxiway graph, keeps a gap behind the leader, gives way to
+traffic on the right, and allows only one aircraft on the runway at a time. The
 older complete-flight generated layer remains available but is disabled in the
 opening scene.
 
@@ -1244,6 +1257,46 @@ It announces its position and intentions without issuing controller clearances.
 An occupied runway at final causes a go-around. Source tests cover circuits,
 straight-in arrivals, departures and cross-country calls; full mixed-flight and
 native acceptance remain open.
+
+### CSL animation and runway lights
+
+Every rendered CSL aircraft uses one animation state machine. The persistent ambient
+layer and the complete-flight generated layer both supply the movement stage, speed,
+turn rate, vertical speed and engine state, so models look consistent in each phase:
+
+| Stage | Visual state |
+| --- | --- |
+| Parked, turnaround | Engines off, beacon and navigation lights off, gear down, flaps and spoilers retract |
+| Pushback, taxi-out, taxi-in | Engines running, beacon and navigation lights on, gear down, flaps up, landing lights off; steering and wheels follow ground speed |
+| Line-up | Takeoff flaps and strobes; landing lights stay off |
+| Takeoff, initial climb | Landing lights on, rotation pitch, gear and flaps retract after rotation |
+| Cruise | Gear and flaps up, landing lights off, beacon, navigation and strobes on |
+| Approach | Landing gear down, landing flaps, landing lights and strobes on |
+| Rollout | Spoilers and touchdown signal, gear down, landing lights on until runway exit |
+
+Startup and shutdown live in the complete-flight layer: parked and turnaround
+aircraft have their engines off, and the engine, beacon and navigation animation
+spools up when pushback or taxi-out begins.
+
+Animation rates come from `traffic/handling.toml`; the model dataref names come from
+`traffic/animation-channels.toml`. The bundled catalogue covers the Bluebell/XPMP and
+cjs/world_traffic channels. `/debug/ambient` reports the current stage, runway entry
+and runway exit distance for each ambient aircraft.
+
+Landing lights follow the Airservices Australia runway-safety guidance:
+
+- crossing a runway: all exterior lights, including landing lights;
+- line up and wait: all exterior lights except landing lights;
+- take-off: landing lights on when take-off clearance is received;
+- approach and landing: landing lights on;
+- ordinary taxiing: landing lights off, beacon and navigation lights on.
+
+The crossing practice is national guidance, not an ICAO rule, and it is not universal.
+The FAA AIM recommends all exterior lights when taxiing on or across a runway at the
+pilot's discretion; European and ICAO rules require night lighting but leave the
+crossing procedure to the operator. There is also no universal numeric crossing speed.
+Generated traffic crosses at `taxi_turn_knots` from the handling catalogue (8 kt with
+the jet envelope); ambient taxi is 25 kt straight and 10 kt in turns.
 
 See [validation](docs/VALIDATION.md) for current test results and earlier engineering
 checks, and the [roadmap](docs/ROADMAP.md) for the remaining traffic scope.
