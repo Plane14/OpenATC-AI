@@ -4210,7 +4210,10 @@ pub async fn prepare(shared: Shared) {
                         .into_iter()
                         .chain((!plan.arrival_stand.is_empty()).then(|| plan.arrival_stand.clone()))
                         .collect(),
-                    local_pattern_traffic: settings.local_pattern_traffic,
+                    // Keep the airport alive when the route catalogue cannot release a
+                    // complete city pair. The local pattern adds departures and a circuit
+                    // arrival only when the scene has fewer than two released flights.
+                    local_pattern_traffic: true,
                     seed_single_arrival: settings.start_first_flight_on_approach,
                     player_airborne,
                     minimum_airborne_spawn_nm,
