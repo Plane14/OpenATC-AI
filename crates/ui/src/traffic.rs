@@ -159,7 +159,47 @@ pub fn settings(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
         }
     }
     widgets::section_title(ui, "TRAFFIC SOURCE");
+    ui.checkbox(
+        "Enable OpenATC generated traffic",
+        &mut interface.settings.generated_traffic,
+    );
     ui.text_wrapped("OpenATC generated traffic uses complete flight plans only. Prepare a flight from a gate, holding point or approach; there is no plan-less preview layer. Native X-Plane AI is optional; installing Bluebell models alone does not create flights.");
+    
+    ui.spacing();
+    ui.separator();
+    ui.spacing();
+    
+    widgets::section_title(ui, "ADSB.LOL REAL-TIME TRAFFIC");
+    ui.checkbox(
+        "Enable ADSB.lol traffic source",
+        &mut interface.settings.adsb_lol_enabled,
+    );
+    setting_input(
+        ui,
+        "ADSB.lol API URL",
+        &mut interface.settings.adsb_lol_url,
+        256,
+    );
+    setting_input(
+        ui,
+        "ADSB.lol API Key (optional)",
+        &mut interface.settings.adsb_lol_api_key,
+        128,
+    );
+    let mut radius = interface.settings.adsb_lol_radius_nm as f32;
+    widgets::muted_wrapped(ui, "Query radius (NM)");
+    ui.set_next_item_width(-1.0);
+    if ui.slider("##adsb-radius", 10.0, 200.0, &mut radius) {
+        interface.settings.adsb_lol_radius_nm = radius as f64;
+    }
+    let mut update_interval = i32::from(interface.settings.adsb_lol_update_interval_sec);
+    widgets::muted_wrapped(ui, "Update interval (seconds)");
+    ui.set_next_item_width(-1.0);
+    if ui.slider("##adsb-interval", 10, 300, &mut update_interval) {
+        interface.settings.adsb_lol_update_interval_sec = update_interval as u64;
+    }
+    ui.text_wrapped("ADSB.lol provides real-time ADS-B traffic data. Enable to merge live traffic with generated flights. Requires internet connection. The API is free but rate-limited.");
+    
     if let Some(reply) = interface.engine.take_reply("/traffic/models/index") {
         interface.traffic_notice = if reply.success {
             format!(
@@ -213,13 +253,6 @@ pub fn settings(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
         ui.text_wrapped(&interface.native_traffic_status);
     }
     widgets::section_title(ui, "TRAFFIC RADIO");
-    if ui.checkbox(
-        "Airport radio chatter",
-        &mut interface.settings.airport_chatter,
-    ) {
-        interface.save_settings();
-    }
-    ui.text_wrapped("When airborne above a receivable Ground or Tower station, you may hear other aircraft taxi and depart. The calls use the installed airport's runways and taxiways. Chatter stops when you retune, leave reception or descend below 1,000 ft above the station.");
     ui.checkbox(
         "Hear simulated traffic pilot reports",
         &mut interface.settings.hear_traffic_radio,

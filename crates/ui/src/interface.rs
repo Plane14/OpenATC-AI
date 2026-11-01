@@ -263,6 +263,8 @@ pub struct Interface {
     pub radio_power: bool,
     /// Matched aircraft profile reported by the simulator plugin.
     pub aircraft_profile: String,
+    /// Detailed aircraft specifications from the loaded .acf file.
+    pub loaded_aircraft_specs: Option<openatc_core::ops::AcfSpecs>,
     /// Bus power state.
     pub bus_power: bool,
     /// Local notices under the transcript.
@@ -328,10 +330,6 @@ pub struct Interface {
     pub last_speech_sequence: u32,
     /// Pending speech entries.
     pub speech_queue: std::collections::VecDeque<Transmission>,
-    /// Background chatter currently playing: radio, frequency and gap after it.
-    chatter_playing: Option<(openatc_core::state::Radio, i32, u32)>,
-    /// Earliest next background chatter line per radio (COM1, COM2).
-    chatter_gate_until: [f64; 2],
     /// Panel window offset in screen points. Stays zero on desktop; the
     /// simulator host sets it so content lands inside the floating window.
     pub window_offset: [f32; 2],
@@ -513,6 +511,7 @@ impl Interface {
             engine_fault: String::new(),
             radio_power: true,
             aircraft_profile: String::new(),
+            loaded_aircraft_specs: None,
             bus_power: true,
             local_notices: Vec::new(),
             last_power_refusal: String::new(),
@@ -547,8 +546,6 @@ impl Interface {
             transcript_layout: None,
             last_speech_sequence: 0,
             speech_queue: std::collections::VecDeque::new(),
-            chatter_playing: None,
-            chatter_gate_until: [0.0; 2],
             window_offset: [0.0, 0.0],
             window_size: [960.0, 760.0],
             compact: false,
@@ -810,12 +807,7 @@ impl Interface {
         }
         self.ptt_armed = false;
         if down {
-            let background = self.chatter_playing.is_some();
-            self.stop_all_chatter();
-            if (!background && self.speech.busy())
-                || self.speech.recording()
-                || self.speech.monitoring()
-            {
+            if self.speech.busy() || self.speech.recording() || self.speech.monitoring() {
                 "Mic busy — wait for the current job".clone_into(&mut self.last_action);
                 return;
             }
@@ -833,12 +825,7 @@ impl Interface {
         }
         if down {
             self.expand();
-            let background = self.chatter_playing.is_some();
-            self.stop_all_chatter();
-            if (!background && self.speech.busy())
-                || self.speech.recording()
-                || self.speech.monitoring()
-            {
+            if self.speech.busy() || self.speech.recording() || self.speech.monitoring() {
                 "Mic busy — wait for the current job".clone_into(&mut self.last_action);
                 return;
             }
@@ -1024,18 +1011,10 @@ impl Interface {
                 } else {
                     "Voice: TTS down".to_owned()
                 };
-                if let Some(version) = reply
-                    .data
-                    .get("aiVersion")
-                    .and_then(serde_json::Value::as_str)
-                {
+                if let Some(version) = reply.data.get("aiVersion").and_then(serde_json::Value::as_str) {
                     version.clone_into(&mut self.ai_version);
                 }
-                if let Some(version) = reply
-                    .data
-                    .get("engineVersion")
-                    .and_then(serde_json::Value::as_str)
-                {
+                if let Some(version) = reply.data.get("engineVersion").and_then(serde_json::Value::as_str) {
                     version.clone_into(&mut self.engine_version);
                 }
             } else {
@@ -1135,16 +1114,12 @@ impl Interface {
         use openatc_core::identify::interpret_text;
         use openatc_core::intents::speech_worth_sending;
         if self.last_com1_khz != 0 && self.last_com1_khz != state.telemetry.com1_khz {
-            self.stop_chatter(openatc_core::state::Radio::Com1);
             self.speech.stop_speech();
-            self.speech_queue
-                .retain(|q| q.radio != Some(openatc_core::state::Radio::Com1));
+            self.speech_queue.retain(|q| q.radio != Some(openatc_core::state::Radio::Com1));
         }
         if self.last_com2_khz != state.telemetry.com2_khz {
-            self.stop_chatter(openatc_core::state::Radio::Com2);
             self.speech_com2.stop_speech();
-            self.speech_queue
-                .retain(|q| q.radio != Some(openatc_core::state::Radio::Com2));
+            self.speech_queue.retain(|q| q.radio != Some(openatc_core::state::Radio::Com2));
         }
         self.last_com1_khz = state.telemetry.com1_khz;
         self.last_com2_khz = state.telemetry.com2_khz;
@@ -1165,7 +1140,6 @@ impl Interface {
         );
         self.speech_com2.poll();
         self.speech.poll();
-        self.reconcile_chatter(state);
         if self.ptt_armed && now_seconds() - self.record_start > 45.0 {
             self.ptt_armed = false;
         }
@@ -1236,14 +1210,6 @@ impl Interface {
                     && entry.speaker != "CABIN"
                     && entry.speaker != "ATTENDANT"
                     && entry.speaker != "GROUND";
-                if entry.background
-                    && entry
-                        .frequency
-                        .is_some_and(|frequency| !state.chatter_frequencies.contains(&frequency))
-                {
-                    self.last_speech_sequence = entry.sequence;
-                    continue;
-                }
                 if (traffic && (self.settings.hear_traffic_radio || self.settings.talk_to_traffic))
                     || (controller && self.settings.controller_speech)
                     || (entry.speaker == "COPILOT" && self.settings.copilot_speech)
@@ -1251,11 +1217,6 @@ impl Interface {
                     || matches!(entry.speaker.as_str(), "CABIN" | "ATTENDANT")
                     || entry.speaker == "GROUND"
                 {
-                    if !entry.background {
-                        if let Some(radio) = entry.radio {
-                            self.stop_chatter(radio);
-                        }
-                    }
                     self.speech_queue.push_back(entry.clone());
                 }
                 self.last_speech_sequence = entry.sequence;
@@ -1264,7 +1225,6 @@ impl Interface {
         while self.speech_queue.len() > 20 {
             self.speech_queue.pop_front();
         }
-        let now = now_seconds();
         for radio in [
             openatc_core::state::Radio::Com1,
             openatc_core::state::Radio::Com2,
@@ -1274,80 +1234,17 @@ impl Interface {
             } else {
                 self.speech.busy()
             };
-            if busy || self.speech.recording() {
-                continue;
-            }
-            let slot = usize::from(radio == openatc_core::state::Radio::Com2);
-            let position = self
-                .speech_queue
-                .iter()
-                .position(|entry| entry.radio.unwrap_or_default() == radio && !entry.background)
-                .or_else(|| {
-                    self.speech_queue.iter().position(|entry| {
-                        entry.radio.unwrap_or_default() == radio
-                            && entry.background
-                            && now >= self.chatter_gate_until[slot]
-                    })
-                });
-            if let Some(index) = position
+            if !busy
+                && !self.speech.recording()
+                && let Some(index) = self
+                    .speech_queue
+                    .iter()
+                    .position(|entry| entry.radio.unwrap_or_default() == radio)
                 && let Some(entry) = self.speech_queue.remove(index)
             {
-                if entry.background {
-                    self.chatter_playing =
-                        Some((radio, entry.frequency.unwrap_or(0), entry.gap_ms));
-                }
                 self.speak_entry(&entry);
             }
         }
-    }
-
-    fn reconcile_chatter(&mut self, state: &State) {
-        let now = now_seconds();
-        if let Some((radio, frequency, gap)) = self.chatter_playing {
-            if !state.chatter_frequencies.contains(&frequency) {
-                self.stop_chatter(radio);
-            } else {
-                let busy = if radio == openatc_core::state::Radio::Com2 {
-                    self.speech_com2.busy()
-                } else {
-                    self.speech.busy()
-                };
-                if !busy {
-                    let slot = usize::from(radio == openatc_core::state::Radio::Com2);
-                    self.chatter_gate_until[slot] = now + f64::from(gap) / 1000.0;
-                    self.chatter_playing = None;
-                }
-            }
-        }
-        self.speech_queue.retain(|entry| {
-            !entry.background
-                || entry
-                    .frequency
-                    .is_none_or(|frequency| state.chatter_frequencies.contains(&frequency))
-        });
-    }
-
-    fn stop_chatter(&mut self, radio: openatc_core::state::Radio) {
-        self.speech_queue
-            .retain(|entry| entry.radio != Some(radio) || !entry.background);
-        if self
-            .chatter_playing
-            .is_some_and(|(playing, _, _)| playing == radio)
-        {
-            if radio == openatc_core::state::Radio::Com2 {
-                self.speech_com2.stop_speech();
-            } else {
-                self.speech.stop_speech();
-            }
-            self.chatter_playing = None;
-            self.chatter_gate_until[usize::from(radio == openatc_core::state::Radio::Com2)] =
-                now_seconds();
-        }
-    }
-
-    fn stop_all_chatter(&mut self) {
-        self.stop_chatter(openatc_core::state::Radio::Com1);
-        self.stop_chatter(openatc_core::state::Radio::Com2);
     }
 
     /// Busy state for the controlling channel, independent of the other receiver.
@@ -1356,20 +1253,17 @@ impl Interface {
     }
 
     fn radio_audio_busy(&self, radio: openatc_core::state::Radio) -> bool {
-        let background = self
-            .chatter_playing
-            .is_some_and(|(playing, _, _)| playing == radio);
         let playback = if radio == openatc_core::state::Radio::Com2 {
             self.speech_com2.busy()
         } else {
             self.speech.busy()
         };
-        playback && !background
+        playback
             || self.speech.recording() && self.ptt_radio == radio
             || self
                 .speech_queue
                 .iter()
-                .any(|entry| entry.radio.unwrap_or_default() == radio && !entry.background)
+                .any(|entry| entry.radio.unwrap_or_default() == radio)
     }
 
     /// Speak one entry with the role voice and levels.
@@ -1679,8 +1573,6 @@ impl Interface {
                     self.atis_airport = reply.data["airport"].as_str().unwrap_or("").to_owned();
                     self.speak_entry(&Transmission {
                         radio: Some(radio),
-                        frequency: None,
-                        gap_ms: 0,
                         information_only: false,
                         pilot_reply: String::new(),
                         background: false,
@@ -2622,8 +2514,6 @@ mod radio_busy_tests {
             .speech_queue
             .push_back(openatc_core::state::Transmission {
                 radio: Some(openatc_core::state::Radio::Com2),
-                frequency: None,
-                gap_ms: 0,
                 speaker: "ATC".into(),
                 information_only: false,
                 pilot_reply: String::new(),
@@ -2643,34 +2533,5 @@ mod radio_busy_tests {
         interface.auto_reply_radio = openatc_core::state::Radio::Com2;
         assert!(!interface.radio_busy(openatc_core::state::Radio::Com1));
         assert!(interface.radio_busy(openatc_core::state::Radio::Com2));
-    }
-
-    #[test]
-    fn background_chatter_does_not_block_the_receiver() {
-        let mut interface = Interface::new("http://127.0.0.1:1");
-        interface
-            .speech_queue
-            .push_back(openatc_core::state::Transmission {
-                radio: Some(openatc_core::state::Radio::Com1),
-                frequency: Some(121_900),
-                gap_ms: 700,
-                speaker: "EZY1234".into(),
-                information_only: false,
-                pilot_reply: String::new(),
-                background: true,
-                text: "ready to taxi".into(),
-                sequence: 1,
-                position: "Traffic".into(),
-                voice: String::new(),
-                delivery: "standard".into(),
-                speed: 1.0,
-                urgent: false,
-            });
-        assert!(!interface.radio_busy(openatc_core::state::Radio::Com1));
-        interface.chatter_playing = Some((openatc_core::state::Radio::Com1, 121_900, 700));
-        assert!(!interface.radio_busy(openatc_core::state::Radio::Com1));
-        interface.stop_chatter(openatc_core::state::Radio::Com1);
-        assert!(interface.speech_queue.is_empty());
-        assert!(interface.chatter_playing.is_none());
     }
 }

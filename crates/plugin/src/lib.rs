@@ -25,6 +25,7 @@ mod weather;
 mod window;
 
 use openatc_ui::interface::Interface;
+use openatc_core::ops::read_acf_specs;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use xplane::{
@@ -186,6 +187,11 @@ fn update_panel(
     interface.set_panel_role(&role, if has_role { "panel" } else { "" });
     interface.set_electrical_power(radio, bus);
     interface.aircraft_profile = profile;
+
+    // Read detailed ACF specs and update interface
+    if let Ok(specs) = read_acf_specs(std::path::Path::new(acf_path)) {
+        interface.loaded_aircraft_specs = Some(specs);
+    }
     if spoken != locked.logged_role {
         locked.logged_role.clone_from(&spoken);
         let panel = if role.is_empty() {
@@ -351,8 +357,6 @@ fn update_autopilot(shared: &Arc<Mutex<Shared>>) {
     }
     let entry = openatc_core::state::Transmission {
         radio: None,
-        frequency: None,
-        gap_ms: 0,
         information_only: false,
         pilot_reply: String::new(),
         background: false,
@@ -968,6 +972,17 @@ impl Plugin for OpenAtc {
                   _state: &mut xplane::flight_loop::LoopState<LoopMarker>| {
                 if last_logic.elapsed() >= Duration::from_millis(500) {
                     flight_tick(&tick_shared, xpapi);
+                    // Run automation engine tick
+                    {
+                        let mut shared = tick_shared
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(interface) = shared.interface.as_mut() {
+                            let state = interface.engine.state_mut();
+                            state.automation.update_config(&state.settings);
+                            state.automation.tick(state);
+                        }
+                    }
                     last_logic = std::time::Instant::now();
                 }
                 let mut shared = tick_shared
