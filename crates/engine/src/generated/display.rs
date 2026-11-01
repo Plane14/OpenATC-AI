@@ -57,13 +57,44 @@ pub(super) fn select(
         a.0.total_cmp(&b.0)
             .then_with(|| a.1.target.id.cmp(&b.1.target.id))
     });
+    let track = telemetry
+        .ground_track_degrees
+        .unwrap_or(telemetry.heading_degrees);
     let mut ids = BTreeSet::new();
-    nearby
-        .into_iter()
-        .filter(|(_, frame)| ids.insert(frame.target.id))
-        .take(policy.visible_aircraft_limit)
-        .map(|(_, frame)| frame.clone())
-        .collect()
+    let mut selected = Vec::with_capacity(policy.visible_aircraft_limit);
+    let mut same_direction = 0usize;
+    let mut trailing = 0usize;
+    for (distance, frame) in nearby {
+        if ids.contains(&frame.target.id) {
+            continue;
+        }
+        if distance <= policy.same_direction_range_nm {
+            let bearing = openatc_core::arrival::bearing(
+                [telemetry.latitude, telemetry.longitude],
+                [frame.target.latitude, frame.target.longitude],
+            );
+            let aligned = openatc_core::navigation::turn(track, frame.target.track_degrees).abs()
+                <= policy.same_direction_cone_degrees;
+            if aligned {
+                let behind = openatc_core::navigation::turn(track, bearing).abs() > 90.0;
+                if same_direction >= policy.same_direction_limit
+                    || behind && trailing >= policy.trailing_limit
+                {
+                    continue;
+                }
+                same_direction += 1;
+                if behind {
+                    trailing += 1;
+                }
+            }
+        }
+        ids.insert(frame.target.id);
+        selected.push(frame.clone());
+        if selected.len() >= policy.visible_aircraft_limit {
+            break;
+        }
+    }
+    selected
 }
 
 #[cfg(test)]
@@ -153,6 +184,42 @@ mod tests {
         assert!(state.session.generated_traffic.is_empty());
         assert_eq!(state.generated.frames.len(), 3);
     }
+    #[test]
+    fn same_direction_flow_is_bounded_without_hiding_other_traffic() {
+        let mut policy =
+            parse_operations(include_str!("../../../../traffic/operations.toml")).unwrap();
+        policy.same_direction_limit = 5;
+        policy.trailing_limit = 2;
+        let own = Telemetry {
+            position_valid: true,
+            latitude: 40.0,
+            longitude: 8.0,
+            heading_degrees: 90.0,
+            ground_track_degrees: Some(90.0),
+            ..Default::default()
+        };
+        let mut frames = Vec::new();
+        for index in 0..3 {
+            let mut frame = frame(index + 1, 10.0);
+            frame.target.track_degrees = 90.0;
+            frames.push(frame);
+        }
+        for index in 0..5 {
+            let mut frame = frame(index + 4, 10.0);
+            frame.target.latitude = 40.0;
+            frame.target.longitude = 8.0 - 10.0 / 60.0;
+            frame.target.track_degrees = 90.0;
+            frames.push(frame);
+        }
+        let selected = select(&frames, &own, &BTreeSet::new(), &policy);
+        assert_eq!(selected.len(), 5);
+        let behind = selected
+            .iter()
+            .filter(|frame| frame.target.longitude < own.longitude)
+            .count();
+        assert_eq!(behind, 2);
+    }
+
     #[test]
     fn range_and_capacity_margins_prevent_churn_without_locking_out_nearer_flights() {
         let mut policy =

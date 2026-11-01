@@ -1226,6 +1226,13 @@ traffic on the right, and allows only one aircraft on the runway at a time. The
 older complete-flight generated layer remains available but is disabled in the
 opening scene.
 
+Visible airborne traffic is limited to three aircraft in the player's same-direction
+flow, with at most two trailing. `same_direction_limit`, `trailing_limit`,
+`same_direction_cone_degrees` and `same_direction_range_nm` in
+`traffic/operations.toml` control the cap. Reaching the destination terminal area
+requests one fresh preparation so a few STAR and approach arrivals are seeded near
+the player.
+
 **Settings → Traffic → Traffic debug** shows the exact planned hold point for each
 ambient departure, the published airport hold lines, the current blocker and the
 phase reason on the taxi map. `/debug/ambient` reports the graph route, hold distance,

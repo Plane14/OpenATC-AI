@@ -55,3 +55,7 @@ visible_aircraft_limit = 63
 display_enter_nm = 40.0
 display_leave_nm = 50.0
 display_replacement_margin_nm = 2.0
+same_direction_limit = 3
+trailing_limit = 2
+same_direction_cone_degrees = 30.0
+same_direction_range_nm = 15.0

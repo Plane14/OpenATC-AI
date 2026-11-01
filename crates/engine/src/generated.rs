@@ -704,6 +704,10 @@ struct Operations {
     display_enter_nm: f64,
     display_leave_nm: f64,
     display_replacement_margin_nm: f64,
+    same_direction_limit: usize,
+    trailing_limit: usize,
+    same_direction_cone_degrees: f64,
+    same_direction_range_nm: f64,
     surface_monitor_radius_nm: f64,
     gate_connector_meters: f64,
     gate_connector_detour_meters: f64,
@@ -731,6 +735,10 @@ fn parse_operations(text: &str) -> Result<Operations, String> {
         || !(policy.network_airport_limit..=32).contains(&policy.network_candidate_limit)
         || !(25.0..=2000.0).contains(&policy.network_radius_nm)
         || !(1..=63).contains(&policy.visible_aircraft_limit)
+        || !(1..=8).contains(&policy.same_direction_limit)
+        || policy.trailing_limit > policy.same_direction_limit
+        || !(10.0..=90.0).contains(&policy.same_direction_cone_degrees)
+        || !(5.0..=50.0).contains(&policy.same_direction_range_nm)
         || !(5.0..=100.0).contains(&policy.display_enter_nm)
         || !(policy.display_enter_nm..=150.0).contains(&policy.display_leave_nm)
         || !(0.0..=10.0).contains(&policy.display_replacement_margin_nm)
@@ -5628,6 +5636,10 @@ pub fn step(state: &mut EngineState) {
     set_traffic_log(state.settings.traffic_log);
     if !state.settings.generated_traffic {
         state.generated = Runtime::default();
+    }
+    if state.settings.generated_traffic {
+        let telemetry = state.session.telemetry.clone();
+        population::request_nearby_scene(&mut state.generated, &telemetry, true);
     }
     if !state.settings.generated_traffic || state.generated.epoch != Some(state.session_generation)
     {

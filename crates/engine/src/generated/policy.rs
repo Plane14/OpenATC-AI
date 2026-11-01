@@ -183,6 +183,8 @@ mod tests {
         let defaults = parse_operations(&legacy).unwrap();
         assert_eq!(defaults.visible_aircraft_limit, 63);
         assert_eq!(defaults.display_enter_nm, 40.0);
+        assert_eq!(defaults.same_direction_limit, 3);
+        assert_eq!(defaults.trailing_limit, 2);
         for (from, to) in [
             ("visible_aircraft_limit = 63", "visible_aircraft_limit = 64"),
             ("display_enter_nm = 40.0", "display_enter_nm = nan"),
@@ -190,6 +192,16 @@ mod tests {
             (
                 "display_replacement_margin_nm = 2.0",
                 "display_replacement_margin_nm = -1.0",
+            ),
+            ("same_direction_limit = 3", "same_direction_limit = 9"),
+            ("trailing_limit = 2", "trailing_limit = 4"),
+            (
+                "same_direction_cone_degrees = 30.0",
+                "same_direction_cone_degrees = 5.0",
+            ),
+            (
+                "same_direction_range_nm = 15.0",
+                "same_direction_range_nm = 100.0",
             ),
         ] {
             assert!(parse_operations(&source.replace(from, to)).is_err());

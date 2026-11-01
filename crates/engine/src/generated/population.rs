@@ -20,6 +20,8 @@ pub(super) struct Population {
     turnaround_retry: BTreeMap<u32, f64>,
     /// A preparation that could not add any flight waits before planning the same scene again.
     pub(super) refill_blocked_until: Option<std::time::Instant>,
+    /// Last time a nearby STAR scene refresh was requested, keyed by airport.
+    nearby_reseed: BTreeMap<String, std::time::Instant>,
     player_stand: String,
 }
 
@@ -300,6 +302,40 @@ pub(super) fn maintain(state: &mut crate::EngineState) {
     for id in retired {
         remove(&mut state.generated, id);
     }
+}
+
+/// Request one fresh preparation when the player reaches the destination terminal area.
+/// The normal scene seeding then places a few arrivals on the STAR and final.
+pub(super) fn request_nearby_scene(runtime: &mut Runtime, telemetry: &Telemetry, generated: bool) {
+    if telemetry.on_ground || telemetry.paused || !telemetry.position_valid || !generated {
+        return;
+    }
+    let Some(airport) = runtime.destination.as_ref().or(runtime.airport.as_ref()) else {
+        return;
+    };
+    let distance = distance_nm(
+        [telemetry.latitude, telemetry.longitude],
+        [airport.reference_latitude, airport.reference_longitude],
+    );
+    if !distance.is_finite() || distance > 30.0 {
+        return;
+    }
+    let now = std::time::Instant::now();
+    if runtime
+        .population
+        .nearby_reseed
+        .get(&airport.icao)
+        .is_some_and(|at| now.duration_since(*at) < std::time::Duration::from_secs(600))
+    {
+        return;
+    }
+    runtime
+        .population
+        .nearby_reseed
+        .insert(airport.icao.clone(), now);
+    runtime.scene_revision = runtime.scene_revision.wrapping_add(1);
+    runtime.retry = None;
+    runtime.population.refill_blocked_until = None;
 }
 
 pub(super) fn remove(runtime: &mut Runtime, id: u32) {
@@ -1015,5 +1051,31 @@ mod tests {
         target.latitude = 0.5;
         target.track_degrees = 0.0;
         assert!(!outside(&target, &telemetry, 50.0, false));
+    }
+
+    #[test]
+    fn nearby_star_entry_requests_one_scene_refresh() {
+        let mut state = crate::test_state();
+        state.settings.generated_traffic = true;
+        state.session.telemetry = Telemetry {
+            position_valid: true,
+            on_ground: false,
+            latitude: 0.0,
+            longitude: 0.0,
+            ..Default::default()
+        };
+        state.generated.destination =
+            Some(super::super::Arc::new(openatc_core::airport::Airport {
+                icao: "TEST".to_owned(),
+                reference_latitude: 0.0,
+                reference_longitude: 0.3,
+                ..Default::default()
+            }));
+        state.generated.scene_revision = 5;
+        let telemetry = state.session.telemetry.clone();
+        request_nearby_scene(&mut state.generated, &telemetry, true);
+        assert_eq!(state.generated.scene_revision, 6);
+        request_nearby_scene(&mut state.generated, &telemetry, true);
+        assert_eq!(state.generated.scene_revision, 6);
     }
 }
