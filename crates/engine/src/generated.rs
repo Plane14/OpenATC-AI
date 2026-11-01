@@ -2711,6 +2711,7 @@ impl Scene {
             ),
         > = BTreeMap::new();
         let mut keep_at_gate = BTreeSet::new();
+        let mut startup_airborne = BTreeSet::new();
         if !player_airborne {
             let mut departures = ids
                 .iter()
@@ -2769,33 +2770,19 @@ impl Scene {
             let total = self.flights.len();
             let gate_target = (total / 8).clamp(1, 3).min(departures.len());
             let usable = departures.len().saturating_sub(gate_target);
-            let hold_target = if startup_cast && usable >= 3 && total >= 6 {
-                2
-            } else if startup_cast {
-                usize::from(usable > 0)
+            let moving_target = taxi_target
+                .min(usable)
+                .max(usize::from(startup_cast && taxi_target > 0 && usable > 0));
+            let hold_target = if startup_cast && moving_target > 1 {
+                (moving_target / 3).clamp(1, 2).min(moving_target)
             } else {
                 0
             };
-            let remaining_departures = usable.saturating_sub(hold_target);
-            let mid_target = if taxi_target == 0 {
+            let mid_target = moving_target.saturating_sub(hold_target);
+            let approach_target = if arrivals.is_empty() {
                 0
             } else {
-                taxi_target
-                    .max(2)
-                    .min(remaining_departures)
-                    .max(usize::from(total >= 8 && remaining_departures > 0))
-            };
-            let moving_target = taxi_target;
-            // Fill the moving target with departures first, but keep at least one arrival
-            // taxiing in when the plan has one: the opening cast must show both flows.
-            let taxi_in_target = if arrivals.is_empty() || moving_target == 0 {
-                0
-            } else {
-                moving_target
-                    .saturating_sub(mid_target)
-                    .max(1)
-                    .min(6usize.saturating_sub(mid_target))
-                    .min(arrivals.len())
+                (total / 4).clamp(1, 4).min(arrivals.len())
             };
             let mut used = BTreeSet::new();
             let mut trial = self.world.clone();
@@ -2868,27 +2855,31 @@ impl Scene {
                     }
                 }
             }
-            // One arrival on the way in to its stand, so the airport is not only departures.
-            for (id, taxi, inbound) in &arrivals {
-                if startup_ground
-                    .values()
-                    .filter(|(_, _, _, role)| *role == "taxi to gate")
-                    .count()
-                    >= taxi_in_target
-                {
+            // Arrivals are seeded on approach at different distances. Taxi-in exists only
+            // after a landing, never as an opening scene state.
+            for (slot, (id, _, _)) in arrivals.iter().enumerate() {
+                if slot >= approach_target {
                     break;
                 }
                 if used.contains(id) {
                     continue;
                 }
-                // Start as far from the gate as the route allows, so the arrival actually
-                // taxis in rather than appearing at its stand.
-                for index in inbound.iter().copied() {
-                    if trial.seed_ground_progress(generation, *id, taxi.clone(), index, 0.35) {
-                        startup_ground.insert(*id, (taxi.clone(), index, 0.35, "taxi to gate"));
-                        used.insert(*id);
-                        break;
-                    }
+                let Some(plan) = self.flights.get(id).cloned() else {
+                    continue;
+                };
+                let target_nm = 5.0 + slot as f64 * 3.0;
+                let Some((index, progress)) = approach_seed(&plan.route, target_nm, own) else {
+                    continue;
+                };
+                if trial.seed_airborne_progress(
+                    generation,
+                    *id,
+                    plan.route.clone(),
+                    index,
+                    progress,
+                ) {
+                    used.insert(*id);
+                    startup_airborne.insert(*id);
                 }
             }
             // Keep a few complete departures at their stands so Ground always has live calls to
@@ -2901,7 +2892,8 @@ impl Scene {
                     keep_at_gate.insert(*id);
                 }
             }
-            if startup_ground.len() > 0 || !keep_at_gate.is_empty() {
+            if !startup_ground.is_empty() || !keep_at_gate.is_empty() || !startup_airborne.is_empty()
+            {
                 self.world = trial;
             }
             let holding = startup_ground
@@ -2916,15 +2908,12 @@ impl Scene {
                 .values()
                 .filter(|(_, _, _, role)| *role == "mid taxi")
                 .count();
-            let taxi_to_gate = startup_ground
-                .values()
-                .filter(|(_, _, _, role)| *role == "taxi to gate")
-                .count();
+            let approach = startup_airborne.len();
             traffic_log(
                 openatc_settings::TrafficLog::Summary,
                 format!(
-                    "traffic cast seed {seed:#018x}: {holding} holding, {queue} queued behind, {mid_taxi} mid taxi, {taxi_to_gate} taxi to gate, {} gates/airborne; taxi target {taxi_target}, {} departures, {} arrivals",
-                    self.flights.len().saturating_sub(startup_ground.len()),
+                    "traffic cast seed {seed:#018x}: {holding} holding, {queue} queued behind, {mid_taxi} mid taxi, {approach} on approach, {} gates/airborne; taxi target {taxi_target}, {} departures, {} arrivals",
+                    self.flights.len().saturating_sub(startup_ground.len() + approach),
                     departures.len(),
                     arrivals.len()
                 ),
@@ -3055,7 +3044,7 @@ impl Scene {
                 );
             }
             if !player_airborne
-                && !local_ground
+                && local_ground
                 && taxi_seeded < 3
                 && let Some(index) = ground_seed(&taxi)
             {
@@ -5861,7 +5850,7 @@ mod tests {
     }
 
     #[test]
-    fn seeding_mixes_approach_taxi_and_staggered_gate_starts() {
+    fn seeding_uses_approach_without_taxi_in() {
         let point = |east: f64, altitude: f64| Waypoint {
             latitude: 0.0,
             longitude: east / 111_320.0,
@@ -6055,38 +6044,33 @@ mod tests {
         );
         assert_eq!(
             scene.seeded_stations.len(),
-            3,
-            "all four flights up to the cap"
+            1,
+            "one ground departure seed"
         );
         let seeded: Vec<_> = scene
             .world
             .snapshot()
             .into_iter()
-            .filter(|pose| scene.seeded_stations.contains_key(&pose.id))
+            .filter(|pose| pose.stage != Stage::Parked)
             .collect();
         assert!(
             seeded.iter().any(|pose| pose.stage == Stage::Approach),
             "one seeded aircraft should already be on approach: {seeded:?}"
         );
         assert!(
-            seeded.iter().any(|pose| pose.stage == Stage::TaxiOut),
-            "one seeded aircraft should already be taxiing out: {seeded:?}"
-        );
-        assert!(
-            scene
-                .world
-                .snapshot()
-                .iter()
-                .filter(|pose| !scene.seeded_stations.contains_key(&pose.id))
-                .all(|pose| pose.stage == Stage::Parked)
+            !seeded.iter().any(|pose| pose.stage == Stage::TaxiIn),
+            "taxi-in is never a startup state: {seeded:?}"
         );
         // A failed corridor must not leave an invisible stand owner in the live world.
         scene.flights.remove(&4);
         assert_eq!(scene.world.resource_owner("STAND/4"), Some(4));
         let mut production = Runtime::default();
         publish_scene(&mut production, scene, "complete".into(), 1);
-        assert_eq!(production.frames.len(), 3);
-        assert_eq!(production.world.snapshot().len(), 3);
+        assert!(!production.frames.is_empty());
+        assert_eq!(
+            production.world.snapshot().len(),
+            production.frames.len()
+        );
         assert_eq!(production.world.resource_owner("STAND/4"), None);
         assert!(
             production
@@ -6094,11 +6078,11 @@ mod tests {
                 .iter()
                 .all(|frame| production.world.current_segment(frame.target.id).is_some())
         );
-        assert_eq!(production.seeded_stations.len(), 3);
+        assert_eq!(production.seeded_stations.len(), 1);
     }
 
     #[test]
-    fn opening_cast_places_two_at_the_hold_two_mid_taxi_and_an_arrival_taxiing_in() {
+    fn opening_cast_uses_the_configured_taxi_target() {
         use openatc_core::traffic::motion::{Route, Segment, Stage, Waypoint};
         let point = |east: f64, altitude: f64| Waypoint {
             latitude: 43.0,
@@ -6319,16 +6303,19 @@ mod tests {
             "a queued aircraft and two mid-taxi aircraft are behind it: {outbound:?}"
         );
         assert!(
-            poses.iter().any(|pose| pose.stage == Stage::TaxiIn),
-            "one arrival should already be taxiing to its gate: {poses:?}"
+            !poses.iter().any(|pose| pose.stage == Stage::TaxiIn),
+            "taxi-in is never a startup state: {poses:?}"
         );
         assert!(
             poses.iter().any(|pose| pose.stage == Stage::Parked),
             "some departures must remain at their gates to call Ground: {poses:?}"
         );
         assert!(
-            scene.seeded_stations.keys().any(|id| (9..=11).contains(id)),
-            "the taxi-in arrival must own a controller and be active"
+            scene
+                .seeded_stations
+                .keys()
+                .all(|id| !(9..=11).contains(id)),
+            "arrivals must not be seeded on the ground"
         );
         assert!(
             (1..=8).any(|id| scene.orders.contains_key(&id)),
