@@ -172,6 +172,8 @@ pub struct Runtime {
     environments: BTreeMap<String, environment::Environment>,
     weather_observations: environment::Observations,
     active_flights: BTreeSet<u32>,
+    /// Aircraft that began the scene already taxiing with their clearance in place.
+    spawned_taxiing: BTreeSet<u32>,
     handoff_targets: BTreeMap<u32, usize>,
     pending_checkins: BTreeSet<(u32, usize)>,
     controllers: BTreeMap<u32, openatc_core::stations::Station>,
@@ -4515,10 +4517,26 @@ fn publish_scene(runtime: &mut Runtime, mut scene: Scene, key: String, epoch: u6
     runtime.nominal_arrivals = scene.nominal_arrivals;
     runtime.nominal_flights = scene.nominal_flights;
     runtime.flights = scene.flights;
-    // A generated flight starts with its surface route already cleared. Ordinary taxi
-    // movement does not wait for a controller exchange; runway crossings, line-up and
-    // takeoff still require their own grants.
-    for (id, flight) in &runtime.flights {
+    // A generated flight that begins the scene already taxiing has, by definition, already
+    // received its taxi clearance. Approve its surface route now; runway crossings, line-up
+    // and takeoff still require their own grants.
+    runtime.spawned_taxiing.clear();
+    for pose in runtime.world.snapshot() {
+        if pose.id != 0
+            && runtime.flights.contains_key(&pose.id)
+            && matches!(
+                pose.stage,
+                openatc_core::traffic::motion::Stage::TaxiOut
+                    | openatc_core::traffic::motion::Stage::TaxiIn
+            )
+        {
+            runtime.spawned_taxiing.insert(pose.id);
+        }
+    }
+    for id in &runtime.spawned_taxiing {
+        let Some(flight) = runtime.flights.get(id) else {
+            continue;
+        };
         for index in 0..flight.route.segment_count() {
             let Some(segment) = flight.route.segment(index) else {
                 break;
@@ -4980,6 +4998,20 @@ fn advance(runtime: &mut Runtime, telemetry: &openatc_core::state::Telemetry) ->
                     current_approved,
                     next_approved,
                 );
+            }
+            // A generated flight that is already taxiing started with its clearance. Approve
+            // ordinary taxi segments as they are reached so a spawned taxiing aircraft never
+            // sits in `awaiting clearance`. Runway crossings, line-up and takeoff still need
+            // their own grants.
+            if runtime.spawned_taxiing.contains(&pose.id)
+                && matches!(
+                    pose.stage,
+                    openatc_core::traffic::motion::Stage::TaxiOut
+                        | openatc_core::traffic::motion::Stage::TaxiIn
+                )
+                && !runtime.approved_orders.contains(&(pose.id, pose.segment))
+            {
+                runtime.approved_orders.insert((pose.id, pose.segment));
             }
             if pose.awaiting_clearance {
                 // Complete flights carry their own clearances after legacy ground orders are removed.
