@@ -4550,6 +4550,42 @@ fn publish_scene(runtime: &mut Runtime, mut scene: Scene, key: String, epoch: u6
             }
         }
     }
+    // Spread the initial taxiing cast between its stands and the active runway. Without this,
+    // every ground flight starts at the same route end and the airport looks like a car park.
+    let mut spawn_ids: Vec<u32> = runtime.spawned_taxiing.iter().copied().collect();
+    spawn_ids.sort_unstable();
+    let spawn_count = spawn_ids.len();
+    for (position, id) in spawn_ids.into_iter().enumerate() {
+        let Some(surface) = runtime.flights.get(&id).map(|flight| {
+            (0..flight.route.segment_count())
+                .filter(|index| {
+                    flight.route.segment(*index).is_some_and(|segment| {
+                        matches!(
+                            segment.stage,
+                            openatc_core::traffic::motion::Stage::TaxiOut
+                                | openatc_core::traffic::motion::Stage::TaxiIn
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        }) else {
+            continue;
+        };
+        if surface.is_empty() {
+            continue;
+        }
+        let fraction = (position + 1) as f64 / (spawn_count + 1) as f64;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let index = ((fraction * surface.len() as f64) as usize).min(surface.len() - 1);
+        runtime.world.place_on_segment(id, surface[index]);
+    }
+    let poses = runtime.world.snapshot();
+    for frame in &mut runtime.frames {
+        if let Some(pose) = poses.iter().find(|pose| pose.id == frame.target.id) {
+            frame.target.latitude = pose.position.latitude;
+            frame.target.longitude = pose.position.longitude;
+        }
+    }
     let roster = runtime
         .world
         .snapshot()

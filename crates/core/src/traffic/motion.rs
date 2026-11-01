@@ -1209,6 +1209,32 @@ impl World {
         );
         true
     }
+    /// Move an inserted aircraft to a different surface segment without advancing time.
+    ///
+    /// Used when dressing the airport at startup so taxiing traffic can begin between a
+    /// stand and the active runway instead of all starting at the same route end.
+    pub fn place_on_segment(&mut self, id: u32, segment: usize) -> bool {
+        let Some(aircraft) = self.aircraft.get_mut(&id) else {
+            return false;
+        };
+        if segment >= aircraft.route.segment_count() || !aircraft.route.segments[segment].stage.on_ground()
+        {
+            return false;
+        }
+        self.owners.retain(|_, owner| *owner != id);
+        aircraft.segment = segment;
+        aircraft.elapsed = 0.0;
+        aircraft.authorised = false;
+        aircraft.complete = false;
+        aircraft.next_authorised = false;
+        aircraft.airborne_authority = None;
+        aircraft.hold_exit = None;
+        aircraft.holding = false;
+        aircraft.surface_reservation = None;
+        aircraft.speed = 0.0;
+        true
+    }
+
     /// Admit an aircraft that is already established on an airborne segment of its route.
     ///
     /// The seeded aircraft owns no surface resources and starts with authority only for its
