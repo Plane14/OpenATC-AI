@@ -12,6 +12,7 @@
 
 use crate::interface::Interface;
 use crate::widgets;
+use openatc_core::aircraft::AircraftBehaviour;
 use openatc_core::ops::{phase_name, request_available, AcfSpecs, acf_specs_to_aircraft, select_best_approach, select_best_sid, select_best_star, validate_approach_performance, validate_sid_performance, validate_star_performance};
 use openatc_core::state::{Request, State};
 use openatc_core::{altitude_text, feet_to_meters, meters_to_feet, resolve_units};
@@ -1298,20 +1299,18 @@ fn load_airport(interface: &mut Interface, icao: &str) {
 }
 
 /// Load procedures catalogue for an airport from the simulator navdata.
-fn load_procedures_catalogue(icao: &str) -> Option<openatc_core::traffic::procedures::Catalogue> {
+fn load_procedures_catalogue(icao: &str, simulator_root: &str) -> Option<openatc_core::traffic::procedures::Catalogue> {
     if icao.is_empty() || icao.len() != 4 {
         return None;
     }
-    let settings = openatc_settings::Settings::default();
-    let root = &settings.simulator_root;
-    if root.is_empty() {
+    if simulator_root.is_empty() {
         return None;
     }
-    let custom = format!("{root}/Custom Data/CIFP/{icao}.dat");
+    let custom = format!("{simulator_root}/Custom Data/CIFP/{icao}.dat");
     let path = if std::path::Path::new(&custom).is_file() {
         custom
     } else {
-        format!("{root}/Resources/default data/CIFP/{icao}.dat")
+        format!("{simulator_root}/Resources/default data/CIFP/{icao}.dat")
     };
     std::fs::read_to_string(&path).ok().and_then(|text| {
         openatc_core::traffic::procedures::Catalogue::parse(&text).ok()
@@ -2228,7 +2227,7 @@ fn intercom_overrides(ui: &imgui::Ui, interface: &mut Interface) {
 }
 
 /// Labelled settings text field.
-fn setting_input(ui: &imgui::Ui, title: &str, value: &mut String, capacity: usize) {
+pub fn setting_input(ui: &imgui::Ui, title: &str, value: &mut String, capacity: usize) {
     ui.text_disabled(title);
     ui.set_next_item_width(-1.0);
     widgets::edit_text(ui, &format!("##{title}"), value, capacity);
@@ -2591,6 +2590,8 @@ fn voice_popup(ui: &imgui::Ui, interface: &mut Interface) {
                     if ui.button("Listen") {
                         interface.speak_entry(&openatc_core::state::Transmission {
                             radio: None,
+                            frequency: None,
+                            gap_ms: 0,
                             information_only: false,
                             speaker: "ATC".into(),
                             text: interface.voice_preview_text.clone(),
@@ -2763,6 +2764,8 @@ fn audio_levels_row(ui: &imgui::Ui, interface: &mut Interface) {
     if ui.button("Test controller voice") {
         interface.speak_entry(&openatc_core::state::Transmission {
             radio: None,
+            frequency: None,
+            gap_ms: 0,
             information_only: false,
             pilot_reply: String::new(),
             background: false,
@@ -2866,6 +2869,10 @@ fn realism_tab(ui: &imgui::Ui, interface: &mut Interface) {
         "Allow other pilots to call me",
         &mut interface.settings.pilots_call_me,
     );
+    ui.checkbox(
+        "Enable airport chatter on tuned frequencies",
+        &mut interface.settings.airport_chatter,
+    );
     let mut chat_chance = i32::from(interface.settings.pilot_chat_chance_percent);
     widgets::muted_wrapped(ui, "Chance per eligible opportunity (%)");
     ui.set_next_item_width(-1.0);
@@ -2901,25 +2908,40 @@ fn automation_tab(ui: &imgui::Ui, interface: &mut Interface) {
     widgets::section_title(ui, "FLIGHT AUTOMATION");
     let _disabled = ui.begin_disabled(!interface.engine.connected());
 
+    // Fetch automation status
+    if let Some(reply) = interface.engine.take_reply("/automation") {
+        if reply.success {
+            interface.automation_status = reply.data;
+        }
+    }
+    if interface.automation_status["lastRequested"] != "status" {
+        interface.engine.post("/automation", serde_json::json!({"action": "status"}));
+        interface.automation_status["lastRequested"] = "status".into();
+    }
+
     // Automation status display
-    let state = interface.engine.state();
-    let automation = &state.automation.status;
+    let automation = &interface.automation_status;
+    let active = automation["active"].as_bool().unwrap_or(false);
     ui.text_colored(
-        if automation.active {
+        if active {
             widgets::accent(ui)
         } else {
             widgets::warning(ui)
         },
-        format!("Status: {}", if automation.active { "ACTIVE" } else { "IDLE" })
+        format!("Status: {}", if active { "ACTIVE" } else { "IDLE" })
     );
-    ui.text(format!("Phase: {:?}", automation.phase));
-    ui.text(format!("Flight: {} / {}", automation.current_flight, automation.total_flights));
-    ui.text(format!("Last action: {}", automation.last_action));
-    ui.text(format!("Next action: {}", automation.next_action));
+    ui.text(format!("Phase: {:?}", automation["phase"].as_str().unwrap_or("Idle")));
+    ui.text(format!(
+        "Flight: {} / {}",
+        automation["current_flight"].as_u64().unwrap_or(0),
+        automation["total_flights"].as_u64().unwrap_or(0)
+    ));
+    ui.text(format!("Last action: {}", automation["last_action"].as_str().unwrap_or("")));
+    ui.text(format!("Next action: {}", automation["next_action"].as_str().unwrap_or("")));
     ui.spacing();
 
     // Controls
-    if !automation.active {
+    if !active {
         if ui.button("Start Automation") {
             interface.engine.post("/automation", serde_json::json!({"action": "start"}));
         }
@@ -2931,7 +2953,8 @@ fn automation_tab(ui: &imgui::Ui, interface: &mut Interface) {
         if ui.button("Stop After This Flight") {
             interface.engine.post("/automation", serde_json::json!({"action": "toggle_stop_after_flight"}));
         }
-        ui.text_wrapped(if automation.stop_after_flight {
+        let stop_after_flight = automation["stop_after_flight"].as_bool().unwrap_or(false);
+        ui.text_wrapped(if stop_after_flight {
             "Will stop after current flight completes."
         } else {
             "Will continue to next flight (if randomized flights enabled)."
@@ -3313,12 +3336,12 @@ fn procedures_tab(ui: &imgui::Ui, interface: &mut Interface) {
     if let Some(specs) = &interface.loaded_aircraft_specs {
         let aircraft = acf_specs_to_aircraft(specs);
         if ui.button("Auto-select procedures for loaded aircraft") {
-            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.departure) {
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.departure, &interface.settings.simulator_root) {
                 if let Some(sid) = select_best_sid(&catalogue, &interface.draft.runway, &aircraft) {
                     interface.draft.sid = sid;
                 }
             }
-            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination) {
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination, &interface.settings.simulator_root) {
                 if let Some(star) = select_best_star(&catalogue, &interface.draft.arrival_runway, &aircraft) {
                     interface.draft.star = star;
                 }
@@ -3373,8 +3396,9 @@ fn procedures_tab(ui: &imgui::Ui, interface: &mut Interface) {
     // Show performance validation warnings
     if let Some(specs) = &interface.loaded_aircraft_specs {
         let aircraft = acf_specs_to_aircraft(specs);
+        let sim_root = &interface.settings.simulator_root;
         if !interface.draft.sid.is_empty() && !interface.draft.runway.is_empty() {
-            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.departure) {
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.departure, sim_root) {
                 if let Ok(warnings) = validate_sid_performance(&catalogue, &interface.draft.sid, &interface.draft.runway, &interface.draft.sid_transition, &aircraft) {
                     for warning in warnings {
                         ui.text_colored(widgets::warning(ui), format!("⚠ {}", warning));
@@ -3383,7 +3407,7 @@ fn procedures_tab(ui: &imgui::Ui, interface: &mut Interface) {
             }
         }
         if !interface.draft.star.is_empty() && !interface.draft.arrival_runway.is_empty() {
-            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination) {
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination, sim_root) {
                 if let Ok(warnings) = validate_star_performance(&catalogue, &interface.draft.star, &interface.draft.arrival_runway, &interface.draft.star_transition, &aircraft) {
                     for warning in warnings {
                         ui.text_colored(widgets::warning(ui), format!("⚠ {}", warning));
@@ -3392,7 +3416,7 @@ fn procedures_tab(ui: &imgui::Ui, interface: &mut Interface) {
             }
         }
         if !interface.draft.approach.is_empty() {
-            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination) {
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination, sim_root) {
                 if let Ok(warnings) = validate_approach_performance(&catalogue, &interface.draft.approach, &interface.draft.approach, &aircraft) {
                     for warning in warnings {
                         ui.text_colored(widgets::warning(ui), format!("⚠ {}", warning));
@@ -3903,6 +3927,8 @@ mod tests {
         let transcript = vec![
             Transmission {
                 radio: Some(openatc_core::state::Radio::Com1),
+                frequency: None,
+                gap_ms: 0,
                 information_only: false,
                 pilot_reply: String::new(),
                 background: false,
@@ -3917,6 +3943,8 @@ mod tests {
             },
             Transmission {
                 radio: Some(openatc_core::state::Radio::Com1),
+                frequency: None,
+                gap_ms: 0,
                 information_only: false,
                 pilot_reply: String::new(),
                 background: false,
@@ -4162,6 +4190,8 @@ mod tests {
             pilot_reply: String::new(),
             urgent: false,
             information_only: false,
+            frequency: None,
+            gap_ms: 0,
         };
         let entry = &mut entry;
         let airport = openatc_core::airport::Airport::default();

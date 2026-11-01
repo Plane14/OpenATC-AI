@@ -743,7 +743,7 @@ async fn tokenize(
             .iter()
             .map(|message| message.content.len())
             .sum::<usize>()
-            > 262144
+            > 262_144
     {
         return Err(api_error(
             StatusCode::BAD_REQUEST,

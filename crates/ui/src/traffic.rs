@@ -7,6 +7,7 @@
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
+use crate::pages::setting_input;
 use crate::widgets;
 use openatc_core::state::State;
 
@@ -192,11 +193,11 @@ pub fn settings(ui: &imgui::Ui, interface: &mut crate::interface::Interface) {
     if ui.slider("##adsb-radius", 10.0, 200.0, &mut radius) {
         interface.settings.adsb_lol_radius_nm = radius as f64;
     }
-    let mut update_interval = i32::from(interface.settings.adsb_lol_update_interval_sec);
+    let mut update_interval = interface.settings.adsb_lol_update_interval_sec as i32;
     widgets::muted_wrapped(ui, "Update interval (seconds)");
     ui.set_next_item_width(-1.0);
     if ui.slider("##adsb-interval", 10, 300, &mut update_interval) {
-        interface.settings.adsb_lol_update_interval_sec = update_interval as u64;
+        interface.settings.adsb_lol_update_interval_sec = update_interval.clamp(10, 300) as u64;
     }
     ui.text_wrapped("ADSB.lol provides real-time ADS-B traffic data. Enable to merge live traffic with generated flights. Requires internet connection. The API is free but rate-limited.");
     

@@ -111,6 +111,7 @@ pub struct Interface {
     pub(crate) model_install_status: serde_json::Value,
     pub(crate) model_install_checked: f64,
     pub(crate) model_install_pending: bool,
+    pub(crate) automation_status: serde_json::Value,
     pub(crate) missions: crate::missions::Browser,
     /// Engine connection plus snapshot cache.
     pub engine: EngineClient,
@@ -426,6 +427,7 @@ impl Interface {
             model_install_status: serde_json::Value::Null,
             model_install_checked: 0.0,
             model_install_pending: false,
+            automation_status: serde_json::Value::Null,
             missions: crate::missions::Browser::default(),
             engine: EngineClient::new(endpoint),
             occupied_airport: String::new(),
@@ -1573,6 +1575,8 @@ impl Interface {
                     self.atis_airport = reply.data["airport"].as_str().unwrap_or("").to_owned();
                     self.speak_entry(&Transmission {
                         radio: Some(radio),
+                        frequency: None,
+                        gap_ms: 0,
                         information_only: false,
                         pilot_reply: String::new(),
                         background: false,
@@ -2514,6 +2518,8 @@ mod radio_busy_tests {
             .speech_queue
             .push_back(openatc_core::state::Transmission {
                 radio: Some(openatc_core::state::Radio::Com2),
+                frequency: None,
+                gap_ms: 0,
                 speaker: "ATC".into(),
                 information_only: false,
                 pilot_reply: String::new(),

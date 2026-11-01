@@ -39,6 +39,16 @@ pub(crate) fn bad_request(message: impl Into<String>) -> Response {
         .into_response()
 }
 
+/// JSON success response with HTTP status 200 and a simple message.
+pub(crate) fn ok(message: impl Into<String>) -> Response {
+    Json(json!({"message": message.into()})).into_response()
+}
+
+/// JSON success response with HTTP status 200 and a custom JSON body.
+pub(crate) fn ok_json(value: Value) -> Response {
+    Json(value).into_response()
+}
+
 fn delivery_name(delivery: Delivery) -> &'static str {
     match delivery {
         Delivery::Standard => "standard",
@@ -1438,7 +1448,14 @@ pub async fn post_automation(
 
     match action {
         "start" => {
-            state.automation.start(&mut state);
+            let mut automation = std::mem::take(&mut state.automation);
+            let state_mut = &mut *state;
+            let session = &mut state_mut.session;
+            let loaded_aircraft_specs = &mut state_mut.loaded_aircraft_specs;
+            let settings = &state_mut.settings;
+            let arrival_airport = &state_mut.arrival_airport;
+            automation.start(session, loaded_aircraft_specs, settings, arrival_airport);
+            state.automation = automation;
             ok("Automation started")
         }
         "stop" => {
@@ -1455,7 +1472,7 @@ pub async fn post_automation(
             ok_json(json!({
                 "active": state.automation.status.active,
                 "phase": state.automation.status.phase,
-                "stop_after_flight": state.automation.status.stop_after_flight,
+                "stop_after_flight": state.automation.config.stop_after_flight,
                 "current_flight": state.automation.status.current_flight,
                 "total_flights": state.automation.status.total_flights,
                 "last_action": state.automation.status.last_action,
@@ -2205,6 +2222,8 @@ pub(crate) fn assign_airspace_controller(
     let position = airspace.split(':').nth(1).unwrap_or(airspace).to_owned();
     SpeechTag {
         radio: None,
+        frequency: None,
+        gap_ms: 0,
         position,
         voice: controller.voice.clone(),
         delivery: controller.delivery.clone(),

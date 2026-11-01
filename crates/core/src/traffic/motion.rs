@@ -2310,13 +2310,13 @@ impl World {
                 .iter()
                 .any(|resource| blocked.contains(resource))
         });
-        let owned = (segment..=end).find(|index| {
+        let owned_by_other = (segment..=end).find(|index| {
             aircraft.route.segments[*index]
                 .resources
                 .iter()
-                .any(|resource| self.owners.get(resource).is_some_and(|owner| *owner != id))
+                .any(|resource| self.owners.get(resource).is_some_and(|o| *o != id))
         });
-        let limit = match (external, owned) {
+        let limit = match (external, owned_by_other) {
             (Some(left), Some(right)) => Some(left.min(right)),
             (Some(index), None) | (None, Some(index)) => Some(index),
             (None, None) => None,
@@ -2327,19 +2327,19 @@ impl World {
                 if index == segment || external == Some(index) {
                     return false;
                 }
-                let owner = aircraft.route.segments[index]
+                let blocker = aircraft.route.segments[index]
                     .resources
                     .iter()
                     .find_map(|resource| {
                         self.owners
                             .get(resource)
                             .copied()
-                            .filter(|owner| *owner != id)
+                            .filter(|o| *o != id)
                     });
-                let Some(owner) = owner else {
+                let Some(blocker) = blocker else {
                     return false;
                 };
-                if !self.companion(id, owner) {
+                if !self.companion(id, blocker) {
                     return false;
                 }
                 index - 1

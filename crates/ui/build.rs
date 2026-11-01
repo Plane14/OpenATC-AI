@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
