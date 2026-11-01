@@ -191,6 +191,9 @@ impl AutomationEngine {
         settings: &Settings,
         arrival_airport: &Option<Airport>,
     ) {
+        // Update config from settings before starting
+        self.config = AutomationConfig::from_settings(settings);
+        
         if !self.config.enabled {
             return;
         }

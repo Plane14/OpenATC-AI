@@ -44,6 +44,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing;
 
 /// Product version with the compile timestamp.
 pub const VERSION: &str = concat!("0.2.1 (", env!("OPENATC_BUILD"), ")");
@@ -388,6 +389,36 @@ async fn weather_loop(shared: Shared) {
     }
 }
 
+/// Periodically fetch real-time traffic from ADSB.lol if enabled.
+async fn adsb_loop(shared: Shared) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let (enabled, url, api_key, radius_nm, interval_sec) = {
+            let state = shared.read().await;
+            (
+                state.settings.adsb_lol_enabled,
+                state.settings.adsb_lol_url.clone(),
+                state.settings.adsb_lol_api_key.clone(),
+                state.settings.adsb_lol_radius_nm,
+                state.settings.adsb_lol_update_interval_sec,
+            )
+        };
+        if !enabled {
+            continue;
+        }
+        // TODO: Implement ADSB.lol fetch and merge with generated traffic
+        // This would require:
+        // 1. Fetch from API with radius and interval settings
+        // 2. Parse aircraft positions
+        // 3. Merge with generated traffic in state
+        // For now, just log that the feature is configured
+        tracing::debug!(
+            "ADSB.lol configured: url={}, radius={}nm, interval={}s",
+            url, radius_nm, interval_sec
+        );
+    }
+}
+
 /// Reload an edited prompt catalogue without interrupting an in-flight exchange.
 async fn reload_prompts_if_changed(shared: &Shared, stamp: &mut std::time::SystemTime) {
     let (config_dir, exe_dir) = {
@@ -665,6 +696,8 @@ async fn main() {
     setup::start_initial(&shared).await;
     let weather = shared.clone();
     tokio::spawn(async move { weather_loop(weather).await });
+    let adsb = shared.clone();
+    tokio::spawn(async move { adsb_loop(adsb).await });
     let lifetime = Arc::new(lifecycle::PluginSession::new(plugin_parent));
     let app = axum::Router::new()
         .route("/health", get(routes::health))
@@ -698,6 +731,7 @@ async fn main() {
         .route("/traffic/models/install", post(traffic_models::install))
         .route("/traffic/models/cancel", post(traffic_models::cancel))
         .route("/atc/offer", post(initiative::answer))
+        .route("/automation", post(routes::post_automation))
         .route("/simulator/root", post(routes::post_simulator_root))
         .route("/debug/cancel-actions", post(routes::debug_cancel_actions))
         .route("/debug/jump/prepare", post(debug_jump::prepare))

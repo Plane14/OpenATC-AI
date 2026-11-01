@@ -3,6 +3,11 @@ name = "openatc-settings"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "Settings management for OpenATC"
+repository = "https://github.com/billpayne4x4/OpenATC-AI"
+readme = "README.md"
+keywords = ["x-plane", "atc", "settings", "configuration"]
+categories = ["simulation", "game-development", "configuration"]
 
 [dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }

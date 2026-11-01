@@ -226,7 +226,7 @@ pub struct Settings {
     pub traffic_circuit_turboprop_nm: f64,
     /// Keep an airport alive this far from a light aircraft flying a local circuit.
     pub traffic_circuit_ga_nm: f64,
-    /// Wake-separation table: auto, icao, recat_eu, faa_cwt or mats.
+    /// Wake-separation table: auto, icao, `recat_eu`, `faa_cwt` or mats.
     pub wake_standard: String,
     /// Speak simulated pilot reports based on observed local traffic movements.
     pub hear_traffic_radio: bool,

@@ -23,6 +23,7 @@ zip = { version = "=6.0.0", default-features = false, features = ["deflate"] }
 sevenz-rust2 = { version = "=0.23.0", default-features = false }
 openatc-core = { path = "../core" }
 openatc-settings = { path = "../settings" }
+tracing = { version = "=0.1.44", features = ["std"] }
 
 [lints]
 workspace = true

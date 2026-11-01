@@ -153,7 +153,7 @@ fn model_usage(runtime: &Runtime, kind: &str, selected: bool) -> Value {
                     .iter()
                     .filter_map(|r| r["memoryMiB"].as_u64())
                     .sum::<u64>()
-                    * 1048576,
+                    * 1_048_576,
             );
         }
     }

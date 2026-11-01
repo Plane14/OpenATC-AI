@@ -1299,20 +1299,18 @@ fn load_airport(interface: &mut Interface, icao: &str) {
 }
 
 /// Load procedures catalogue for an airport from the simulator navdata.
-fn load_procedures_catalogue(icao: &str) -> Option<openatc_core::traffic::procedures::Catalogue> {
+fn load_procedures_catalogue(icao: &str, simulator_root: &str) -> Option<openatc_core::traffic::procedures::Catalogue> {
     if icao.is_empty() || icao.len() != 4 {
         return None;
     }
-    let settings = openatc_settings::Settings::default();
-    let root = &settings.simulator_root;
-    if root.is_empty() {
+    if simulator_root.is_empty() {
         return None;
     }
-    let custom = format!("{root}/Custom Data/CIFP/{icao}.dat");
+    let custom = format!("{simulator_root}/Custom Data/CIFP/{icao}.dat");
     let path = if std::path::Path::new(&custom).is_file() {
         custom
     } else {
-        format!("{root}/Resources/default data/CIFP/{icao}.dat")
+        format!("{simulator_root}/Resources/default data/CIFP/{icao}.dat")
     };
     std::fs::read_to_string(&path).ok().and_then(|text| {
         openatc_core::traffic::procedures::Catalogue::parse(&text).ok()
@@ -2871,6 +2869,10 @@ fn realism_tab(ui: &imgui::Ui, interface: &mut Interface) {
         "Allow other pilots to call me",
         &mut interface.settings.pilots_call_me,
     );
+    ui.checkbox(
+        "Enable airport chatter on tuned frequencies",
+        &mut interface.settings.airport_chatter,
+    );
     let mut chat_chance = i32::from(interface.settings.pilot_chat_chance_percent);
     widgets::muted_wrapped(ui, "Chance per eligible opportunity (%)");
     ui.set_next_item_width(-1.0);
@@ -3334,12 +3336,12 @@ fn procedures_tab(ui: &imgui::Ui, interface: &mut Interface) {
     if let Some(specs) = &interface.loaded_aircraft_specs {
         let aircraft = acf_specs_to_aircraft(specs);
         if ui.button("Auto-select procedures for loaded aircraft") {
-            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.departure) {
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.departure, &interface.settings.simulator_root) {
                 if let Some(sid) = select_best_sid(&catalogue, &interface.draft.runway, &aircraft) {
                     interface.draft.sid = sid;
                 }
             }
-            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination) {
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination, &interface.settings.simulator_root) {
                 if let Some(star) = select_best_star(&catalogue, &interface.draft.arrival_runway, &aircraft) {
                     interface.draft.star = star;
                 }
@@ -3394,8 +3396,9 @@ fn procedures_tab(ui: &imgui::Ui, interface: &mut Interface) {
     // Show performance validation warnings
     if let Some(specs) = &interface.loaded_aircraft_specs {
         let aircraft = acf_specs_to_aircraft(specs);
+        let sim_root = &interface.settings.simulator_root;
         if !interface.draft.sid.is_empty() && !interface.draft.runway.is_empty() {
-            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.departure) {
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.departure, sim_root) {
                 if let Ok(warnings) = validate_sid_performance(&catalogue, &interface.draft.sid, &interface.draft.runway, &interface.draft.sid_transition, &aircraft) {
                     for warning in warnings {
                         ui.text_colored(widgets::warning(ui), format!("⚠ {}", warning));
@@ -3404,7 +3407,7 @@ fn procedures_tab(ui: &imgui::Ui, interface: &mut Interface) {
             }
         }
         if !interface.draft.star.is_empty() && !interface.draft.arrival_runway.is_empty() {
-            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination) {
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination, sim_root) {
                 if let Ok(warnings) = validate_star_performance(&catalogue, &interface.draft.star, &interface.draft.arrival_runway, &interface.draft.star_transition, &aircraft) {
                     for warning in warnings {
                         ui.text_colored(widgets::warning(ui), format!("⚠ {}", warning));
@@ -3413,7 +3416,7 @@ fn procedures_tab(ui: &imgui::Ui, interface: &mut Interface) {
             }
         }
         if !interface.draft.approach.is_empty() {
-            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination) {
+            if let Some(catalogue) = load_procedures_catalogue(&interface.draft.destination, sim_root) {
                 if let Ok(warnings) = validate_approach_performance(&catalogue, &interface.draft.approach, &interface.draft.approach, &aircraft) {
                     for warning in warnings {
                         ui.text_colored(widgets::warning(ui), format!("⚠ {}", warning));

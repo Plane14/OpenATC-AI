@@ -67,7 +67,7 @@ impl EurocontrolClient {
                 .build()
                 .unwrap_or_default(),
             cache: EurocontrolCache {
-                cache_duration: Duration::from_secs(24 * 3600), // 24 hours
+                cache_duration: Duration::from_hours(24), // 24 hours
                 ..Default::default()
             },
         }

@@ -969,13 +969,13 @@ pub fn read_acf_specs(path: &std::path::Path) -> Result<AcfSpecs, String> {
         std::fs::read_to_string(path).map_err(|error| format!("cannot open file: {error}"))?;
 
     let mut specs = AcfSpecs::default();
-    let mut in_aircraft_section = false;
+    let mut _in_aircraft_section = false;
 
     for line in text.lines() {
         let line = line.trim();
 
         if line == "ACF" || line == "AIRCRAFT" {
-            in_aircraft_section = true;
+            _in_aircraft_section = true;
             continue;
         }
 
@@ -1333,7 +1333,7 @@ pub fn select_best_sid(
     let mut best_score = i32::MAX;
 
     for (key, legs) in routes {
-        if !key.transition.contains(&runway.trim_end_matches(['L', 'R', 'C'])) {
+        if !key.transition.contains(&runway.trim_end_matches(|c| matches!(c, 'L' | 'R' | 'C'))) {
             continue;
         }
         let mut score = 0;
@@ -1388,7 +1388,7 @@ pub fn select_best_star(
     let mut best_score = i32::MAX;
 
     for (key, legs) in routes {
-        if !key.transition.contains(&runway.trim_end_matches(['L', 'R', 'C'])) {
+        if !key.transition.contains(&runway.trim_end_matches(|c| matches!(c, 'L' | 'R' | 'C'))) {
             continue;
         }
         let mut score = 0;

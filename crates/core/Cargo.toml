@@ -3,13 +3,18 @@ name = "openatc-core"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+description = "Core logic for OpenATC: ATC simulation, traffic generation, flight planning, and radio communication"
+repository = "https://github.com/billpayne4x4/OpenATC-AI"
+readme = "README.md"
+keywords = ["x-plane", "atc", "simulation", "aviation"]
+categories = ["simulation", "game-development", "api-bindings"]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 dubins_paths = "=3.1.0"
 earcutr = "=0.4.3"
 regex = "=1.13.1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "=1.0.229", features = ["derive", "rc"] }
 serde_json = "=1.0.151"
 serde_repr = "=0.1.21"
