@@ -77,18 +77,18 @@ pub fn weather_multiplier(
     }
 
     // Visibility factor: 1.0 at or above the minimum, scaling down to 0.25 at zero.
-    let vis_factor = if visibility >= settings.weather_min_visibility_meters as f64 {
+    let vis_factor = if visibility >= f64::from(settings.weather_min_visibility_meters) {
         1.0f32
     } else {
-        let min = settings.weather_min_visibility_meters.max(1.0) as f64;
+        let min = f64::from(settings.weather_min_visibility_meters.max(1.0));
         (0.25f64 + 0.75f64 * (visibility / min).clamp(0.0, 1.0)) as f32
     };
 
     // Wind factor: 1.0 at or below the maximum, scaling down to 0.25 at double the max.
-    let wind_factor = if wind <= settings.weather_max_wind_knots as f64 {
+    let wind_factor = if wind <= f64::from(settings.weather_max_wind_knots) {
         1.0f32
     } else {
-        let max = settings.weather_max_wind_knots.max(1.0) as f64;
+        let max = f64::from(settings.weather_max_wind_knots.max(1.0));
         let excess = (wind - max) / max; // 0 at max, 1 at double max
         (1.0f64 - 0.75f64 * excess.clamp(0.0, 1.0)) as f32
     };

@@ -1,7 +1,6 @@
 //! Airport-local runway, taxi and resource state. Weather and traffic stay outside.
 
 use openatc_core::airport::Airport;
-use openatc_core::state::Point;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -18,6 +17,7 @@ pub struct RunwayAssignment {
 }
 
 /// Airport data kept only while the player or a live aircraft still needs it.
+#[derive(Default)]
 pub struct AirportManager {
     contexts: BTreeMap<String, AirportContext>,
 }
@@ -39,13 +39,6 @@ struct End<'a> {
     physical: usize,
 }
 
-impl Default for AirportManager {
-    fn default() -> Self {
-        Self {
-            contexts: BTreeMap::new(),
-        }
-    }
-}
 
 impl AirportManager {
     /// Load or refresh one airport context.
@@ -230,8 +223,8 @@ fn runway_ends(airport: &Airport) -> Vec<End<'_>> {
     ends
 }
 
-fn choose_departure<'a>(
-    ends: &[End<'a>],
+fn choose_departure(
+    ends: &[End<'_>],
     planned: &str,
     wind_from: f64,
     wind_knots: f64,
@@ -298,6 +291,7 @@ fn runway_key(airport: &Airport, name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use openatc_core::airport::Runway;
+    use openatc_core::state::Point;
 
     fn point(east: f64, north: f64) -> Point {
         Point {

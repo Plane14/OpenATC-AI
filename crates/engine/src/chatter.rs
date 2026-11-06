@@ -98,11 +98,10 @@ impl ChatterManager {
                             .is_none_or(|loaded| loaded.icao != airport)
                         && !state.chatter.airports.contains_key(&airport)
                         && !state.chatter.loading.contains(&airport)
-                        && !state
+                        && state
                             .chatter
                             .failed
-                            .get(&airport)
-                            .is_some_and(|at| at.elapsed() < Duration::from_secs(60)))
+                            .get(&airport).is_none_or(|at| at.elapsed() >= Duration::from_secs(60)))
                     .then_some(airport)
                 })
                 .collect::<BTreeSet<_>>();
@@ -186,8 +185,8 @@ impl ChatterManager {
             if let Some(session) = self.sessions.get(&frequency) {
                 if session.last_station_check.elapsed() < Duration::from_secs(5) {
                     keep = true;
-                } else if let Some(station) = station_for(state, frequency, &telemetry) {
-                    if station.airport == session.airport
+                } else if let Some(station) = station_for(state, frequency, &telemetry)
+                    && station.airport == session.airport
                         && service_for(&station) == session.service
                     {
                         if let Some(session) = self.sessions.get_mut(&frequency) {
@@ -198,7 +197,6 @@ impl ChatterManager {
                         }
                         keep = true;
                     }
-                }
             }
             if keep {
                 if let Some(session) = self.sessions.get_mut(&frequency) {

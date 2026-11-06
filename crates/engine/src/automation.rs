@@ -10,16 +10,14 @@
 use crate::EngineState;
 use openatc_core::{
     airport::Airport,
-    apply::add_transmission,
     dialogue::say,
-    eurocontrol::{AircraftPerformance, EurocontrolClient, merge_performance_data},
+    eurocontrol::{AircraftPerformance, EurocontrolClient},
     ops::{distance_nm, AcfSpecs},
-    state::{PhaseCode, Request, SpeechTag, State},
-    stations::{Station, nearby, tuned},
+    state::{PhaseCode, Request, State},
 };
 use openatc_settings::Settings;
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Automation state machine phases.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,7 +225,7 @@ impl AutomationEngine {
         let icao = session.plan.aircraft.clone();
         if !icao.is_empty() {
             // Try to get from ACF specs first
-            if let Some(acf_specs) = loaded_aircraft_specs {
+            if let Some(_acf_specs) = loaded_aircraft_specs {
                 // We'll merge with Eurocontrol data when we have it
                 // For now, just store the ACF specs
             }
@@ -323,7 +321,7 @@ impl AutomationEngine {
         // Check if we need to generate next flight
         if self.phase == AutomationPhase::Complete {
             if let Some(last_end) = self.random_flight_state.last_flight_end {
-                if now.duration_since(last_end).as_secs() > 60 * self.config.min_flight_interval_min as u64 {
+                if now.duration_since(last_end).as_secs() > 60 * u64::from(self.config.min_flight_interval_min) {
                     self.generate_next_random_flight(state);
                 }
             } else {
@@ -345,17 +343,16 @@ impl AutomationEngine {
         }
 
         // Check weight limits
-        if let Some(specs) = &state.loaded_aircraft_specs {
-            if state.session.plan.takeoff_weight_kg > specs.max_takeoff_weight_kg.unwrap_or(f64::MAX) {
+        if let Some(specs) = &state.loaded_aircraft_specs
+            && state.session.plan.takeoff_weight_kg > specs.max_takeoff_weight_kg.unwrap_or(f64::MAX) {
                 self.automation_errors.push(format!(
                     "Takeoff weight {:.0} kg exceeds MTOW {:.0} kg",
                     state.session.plan.takeoff_weight_kg, specs.max_takeoff_weight_kg.unwrap_or(0.0)
                 ));
             }
-        }
 
         // Verify alternate is selected
-        if self.current_flight_plan.as_ref().map(|p| p.alternate.is_empty()).unwrap_or(true) {
+        if self.current_flight_plan.as_ref().is_none_or(|p| p.alternate.is_empty()) {
             self.automation_errors.push("No alternate airport selected".to_string());
         }
 
@@ -376,7 +373,7 @@ impl AutomationEngine {
             self.advance_phase(AutomationPhase::BeforeStart);
         } else {
             // Request startup clearance
-            let request = Request {
+            let _request = Request {
                 intent: "startup".to_string(),
                 text: say("pilot_request_startup", &[("callsign", state.session.plan.callsign.clone())]),
                 ..Default::default()
@@ -395,7 +392,7 @@ impl AutomationEngine {
         }
     }
 
-    fn after_start_phase(&mut self, state: &mut EngineState) {
+    fn after_start_phase(&mut self, _state: &mut EngineState) {
         self.status.last_action = "After start checks".to_string();
         self.status.next_action = "Request taxi clearance".to_string();
 
@@ -463,8 +460,8 @@ impl AutomationEngine {
         let distance_to_dest = distance_nm(
             state.session.telemetry.latitude,
             state.session.telemetry.longitude,
-            state.arrival_airport.as_ref().map(|a| a.reference_latitude).unwrap_or(0.0),
-            state.arrival_airport.as_ref().map(|a| a.reference_longitude).unwrap_or(0.0),
+            state.arrival_airport.as_ref().map_or(0.0, |a| a.reference_latitude),
+            state.arrival_airport.as_ref().map_or(0.0, |a| a.reference_longitude),
         );
 
         let descent_rate = state.session.plan.fixes.iter()
@@ -472,7 +469,7 @@ impl AutomationEngine {
             .max_by(f64::total_cmp)
             .unwrap_or(250.0);
 
-        let descent_distance = (state.session.telemetry.altitude_feet - state.arrival_airport.as_ref().map(|a| a.elevation_feet).unwrap_or(0.0) as f64)
+        let descent_distance = (state.session.telemetry.altitude_feet - state.arrival_airport.as_ref().map_or(0.0, |a| a.elevation_feet))
             / (descent_rate / 60.0) * (state.session.telemetry.ground_speed_knots / 60.0);
 
         if distance_to_dest <= descent_distance / 1852.0 + 10.0 {
@@ -530,7 +527,7 @@ impl AutomationEngine {
         }
     }
 
-    fn complete_phase(&mut self, state: &mut EngineState) {
+    fn complete_phase(&mut self, _state: &mut EngineState) {
         self.status.last_action = "Flight complete".to_string();
         self.status.next_action = if self.config.randomized_flights {
             "Waiting for next flight".to_string()
@@ -542,16 +539,15 @@ impl AutomationEngine {
         self.status.current_flight += 1;
 
         // Refuel for next flight if randomized
-        if self.config.randomized_flights {
-            if let Some(next_plan) = &self.current_flight_plan {
+        if self.config.randomized_flights
+            && let Some(next_plan) = &self.current_flight_plan {
                 let required_fuel = next_plan.fuel_plan_kg;
                 if required_fuel > 0.0 {
-                    self.status.next_action = format!("Refueling {:.0} kg for next flight", required_fuel);
+                    self.status.next_action = format!("Refueling {required_fuel:.0} kg for next flight");
                     // In a real implementation, this would call the X-Plane refuel function
                     // refuel_aircraft(xpapi, required_fuel);
                 }
             }
-        }
     }
 
     fn advance_phase(&mut self, new_phase: AutomationPhase) {
@@ -562,7 +558,7 @@ impl AutomationEngine {
     }
 
     /// Calculate fuel plan: trip + alternate + 5% contingency + 30/45 min final reserve.
-    fn calculate_fuel_plan(&mut self, session: &State, settings: &Settings) {
+    fn calculate_fuel_plan(&mut self, session: &State, _settings: &Settings) {
         let plan = &session.plan;
         let perf = self.aircraft_performance.as_ref();
         
@@ -573,13 +569,13 @@ impl AutomationEngine {
         let contingency_fuel = trip_fuel * 0.05;
         
         // Final reserve: 30 min for jets, 45 min for props/rotorcraft
-        let is_jet = perf.as_ref().map(|p| p.engine_type.to_lowercase().contains("jet") || p.engine_type.to_lowercase().contains("turbofan")).unwrap_or(false);
-        let is_rotorcraft = perf.as_ref().map(|p| p.engine_type.to_lowercase().contains("rotor")).unwrap_or(false);
-        let is_turboprop = perf.as_ref().map(|p| p.engine_type.to_lowercase().contains("turboprop")).unwrap_or(false);
+        let is_jet = perf.as_ref().is_some_and(|p| p.engine_type.to_lowercase().contains("jet") || p.engine_type.to_lowercase().contains("turbofan"));
+        let _is_rotorcraft = perf.as_ref().is_some_and(|p| p.engine_type.to_lowercase().contains("rotor"));
+        let is_turboprop = perf.as_ref().is_some_and(|p| p.engine_type.to_lowercase().contains("turboprop"));
         
         let reserve_minutes = if is_jet { 30 } else { 45 };
         let reserve_fuel = if let Some(p) = perf {
-            p.fuel_consumption_kg_per_hr * (reserve_minutes as f64 / 60.0)
+            p.fuel_consumption_kg_per_hr * (f64::from(reserve_minutes) / 60.0)
         } else {
             // Estimate based on aircraft type
             if is_jet { 1000.0 } else if is_turboprop { 300.0 } else { 150.0 }
@@ -625,16 +621,16 @@ impl AutomationEngine {
                 AlternateAirport { icao: "LFLL".to_string(), name: "Lyon".to_string(), distance_nm: 200.0, runway_length_m: 4000.0, has_fuel: true, has_approach: true, weather_ok: true },
             ],
             _ => vec![
-                AlternateAirport { icao: "".to_string(), name: "".to_string(), distance_nm: 0.0, runway_length_m: 0.0, has_fuel: false, has_approach: false, weather_ok: false },
+                AlternateAirport { icao: String::new(), name: String::new(), distance_nm: 0.0, runway_length_m: 0.0, has_fuel: false, has_approach: false, weather_ok: false },
             ],
         };
         
         // Filter by aircraft capabilities
-        let min_runway = perf.and_then(|p| {
-            if p.engine_type.to_lowercase().contains("jet") { Some(1500.0) }
-            else if p.engine_type.to_lowercase().contains("turboprop") { Some(1000.0) }
-            else { Some(600.0) }
-        }).unwrap_or(1000.0);
+        let min_runway = perf.map_or(1000.0, |p| {
+            if p.engine_type.to_lowercase().contains("jet") { 1500.0 }
+            else if p.engine_type.to_lowercase().contains("turboprop") { 1000.0 }
+            else { 600.0 }
+        });
         
         self.alternate_airports = alternates.into_iter()
             .filter(|a| a.runway_length_m >= min_runway)
@@ -643,13 +639,11 @@ impl AutomationEngine {
             .collect();
         
         // Set the first valid alternate in the flight plan
-        if let Some(first) = self.alternate_airports.first() {
-            if let Some(flight_plan) = &mut self.current_flight_plan {
-                if flight_plan.alternate.is_empty() {
+        if let Some(first) = self.alternate_airports.first()
+            && let Some(flight_plan) = &mut self.current_flight_plan
+                && flight_plan.alternate.is_empty() {
                     flight_plan.alternate = first.icao.clone();
                 }
-            }
-        }
     }
 
     /// Select cruise altitude per leg (aircraft ceiling, distance, semi-circular rule, MORA).
@@ -657,12 +651,12 @@ impl AutomationEngine {
         let perf = self.aircraft_performance.as_ref();
         let plan = &session.plan;
         
-        let ceiling = perf.map(|p| p.ceiling_ft).unwrap_or(plan.cruise_feet);
+        let ceiling = perf.map_or(plan.cruise_feet, |p| p.ceiling_ft);
         let distance_nm = openatc_core::ops::distance_nm(
             session.telemetry.latitude,
             session.telemetry.longitude,
-            arrival_airport.as_ref().map(|a| a.reference_latitude).unwrap_or(0.0),
-            arrival_airport.as_ref().map(|a| a.reference_longitude).unwrap_or(0.0),
+            arrival_airport.as_ref().map_or(0.0, |a| a.reference_latitude),
+            arrival_airport.as_ref().map_or(0.0, |a| a.reference_longitude),
         );
         
         // Optimal altitude based on distance
@@ -683,9 +677,7 @@ impl AutomationEngine {
         let mut cruise_fl = (optimal_altitude / 100) * 100;
         if is_eastbound {
             if cruise_fl % 200 == 0 { cruise_fl += 100; } // Odd FL for eastbound
-        } else {
-            if cruise_fl % 200 == 100 { cruise_fl += 100; } // Even FL for westbound
-        }
+        } else if cruise_fl % 200 == 100 { cruise_fl += 100; }
         
         // Respect aircraft ceiling
         cruise_fl = cruise_fl.min(ceiling);
@@ -699,33 +691,32 @@ impl AutomationEngine {
         valid_fls.iter()
             .filter(|&&fl| fl * 100 <= ceiling)
             .min_by_key(|&&fl| (fl * 100 - cruise_fl).abs())
-            .map(|&fl| fl * 100)
-            .unwrap_or(plan.cruise_feet)
+            .map_or(plan.cruise_feet, |&fl| fl * 100)
     }
 
     /// Check if an airport can support the aircraft type.
-    fn airport_supports_aircraft(&self, airport_icao: &str, state: &EngineState) -> bool {
+    fn airport_supports_aircraft(&self, airport_icao: &str, _state: &EngineState) -> bool {
         let perf = self.aircraft_performance.as_ref();
-        let min_runway = perf.and_then(|p| {
-            if p.engine_type.to_lowercase().contains("jet") { Some(1800.0) }
-            else if p.engine_type.to_lowercase().contains("turboprop") { Some(1200.0) }
-            else if p.engine_type.to_lowercase().contains("rotor") { Some(0.0) }
-            else { Some(800.0) }
-        }).unwrap_or(1000.0);
+        let _min_runway = perf.map_or(1000.0, |p| {
+            if p.engine_type.to_lowercase().contains("jet") { 1800.0 }
+            else if p.engine_type.to_lowercase().contains("turboprop") { 1200.0 }
+            else if p.engine_type.to_lowercase().contains("rotor") { 0.0 }
+            else { 800.0 }
+        });
         
         // In a real implementation, this would query airport data
         // For now, simplified check based on known airports
-        let supports = match airport_icao {
+        
+        
+        match airport_icao {
             // Major airports - support everything
             "KLAX" | "KJFK" | "KORD" | "KATL" | "LFPG" | "EGLL" | "EDDF" | "RJTT" | "YSSY" => true,
             // Regional airports
-            "KSMF" | "KSAC" | "KONT" | "KSBA" | "KSNA" | "KMRY" | "KSBP" => !perf.map(|p| p.engine_type.to_lowercase().contains("jet")).unwrap_or(false),
+            "KSMF" | "KSAC" | "KONT" | "KSBA" | "KSNA" | "KMRY" | "KSBP" => !perf.is_some_and(|p| p.engine_type.to_lowercase().contains("jet")),
             // Small GA airports
-            "KSQL" | "KHWD" | "KPAO" | "KRHV" => !perf.map(|p| p.engine_type.to_lowercase().contains("jet") || p.engine_type.to_lowercase().contains("turboprop")).unwrap_or(false),
+            "KSQL" | "KHWD" | "KPAO" | "KRHV" => !perf.is_some_and(|p| p.engine_type.to_lowercase().contains("jet") || p.engine_type.to_lowercase().contains("turboprop")),
             _ => true, // Default to true for unknown airports
-        };
-        
-        supports
+        }
     }
 
     /// Generate next random flight with airport compatibility checking.
@@ -767,7 +758,7 @@ impl AutomationEngine {
     /// Get compatible destination airports based on aircraft range and capabilities.
     fn get_compatible_destinations(&self, from: &str, state: &EngineState) -> Vec<DestinationCandidate> {
         let perf = self.aircraft_performance.as_ref();
-        let range_nm = perf.map(|p| p.range_nm).unwrap_or(500.0);
+        let range_nm = perf.map_or(500.0, |p| p.range_nm);
         
         // In a real implementation, this would query a database
         // For now, return a static list of candidates

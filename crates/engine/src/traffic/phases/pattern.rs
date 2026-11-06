@@ -5,7 +5,7 @@
  //! unless right traffic is published. Entry is 45 degrees to downwind at midfield.
 
 use openatc_core::airport::Airport;
-use openatc_core::arrival::{bearing, destination, distance_nm};
+use openatc_core::arrival::{bearing, destination};
 use openatc_core::traffic::animation::{Handling, Kind};
 use openatc_core::traffic::motion::Waypoint;
 use openatc_core::traffic::profiles::Aircraft as Profile;
@@ -155,7 +155,7 @@ pub(crate) fn pattern_entry_waypoints(
             + rw.second.east / (111_320.0 * airport.reference_latitude.to_radians().cos().max(0.01)),
     ]) + 180.0)
         .rem_euclid(360.0);
-    let entry_heading = (downwind_heading + 45.0 * -1.0).rem_euclid(360.0); // left traffic entry from downwind side
+    let entry_heading = (downwind_heading + -45.0).rem_euclid(360.0); // left traffic entry from downwind side
     let entry = destination([midfield_lat, midfield_lon], entry_heading, 1.0 * 1852.0);
     waypoints.push(Waypoint {
         latitude: entry[0],

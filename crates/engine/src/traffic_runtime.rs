@@ -377,19 +377,16 @@ fn run_station(
             let mut worked = false;
             let mut stop = false;
             while let Ok(command) = commands.try_recv() {
-                match apply_command(
+                if let Some(queued) = apply_command(
                     frequency,
                     command,
                     &mut watch,
                     &mut triggers,
                     &mut transmissions,
                     &events,
-                ) {
-                    Some(queued) => worked |= queued,
-                    None => {
-                        stop = true;
-                        break;
-                    }
+                ) { worked |= queued } else {
+                    stop = true;
+                    break;
                 }
             }
             if stop || (!worked && triggers.is_empty() && transmissions.is_empty()) {
@@ -401,8 +398,7 @@ fn run_station(
         }
         let wait = transmissions
             .front()
-            .map(|transmission| transmission.due.saturating_duration_since(now))
-            .unwrap_or(Duration::from_millis(50))
+            .map_or(Duration::from_millis(50), |transmission| transmission.due.saturating_duration_since(now))
             .min(Duration::from_millis(50));
         match commands.recv_timeout(wait) {
             Ok(StationCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
@@ -677,7 +673,7 @@ impl TrafficHealth {
     /// player is never retired.
     pub(crate) fn check(&self, registry: &mut SessionRegistry, at: f64) -> Vec<HealthAction> {
         let mut actions = Vec::new();
-        for (&id, session) in registry.sessions.iter_mut() {
+        for (&id, session) in &mut registry.sessions {
             if id == 0 || !at.is_finite() || at < session.last_progress {
                 continue;
             }

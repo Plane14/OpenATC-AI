@@ -26,9 +26,7 @@ pub(crate) fn round_taxi_path(
         minimum,
         5.0,
         |point| openatc_core::airport::on_pavement(airport, point),
-    )
-    .map(|samples| samples.into_iter().map(|sample| sample.point).collect())
-    .unwrap_or_else(|_| points.to_vec())
+    ).map_or_else(|_| points.to_vec(), |samples| samples.into_iter().map(|sample| sample.point).collect())
 }
 
 /// Taxi speed near the current position.
