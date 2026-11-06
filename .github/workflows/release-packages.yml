@@ -184,7 +184,15 @@ jobs:
       
       - name: Build packaging tools
         run: cargo build --locked --release -p xtask
-      
+
+      - name: Install Linux AppImage packaging runtime
+        if: runner.os == 'Linux' && matrix.product == 'ai-server'
+        run: |
+          set -euo pipefail
+          cargo xtask fetch-package-tools "$RUNNER_TEMP/package-tools"
+          echo "APPIMAGETOOL=$RUNNER_TEMP/package-tools/appimagetool" >> "$GITHUB_ENV"
+          echo "APPIMAGE_RUNTIME=$RUNNER_TEMP/package-tools/runtime-x86_64" >> "$GITHUB_ENV"
+       
       - name: Package release
         if: runner.os == 'Windows'
         shell: pwsh
