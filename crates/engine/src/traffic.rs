@@ -130,11 +130,10 @@ pub fn observe(state: &mut EngineState) {
             continue;
         }
         if !state.traffic.pilot_voices.contains_key(&target.callsign)
-            && !state
+            && state
                 .traffic
                 .pilots
-                .get(&target.id)
-                .is_some_and(|pilot| pilot.target.callsign == target.callsign)
+                .get(&target.id).is_none_or(|pilot| pilot.target.callsign != target.callsign)
         {
             pilot_voice_for_callsign(state, &target.callsign);
         }

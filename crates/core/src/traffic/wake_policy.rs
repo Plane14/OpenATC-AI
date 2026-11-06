@@ -153,6 +153,7 @@ impl Policy {
         })
     }
 
+    #[must_use]
     pub fn with_standard(mut self, standard: &str) -> Self {
         self.standard = normalize_standard(standard).to_owned();
         self

@@ -11,7 +11,7 @@ const PLAYER_BUFFER: f64 = 10.0;
 /// Required centre-to-centre gap for two aircraft nose-to-tail.
 #[must_use]
 pub(crate) fn required_gap(own_length: f64, other_length: f64) -> f64 {
-    ((own_length + other_length) / 2.0 + 15.0).clamp(45.0, 80.0)
+    (f64::midpoint(own_length, other_length) + 15.0).clamp(45.0, 80.0)
 }
 
 /// Gap a follower holds behind the aircraft ahead of it.
@@ -87,7 +87,7 @@ pub(crate) fn closest_ahead(
             [other.latitude, other.longitude],
         );
         let relative = (bearing - heading).rem_euclid(360.0);
-        if relative >= 45.0 && relative <= 315.0 {
+        if (45.0..=315.0).contains(&relative) {
             continue;
         }
         let candidate = Ahead {

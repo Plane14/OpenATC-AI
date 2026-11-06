@@ -60,6 +60,7 @@ pub struct EurocontrolClient {
 }
 
 impl EurocontrolClient {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::builder()
@@ -78,18 +79,17 @@ impl EurocontrolClient {
         let icao = icao_code.to_uppercase();
 
         // Check cache first
-        if let Some(cached) = self.cache.aircraft_data.get(&icao) {
-            if let Some(last) = self.cache.last_updated {
+        if let Some(cached) = self.cache.aircraft_data.get(&icao)
+            && let Some(last) = self.cache.last_updated {
                 let age = Utc::now() - last;
                 let cache_duration = TimeDelta::from_std(self.cache.cache_duration).unwrap_or(TimeDelta::zero());
                 if age < cache_duration {
                     return Ok(cached.clone());
                 }
             }
-        }
 
         // Try to fetch from Eurocontrol ATPCFDB
-        let url = format!("{}/default.aspx?aircraft={}", EUROCONTROL_BASE_URL, icao);
+        let url = format!("{EUROCONTROL_BASE_URL}/default.aspx?aircraft={icao}");
         
         match self.fetch_and_parse(&url, &icao).await {
             Ok(perf) => {
@@ -107,14 +107,14 @@ impl EurocontrolClient {
     /// Fetch and parse performance data from Eurocontrol web page.
     async fn fetch_and_parse(&self, url: &str, icao: &str) -> Result<AircraftPerformance, String> {
         let response = self.client.get(url).send().await
-            .map_err(|e| format!("HTTP request failed: {}", e))?;
+            .map_err(|e| format!("HTTP request failed: {e}"))?;
 
         if !response.status().is_success() {
             return Err(format!("HTTP {}", response.status()));
         }
 
         let html = response.text().await
-            .map_err(|e| format!("Failed to read response: {}", e))?;
+            .map_err(|e| format!("Failed to read response: {e}"))?;
 
         self.parse_aircraft_page(&html, icao)
     }
@@ -134,11 +134,10 @@ impl EurocontrolClient {
             let line = line.trim();
             
             // Look for table rows with performance data
-            if line.contains("<td>") || line.contains("<th>") {
-                if let Some((key, value)) = self.extract_table_cell(line) {
+            if (line.contains("<td>") || line.contains("<th>"))
+                && let Some((key, value)) = self.extract_table_cell(line) {
                     self.assign_performance_field(&mut perf, &key, &value);
                 }
-            }
         }
 
         // Validate we got meaningful data
@@ -210,6 +209,7 @@ impl EurocontrolClient {
     }
 
     /// Get built-in performance data for common aircraft types.
+    #[must_use]
     pub fn get_builtin_performance(&self, icao: &str) -> Option<AircraftPerformance> {
         let perf = match icao {
             "A320" | "A20N" | "A319" | "A321" => AircraftPerformance {
@@ -329,6 +329,7 @@ impl std::fmt::Debug for EurocontrolClient {
 }
 
 /// Merge Eurocontrol data with ACF specs for complete aircraft profile.
+#[must_use]
 pub fn merge_performance_data(
     acf_specs: &crate::ops::AcfSpecs,
     eurocontrol: &AircraftPerformance,

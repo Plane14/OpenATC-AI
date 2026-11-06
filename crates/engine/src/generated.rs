@@ -2676,8 +2676,7 @@ impl Scene {
                         airborne_seed(&plan.route, true).and_then(|index| plan.route.segment(index))
                     })
                     .and_then(|segment| segment.points.first())
-                    .map(|point| [point.latitude, point.longitude])
-                    .unwrap_or(own)
+                    .map_or(own, |point| [point.latitude, point.longitude])
             };
             openatc_core::arrival::distance_nm(own, position(*first))
                 .total_cmp(&openatc_core::arrival::distance_nm(own, position(*second)))
@@ -2951,12 +2950,11 @@ impl Scene {
                 continue;
             };
             let prepared = self.flights.get(&id).cloned();
-            if *role == "taxi to gate"
+            if (*role == "taxi to gate"
                 || prepared
                     .as_ref()
-                    .is_some_and(|prepared| Arc::ptr_eq(route, &prepared.route))
-            {
-                if let Some(prepared) = &prepared {
+                    .is_some_and(|prepared| Arc::ptr_eq(route, &prepared.route)))
+                && let Some(prepared) = &prepared {
                     let station = prepared
                         .clearances
                         .range(..=*index)
@@ -2974,7 +2972,6 @@ impl Scene {
                         self.seeded_stations.insert(id, station);
                     }
                 }
-            }
             seeded.insert(id);
         }
         // Seed any local arrivals as needed after the planned departure positions. The counter
@@ -4294,7 +4291,7 @@ pub async fn prepare(shared: Shared) {
                 "Traffic airports selected; waiting for simulator airport weather".into();
             traffic_log(
                 openatc_settings::TrafficLog::Summary,
-                format!("{}", state.generated.status),
+                &state.generated.status,
             );
         }
         Ok(PreparedJob::Scene(scene)) if scene.weather_fresh() => {
@@ -4330,7 +4327,7 @@ pub async fn prepare(shared: Shared) {
             state.generated.network_pending = local_only;
             traffic_log(
                 openatc_settings::TrafficLog::Summary,
-                format!("{}", state.generated.status),
+                &state.generated.status,
             );
         }
         Ok(PreparedJob::Scene(_)) => {
@@ -4339,7 +4336,7 @@ pub async fn prepare(shared: Shared) {
                     .into();
             traffic_log(
                 openatc_settings::TrafficLog::Summary,
-                format!("{}", state.generated.status),
+                &state.generated.status,
             );
         }
         Err(error) => {
@@ -5007,9 +5004,7 @@ fn update_sessions(runtime: &mut Runtime, seconds: f64) {
             continue;
         };
         let frequency = frame.target.com1_khz.unwrap_or(0);
-        if !runtime.sessions.contains(pose.id) {
-            runtime.sessions.add(pose.id, frequency, phase, seconds);
-        } else {
+        if runtime.sessions.contains(pose.id) {
             runtime.sessions.phase(pose.id, phase, seconds);
             // A speed above zero is not progress: a stopped crossing can still vibrate or
             // creep on the spot. Only a new segment or a real position change resets health.
@@ -5027,6 +5022,8 @@ fn update_sessions(runtime: &mut Runtime, seconds: f64) {
             if runtime.session_segments.get(&pose.id) != Some(&pose.segment) || moved {
                 runtime.sessions.progress(pose.id, seconds);
             }
+        } else {
+            runtime.sessions.add(pose.id, frequency, phase, seconds);
         }
         runtime.session_segments.insert(pose.id, pose.segment);
         runtime
@@ -5688,9 +5685,7 @@ pub fn animation_channels(config: &std::path::Path) -> BTreeMap<String, animatio
 pub fn animation_handling(
     config: &std::path::Path,
 ) -> BTreeMap<animation::Kind, animation::Handling> {
-    policy::load(config)
-        .map(|(handling, _, _)| handling)
-        .unwrap_or_else(|_| animation::builtin().unwrap_or_default())
+    policy::load(config).map_or_else(|_| animation::builtin().unwrap_or_default(), |(handling, _, _)| handling)
 }
 
 /// Publish the most recent complete worker sample without waiting for simulation.

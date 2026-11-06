@@ -387,9 +387,8 @@ pub fn ahead_on_same_taxi_route(
     if gap > 150.0 {
         return false;
     }
-    let same_direction =
-        ((target.track_degrees - route_heading + 180.0).rem_euclid(360.0) - 180.0).abs() < 45.0;
-    same_direction
+    
+    ((target.track_degrees - route_heading + 180.0).rem_euclid(360.0) - 180.0).abs() < 45.0
 }
 
 /// Magnitude and side of the surface crosswind, using true wind and true runway bearing.

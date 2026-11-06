@@ -424,14 +424,13 @@ fn departure_hold(state: &mut EngineState) {
             .generated
             .world
             .assigned_route(pose.id)
-            .map(|route| {
+            .map_or(f64::INFINITY, |route| {
                 let end = route.end_position();
                 openatc_core::arrival::distance_nm(
                     [pose.position.latitude, pose.position.longitude],
                     [end.latitude, end.longitude],
                 ) * 1852.0
-            })
-            .unwrap_or(f64::INFINITY);
+            });
         if distance > 550.0 || !state.generated.departure_ready(pose.id) {
             continue;
         }
@@ -523,8 +522,7 @@ fn departure_hold(state: &mut EngineState) {
             LAST.store(now, Ordering::Relaxed);
             let sample = all
                 .iter()
-                .find(|pose| state.generated.flights.contains_key(&pose.id))
-                .map(|pose| {
+                .find(|pose| state.generated.flights.contains_key(&pose.id)).map_or_else(|| "none".to_owned(), |pose| {
                     let next = state
                         .generated
                         .flights
@@ -559,8 +557,7 @@ fn departure_hold(state: &mut EngineState) {
                         ),
                         distance
                     )
-                })
-                .unwrap_or_else(|| "none".to_owned());
+                });
             let taxi = all
                 .iter()
                 .filter(|pose| pose.stage == openatc_core::traffic::motion::Stage::TaxiOut)
@@ -594,10 +591,10 @@ fn departure_hold(state: &mut EngineState) {
             continue;
         }
         if !state.generated.departure_ready(pose.id) {
-            let reason = if !planned {
-                "no complete onward flight"
-            } else {
+            let reason = if planned {
                 "sequenced flight capacity reached"
+            } else {
+                "no complete onward flight"
             };
             departure_wait(state, pose.id, reason);
             continue;
@@ -933,7 +930,7 @@ fn release_held(state: &mut EngineState) -> Option<Exchange> {
         let Some(airport) = state.generated.surface_airport(&order.airport) else {
             continue;
         };
-        let Some(station) = ground_station(state, &airport, id, false) else {
+        let Some(station) = ground_station(state, airport, id, false) else {
             continue;
         };
         let Some(frame) = state
@@ -1539,7 +1536,7 @@ fn advance_exchange(state: &mut EngineState, mut exchange: Exchange) -> Option<E
     exchange.due =
         Instant::now() + Duration::from_secs_f64(spoken_text.chars().count() as f64 / rate + gap);
     exchange.next += 1;
-    return Some(exchange);
+    Some(exchange)
 }
 pub fn tick(state: &mut EngineState) {
     deliver_station_transmissions(state, Duration::ZERO);

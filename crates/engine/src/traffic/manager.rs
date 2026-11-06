@@ -79,11 +79,7 @@ fn find_model(
             .map(|entry| {
                 if paints.contains(entry.operator.as_str()) {
                     3
-                } else if entry.operator.is_empty() {
-                    1
-                } else {
-                    0
-                }
+                } else { i32::from(entry.operator.is_empty()) }
             })
             .max()
             .unwrap_or(0);
@@ -196,7 +192,7 @@ fn airline_candidates(
                 continue;
             };
             let Some(callsign) =
-                scheduled_callsign(airline, airport, seed.wrapping_add(*fleet_weight as u64))
+                scheduled_callsign(airline, airport, seed.wrapping_add(u64::from(*fleet_weight)))
             else {
                 continue;
             };
@@ -247,7 +243,7 @@ fn ga_candidates(
             continue;
         };
         let Some(callsign) =
-            scheduled_callsign(airline, airport, seed.wrapping_add(*fleet_weight as u64))
+            scheduled_callsign(airline, airport, seed.wrapping_add(u64::from(*fleet_weight)))
         else {
             continue;
         };
@@ -279,7 +275,7 @@ fn military_candidates(
     player: &str,
 ) -> Vec<(u64, AmbientCandidate)> {
     let mut candidates = Vec::new();
-    for (_id, airline) in &profiles.airlines {
+    for airline in profiles.airlines.values() {
         if airline.category != Category::Military {
             continue;
         }
@@ -303,7 +299,7 @@ fn military_candidates(
                 continue;
             };
             let Some(callsign) =
-                scheduled_callsign(airline, airport, seed.wrapping_add(*fleet_weight as u64))
+                scheduled_callsign(airline, airport, seed.wrapping_add(u64::from(*fleet_weight)))
             else {
                 continue;
             };
@@ -1562,13 +1558,12 @@ impl TrafficManager {
         let (wind_from, wind_knots) = state
             .sim_weather
             .get(&airport.icao)
-            .map(|(sample, _)| {
+            .map_or((0.0, 0.0), |(sample, _)| {
                 (
                     sample["windDegrees"].as_f64().unwrap_or(0.0),
                     sample["windKnots"].as_f64().unwrap_or(0.0),
                 )
-            })
-            .unwrap_or((0.0, 0.0));
+            });
         let fallback = airport
             .runways
             .first()
@@ -1655,10 +1650,9 @@ impl TrafficManager {
             .session
             .telemetry
             .simulation_seconds
-            .and_then(|seconds| time_of_day::classify(seconds));
+            .and_then(time_of_day::classify);
         let ga_multiplier = time_of_day
-            .map(|tod| time_of_day::ga_multiplier(tod, &state.settings))
-            .unwrap_or(1.0);
+            .map_or(1.0, |tod| time_of_day::ga_multiplier(tod, &state.settings));
         let weather = state.sim_weather.get(&airport.icao);
         let visibility = weather
             .and_then(|(sample, _)| sample["visibilityMeters"].as_f64());
@@ -1814,8 +1808,7 @@ impl TrafficManager {
                 // Poor weather also reduces rotorcraft traffic.
                 if candidate.profile.handling == Some(Kind::Rotorcraft) {
                     let rc_multiplier = time_of_day
-                        .map(|tod| time_of_day::rotorcraft_multiplier(tod, &state.settings))
-                        .unwrap_or(1.0);
+                        .map_or(1.0, |tod| time_of_day::rotorcraft_multiplier(tod, &state.settings));
                     let rc_roll = mix(
                         state
                             .traffic_seed
@@ -1891,11 +1884,11 @@ impl TrafficManager {
                 continue;
             };
             let surface_points =
-                phases::ground::round_taxi_path(&airport, &surface_points, &handling);
+                phases::ground::round_taxi_path(airport, &surface_points, &handling);
             let entry_points = (kind == AmbientKind::Departure)
                 .then(|| {
                     runway_entry_points(
-                        &airport,
+                        airport,
                         surface_points.last().copied(),
                         &departure_runway,
                         size,

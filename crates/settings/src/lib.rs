@@ -547,7 +547,7 @@ impl Default for Settings {
             ga_traffic: 5,
             military_traffic: 0,
             traffic_time_of_day_variations: false,
-            traffic_weather_variations: false,
+            traffic_weather_variations: true,
             ga_day_multiplier: 1.2,
             ga_night_multiplier: 0.5,
             rotorcraft_day_multiplier: 1.0,

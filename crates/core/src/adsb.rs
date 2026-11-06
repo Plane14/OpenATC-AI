@@ -89,6 +89,7 @@ pub struct AdsbClient {
 }
 
 impl AdsbClient {
+    #[must_use]
     pub fn new(config: AdsbClientConfig) -> Self {
         Self {
             client: reqwest::Client::builder()
@@ -112,13 +113,11 @@ impl AdsbClient {
         let now = Instant::now();
         
         // Check cache
-        if let Some(last) = self.last_update {
-            if now.duration_since(last).as_secs() < self.config.update_interval_sec {
-                if let Some(cached) = &self.cache {
+        if let Some(last) = self.last_update
+            && now.duration_since(last).as_secs() < self.config.update_interval_sec
+                && let Some(cached) = &self.cache {
                     return Ok(cached.aircraft.clone());
                 }
-            }
-        }
 
         // Build query URL
         let url = format!(
@@ -131,32 +130,30 @@ impl AdsbClient {
 
         let mut request = self.client.get(&url);
         if let Some(key) = &self.config.api_key {
-            request = request.header("Authorization", format!("Bearer {}", key));
+            request = request.header("Authorization", format!("Bearer {key}"));
         }
 
         let response = request.send().await
-            .map_err(|e| format!("HTTP request failed: {}", e))?;
+            .map_err(|e| format!("HTTP request failed: {e}"))?;
 
         if !response.status().is_success() {
             return Err(format!("HTTP {}", response.status()));
         }
 
         let adsb_response: AdsbResponse = response.json().await
-            .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+            .map_err(|e| format!("Failed to parse JSON: {e}"))?;
 
         // Filter by altitude if configured
         let filtered: Vec<AdsbAircraft> = adsb_response.aircraft.into_iter()
             .filter(|a| {
-                if let Some(min) = self.config.min_altitude_ft {
-                    if a.alt_baro.unwrap_or(0) < min || a.alt_geom.unwrap_or(0) < min {
+                if let Some(min) = self.config.min_altitude_ft
+                    && (a.alt_baro.unwrap_or(0) < min || a.alt_geom.unwrap_or(0) < min) {
                         return false;
                     }
-                }
-                if let Some(max) = self.config.max_altitude_ft {
-                    if a.alt_baro.unwrap_or(i32::MAX) > max || a.alt_geom.unwrap_or(i32::MAX) > max {
+                if let Some(max) = self.config.max_altitude_ft
+                    && (a.alt_baro.unwrap_or(i32::MAX) > max || a.alt_geom.unwrap_or(i32::MAX) > max) {
                         return false;
                     }
-                }
                 true
             })
             .collect();
@@ -170,7 +167,8 @@ impl AdsbClient {
         Ok(filtered)
     }
 
-    /// Convert ADS-B aircraft to OpenATC traffic format.
+    /// Convert ADS-B aircraft to `OpenATC` traffic format.
+    #[must_use]
     pub fn convert_to_traffic(&self, aircraft: &AdsbAircraft) -> Option<AdsbTraffic> {
         let callsign = aircraft.flight.as_ref()?.trim();
         if callsign.is_empty() {
@@ -206,7 +204,7 @@ impl AdsbClient {
     }
 }
 
-/// Converted ADS-B traffic for OpenATC.
+/// Converted ADS-B traffic for `OpenATC`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AdsbTraffic {
     pub callsign: String,
@@ -230,6 +228,7 @@ pub struct AdsbTrafficSource {
 }
 
 impl AdsbTrafficSource {
+    #[must_use]
     pub fn new(config: AdsbClientConfig) -> Self {
         Self {
             client: AdsbClient::new(config),
@@ -245,6 +244,7 @@ impl AdsbTrafficSource {
         self.enabled = false;
     }
 
+    #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }

@@ -1263,12 +1263,9 @@ pub async fn request(shared: &Shared, request: &Request) -> Option<Response> {
             let value = match command.value.as_str() {
                 "on" => control.on,
                 "off" => control.off,
-                other => match other.parse::<f64>() {
-                    Ok(value) => value,
-                    Err(_) => {
-                        resolved = false;
-                        break;
-                    }
+                other => if let Ok(value) = other.parse::<f64>() { value } else {
+                    resolved = false;
+                    break;
                 },
             };
             actions.push(openatc_core::crew::request::ControlAction {

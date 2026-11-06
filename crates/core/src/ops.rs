@@ -11,7 +11,7 @@ use super::state::{FlightPlan, PhaseCode, State, Telemetry};
 pub fn callsign_key(callsign: &str) -> String {
     callsign
         .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .map(|character| character.to_ascii_uppercase())
         .collect()
 }
@@ -1067,27 +1067,25 @@ pub fn read_acf_specs(path: &std::path::Path) -> Result<AcfSpecs, String> {
 
 /// Merge runtime dataref values with ACF specs.
 /// Uses dataref values where ACF specs are missing or zero.
+#[must_use]
 pub fn merge_acf_specs_with_datarefs(
     mut specs: AcfSpecs,
     dataref_wingspan: Option<f64>,
     dataref_length: Option<f64>,
     dataref_mtow: Option<f64>,
 ) -> AcfSpecs {
-    if let Some(ws) = dataref_wingspan {
-        if ws.is_finite() && ws > 0.0 && (specs.wingspan_meters.is_none() || specs.wingspan_meters.unwrap_or(0.0) <= 0.0) {
+    if let Some(ws) = dataref_wingspan
+        && ws.is_finite() && ws > 0.0 && (specs.wingspan_meters.is_none() || specs.wingspan_meters.unwrap_or(0.0) <= 0.0) {
             specs.wingspan_meters = Some(ws);
         }
-    }
-    if let Some(len) = dataref_length {
-        if len.is_finite() && len > 0.0 && (specs.length_meters.is_none() || specs.length_meters.unwrap_or(0.0) <= 0.0) {
+    if let Some(len) = dataref_length
+        && len.is_finite() && len > 0.0 && (specs.length_meters.is_none() || specs.length_meters.unwrap_or(0.0) <= 0.0) {
             specs.length_meters = Some(len);
         }
-    }
-    if let Some(mtow) = dataref_mtow {
-        if mtow.is_finite() && mtow > 0.0 && (specs.max_takeoff_weight_kg.is_none() || specs.max_takeoff_weight_kg.unwrap_or(0.0) <= 0.0) {
+    if let Some(mtow) = dataref_mtow
+        && mtow.is_finite() && mtow > 0.0 && (specs.max_takeoff_weight_kg.is_none() || specs.max_takeoff_weight_kg.unwrap_or(0.0) <= 0.0) {
             specs.max_takeoff_weight_kg = Some(mtow);
         }
-    }
     specs
 }
 
@@ -1107,7 +1105,8 @@ fn parse_u16(s: &str) -> Option<u16> {
     s.trim().parse().ok().filter(|v| *v > 0)
 }
 
-/// Convert AcfSpecs to a traffic profile Aircraft for performance validation.
+/// Convert `AcfSpecs` to a traffic profile Aircraft for performance validation.
+#[must_use]
 pub fn acf_specs_to_aircraft(specs: &AcfSpecs) -> crate::traffic::profiles::Aircraft {
     let wake = specs.wake_category.unwrap_or('M');
     let approach_category = specs.approach_category.unwrap_or('C');
@@ -1134,9 +1133,9 @@ pub fn acf_specs_to_aircraft(specs: &AcfSpecs) -> crate::traffic::profiles::Airc
 
     let wingspan = specs.wingspan_meters.unwrap_or(15.0);
     let length = specs.length_meters.unwrap_or(wingspan * 0.8);
-    let ceiling = specs.ceiling_feet.unwrap_or(25000) as f64;
+    let ceiling = f64::from(specs.ceiling_feet.unwrap_or(25000));
     let cruise_knots = specs.cruise_speed_knots.unwrap_or(300.0);
-    let approach_knots = specs.vref_knots.unwrap_or_else(|| {
+    let approach_knots = specs.vref_knots.unwrap_or({
         if is_rotorcraft { 60.0 } else if is_jet { 130.0 } else { 90.0 }
     });
     let climb_fpm = specs.max_climb_rate_fpm.unwrap_or(if is_jet { 2500.0 } else { 1000.0 });
@@ -1147,7 +1146,7 @@ pub fn acf_specs_to_aircraft(specs: &AcfSpecs) -> crate::traffic::profiles::Airc
     } else if is_jet { 3000.0 } else if is_turboprop { 1000.0 } else { 600.0 };
 
     let runway = if is_rotorcraft { 0.0 } else {
-        specs.min_runway_length_meters.unwrap_or_else(|| {
+        specs.min_runway_length_meters.unwrap_or({
             if is_jet { 1800.0 } else if is_turboprop { 1000.0 } else { 600.0 }
         })
     };
@@ -1198,12 +1197,12 @@ pub fn validate_sid_performance(
             for segment in segments {
                 for leg in segment {
                     // Check climb gradient requirements
-                    if let (Some(alt1), Some(alt2)) = (leg.altitude_one, leg.altitude_two) {
-                        if alt2 > alt1 {
+                    if let (Some(alt1), Some(alt2)) = (leg.altitude_one, leg.altitude_two)
+                        && alt2 > alt1 {
                             let climb_required = alt2 - alt1;
                             // Assume 3 NM per 1000 ft for standard climb gradient
                             let distance_nm = leg.distance_time.parse::<f64>().unwrap_or(10.0);
-                            let gradient_ft_per_nm = climb_required as f64 / distance_nm;
+                            let gradient_ft_per_nm = f64::from(climb_required) / distance_nm;
                             let aircraft_gradient = aircraft.climb_fpm / (aircraft.cruise_knots / 60.0);
                             if gradient_ft_per_nm > aircraft_gradient * 1.2 {
                                 warnings.push(format!(
@@ -1212,29 +1211,26 @@ pub fn validate_sid_performance(
                                 ));
                             }
                         }
-                    }
                     // Check speed restrictions
-                    if let Some(speed) = leg.speed_knots {
-                        if speed > aircraft.cruise_knots * 1.1 {
+                    if let Some(speed) = leg.speed_knots
+                        && speed > aircraft.cruise_knots * 1.1 {
                             warnings.push(format!(
                                 "SID {} leg {}: speed restriction {} kts exceeds aircraft cruise {} kts",
                                 sid_name, leg.identifier, speed, aircraft.cruise_knots
                             ));
                         }
-                    }
                     // Check altitude constraints
-                    if let Some(alt) = leg.altitude_one {
-                        if alt as f64 > aircraft.ceiling {
+                    if let Some(alt) = leg.altitude_one
+                        && f64::from(alt) > aircraft.ceiling {
                             warnings.push(format!(
                                 "SID {} leg {}: altitude {} ft exceeds aircraft ceiling {} ft",
                                 sid_name, leg.identifier, alt, aircraft.ceiling as i32
                             ));
                         }
-                    }
                 }
             }
         }
-        Err(e) => warnings.push(format!("SID {} unavailable: {}", sid_name, e)),
+        Err(e) => warnings.push(format!("SID {sid_name} unavailable: {e}")),
     }
     Ok(warnings)
 }
@@ -1254,11 +1250,11 @@ pub fn validate_star_performance(
             for segment in segments {
                 for leg in segment {
                     // Check descent gradient requirements
-                    if let (Some(alt1), Some(alt2)) = (leg.altitude_one, leg.altitude_two) {
-                        if alt1 > alt2 {
+                    if let (Some(alt1), Some(alt2)) = (leg.altitude_one, leg.altitude_two)
+                        && alt1 > alt2 {
                             let descent_required = alt1 - alt2;
                             let distance_nm = leg.distance_time.parse::<f64>().unwrap_or(10.0);
-                            let gradient_ft_per_nm = descent_required as f64 / distance_nm;
+                            let gradient_ft_per_nm = f64::from(descent_required) / distance_nm;
                             let aircraft_gradient = aircraft.descent_fpm / (aircraft.cruise_knots / 60.0);
                             if gradient_ft_per_nm > aircraft_gradient * 1.5 {
                                 warnings.push(format!(
@@ -1267,7 +1263,6 @@ pub fn validate_star_performance(
                                 ));
                             }
                         }
-                    }
                     // Check speed restrictions
                     if let Some(speed) = leg.speed_knots {
                         if speed < aircraft.approach_knots * 0.8 {
@@ -1284,18 +1279,17 @@ pub fn validate_star_performance(
                         }
                     }
                     // Check altitude constraints
-                    if let Some(alt) = leg.altitude_one {
-                        if alt as f64 > aircraft.ceiling {
+                    if let Some(alt) = leg.altitude_one
+                        && f64::from(alt) > aircraft.ceiling {
                             warnings.push(format!(
                                 "STAR {} leg {}: altitude {} ft exceeds aircraft ceiling {} ft",
                                 star_name, leg.identifier, alt, aircraft.ceiling as i32
                             ));
                         }
-                    }
                 }
             }
         }
-        Err(e) => warnings.push(format!("STAR {} unavailable: {}", star_name, e)),
+        Err(e) => warnings.push(format!("STAR {star_name} unavailable: {e}")),
     }
     Ok(warnings)
 }
@@ -1313,14 +1307,13 @@ pub fn validate_approach_performance(
         Ok(approach) => {
             for leg in approach.landing {
                 // Check glideslope angle
-                if let Some(angle) = leg.vertical_angle_degrees {
-                    if angle > 3.5 && !aircraft.is_rotorcraft() {
+                if let Some(angle) = leg.vertical_angle_degrees
+                    && angle > 3.5 && !aircraft.is_rotorcraft() {
                         warnings.push(format!(
                             "Approach {} leg {}: glideslope angle {:.1}° exceeds standard 3.0°",
                             approach_name, leg.identifier, angle
                         ));
                     }
-                }
                 // Check speed restrictions
                 if let Some(speed) = leg.speed_knots {
                     if speed < aircraft.approach_knots * 0.8 {
@@ -1337,33 +1330,32 @@ pub fn validate_approach_performance(
                     }
                 }
                 // Check altitude constraints
-                if let Some(alt) = leg.altitude_one {
-                    if alt as f64 > aircraft.ceiling {
+                if let Some(alt) = leg.altitude_one
+                    && f64::from(alt) > aircraft.ceiling {
                         warnings.push(format!(
                             "Approach {} leg {}: altitude {} ft exceeds aircraft ceiling {} ft",
                             approach_name, leg.identifier, alt, aircraft.ceiling as i32
                         ));
                     }
-                }
             }
             // Check missed approach
             for leg in approach.missed {
-                if let Some(alt) = leg.altitude_one {
-                    if alt as f64 > aircraft.ceiling {
+                if let Some(alt) = leg.altitude_one
+                    && f64::from(alt) > aircraft.ceiling {
                         warnings.push(format!(
                             "Approach {} missed leg {}: altitude {} ft exceeds aircraft ceiling {} ft",
                             approach_name, leg.identifier, alt, aircraft.ceiling as i32
                         ));
                     }
-                }
             }
         }
-        Err(e) => warnings.push(format!("Approach {} unavailable: {}", approach_name, e)),
+        Err(e) => warnings.push(format!("Approach {approach_name} unavailable: {e}")),
     }
     Ok(warnings)
 }
 
 /// Auto-select the best SID for an aircraft based on performance.
+#[must_use]
 pub fn select_best_sid(
     catalogue: &crate::traffic::procedures::Catalogue,
     runway: &str,
@@ -1379,17 +1371,17 @@ pub fn select_best_sid(
     let mut best_score = i32::MAX;
 
     for (key, legs) in routes {
-        if !key.transition.contains(&runway.trim_end_matches(|c| matches!(c, 'L' | 'R' | 'C'))) {
+        if !key.transition.contains(runway.trim_end_matches(['L', 'R', 'C'])) {
             continue;
         }
         let mut score = 0;
         for leg in legs {
             // Prefer lower climb gradients
-            if let (Some(alt1), Some(alt2)) = (leg.altitude_one, leg.altitude_two) {
-                if alt2 > alt1 {
+            if let (Some(alt1), Some(alt2)) = (leg.altitude_one, leg.altitude_two)
+                && alt2 > alt1 {
                     let climb = alt2 - alt1;
                     let distance = leg.distance_time.parse::<f64>().unwrap_or(10.0);
-                    let gradient = climb as f64 / distance;
+                    let gradient = f64::from(climb) / distance;
                     let aircraft_gradient = aircraft.climb_fpm / (aircraft.cruise_knots / 60.0);
                     if gradient > aircraft_gradient {
                         score += 100;
@@ -1397,7 +1389,6 @@ pub fn select_best_sid(
                         score += (gradient / aircraft_gradient * 50.0) as i32;
                     }
                 }
-            }
             // Prefer RNAV-capable SIDs for RNAV aircraft
             if aircraft.rnav && legs.iter().any(|l| ["DF", "TF", "RF"].contains(&l.terminator.as_str())) {
                 score -= 10;
@@ -1419,6 +1410,7 @@ pub fn select_best_sid(
 }
 
 /// Auto-select the best STAR for an aircraft based on performance.
+#[must_use]
 pub fn select_best_star(
     catalogue: &crate::traffic::procedures::Catalogue,
     runway: &str,
@@ -1434,17 +1426,17 @@ pub fn select_best_star(
     let mut best_score = i32::MAX;
 
     for (key, legs) in routes {
-        if !key.transition.contains(&runway.trim_end_matches(|c| matches!(c, 'L' | 'R' | 'C'))) {
+        if !key.transition.contains(runway.trim_end_matches(['L', 'R', 'C'])) {
             continue;
         }
         let mut score = 0;
         for leg in legs {
             // Prefer lower descent gradients
-            if let (Some(alt1), Some(alt2)) = (leg.altitude_one, leg.altitude_two) {
-                if alt1 > alt2 {
+            if let (Some(alt1), Some(alt2)) = (leg.altitude_one, leg.altitude_two)
+                && alt1 > alt2 {
                     let descent = alt1 - alt2;
                     let distance = leg.distance_time.parse::<f64>().unwrap_or(10.0);
-                    let gradient = descent as f64 / distance;
+                    let gradient = f64::from(descent) / distance;
                     let aircraft_gradient = aircraft.descent_fpm / (aircraft.cruise_knots / 60.0);
                     if gradient > aircraft_gradient {
                         score += 100;
@@ -1452,7 +1444,6 @@ pub fn select_best_star(
                         score += (gradient / aircraft_gradient * 50.0) as i32;
                     }
                 }
-            }
             // Prefer RNAV-capable STARs for RNAV aircraft
             if aircraft.rnav && legs.iter().any(|l| ["DF", "TF", "RF"].contains(&l.terminator.as_str())) {
                 score -= 10;
@@ -1467,6 +1458,7 @@ pub fn select_best_star(
 }
 
 /// Auto-select the best approach for an aircraft based on performance.
+#[must_use]
 pub fn select_best_approach(
     catalogue: &crate::traffic::procedures::Catalogue,
     aircraft: &crate::traffic::profiles::Aircraft,
@@ -1492,11 +1484,10 @@ pub fn select_best_approach(
                 score -= 10;
             }
             // Check glideslope
-            if let Some(angle) = leg.vertical_angle_degrees {
-                if angle > 3.2 {
+            if let Some(angle) = leg.vertical_angle_degrees
+                && angle > 3.2 {
                     score += 50;
                 }
-            }
         }
         if score < best_score {
             best_score = score;

@@ -1,5 +1,4 @@
 //! Follow-me movement along an acknowledged surface route.
-use crate::aircraft::AircraftBehaviour;
 use crate::state::{PhaseCode, Point, State};
 
 /// Cached route and vehicle progress in metres along it.
@@ -167,6 +166,7 @@ impl Escort {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aircraft::AircraftBehaviour;
     fn route() -> State {
         let mut state = State {
             phase: PhaseCode::Taxi,

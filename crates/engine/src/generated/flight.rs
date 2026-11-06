@@ -1492,19 +1492,15 @@ pub(super) fn lineup_ahead(
     let rank = |pose: &openatc_core::traffic::motion::Pose| {
         if matches!(pose.stage, Stage::LineUp | Stage::Takeoff) {
             2
-        } else if pose.stage == Stage::TaxiOut && pose.complete {
-            1
-        } else {
-            0
-        }
+        } else { i32::from(pose.stage == Stage::TaxiOut && pose.complete) }
     };
     let own_pose = runtime
         .world
         .snapshot()
         .into_iter()
         .find(|pose| pose.id == id);
-    let own = own_pose.as_ref().map_or(f64::INFINITY, &distance);
-    let own_rank = own_pose.as_ref().map_or(0, &rank);
+    let own = own_pose.as_ref().map_or(f64::INFINITY, distance);
+    let own_rank = own_pose.as_ref().map_or(0, rank);
     let own_order = runtime.departure_order.get(&id).copied();
     runtime.world.snapshot().into_iter().find_map(|pose| {
         if pose.id == id || rank(&pose) == 0 {
@@ -1716,7 +1712,7 @@ fn exchange_filtered(
             }
         };
         let ground = |pose: &openatc_core::traffic::motion::Pose| {
-            if pose.stage.on_ground() { 0 } else { 1 }
+            i32::from(!pose.stage.on_ground())
         };
         ground(left)
             .cmp(&ground(right))
@@ -2365,9 +2361,8 @@ fn exchange_filtered(
                 ));
             }
             continue;
-        } else {
-            state.generated.hold_reasons.remove(&(pose.id, index));
         }
+        state.generated.hold_reasons.remove(&(pose.id, index));
         if !current_handoff && state.generated.approved_orders.contains(&(pose.id, index)) {
             continue;
         }
