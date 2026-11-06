@@ -1027,7 +1027,7 @@ fn process_delivery(state: &mut EngineState, rate: f64, gap: f64) {
                 due: Instant::now(),
             },
         );
-        deliver_station_transmissions(state, Duration::from_millis(2));
+        deliver_station_transmissions(state, Duration::from_millis(100));
     }
     exchange.due =
         Instant::now() + Duration::from_secs_f64(spoken_text.chars().count() as f64 / rate + gap);
@@ -1524,7 +1524,7 @@ fn advance_exchange(state: &mut EngineState, mut exchange: Exchange) -> Option<E
                 due: Instant::now(),
             },
         );
-        deliver_station_transmissions(state, Duration::from_millis(2));
+        deliver_station_transmissions(state, Duration::from_millis(100));
     }
     let (rate, gap) = state
         .generated
