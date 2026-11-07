@@ -272,6 +272,12 @@ impl AutomationEngine {
 
     /// Main automation tick - called each engine tick.
     pub fn tick(&mut self, state: &mut EngineState) {
+        // Keep automation configuration aligned with the live settings,
+        // preserving runtime-only toggles such as stop_after_flight.
+        let stop_after_flight = self.config.stop_after_flight;
+        self.config = AutomationConfig::from_settings(&state.settings);
+        self.config.stop_after_flight = stop_after_flight;
+        self.status.stop_after_flight = stop_after_flight;
         if !self.status.active {
             return;
         }
@@ -741,14 +747,21 @@ impl AutomationEngine {
                 alternate: next_dest.alternates.first().map(|a| a.icao.clone()).unwrap_or_default(),
                 route: "DCT".to_string(), // Would be calculated properly
                 cruise_feet: self.select_cruise_altitude(&state.session, &state.arrival_airport),
-                estimated_minutes: 60.0, // Would be calculated based on distance
+                estimated_minutes: (next_dest.distance_nm / 400.0 * 60.0).max(30.0),
                 fuel_plan_kg: 0.0, // Will be calculated
             };
             
             self.current_flight_plan = Some(new_plan);
             self.random_flight_state.current_leg += 1;
+            self.status.total_flights = self.random_flight_state.flight_history.len() as u32 + 1;
+        } else {
+            self.automation_errors.push(format!(
+                "No compatible destination within aircraft range from {current_airport}"
+            ));
+            self.stop();
+            return;
         }
-
+        
         // Reset for next flight
         self.phase = AutomationPhase::Preflight;
         self.status.phase = AutomationPhase::Preflight;

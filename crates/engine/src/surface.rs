@@ -217,6 +217,9 @@ pub async fn post_telemetry(
         }
         let sequence = state.session.next_sequence;
         super::flight::tick(&mut state);
+        let mut automation = std::mem::take(&mut state.automation);
+        automation.tick(&mut state);
+        state.automation = automation;
         if state.session.next_sequence != sequence {
             return Json(json!({"accepted":true})).into_response();
         }
