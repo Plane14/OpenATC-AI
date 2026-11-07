@@ -723,7 +723,9 @@ pub fn covering_facility(
         let in_range = positioned && range <= COVERAGE_RANGE_NM;
         if (matching && !positioned) || in_range {
             for frequency in &airport.frequencies {
-                if frequency.service == service {
+                if frequency.service == service
+                    || (service == "Clearance" && frequency.service == "Delivery")
+                {
                     return Some(Coverage {
                         service: service.to_owned(),
                         khz: frequency.khz,

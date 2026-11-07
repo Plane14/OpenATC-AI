@@ -21,7 +21,7 @@ pub fn data_dir() -> PathBuf {
 #[must_use]
 pub fn service_unit(server_binary: &std::path::Path, port: u16, _use_cuda: bool) -> String {
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
          \t<Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>\n\
          \t<Actions><Exec>\n\

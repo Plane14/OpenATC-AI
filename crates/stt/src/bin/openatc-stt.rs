@@ -53,7 +53,12 @@ async fn transcribe(
             Json(serde_json::json!({ "error": message })),
         )
     };
-    match state.engine.transcribe_wav(&body) {
+    // Whisper inference is fully synchronous and can take seconds; run it on
+    // a blocking thread so health checks and other requests are not starved.
+    // `#[tokio::main]` uses the multi-thread runtime, so `block_in_place` is
+    // safe here.
+    let result = tokio::task::block_in_place(|| state.engine.transcribe_wav(&body));
+    match result {
         Ok(text) => Ok(Json(serde_json::json!({ "text": text }))),
         Err(message) => Err(failed(message)),
     }

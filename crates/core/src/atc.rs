@@ -119,8 +119,17 @@ pub fn extend_index(root: &str, stations: &mut Vec<Station>) -> Result<(), Strin
                 }
                 station.latitude = points.iter().map(|p| p[0]).sum::<f64>()
                     / f64::from(u32::try_from(points.len()).unwrap_or(u32::MAX));
-                station.longitude = points.iter().map(|p| p[1]).sum::<f64>()
-                    / f64::from(u32::try_from(points.len()).unwrap_or(u32::MAX));
+                // Circular mean: a polygon crossing the dateline (179/-179)
+                // must not average to longitude 0.
+                let sin_sum: f64 = points
+                    .iter()
+                    .map(|p| (p[1].to_radians()).sin())
+                    .sum();
+                let cos_sum: f64 = points
+                    .iter()
+                    .map(|p| (p[1].to_radians()).cos())
+                    .sum();
+                station.longitude = sin_sum.atan2(cos_sum).to_degrees();
             }
             station.name = if c
                 .name

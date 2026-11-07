@@ -118,7 +118,7 @@ impl Monitor {
             .fold(0.0, f64::max)
     }
 
-    fn arrival_conflict(
+    pub(super) fn arrival_conflict(
         &mut self,
         t: &Telemetry,
         targets: &[TrafficTarget],

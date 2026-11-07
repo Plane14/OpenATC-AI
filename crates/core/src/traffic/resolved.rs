@@ -32,6 +32,8 @@ pub struct Context<'a> {
     pub maximum_intercept_nm: f64,
     /// Planned climb rate used for altitude-terminated legs.
     pub climb_fpm: f64,
+    /// Planned descent rate used for altitude-terminated legs.
+    pub descent_fpm: f64,
     /// Geometric terrain/corridor floor supplied by the route planner.
     pub minimum_feet: f64,
     /// Geometric aircraft ceiling.
@@ -185,6 +187,7 @@ fn decode_amended(
         || !c.variation.is_finite()
         || !(-180.0..=180.0).contains(&c.variation)
         || !(100.0..=10000.0).contains(&c.climb_fpm)
+        || !(100.0..=10000.0).contains(&c.descent_fpm)
         || !(1.0..=100.0).contains(&c.maximum_intercept_nm)
         || c.minimum_feet > c.maximum_feet
     {
@@ -224,7 +227,11 @@ fn decode_amended(
             });
             break;
         }
-        let (minimum_feet, mut maximum_feet) = altitude_bounds(leg, c)?;
+        let (minimum_feet, published_maximum) = altitude_bounds(leg, c)?;
+        // An exact crossing (no descriptor or "H") pins both bounds; range
+        // descriptors like "+"/"-" only bound one side.
+        let exact_crossing = (minimum_feet - published_maximum).abs() <= f64::EPSILON;
+        let mut maximum_feet = published_maximum;
         if matches!(leg.terminator.as_str(), "CA" | "FA" | "VA") {
             maximum_feet = minimum_feet;
         }
@@ -302,7 +309,11 @@ fn decode_amended(
             {
                 return Err("Heading-to-altitude leg needs a fixed incoming altitude".into());
             }
-            if minimum_feet <= altitude {
+            let delta = minimum_feet - altitude;
+            // Already at the required level: an "at or above" constraint is
+            // satisfied by staying high, but an exact crossing still demands
+            // the published descent back down to it.
+            if delta <= f64::EPSILON && !(exact_crossing && delta < -f64::EPSILON) {
                 continue;
             }
             // Nominal movement uses one ground speed per leg. Use the same
@@ -316,7 +327,12 @@ fn decode_amended(
                     heading,
                 )
             };
-            let minutes = (minimum_feet - altitude) / c.climb_fpm;
+            let rate = if delta > 0.0 {
+                c.climb_fpm
+            } else {
+                c.descent_fpm
+            };
+            let minutes = delta.abs() / rate;
             destination(from, track, speed * minutes / 60.0)
         } else {
             Points::runway(leg, c.airport)
@@ -506,6 +522,7 @@ mod tests {
             indicated_knots: 150.0,
             maximum_intercept_nm: 20.0,
             climb_fpm: 1000.0,
+            descent_fpm: 1000.0,
             minimum_feet: 0.0,
             maximum_feet: 20000.0,
             preferred_feet: 10000.0,
@@ -591,6 +608,7 @@ mod tests {
             indicated_knots: 150.0,
             maximum_intercept_nm: 20.0,
             climb_fpm: 1000.0,
+            descent_fpm: 1000.0,
             minimum_feet: 0.0,
             maximum_feet: 20000.0,
             preferred_feet: 10000.0,
@@ -671,6 +689,7 @@ mod tests {
             indicated_knots: 150.0,
             maximum_intercept_nm: 20.0,
             climb_fpm: 1000.0,
+            descent_fpm: 1000.0,
             minimum_feet: 0.0,
             maximum_feet: 2000.0,
             preferred_feet: 1000.0,
@@ -777,6 +796,7 @@ mod tests {
             indicated_knots: 150.0,
             maximum_intercept_nm: 40.0,
             climb_fpm: 1000.0,
+            descent_fpm: 1000.0,
             minimum_feet: 0.0,
             maximum_feet: 20000.0,
             preferred_feet: 10000.0,
@@ -867,6 +887,7 @@ mod tests {
             indicated_knots: 140.0,
             maximum_intercept_nm: 20.0,
             climb_fpm: 1000.0,
+            descent_fpm: 1000.0,
             minimum_feet: 0.0,
             maximum_feet: 20000.0,
             preferred_feet: 10000.0,
@@ -919,6 +940,7 @@ mod tests {
             indicated_knots: 150.0,
             maximum_intercept_nm: 40.0,
             climb_fpm: 1000.0,
+            descent_fpm: 1000.0,
             minimum_feet: 0.0,
             maximum_feet: 30000.0,
             preferred_feet: 10000.0,
@@ -1045,6 +1067,7 @@ mod installed_tests {
             indicated_knots: 180.0,
             maximum_intercept_nm: 40.0,
             climb_fpm: 2000.0,
+            descent_fpm: 2000.0,
             minimum_feet: 0.0,
             maximum_feet: 18000.0,
             preferred_feet: 5000.0,

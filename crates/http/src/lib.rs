@@ -82,8 +82,15 @@ fn round_trip_cancelled(
     stream
         .write_all(body)
         .map_err(|_| "Engine request failed")?;
+    // Bound the buffered response: the engine is a local trusted peer, but a
+    // hung or hostile endpoint must not exhaust plugin memory. 64 MiB covers
+    // several minutes of 48 kHz stereo WAV.
+    const MAX_RESPONSE: usize = 64 * 1024 * 1024;
+    const MAX_HEADER: usize = 64 * 1024;
     let mut raw = Vec::new();
     let mut buffer = [0u8; 8192];
+    let mut head_end: Option<usize> = None;
+    let mut content_length: Option<usize> = None;
     loop {
         if stopped() {
             return Err("Cancelled".to_owned());
@@ -94,18 +101,35 @@ fn round_trip_cancelled(
         match stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(count) => {
+                if raw.len() + count > MAX_RESPONSE {
+                    return Err("Engine response too large".to_owned());
+                }
                 raw.extend_from_slice(&buffer[..count]);
                 // Content-Length completes the response without waiting for EOF.
-                if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n")
+                if let Some(end) = head_end {
+                    if let Some(length) = content_length
+                        && raw.len().saturating_sub(end + 4) >= length
+                    {
+                        break;
+                    }
+                } else if raw.len() <= MAX_HEADER
+                    && let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n")
                     && let Ok(head) = std::str::from_utf8(&raw[..end])
-                    && let Some(length) = head
+                {
+                    head_end = Some(end);
+                    content_length = head
                         .lines()
                         .filter_map(|line| line.split_once(':'))
                         .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-                    && raw.len().saturating_sub(end + 4) >= length
-                {
-                    break;
+                        .and_then(|(_, value)| value.trim().parse::<usize>().ok());
+                    if content_length.is_none() {
+                        // No length: must read to EOF, which the loop does.
+                        head_end = None;
+                    } else if raw.len().saturating_sub(end + 4)
+                        >= content_length.unwrap_or(usize::MAX)
+                    {
+                        break;
+                    }
                 }
             }
             Err(error)

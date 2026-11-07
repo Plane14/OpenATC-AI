@@ -80,6 +80,10 @@ impl NativeTraffic {
         };
         &self.status
     }
+    /// Whether this plugin currently owns the simulator's AI aircraft slots.
+    pub fn owns_planes(&self) -> bool {
+        self.owned
+    }
     pub fn yield_to_provider(&mut self) {
         if self.owned {
             self.release(false);

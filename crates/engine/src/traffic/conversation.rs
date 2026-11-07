@@ -226,13 +226,15 @@ pub(super) async fn request(shared: Shared, body: Value) -> Response {
         baseline
     };
     let mut state = shared.write().await;
+    // Clear the pending flag before the generation check: a session reset
+    // while the LLM call was in flight must not leave chat_pending stuck.
+    state.traffic.chat_pending = false;
     if state.session_generation != generation {
         return crate::routes::bad_request(openatc_core::dialogue::say(
             "notice_the_flight_changed_before_that_pilot_could_reply_14af1ae9",
             &[],
         ));
     }
-    state.traffic.chat_pending = false;
     if !quiet(&state)
         || state.session.control_frequency() != Some(frequency)
         || !state.settings.talk_to_traffic

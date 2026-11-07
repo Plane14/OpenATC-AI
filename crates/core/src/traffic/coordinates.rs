@@ -96,7 +96,7 @@ impl Points {
         };
         let length = (end.east - start.east).hypot(end.north - start.north);
         if length < 100.0
-            || !(0.0..length).contains(&displacement)
+            || !(0.0..=length).contains(&displacement)
             || airport.reference_latitude.abs() >= 85.0
         {
             return None;

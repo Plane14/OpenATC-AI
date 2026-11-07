@@ -163,7 +163,7 @@ struct Completion {
 /// Cloneable handle to the inference thread.
 #[derive(Clone)]
 struct InferenceHandle {
-    jobs: mpsc::Sender<InferenceJob>,
+    jobs: mpsc::SyncSender<InferenceJob>,
 }
 
 /// Handle to the STT sidecar (separate process: `whisper.cpp` and
@@ -255,7 +255,7 @@ async fn start_sidecar(
 /// Handle to the TTS worker thread (the session lives there, mirroring the
 /// gateway's single-inference lock).
 struct TtsHandle {
-    jobs: mpsc::Sender<TtsJob>,
+    jobs: mpsc::SyncSender<TtsJob>,
 }
 
 /// One synthesis request crossing into the TTS thread.
@@ -687,18 +687,20 @@ async fn chat_completions(
         max_tokens,
         reply: reply_tx,
     };
-    state
+    let handle = state
         .inference
         .as_ref()
-        .ok_or_else(|| unloaded("Language model"))?
-        .jobs
-        .send(job)
-        .map_err(|_| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "inference thread gone".to_owned(),
-            )
-        })?;
+        .ok_or_else(|| unloaded("Language model"))?;
+    handle.jobs.try_send(job).map_err(|error| match error {
+        mpsc::TrySendError::Full(_) => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "inference queue is full; retry shortly".to_owned(),
+        ),
+        mpsc::TrySendError::Disconnected(_) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "inference thread gone".to_owned(),
+        ),
+    })?;
     let output = reply_rx.await.map_err(|_| {
         api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -757,7 +759,7 @@ async fn tokenize(
         .as_ref()
         .ok_or_else(|| unloaded("Language model"))?
         .jobs
-        .send(InferenceJob {
+        .try_send(InferenceJob {
             tokenize_only: true,
             grammar: None,
             json: false,
@@ -766,7 +768,14 @@ async fn tokenize(
             max_tokens: reserve,
             reply,
         })
-        .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+        .map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => {
+                api_error(StatusCode::SERVICE_UNAVAILABLE, "inference queue is full".into())
+            }
+            mpsc::TrySendError::Disconnected(_) => {
+                api_error(StatusCode::SERVICE_UNAVAILABLE, "inference thread gone".into())
+            }
+        })?;
     let completion = result
         .await
         .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?
@@ -823,13 +832,25 @@ async fn transcriptions(
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?
     {
         if field.name() == Some("file") {
-            wav = Some(
-                field
-                    .bytes()
-                    .await
-                    .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?
-                    .to_vec(),
-            );
+            // Cap the upload: a WAV clip is a few MB; anything larger is not
+            // a microphone capture and must not exhaust memory.
+            const MAX_WAV: usize = 32 * 1024 * 1024;
+            let mut bytes = Vec::new();
+            let mut field = field;
+            while let Some(chunk) = field
+                .chunk()
+                .await
+                .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?
+            {
+                if bytes.len() + chunk.len() > MAX_WAV {
+                    return Err(api_error(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "audio upload exceeds 32 MiB".to_owned(),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            wav = Some(bytes);
         }
     }
     let wav = wav.ok_or_else(|| {
@@ -945,7 +966,7 @@ async fn speech(
         .as_ref()
         .ok_or_else(|| unloaded("Speech synthesis"))?
         .jobs
-        .send(TtsJob {
+        .try_send(TtsJob {
             text,
             voice,
             speed,
@@ -954,11 +975,15 @@ async fn speech(
             fx,
             reply: reply_tx,
         })
-        .map_err(|_| {
-            api_error(
+        .map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "synthesis queue is full; retry shortly".to_owned(),
+            ),
+            mpsc::TrySendError::Disconnected(_) => api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "synthesizer gone".to_owned(),
-            )
+            ),
         })?;
     let wav = reply_rx
         .await
@@ -1221,7 +1246,9 @@ async fn main() -> Result<(), String> {
             backend,
         ))
     };
-    let (tts_tx, tts_rx) = mpsc::channel();
+    // Bound the queue: each job can carry a large prompt and inference is
+    // serial, so an unbounded backlog is a memory/CPU exhaustion vector.
+    let (tts_tx, tts_rx) = mpsc::sync_channel(32);
     let mut tts_loader = None;
     let tts_status = if args.disable_tts {
         synthesis::Status {
@@ -1247,7 +1274,7 @@ async fn main() -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .map_err(|e| format!("TTS startup: {e}"))??
     };
-    let (job_tx, job_rx) = mpsc::channel();
+    let (job_tx, job_rx) = mpsc::sync_channel(32);
     let mut loader = None;
     let (llm_device, context_tokens) = if args.disable_llm {
         (

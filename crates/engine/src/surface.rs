@@ -184,6 +184,17 @@ pub async fn post_telemetry(
         let mut ambient = std::mem::take(&mut state.ambient);
         ambient.tick(&mut state);
         state.ambient = ambient;
+        let mut native_manager = std::mem::take(&mut state.native_manager);
+        let airport = state
+            .airport
+            .as_ref()
+            .and_then(|airport| state.airports.airport(&airport.icao));
+        match airport {
+            Some(airport) => native_manager.set_airport(airport),
+            None => native_manager.clear_airport(),
+        }
+        native_manager.tick(&mut state);
+        state.native_manager = native_manager;
         let mut chatter = std::mem::take(&mut state.chatter);
         chatter.tick(&mut state);
         state.chatter = chatter;

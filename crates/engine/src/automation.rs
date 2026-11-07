@@ -462,23 +462,58 @@ impl AutomationEngine {
         self.status.last_action = "Cruising".to_string();
         self.status.next_action = "Monitor progress, start descent planning".to_string();
 
-        // Calculate top of descent
+        // Reference point for the top-of-descent: arrival airport geometry
+        // when loaded, the airport catalog, or finally the last route fix.
+        let arrival = state
+            .arrival_airport
+            .as_ref()
+            .map(|a| {
+                (
+                    a.reference_latitude,
+                    a.reference_longitude,
+                    a.elevation_feet,
+                )
+            })
+            .or_else(|| {
+                state
+                    .airports
+                    .airport(&state.session.plan.destination)
+                    .map(|a| {
+                        (
+                            a.reference_latitude,
+                            a.reference_longitude,
+                            a.elevation_feet,
+                        )
+                    })
+            });
+
+        let (dest_lat, dest_lon, field_elevation) = match arrival {
+            Some(reference) => reference,
+            None => match state.session.plan.fixes.last() {
+                Some(fix) if fix.latitude != 0.0 || fix.longitude != 0.0 => {
+                    (fix.latitude, fix.longitude, 0.0)
+                }
+                _ => return,
+            },
+        };
+
         let distance_to_dest = distance_nm(
             state.session.telemetry.latitude,
             state.session.telemetry.longitude,
-            state.arrival_airport.as_ref().map_or(0.0, |a| a.reference_latitude),
-            state.arrival_airport.as_ref().map_or(0.0, |a| a.reference_longitude),
+            dest_lat,
+            dest_lon,
         );
 
-        let descent_rate = state.session.plan.fixes.iter()
-            .filter_map(|f| f.minimum_speed_knots)
-            .max_by(f64::total_cmp)
-            .unwrap_or(250.0);
+        // Descent distance along a nominal 3° profile, plus a margin for
+        // slowing down, configuration and ATC delays.
+        let descent_nm = openatc_core::ops::descent_distance_nm(
+            state.session.telemetry.altitude_feet,
+            field_elevation,
+            3.0,
+        )
+        .unwrap_or(f64::INFINITY);
 
-        let descent_distance = (state.session.telemetry.altitude_feet - state.arrival_airport.as_ref().map_or(0.0, |a| a.elevation_feet))
-            / (descent_rate / 60.0) * (state.session.telemetry.ground_speed_knots / 60.0);
-
-        if distance_to_dest <= descent_distance / 1852.0 + 10.0 {
+        if distance_to_dest <= descent_nm + 10.0 {
             self.advance_phase(AutomationPhase::Descent);
         }
     }

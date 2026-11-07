@@ -596,6 +596,7 @@ fn prepare_start(
         indicated_knots: indicated,
         maximum_intercept_nm: planner.policy.terminal_intercept_limit_nm,
         climb_fpm: planner.aircraft.climb_fpm,
+        descent_fpm: planner.aircraft.descent_fpm,
         minimum_feet,
         maximum_feet: weather
             .atmosphere

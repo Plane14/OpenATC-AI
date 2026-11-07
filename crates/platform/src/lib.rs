@@ -43,7 +43,7 @@ pub fn models_dir() -> PathBuf {
 /// Sibling directory for server state (controller roster, logs).
 #[must_use]
 pub fn state_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("OPENATC_AI_MODELS") {
+    if let Ok(dir) = std::env::var("OPENATC_AI_STATE") {
         return PathBuf::from(dir);
     }
     data_dir().join("openatc-ai")

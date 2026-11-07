@@ -1311,7 +1311,11 @@ fn apply_frequency(state: &mut State, ctx: &RequestContext<'_>) -> Option<Reques
         "Approach"
     };
     for frequency in &airport.frequencies {
-        if frequency.service == service {
+        // Delivery fills the clearance role at airports that publish no
+        // dedicated Clearance frequency.
+        if frequency.service == service
+            || (service == "Clearance" && frequency.service == "Delivery")
+        {
             state.recommended_frequency_khz = frequency.khz;
             state.frequency_sequence = state.next_sequence;
             return Some(reply(

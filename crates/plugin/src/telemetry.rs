@@ -233,6 +233,7 @@ pub fn gather(refs: &Refs) -> openatc_core::state::Telemetry {
             .and_then(|value| u8::try_from(value).ok())
             .filter(|value| *value <= 3),
         traffic: refs.traffic.as_ref().map(|read| read()),
+        native_ai_owned: false,
         radio_busy: false,
         radio_sequence_seen: None,
         latitude,

@@ -46,7 +46,6 @@ unsafe extern "C" {
         out: *mut c_float,
         frames: c_ulonglong,
     ) -> c_ulonglong;
-    fn oatc_decode_total(decoder: *mut MaDecoder) -> c_ulonglong;
     fn oatc_decode_close(decoder: *mut MaDecoder);
 }
 
@@ -917,7 +916,7 @@ unsafe extern "C" fn capture_callback(ud: *mut c_void, samples: *const c_short, 
     if let Ok(mut locked) = capture.lock() {
         let (rms, peak, kept) = meter_samples(locked.rms, frames, locked.gain);
         locked.rms = rms;
-        locked.peak = peak.max(locked.peak);
+        locked.peak = peak.max(locked.peak * 0.85);
         let room = MAX_SAMPLES - locked.samples.len().min(MAX_SAMPLES);
         locked.samples.extend(kept.into_iter().take(room));
         if locked.samples.len() >= MAX_SAMPLES {
@@ -1046,29 +1045,39 @@ fn synthesize_and_play(
 
 /// Decode any WAV answer to f32 stereo 48 kHz through the C decoder.
 fn decode_wav(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    // Hard cap on decoded audio: 5 minutes at 48 kHz stereo. The declared
+    // container length is untrusted, so decode incrementally instead of
+    // trusting `oatc_decode_total` for an upfront allocation.
+    const MAX_FRAMES: usize = 48_000 * 300;
+    const CHUNK_FLOATS: usize = 8192;
     unsafe {
         let decoder = oatc_decode_open(bytes.as_ptr(), u64::try_from(bytes.len()).unwrap_or(0));
         if decoder.is_null() {
             return Err("TTS response is not decodable audio".to_owned());
         }
-        let total = usize::try_from(oatc_decode_total(decoder)).unwrap_or(usize::MAX);
-        let mut frames = vec![0.0f32; total.min(1 << 28) * 2];
-        let mut read = 0;
-        while read < frames.len() / 2 {
-            let want = u64::try_from(frames.len() / 2 - read).unwrap_or(u64::MAX);
+        let mut frames = Vec::new();
+        let mut chunk = vec![0.0f32; CHUNK_FLOATS];
+        loop {
+            let remaining = MAX_FRAMES.saturating_sub(frames.len() / 2);
+            if remaining == 0 {
+                break;
+            }
+            let want = (CHUNK_FLOATS / 2).min(remaining);
             let got = usize::try_from(oatc_decode_read(
                 decoder,
-                frames.as_mut_ptr().wrapping_add(read * 2),
-                want,
+                chunk.as_mut_ptr(),
+                u64::try_from(want).unwrap_or(0),
             ))
             .unwrap_or(0);
             if got == 0 {
                 break;
             }
-            read += got;
+            frames.extend_from_slice(&chunk[..got * 2]);
         }
-        frames.truncate(read * 2);
         oatc_decode_close(decoder);
+        if frames.is_empty() {
+            return Err("TTS response decoded to empty audio".to_owned());
+        }
         Ok(frames)
     }
 }

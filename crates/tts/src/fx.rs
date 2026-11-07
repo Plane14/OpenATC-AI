@@ -66,7 +66,9 @@ pub fn apply_fx(samples: &[f32], rate: u32, fx: Fx, seed_key: &str) -> Vec<f32> 
         }
     }
     if fx.static_ > 0.0 {
-        for _ in 0..=((f64::from(fx.static_) * 3.0) as usize) {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let bursts = ((f64::from(fx.static_) * 3.0).round() as usize).clamp(1, 8);
+        for _ in 0..bursts {
             #[allow(clippy::cast_possible_truncation)]
             let length = (f64::from(rate) * (0.03 + 0.09 * rng.r#gen::<f64>())) as usize;
             let start = rng.r#gen_range(0..x.len().saturating_sub(length).max(1));

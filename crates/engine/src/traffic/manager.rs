@@ -770,11 +770,6 @@ impl TrafficManager {
             self.last_spawn = Some(now);
         }
 
-        let dt = self.aircraft.first().map_or(0.016, |aircraft| {
-            now.duration_since(aircraft.last)
-                .as_secs_f64()
-                .clamp(0.0, 0.2)
-        });
         let player_runway = state.session.plan.runway.clone();
         let player_takeoff = state.session.taxi_clearance.takeoff_state;
         let player_runway_state = (telemetry.on_ground
@@ -1170,6 +1165,12 @@ impl TrafficManager {
                 || overlap_stop.is_some()
                 || hold_for_clearance;
             let aircraft = &mut self.aircraft[index];
+            // Per-aircraft timestep: a freshly spawned neighbour must not
+            // freeze or skew every other aircraft's integration this tick.
+            let dt = now
+                .duration_since(aircraft.last)
+                .as_secs_f64()
+                .clamp(0.0, 0.2);
             aircraft.last = now;
             aircraft.blocked = blocked;
             aircraft.blocker = blocker;
@@ -1973,7 +1974,15 @@ impl TrafficManager {
                 AmbientKind::Arrival => 0.0,
                 AmbientKind::Departure => {
                     let positions = seed_distances(hold_distance, departures_requested);
-                    let Some(raw) = positions.get(slot).copied() else {
+                    // Rotate the seed slot across spawn attempts: when the
+                    // population partially refills, slot 0 would otherwise map
+                    // to the same along-route position every call and a single
+                    // blocked point could starve departures indefinitely.
+                    let rotation = self.attempts as usize % positions.len().max(1);
+                    let Some(raw) = positions
+                        .get((slot + rotation) % positions.len().max(1))
+                        .copied()
+                    else {
                         self.rejected_route = self.rejected_route.saturating_add(1);
                         self.last_error = "no safe taxiway length for another departure".to_owned();
                         continue;

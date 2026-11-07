@@ -442,6 +442,9 @@ fn flight_tick(shared: &Arc<Mutex<Shared>>, xpapi: &mut xplane::XPAPI) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let debug_cancel_pending = locked.debug_cancel_pending;
     let debug_air_pending = locked.debug_air_pending;
+    if let Some(telemetry) = telemetry.as_mut() {
+        telemetry.native_ai_owned = locked.native_traffic.owns_planes();
+    }
     let receives_atis = locked
         .interface
         .as_ref()
@@ -1040,9 +1043,11 @@ impl Plugin for OpenAtc {
                 if tcas.active() {
                     // Do not release the whole override just because the renderer is between
                     // playout samples. Movement snapshots arrive every half second; an empty
-                    // interpolation frame must leave the existing targets in place.
+                    // interpolation frame must leave the existing targets in place. But when
+                    // generated traffic is gone entirely, release so TCAS targets do not
+                    // persist as ghosts.
                     let frames = generated_traffic.frames();
-                    if !frames.is_empty() {
+                    if !frames.is_empty() || !generated_traffic.active() {
                         tcas.receive(frames);
                     }
                     tcas.refresh();

@@ -669,6 +669,29 @@ fn taxi_path(
 }
 
 /// A straight connector to the taxi network must stay on non-runway pavement.
+/// Weaker connector check for airports without complete pavement data: the
+/// straight join must not cross a runway or a published hold-short line.
+fn clear_connector(airport: &Airport, from: Point, to: Point) -> bool {
+    if airport
+        .taxi_hold_lines
+        .iter()
+        .any(|h| intersection(from, to, h[0], h[1]).is_some())
+    {
+        return false;
+    }
+    let distance = flat_distance(&from, &to);
+    let samples = (distance / 5.0).ceil().max(1.0) as usize;
+    (0..=samples).all(|index| {
+        let amount = index as f64 / samples as f64;
+        let point = Point {
+            east: from.east + (to.east - from.east) * amount,
+            north: from.north + (to.north - from.north) * amount,
+            height: 0.0,
+        };
+        !within_runway(airport, &point)
+    })
+}
+
 fn paved_connector(airport: &Airport, from: Point, to: Point) -> bool {
     let distance = flat_distance(&from, &to);
     let samples = (distance / 1.0).ceil().max(1.0) as usize;
@@ -754,11 +777,18 @@ pub fn calculate_taxi_route(
             break;
         }
     }
-    if start < 0
-        && let Some((separation, id)) = candidates.first()
-    {
-        start = *id;
-        nearest = *separation;
+    if start < 0 {
+        // Airports without inferred pavement may lack apron coverage, so a
+        // strict paved connector can fail for a legitimate stand. Fall back
+        // to the nearest candidate whose straight join at least avoids
+        // runways and published hold-short lines.
+        if let Some((separation, id)) = candidates
+            .iter()
+            .find(|(_, id)| clear_connector(airport, start_point, nodes[id]))
+        {
+            start = *id;
+            nearest = *separation;
+        }
     }
     if start < 0
         || nearest > limit

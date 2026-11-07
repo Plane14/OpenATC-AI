@@ -17,10 +17,16 @@ use std::time::{Duration, Instant};
 pub struct AdsbAircraft {
     pub hex: String,
     pub flight: Option<String>,
+    /// ICAO aircraft type code (adsb.lol `t` field).
+    #[serde(rename = "t", default)]
     pub r#type: Option<String>,
-    pub lat: f64,
-    pub lon: f64,
+    #[serde(default)]
+    pub lat: Option<f64>,
+    #[serde(default)]
+    pub lon: Option<f64>,
+    #[serde(default, deserialize_with = "de_altitude")]
     pub alt_baro: Option<i32>,
+    #[serde(default, deserialize_with = "de_altitude")]
     pub alt_geom: Option<i32>,
     pub gs: Option<f64>,
     pub track: Option<f64>,
@@ -41,7 +47,21 @@ pub struct AdsbAircraft {
 pub struct AdsbResponse {
     pub now: f64,
     pub messages: u64,
+    /// adsb.lol returns aircraft under the `ac` key.
+    #[serde(rename = "ac", alias = "aircraft", default)]
     pub aircraft: Vec<AdsbAircraft>,
+}
+
+/// adsb.lol reports altitude either as a number (feet) or the string `"ground"`.
+fn de_altitude<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Number(n) => Ok(n.as_i64().map(|v| v as i32)),
+        serde_json::Value::String(s) if s.eq_ignore_ascii_case("ground") => Ok(Some(0)),
+        _ => Ok(None),
+    }
 }
 
 /// ADSB.lol client configuration.
@@ -146,12 +166,13 @@ impl AdsbClient {
         // Filter by altitude if configured
         let filtered: Vec<AdsbAircraft> = adsb_response.aircraft.into_iter()
             .filter(|a| {
+                let altitude = a.alt_baro.or(a.alt_geom).unwrap_or(0);
                 if let Some(min) = self.config.min_altitude_ft
-                    && (a.alt_baro.unwrap_or(0) < min || a.alt_geom.unwrap_or(0) < min) {
+                    && altitude < min {
                         return false;
                     }
                 if let Some(max) = self.config.max_altitude_ft
-                    && (a.alt_baro.unwrap_or(i32::MAX) > max || a.alt_geom.unwrap_or(i32::MAX) > max) {
+                    && altitude > max {
                         return false;
                     }
                 true
@@ -180,8 +201,7 @@ impl AdsbClient {
             return None;
         }
 
-        let lat = aircraft.lat;
-        let lon = aircraft.lon;
+        let (lat, lon) = (aircraft.lat?, aircraft.lon?);
         let altitude = aircraft.alt_baro.or(aircraft.alt_geom).unwrap_or(0);
         let ground_speed = aircraft.gs.unwrap_or(0.0);
         let track = aircraft.track.unwrap_or(0.0);
@@ -293,8 +313,8 @@ mod tests {
             hex: "a1b2c3".to_string(),
             flight: Some("UAL123".to_string()),
             r#type: Some("B738".to_string()),
-            lat: 37.6189,
-            lon: -122.375,
+            lat: Some(37.6189),
+            lon: Some(-122.375),
             alt_baro: Some(35000),
             gs: Some(450.0),
             track: Some(270.0),

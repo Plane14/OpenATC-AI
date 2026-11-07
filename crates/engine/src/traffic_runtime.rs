@@ -233,10 +233,14 @@ impl StationSupervisor {
         let gate = Arc::new(Mutex::new(true));
         let thread_gate = gate.clone();
         let events = station.events.clone();
-        let join = thread::Builder::new()
+        // A failed spawn (thread exhaustion) must not panic the engine tick;
+        // leave the watch/pending state in place so a later trigger retries.
+        let Ok(join) = thread::Builder::new()
             .name(format!("openatc-station-{frequency}"))
             .spawn(move || run_station(frequency, receiver, events, thread_gate))
-            .expect("station thread");
+        else {
+            return;
+        };
         let restore = station
             .watch
             .iter()

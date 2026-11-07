@@ -831,13 +831,12 @@ impl Settings {
             ));
         }
         for url in [&self.ai_url, &self.stt_url, &self.tts_url] {
-            let rest = url
-                .strip_prefix("http://")
-                .or_else(|| url.strip_prefix("https://"))
-                .unwrap_or("");
+            // The transport only speaks plain http://; https would pass here
+            // and then fail on every request.
+            let rest = url.strip_prefix("http://").unwrap_or("");
             if rest.is_empty()
-                || rest.contains(['/', ' ', '\t'])
-                || !(url.starts_with("http://") || url.starts_with("https://"))
+                || rest.contains(['/', ' ', '\t', '?', '#', '@'])
+                || !url.starts_with("http://")
             {
                 return Err(ValidationError::BadUrl(url.clone()));
             }
@@ -881,6 +880,13 @@ impl Settings {
                 self.window_opacity,
             ));
         }
+        if !self.fade_delay.is_finite()
+            || !(0.0..=3600.0).contains(&self.fade_delay)
+            || !self.faded_opacity.is_finite()
+            || !(0.0..=1.0).contains(&self.faded_opacity)
+        {
+            return Err(ValidationError::OutOfRange("window fade", self.fade_delay));
+        }
         for (name, value) in [
             ("hiss", self.radio_hiss),
             ("crackle", self.radio_crackle),
@@ -921,7 +927,7 @@ impl Settings {
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum ValidationError {
     /// URL is not a bare http(s) origin.
-    #[error("Service URLs must be http(s) origins, without /v1 paths: {0}")]
+    #[error("Service URLs must be http:// origins, without /v1 paths: {0}")]
     BadUrl(String),
     /// Numeric setting outside its valid band.
     #[error("Setting out of range: {0} ({1})")]

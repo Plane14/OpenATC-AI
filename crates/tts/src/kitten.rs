@@ -188,17 +188,43 @@ fn vocabulary() -> BTreeMap<char, i64> {
 }
 
 fn chunks(text: &str) -> Vec<String> {
+    const LIMIT: usize = 180;
     let mut chunks = Vec::new();
     let mut current = String::new();
     for word in text.split_whitespace() {
-        if current.chars().count() + word.chars().count() + 1 > 180 && !current.is_empty() {
+        // A single word longer than the budget is hard-split at char
+        // boundaries; otherwise its phoneme expansion can exceed the model
+        // context and fail the whole utterance.
+        let mut rest = word;
+        loop {
+            if rest.chars().count() <= LIMIT {
+                break;
+            }
+            let cut = rest
+                .char_indices()
+                .nth(LIMIT)
+                .map_or(rest.len(), |(index, _)| index);
+            let (head, tail) = rest.split_at(cut);
+            if current.chars().count() + head.chars().count() + 1 > LIMIT
+                && !current.is_empty()
+            {
+                chunks.push(std::mem::take(&mut current));
+            }
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(head);
+            chunks.push(std::mem::take(&mut current));
+            rest = tail;
+        }
+        if current.chars().count() + rest.chars().count() + 1 > LIMIT && !current.is_empty() {
             chunks.push(std::mem::take(&mut current));
         }
         if !current.is_empty() {
             current.push(' ');
         }
-        current.push_str(word);
-        if word.ends_with(['.', '?', '!', ';']) {
+        current.push_str(rest);
+        if rest.ends_with(['.', '?', '!', ';']) {
             chunks.push(std::mem::take(&mut current));
         }
     }

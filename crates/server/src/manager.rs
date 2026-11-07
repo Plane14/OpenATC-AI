@@ -718,33 +718,49 @@ fn read_events(
                 Ok(bytes) if !bytes.is_empty() => bytes,
                 _ => break,
             };
-            let end = available
+            let room = 8192usize.saturating_sub(buffer.len());
+            if room == 0 {
+                // Over-long line: discard through the next newline instead of
+                // corrupting the buffered prefix.
+                let skip = available
+                    .iter()
+                    .position(|byte| *byte == b'\n' || *byte == b'\r')
+                    .map_or(available.len(), |n| n + 1);
+                buffer.clear();
+                reader.consume(skip);
+                continue;
+            }
+            let limit = room.min(available.len());
+            let end = available[..limit]
                 .iter()
                 .position(|byte| *byte == b'\n' || *byte == b'\r');
-            let used = end.map_or(available.len(), |n| n + 1);
-            let keep = (8192 - buffer.len()).min(end.unwrap_or(available.len()));
-            buffer.extend_from_slice(&available[..keep]);
-            reader.consume(used);
-            if end.is_none() {
-                continue;
-            }
-            let text = String::from_utf8_lossy(&buffer).trim().to_owned();
-            buffer.clear();
-            if text.is_empty() {
-                continue;
-            }
-            let event = if structured {
-                text.strip_prefix("OPENATC_STATUS ")
-                    .and_then(|v| serde_json::from_str(v).ok())
-            } else {
-                None
-            };
-            if events
-                .send((generation, event, text.chars().take(2000).collect()))
-                .await
-                .is_err()
-            {
-                break;
+            match end {
+                Some(end) => {
+                    buffer.extend_from_slice(&available[..end]);
+                    reader.consume(end + 1);
+                    let text = String::from_utf8_lossy(&buffer).trim().to_owned();
+                    buffer.clear();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let event = if structured {
+                        text.strip_prefix("OPENATC_STATUS ")
+                            .and_then(|v| serde_json::from_str(v).ok())
+                    } else {
+                        None
+                    };
+                    if events
+                        .send((generation, event, text.chars().take(2000).collect()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                None => {
+                    buffer.extend_from_slice(&available[..limit]);
+                    reader.consume(limit);
+                }
             }
         }
     });

@@ -53,6 +53,171 @@ impl PhaseCode {
     }
 }
 
+/// Operational phase of a native simulator AI aircraft tracked by the engine.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NativePhase {
+    /// Phase not yet determined from telemetry.
+    #[default]
+    Unknown,
+    /// Parked at a stand or gate.
+    AtGate,
+    /// Pushback from the stand.
+    Pushback,
+    /// Taxiing under own power before departure.
+    TaxiOut,
+    /// Holding short of a runway.
+    HoldShort,
+    /// Lined up on the runway awaiting takeoff clearance.
+    LineUp,
+    /// Takeoff roll or airborne departure.
+    Takeoff,
+    /// Climbing after departure.
+    InitialClimb,
+    /// Enroute cruise.
+    Enroute,
+    /// Descending toward the destination.
+    Descent,
+    /// Established on approach.
+    Approach,
+    /// On final approach.
+    Final,
+    /// Over the threshold, still airborne.
+    Landing,
+    /// On the runway after touchdown.
+    Rollout,
+    /// Taxiing from the runway to parking after arrival.
+    TaxiIn,
+    /// Arrived and stopped at the gate.
+    AtGateArrival,
+}
+
+/// Kind of clearance issued to a native aircraft.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ClearanceKind {
+    /// Taxi route, optionally with a hold-short restriction.
+    #[default]
+    Taxi,
+    /// Hold short of a runway or point.
+    HoldShort,
+    /// Line up and wait on a runway.
+    LineUp,
+    /// Cleared for takeoff.
+    Takeoff,
+    /// Climb to an altitude.
+    Climb,
+    /// Descend to an altitude.
+    Descend,
+    /// Fly a heading.
+    Heading,
+    /// Fly a speed.
+    Speed,
+    /// Cleared for an approach.
+    Approach,
+    /// Cleared to land.
+    Land,
+    /// Cleared to cross a runway.
+    CrossRunway,
+}
+
+/// Item a native aircraft is expected to read back after a clearance.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReadbackItem {
+    /// Taxi route and hold-short restriction.
+    TaxiRoute,
+    /// Runway or point to hold short of.
+    HoldShort,
+    /// Assigned runway.
+    Runway,
+    /// Assigned altitude.
+    Altitude,
+    /// Assigned heading.
+    Heading,
+    /// Assigned speed.
+    Speed,
+}
+
+/// A clearance issued by OpenATC to a native simulator aircraft.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NativeClearance {
+    /// Kind of clearance.
+    pub kind: ClearanceKind,
+    /// Assigned altitude in feet, when applicable.
+    pub altitude_feet: Option<i32>,
+    /// Assigned heading in degrees, when applicable.
+    pub heading: Option<f64>,
+    /// Assigned speed in knots, when applicable.
+    pub speed_knots: Option<i32>,
+    /// Assigned runway, when applicable.
+    pub runway: Option<String>,
+    /// Taxi route names, when applicable.
+    pub taxi_route: Option<Vec<String>>,
+    /// Runway or point to hold short of, when applicable.
+    pub hold_short_of: Option<String>,
+    /// Engine-assigned sequence number.
+    pub sequence: u32,
+}
+
+/// Readback the engine expects a native aircraft to make for a clearance.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ReadbackExpectation {
+    /// Sequence number of the clearance this readback answers.
+    pub clearance_sequence: u32,
+    /// Items the aircraft should read back.
+    pub expected_items: Vec<ReadbackItem>,
+    /// Simulation-clock deadline after which the readback is considered missed.
+    pub deadline: f64,
+}
+
+/// A native simulator AI aircraft tracked under OpenATC ATC control.
+///
+/// These aircraft are flown by the simulator's own AI; OpenATC issues simulated
+/// clearances and readback expectations but does not directly command their flight.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NativeAircraft {
+    /// Simulator AI slot index, zero when unknown.
+    pub plane_index: u8,
+    /// Stable simulator Mode S identity.
+    pub id: u32,
+    /// Flight ID / callsign supplied by the simulator.
+    pub callsign: String,
+    /// ICAO aircraft type supplied by the simulator.
+    pub aircraft: String,
+    /// Current operational phase.
+    pub phase: NativePhase,
+    /// Latest clearance issued to this aircraft.
+    pub clearance: Option<NativeClearance>,
+    /// Outstanding readback expectation.
+    pub awaiting_readback: Option<ReadbackExpectation>,
+    /// Degrees north.
+    pub latitude: f64,
+    /// Degrees east.
+    pub longitude: f64,
+    /// Altitude in feet MSL.
+    pub altitude_feet: f64,
+    /// Ground track in degrees true.
+    pub track_degrees: f64,
+    /// Ground speed in knots.
+    pub ground_speed_knots: f64,
+    /// Weight-on-wheels flag.
+    pub on_ground: bool,
+    /// Whether simulator AI has been disabled for this aircraft.
+    pub ai_disabled: bool,
+    /// Tuned COM1 frequency in kHz, when known.
+    pub com1_khz: Option<i32>,
+    /// Tuned COM2 frequency in kHz, when known.
+    pub com2_khz: Option<i32>,
+    /// Simulator wake category: 0 light, 1 medium, 2 heavy, 3 super.
+    pub wake_category: Option<u8>,
+    /// Wingspan reported by the traffic provider, if available.
+    pub wingspan_meters: Option<f64>,
+}
+
 /// Simulator-reported traffic target, excluding ownship.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -206,6 +371,9 @@ pub struct Telemetry {
     pub radio_power: bool,
     /// None means traffic data unavailable; an empty list is a valid clear scan.
     pub traffic: Option<Vec<TrafficTarget>>,
+    /// Whether the plugin owns the simulator's native AI aircraft slots.
+    #[serde(default)]
+    pub native_ai_owned: bool,
     /// Position data valid.
     pub position_valid: bool,
 }
@@ -242,6 +410,7 @@ impl Default for Telemetry {
             transponder_mode: None,
             radio_power: true,
             traffic: None,
+            native_ai_owned: false,
             position_valid: false,
         }
     }
@@ -945,6 +1114,9 @@ pub struct State {
     /// Per-aircraft generated-traffic debug state.
     #[serde(default)]
     pub generated_traffic_debug: Vec<TrafficDebug>,
+    /// Native simulator AI aircraft tracked under OpenATC ATC control.
+    #[serde(default)]
+    pub native_aircraft: Vec<NativeAircraft>,
     /// Remaining observed departure wake delay; zero does not override runway occupancy.
     #[serde(default)]
     pub departure_wake_seconds: f64,
@@ -1048,6 +1220,7 @@ impl Default for State {
             chatter_frequencies: std::collections::BTreeSet::new(),
             generated_traffic_diagnostics: Vec::new(),
             generated_traffic_debug: Vec::new(),
+            native_aircraft: Vec::new(),
             traffic_call: None,
             departure_wake_seconds: 0.0,
             arrival_wake_conflict: false,

@@ -66,7 +66,7 @@ pub(crate) fn pattern_waypoints(
     let mut waypoints = Vec::new();
 
     // Departure: climb straight ahead along extended centerline.
-    let departure = destination([threshold_lat, threshold_lon], runway_heading, 1.0 * 1852.0);
+    let departure = destination([threshold_lat, threshold_lon], runway_heading, 1.0);
     waypoints.push(Waypoint {
         latitude: departure[0],
         longitude: departure[1],
@@ -74,7 +74,7 @@ pub(crate) fn pattern_waypoints(
     });
 
     // Upwind: continue straight ahead beyond departure end.
-    let upwind = destination([threshold_lat, threshold_lon], runway_heading, 2.0 * 1852.0);
+    let upwind = destination([threshold_lat, threshold_lon], runway_heading, 2.0);
     waypoints.push(Waypoint {
         latitude: upwind[0],
         longitude: upwind[1],
@@ -83,7 +83,7 @@ pub(crate) fn pattern_waypoints(
 
     // Crosswind: 90-degree turn from upwind.
     let crosswind_heading = (runway_heading + 90.0 * turn_dir).rem_euclid(360.0);
-    let crosswind = destination([upwind[0], upwind[1]], crosswind_heading, downwind_offset_nm * 1852.0);
+    let crosswind = destination([upwind[0], upwind[1]], crosswind_heading, downwind_offset_nm);
     waypoints.push(Waypoint {
         latitude: crosswind[0],
         longitude: crosswind[1],
@@ -92,7 +92,7 @@ pub(crate) fn pattern_waypoints(
 
     // Downwind: parallel to runway, opposite direction.
     let downwind_heading = (runway_heading + 180.0).rem_euclid(360.0);
-    let downwind = destination([crosswind[0], crosswind[1]], downwind_heading, 1.0 * 1852.0);
+    let downwind = destination([crosswind[0], crosswind[1]], downwind_heading, 1.0);
     waypoints.push(Waypoint {
         latitude: downwind[0],
         longitude: downwind[1],
@@ -101,7 +101,7 @@ pub(crate) fn pattern_waypoints(
 
     // Base: 90-degree turn from downwind toward the runway.
     let base_heading = (downwind_heading + 90.0 * turn_dir).rem_euclid(360.0);
-    let base = destination([downwind[0], downwind[1]], base_heading, base_turn_nm * 1852.0);
+    let base = destination([downwind[0], downwind[1]], base_heading, base_turn_nm);
     waypoints.push(Waypoint {
         latitude: base[0],
         longitude: base[1],
@@ -109,7 +109,7 @@ pub(crate) fn pattern_waypoints(
     });
 
     // Final: aligned with runway heading, at least 1/4 mile from threshold.
-    let final_wp = destination([threshold_lat, threshold_lon], runway_heading, final_turn_nm * 1852.0);
+    let final_wp = destination([threshold_lat, threshold_lon], runway_heading, final_turn_nm);
     waypoints.push(Waypoint {
         latitude: final_wp[0],
         longitude: final_wp[1],
@@ -135,8 +135,14 @@ pub(crate) fn pattern_entry_waypoints(
         + threshold.east / (111_320.0 * airport.reference_latitude.to_radians().cos().max(0.01));
     let agl = pattern_altitude_agl(profile.handling.unwrap_or(Kind::Jet));
     let pattern_alt = airport.elevation_feet + agl;
-    let midfield_lat = threshold_lat;
-    let midfield_lon = threshold_lon;
+    let midfield = openatc_core::state::Point {
+        east: (rw.first.east + rw.second.east) / 2.0,
+        north: (rw.first.north + rw.second.north) / 2.0,
+        height: 0.0,
+    };
+    let midfield_lat = airport.reference_latitude + midfield.north / 111_320.0;
+    let midfield_lon = airport.reference_longitude
+        + midfield.east / (111_320.0 * airport.reference_latitude.to_radians().cos().max(0.01));
 
     let mut waypoints = Vec::new();
 
@@ -156,7 +162,7 @@ pub(crate) fn pattern_entry_waypoints(
     ]) + 180.0)
         .rem_euclid(360.0);
     let entry_heading = (downwind_heading + -45.0).rem_euclid(360.0); // left traffic entry from downwind side
-    let entry = destination([midfield_lat, midfield_lon], entry_heading, 1.0 * 1852.0);
+    let entry = destination([midfield_lat, midfield_lon], entry_heading, 1.0);
     waypoints.push(Waypoint {
         latitude: entry[0],
         longitude: entry[1],

@@ -80,6 +80,7 @@ pub(super) fn resolve(input: &Request<'_>) -> Result<Decoded, String> {
             indicated_knots: speed,
             maximum_intercept_nm: input.intercept_limit_nm,
             climb_fpm: input.aircraft.climb_fpm,
+            descent_fpm: input.aircraft.descent_fpm,
             minimum_feet: floor,
             maximum_feet: ceiling,
             preferred_feet: ceiling,

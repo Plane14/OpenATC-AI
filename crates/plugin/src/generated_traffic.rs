@@ -310,6 +310,12 @@ impl Timeline {
                     frame.animation.propeller_angle = (from.animation.propeller_angle
                         + from.animation.propeller_rpm * 6.0 * span * amount)
                         .rem_euclid(360.0);
+                } else if amount < 1.0 {
+                    // A discontinuity (teleport, scene relocation, spawn/despawn)
+                    // is not a trajectory: hold the previous pose until this
+                    // interval completes instead of publishing the far endpoint
+                    // early.
+                    return from.clone();
                 }
                 frame
             })

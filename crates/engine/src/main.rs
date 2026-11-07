@@ -85,6 +85,8 @@ pub struct EngineState {
     pub parking: parking::Monitor,
     /// Persistent ambient airport traffic.
     pub ambient: traffic::manager::TrafficManager,
+    /// Native simulator AI aircraft tracked under ATC control.
+    pub native_manager: traffic::native_manager::NativeAircraftManager,
     /// Audio-only simulated airport chatter.
     pub chatter: chatter::ChatterManager,
     /// CSL animation channel names shared by generated and ambient traffic.
@@ -664,6 +666,7 @@ async fn main() {
         parking: Default::default(),
         initiative: Default::default(),
         ambient: Default::default(),
+        native_manager: Default::default(),
         chatter: Default::default(),
         traffic_channels: generated::animation_channels(&config_dir),
         traffic_handling: generated::animation_handling(&config_dir),
@@ -835,6 +838,7 @@ fn test_state() -> EngineState {
         parking: Default::default(),
         initiative: Default::default(),
         ambient: Default::default(),
+        native_manager: Default::default(),
         chatter: Default::default(),
         traffic_channels: generated::animation_channels(&config_dir),
         traffic_handling: generated::animation_handling(&config_dir),
